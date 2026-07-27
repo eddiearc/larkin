@@ -14,11 +14,15 @@ function validPid(pid: unknown): number | null {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function pidAlive(pid: unknown): boolean {
+function pidAlive(pid: unknown, kill: typeof process.kill = process.kill): boolean {
   const value = validPid(pid);
   if (!value) return false;
-  try { process.kill(value, 0); return true; }
-  catch { return false; }
+  try { kill(value, 0); return true; }
+  catch (error) {
+    // POSIX reserves ESRCH for a missing process. EPERM means the process may
+    // be alive but is not inspectable by this user and therefore must fail closed.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 function inspectUnix(pid: number): ProcessInspection {

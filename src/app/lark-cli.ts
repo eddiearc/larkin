@@ -54,20 +54,28 @@ function exactPath(argv: readonly string[], pathSegments: readonly string[]): bo
 
 function parsePolicyArgv(argv: readonly string[]): PolicyArgv {
   const boundary = argv.indexOf("--");
-  const commandArgv = argv.slice(0, boundary < 0 ? argv.length : boundary);
+  const nativeArgv = argv.slice(0, boundary < 0 ? argv.length : boundary);
+  const help = nativeArgv.some((argument) => HELP_FLAGS.has(argument));
+  // Native help is an observational path. It must reach Cobra byte-for-byte even
+  // when the surrounding argv would be rejected for a real operation.
+  if (help) return { commandArgv: nativeArgv, flags: new Map(), help: true, error: null };
+  const commandArgv: string[] = [];
   const flags = new Map<string, string>();
-  for (let index = 0; index < commandArgv.length; index += 1) {
-    const argument = argv[index];
+  for (let index = 0; index < nativeArgv.length; index += 1) {
+    const argument = nativeArgv[index];
     const inlineFlag = [...POLICY_VALUE_FLAGS].find((flag) => argument.startsWith(`${flag}=`));
     const flag = POLICY_VALUE_FLAGS.has(argument) ? argument : inlineFlag;
-    if (!flag) continue;
-    const value = inlineFlag ? argument.slice(flag.length + 1) : commandArgv[index + 1];
+    if (!flag) {
+      commandArgv.push(argument);
+      continue;
+    }
+    const value = inlineFlag ? argument.slice(flag.length + 1) : nativeArgv[index + 1];
     if (!inlineFlag) index += 1;
-    if (!value || value.startsWith("-")) return { commandArgv, flags, help: commandArgv.some((item) => HELP_FLAGS.has(item)), error: `${flag} 缺少有效值` };
-    if (flags.has(flag)) return { commandArgv, flags, help: commandArgv.some((item) => HELP_FLAGS.has(item)), error: `${flag} 不允许重复或冲突赋值` };
+    if (!value || value.startsWith("-")) return { commandArgv, flags, help: false, error: `${flag} 缺少有效值` };
+    if (flags.has(flag)) return { commandArgv, flags, help: false, error: `${flag} 不允许重复或冲突赋值` };
     flags.set(flag, value);
   }
-  return { commandArgv, flags, help: commandArgv.some((argument) => HELP_FLAGS.has(argument)), error: null };
+  return { commandArgv, flags, help: false, error: null };
 }
 
 function resolveUpstreamScript(): string {
@@ -81,31 +89,35 @@ function policyFlagValue(argv: readonly string[], flag: string): string | null {
 
 export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandDecision {
   const parsed = parsePolicyArgv(argv);
+  if (parsed.help) return { kind: "passthrough" };
   if (parsed.error) return { kind: "denied", reason: `参数边界：${parsed.error}` };
   for (const flag of ["--profile", "--config-dir", "--agent"]) {
     if (parsed.flags.has(flag)) return { kind: "denied", reason: `身份边界：${flag} 由 Larkin Runtime 锁定` };
   }
   const as = parsed.flags.get("--as");
   if (as && as !== "bot") return { kind: "denied", reason: "身份边界：Runtime 内 lark-cli 只允许 Bot identity" };
-  if (parsed.help) return { kind: "passthrough" };
   const command = parsed.commandArgv[0] || "";
   if (MANAGEMENT_COMMANDS.has(command)) return { kind: "denied", reason: `身份边界：Runtime 不开放 lark-cli ${command} 管理命令` };
   if (command === "event") return { kind: "denied", reason: "Runtime 不允许另开 event 连接与 Host 争抢事件流" };
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
-  if (exactPath(argv, ["larkin-draft", "list"])) return { kind: "runtime-owned", operation: "draft-list" };
-  if (exactPath(argv, ["larkin-draft", "send"])) return { kind: "runtime-owned", operation: "draft-send" };
-  if (exactPath(argv, ["larkin-draft", "abandon"])) return { kind: "runtime-owned", operation: "draft-abandon" };
-  if (exactPath(argv, ["im", "+messages-send"])) return { kind: "guarded", operation: "send" };
-  if (exactPath(argv, ["im", "+messages-reply"])) return { kind: "guarded", operation: "reply" };
-  if (exactPath(argv, ["im", "messages", "patch"]) || exactPath(argv, ["im", "messages", "update"])) {
+  if (exactPath(parsed.commandArgv, ["larkin-draft", "list"])) return { kind: "runtime-owned", operation: "draft-list" };
+  if (exactPath(parsed.commandArgv, ["larkin-draft", "send"])) return { kind: "runtime-owned", operation: "draft-send" };
+  if (exactPath(parsed.commandArgv, ["larkin-draft", "abandon"])) return { kind: "runtime-owned", operation: "draft-abandon" };
+  if (exactPath(parsed.commandArgv, ["im", "+messages-send"])) return { kind: "guarded", operation: "send" };
+  if (exactPath(parsed.commandArgv, ["im", "+messages-reply"])) return { kind: "guarded", operation: "reply" };
+  if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
     return { kind: "guarded", operation: "card" };
   }
-  if (exactPath(argv, ["im", "messages", "create"]) || exactPath(argv, ["im", "messages", "reply"])) {
+  if (exactPath(parsed.commandArgv, ["im", "messages", "create"]) || exactPath(parsed.commandArgv, ["im", "messages", "reply"])) {
     return { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" };
   }
   if (["forward", "merge_forward", "delete", "urgent_app", "urgent_phone", "urgent_sms"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "messages", operation]))) {
     return { kind: "denied", reason: "该 IM 写入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" };
+  }
+  if (["forward", "merge_forward"]
+    .some((operation) => exactPath(parsed.commandArgv, ["im", "threads", operation]))) {
+    return { kind: "denied", reason: "该 IM forwarding 入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" };
   }
   if (command === "api") return { kind: "denied", reason: "generic API 会旁路 Runtime identity/freshness policy" };
   return { kind: "passthrough" };

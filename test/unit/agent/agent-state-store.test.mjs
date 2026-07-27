@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { test } from "bun:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const moduleUrl = pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href;
+const processStateUrl = pathToFileURL(path.join(ROOT, "dist/platform/process-state.mjs")).href;
 
 test("Agent state layout owns every canonical persistence path", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-layout-"));
@@ -134,4 +137,78 @@ test("Inbox lock reclaims a verifiably dead owner record", async () => {
     assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_after_dead_lock"]);
     assert.equal(fs.existsSync(lockDir), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("EPERM inspection of a live Inbox owner fails closed without reclaim", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-eperm-lock-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "ignore" });
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const processState = await import(processStateUrl);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const childIdentity = processState.inspectProcess(child.pid);
+    assert.equal(childIdentity.ok, true, childIdentity.reason);
+    const store = createAgentStateStore(root, "cli_stateEpermLockA1", {
+      inspectProcess(pid) {
+        if (pid === child.pid) return { ok: false, reason: "kill(0) EPERM" };
+        return processState.inspectProcess(pid);
+      },
+    });
+    store.writeJson("status", { prepared: true });
+    const lockDir = `${store.paths.inbox}.lock`;
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
+      version: 1, pid: child.pid, processStartToken: childIdentity.startToken,
+      nonce: "00000000-0000-4000-8000-000000000001",
+    })}\n`, { mode: 0o600 });
+    assert.throws(() => store.appendNdjson("inbox", { message_id: "om_eperm" }), /锁等待超时/);
+    assert.equal(fs.existsSync(lockDir), true, "unknown live owner must not be reclaimed");
+    assert.doesNotThrow(() => process.kill(child.pid, 0));
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await once(child, "exit");
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an active Inbox reclaimer is exclusive and its crash orphan is recoverable", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-reclaim-owner-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "ignore" });
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const processState = await import(processStateUrl);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const childIdentity = processState.inspectProcess(child.pid);
+    assert.equal(childIdentity.ok, true, childIdentity.reason);
+    const store = createAgentStateStore(root, "cli_stateReclaimOwnerA1");
+    store.writeJson("status", { prepared: true });
+    const lockDir = `${store.paths.inbox}.lock`;
+    const reclaimFile = `${lockDir}.reclaim`;
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
+      version: 1, pid: 2_147_483_647, processStartToken: "dead-target", nonce: "00000000-0000-4000-8000-000000000002",
+    })}\n`, { mode: 0o600 });
+    fs.writeFileSync(reclaimFile, `${JSON.stringify({
+      pid: child.pid, processStartToken: childIdentity.startToken, commandToken: "setInterval",
+      nonce: "active-reclaimer", startedAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    assert.throws(() => store.appendNdjson("inbox", { message_id: "om_double_reclaim" }), /锁等待超时/);
+    assert.equal(fs.existsSync(lockDir), true);
+    assert.equal(fs.existsSync(reclaimFile), true, "a second contender must not delete the active reclaimer");
+
+    child.kill("SIGKILL");
+    await once(child, "exit");
+    store.appendNdjson("inbox", { message_id: "om_after_reclaimer_crash", chat_id: "oc_reclaim" });
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_after_reclaimer_crash"]);
+    assert.equal(fs.existsSync(lockDir), false);
+    assert.equal(fs.existsSync(reclaimFile), false, "dead reclaimer poison must be removed");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await once(child, "exit");
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

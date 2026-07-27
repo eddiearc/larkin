@@ -102,9 +102,8 @@ test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface e
     const prompt = new ContextPromptBuilder().build({
       agentId: "cli_runtimeInterfaceEvalA1", name: "Runtime Interface Eval", runtime: "codex",
     });
-    // The production adapter's catalog probe currently speaks an older model/list
-    // handshake than Codex 0.144.6. Supplying the same native spawn implementation
-    // skips only that unrelated probe while retaining the real app-server session.
+    // Supplying the same native spawn implementation skips the unrelated readiness
+    // probe while retaining the real app-server session and its authenticated model.
     const adapter = createNativeRuntimeAdapter("codex", { codexCommand, spawn });
     const isolatedMessagingEnv = Object.fromEntries(Object.keys(process.env)
       .filter((key) => /(?:LARK|FEISHU)/i.test(key)).map((key) => [key, undefined]));
@@ -112,7 +111,9 @@ test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface e
       agentId: "cli_runtimeInterfaceEvalA1", workspaceDir, stateDir, standingPrompt: prompt,
       env: {
         ...isolatedMessagingEnv,
-        PATH: `${binDir}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+        // The installed Codex entry resolves Node through its environment; keep
+        // its own directory in the isolated PATH so that interpreter is available.
+        PATH: `${binDir}:${path.dirname(codexCommand)}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
         LARKIN_EVAL_STATE_FILE: controlFile,
         LARKIN_EVAL_TRACE_FILE: traceFile,
       },

@@ -137,21 +137,79 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
       cwd: consumer, env: runtimeEnv, timeout: 120_000,
     }, "run installed package-local native lark-cli help");
     assert.match(nativeHelp.stdout, /lark-cli|Usage|USAGE/i);
+    const runtimeAgentConfig = await import(pathToFileURL(path.join(installed, "dist", "app", "runtime-agent-config.mjs")).href);
+    const pinnedNative = runtimeAgentConfig.resolvePinnedLarkCliCommand(inboxDir);
+    assert.match([pinnedNative.command, ...pinnedNative.argsPrefix].join(" "), /@larksuite[/\\]cli|lark-cli/);
+    const evaluatorHelpArgv = ["im", "+messages-send", "--as", "user", "--chat-id", "a", "--chat-id=b", "--help"];
+    const beforeHelpConfig = fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json"));
+    const beforeHelpState = fs.readFileSync(path.join(inboxDir, "inbox-state.json"));
+    const directEvaluatorHelp = spawnSync(pinnedNative.command, [...pinnedNative.argsPrefix, ...evaluatorHelpArgv], {
+      cwd: consumer,
+      env: { ...runtimeEnv, LARKSUITE_CLI_CONFIG_DIR: path.join(inboxDir, "lark-cli-config") },
+      encoding: "utf8", timeout: 15_000,
+    });
+    const wrappedEvaluatorHelp = spawnSync(runtimeLarkCli, evaluatorHelpArgv, {
+      cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
+    });
+    assert.deepEqual(
+      { status: wrappedEvaluatorHelp.status, stdout: wrappedEvaluatorHelp.stdout, stderr: wrappedEvaluatorHelp.stderr },
+      { status: directEvaluatorHelp.status, stdout: directEvaluatorHelp.stdout, stderr: directEvaluatorHelp.stderr },
+      "Runtime help must preserve native stdout/stderr/exit exactly",
+    );
+    assert.equal(wrappedEvaluatorHelp.status, 0);
+    assert.deepEqual(fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json")), beforeHelpConfig);
+    assert.deepEqual(fs.readFileSync(path.join(inboxDir, "inbox-state.json")), beforeHelpState);
+
+    for (const dryRunArgv of [
+      ["--chat-id", "oc_native_order", "im", "+messages-send", "--text", "native prefix", "--dry-run"],
+      ["im", "--chat-id", "oc_native_order", "+messages-send", "--text", "native middle", "--dry-run"],
+    ]) {
+      const nativeDryRun = checked(pinnedNative.command, [...pinnedNative.argsPrefix, ...dryRunArgv], {
+        cwd: consumer,
+        env: { ...runtimeEnv, LARKSUITE_CLI_CONFIG_DIR: path.join(inboxDir, "lark-cli-config") },
+        timeout: 15_000,
+      }, `run native ordered flag dry-run: ${dryRunArgv.join(" ")}`);
+      assert.match(nativeDryRun.stdout, /oc_native_order/);
+    }
     const identityEscape = spawnSync(runtimeLarkCli, ["im", "+chat-list", "--profile", "idan"], {
       cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
     });
     assert.equal(identityEscape.status, 2);
     assert.match(identityEscape.stderr, /身份边界|--profile/);
-    const duplicateTarget = spawnSync(runtimeLarkCli, ["im", "+messages-send", "--chat-id", "oc_first", "--chat-id=oc_last", "--help"], {
+    fs.appendFileSync(inboxFile, `${JSON.stringify({
+      envelope_version: 2, target: "chat:oc_installed", target_seq: 2,
+      message_id: "om_installed_unseen", chat_id: "oc_installed", content: "new installed context",
+    })}\n`);
+    for (const guardedArgv of [
+      ["--chat-id", "oc_installed", "im", "+messages-send", "--text", "stale prefix", "--dry-run"],
+      ["im", "--chat-id", "oc_installed", "+messages-send", "--text", "stale middle", "--dry-run"],
+    ]) {
+      const held = spawnSync(runtimeLarkCli, guardedArgv, {
+        cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
+      });
+      assert.equal(held.status, 0, held.stderr);
+      assert.equal(JSON.parse(held.stdout).status, "held");
+    }
+    const duplicateTarget = spawnSync(runtimeLarkCli, ["im", "+messages-send", "--chat-id", "oc_first", "--chat-id=oc_last", "--text", "x"], {
       cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
     });
     assert.equal(duplicateTarget.status, 2);
     assert.match(duplicateTarget.stderr, /--chat-id.*重复|参数边界/);
+    const genericBypass = spawnSync(runtimeLarkCli, ["--as", "bot", "api", "POST", "/open-apis/im/v1/messages"], {
+      cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
+    });
+    assert.equal(genericBypass.status, 2);
+    assert.match(genericBypass.stderr, /generic API/);
     const unsafeForward = spawnSync(runtimeLarkCli, ["im", "messages", "forward", "--message-id", "om_installed_1"], {
       cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
     });
     assert.equal(unsafeForward.status, 2);
     assert.match(unsafeForward.stderr, /target freshness/);
+    const unsafeThreadForward = spawnSync(runtimeLarkCli, ["im", "threads", "forward", "--message-id", "om_installed_1"], {
+      cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
+    });
+    assert.equal(unsafeThreadForward.status, 2);
+    assert.match(unsafeThreadForward.stderr, /target freshness/);
     const importedTransport = checked(process.execPath, ["--eval", `
       const transport = await import(${JSON.stringify(pathToFileURL(transport).href)});
       if (typeof transport.createAgentTransport !== "function") {

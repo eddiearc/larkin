@@ -153,6 +153,64 @@ test("HostShell signal path does not call process.exit ahead of ordered shutdown
   assert.match(source, /await Promise\.resolve\(eventSourceStop\(\)\)[\s\S]*await runtimeHost\.shutdown\(reason\)/);
 });
 
+test("failed durable Inbox append does not burn same-process event redelivery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-inbox-redelivery-"));
+  const agentId = "cli_inboxRetryA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const inboxFile = path.join(stateDir, "feishu-inbox.ndjson");
+  const outside = path.join(root, "unsafe-inbox-target");
+  let deliveries = 0;
+  const runtimeHost = {
+    subscribe() { return () => {}; },
+    async start() {},
+    async deliver() { deliveries += 1; return { status: "accepted", deliveryId: "delivery-retry" }; },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = {
+    agentId, name: agentId, runtime: "codex", model: "gpt", feishuAppId: agentId,
+    feishuProfile: agentId, workspaceDir: path.join(root, "agents", agentId), stateDir,
+  };
+  const eventFile = path.join(root, "events.ndjson");
+  const env = {
+    LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-inbox-retry",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: eventFile,
+  };
+  const logs = [];
+  const host = createHostShell({
+    env, runtimeHost, eventSourceStartDelayMs: 60_000, logImpl: (...parts) => logs.push(parts.join(" ")),
+    execFileImpl(_command, _args, _options, callback) {
+      callback(null, JSON.stringify({ ok: true, data: { items: [{ member_id: "ou_sender", name: "Sender" }] } }), "");
+      return {};
+    },
+  });
+  const event = {
+    chat_id: "oc_retry", chat_type: "group", sender_id: "ou_sender", message_id: "om_retry",
+    event_id: "evt_retry", content: "retry me", thread_id: null, _mentioned_bot: true,
+    _mention_all: false, _sender_is_bot: true,
+  };
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(outside, "must remain unchanged");
+    fs.symlinkSync(outside, inboxFile);
+    await host.ingest(agentId, event);
+    assert.equal(deliveries, 0);
+    assert.match(logs.join("\n"), /inbox 写失败/);
+    assert.equal(fs.readFileSync(outside, "utf8"), "must remain unchanged");
+
+    fs.unlinkSync(inboxFile);
+    await host.ingest(agentId, event);
+    assert.equal(deliveries, 1, "the same event_id must be retried after a failed durable append");
+    const rows = fs.readFileSync(inboxFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(rows.map((row) => row.message_id), ["om_retry"]);
+    await host.ingest(agentId, event);
+    assert.equal(deliveries, 1, "a durably appended event remains deduplicated");
+  } finally {
+    await host.shutdown("inbox retry test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("production HostShell clears eyes on inactive/error and ignores heartbeat activity", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-eye-terminal-"));
   const agentId = "cli_eyehostA1";

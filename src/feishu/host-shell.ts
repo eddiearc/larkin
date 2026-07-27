@@ -314,12 +314,13 @@ export function createHostShell({
   for (const agent of agents) prepareAgentState(agent);
   const reminder = new HostReminderOrchestrator({ agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log });
   const seenEventIds = new Set<string>();
+  const inFlightEventIds = new Set<string>();
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
     const wake = options?.wake !== false;
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
-    if (event.event_id && seenEventIds.has(eventKey)) return;
-    if (event.event_id) seenEventIds.add(eventKey);
+    if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
+    if (event.event_id) inFlightEventIds.add(eventKey);
     try {
       const [names, signature] = await Promise.all([
         senderIdentity.ensureChatNames(agent, event.chat_id, 3_000),
@@ -336,6 +337,9 @@ export function createHostShell({
       });
       try { stateStore(agent).appendNdjson("inbox", inboxEnvelope); }
       catch (error) { throw new Error(`inbox 写失败: ${errorMessage(error)}`); }
+      // An event becomes permanently seen only after its canonical Inbox append
+      // is durable. Failures remain eligible for same-process redelivery.
+      if (event.event_id) seenEventIds.add(eventKey);
       hostState.appendConversation(agent, {
         direction: "in", from: envelope.sender_name, senderType: envelope.sender_type,
         target: targetFor(event).target, wake, text: event.content, messageId: envelope.message_id,
@@ -356,6 +360,8 @@ export function createHostShell({
     } catch (error) {
       log(`onFeishuMessage 异常 agent=${agent.name}: ${error instanceof Error ? error.stack || error.message : String(error)}`);
       hostState.recordStatusError(agent, `onFeishuMessage: ${errorMessage(error)}`);
+    } finally {
+      if (event.event_id) inFlightEventIds.delete(eventKey);
     }
   };
   const interactionChannels = new Map<string, LarkChannel>();

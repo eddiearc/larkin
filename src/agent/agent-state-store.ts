@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.js";
-import { inspectProcess } from "../platform/process-state.js";
+import { acquireProcessLock, inspectProcess } from "../platform/process-state.js";
 import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
@@ -102,11 +102,22 @@ export interface InboxDraft {
   updated_at: string;
 }
 
+interface InboxSendIntent {
+  intent_id: string;
+  target: string;
+  argv: string[];
+  latest_received_seq: number;
+  model_seen_seq: number;
+  committed_at: string;
+  draft_id?: string;
+}
+
 interface InboxStateFile {
   version: 2;
   targets: Record<string, InboxTargetState>;
   messages: Record<string, { target: string; seq: number }>;
   drafts: Record<string, InboxDraft>;
+  intents: Record<string, InboxSendIntent>;
 }
 
 export type FreshnessGateResult<T> =
@@ -114,7 +125,7 @@ export type FreshnessGateResult<T> =
   | { status: "ready"; target: string; intentId: string; result: T };
 
 function emptyInboxState(): InboxStateFile {
-  return { version: 2, targets: {}, messages: {}, drafts: {} };
+  return { version: 2, targets: {}, messages: {}, drafts: {}, intents: {} };
 }
 
 function validSequence(value: unknown): value is number {
@@ -151,6 +162,20 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       }
     }
   }
+  if (raw.intents && typeof raw.intents === "object" && !Array.isArray(raw.intents)) {
+    for (const [intentId, candidate] of Object.entries(raw.intents)) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const intent = candidate as InboxSendIntent;
+      if (intent.intent_id === intentId && typeof intent.target === "string" && !!intent.target
+        && Array.isArray(intent.argv) && intent.argv.every((argument) => typeof argument === "string")
+        && Number.isSafeInteger(intent.latest_received_seq) && intent.latest_received_seq >= 0
+        && Number.isSafeInteger(intent.model_seen_seq) && intent.model_seen_seq >= 0
+        && typeof intent.committed_at === "string" && !!intent.committed_at
+        && (intent.draft_id === undefined || typeof intent.draft_id === "string")) {
+        state.intents[intentId] = { ...intent, argv: [...intent.argv] };
+      }
+    }
+  }
   return state;
 }
 
@@ -172,9 +197,14 @@ interface InboxLockOwner {
 }
 
 type InboxLockState = "active" | "unknown" | "reclaimable";
+type InspectProcess = typeof inspectProcess;
 
-function newInboxLockOwner(): InboxLockOwner {
-  const inspected = inspectProcess(process.pid);
+export interface AgentStateStoreDependencies {
+  inspectProcess?: InspectProcess;
+}
+
+function newInboxLockOwner(inspect: InspectProcess): InboxLockOwner {
+  const inspected = inspect(process.pid);
   if (!inspected.ok || !inspected.startToken) {
     throw new Error(`无法读取 Inbox lock owner 身份：${inspected.reason || "metadata incomplete"}`);
   }
@@ -194,10 +224,12 @@ export type InboxDeliveryPreparation = "appended" | "present" | "active" | "term
 export class AgentStateStore {
   readonly paths: AgentStatePaths;
   private readonly boundary: string;
+  private readonly inspect: InspectProcess;
 
-  constructor(layout: TargetRootLayout, agentId: string) {
+  constructor(layout: TargetRootLayout, agentId: string, dependencies: AgentStateStoreDependencies = {}) {
     this.paths = layout.agentStatePaths(agentId);
     this.boundary = path.join(layout.root, "state");
+    this.inspect = dependencies.inspectProcess ?? inspectProcess;
   }
 
   private file(key: JsonStateKey | NdjsonStateKey): string {
@@ -238,7 +270,7 @@ export class AgentStateStore {
       const age = Date.now() - fs.lstatSync(lockDir).mtimeMs;
       return age >= INBOX_MALFORMED_LOCK_GRACE_MS ? "reclaimable" : "unknown";
     }
-    const inspected = inspectProcess(owner.pid);
+    const inspected = this.inspect(owner.pid);
     if (!inspected.ok) return inspected.dead ? "reclaimable" : "unknown";
     if (!inspected.startToken) return "unknown";
     return inspected.startToken === owner.processStartToken ? "active" : "reclaimable";
@@ -253,10 +285,15 @@ export class AgentStateStore {
   }
 
   private tryReclaimInboxLock(lockDir: string): boolean {
-    const reclaimDir = `${lockDir}.reclaim`;
-    try { fs.mkdirSync(reclaimDir, { mode: 0o700 }); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    const reclaimFile = `${lockDir}.reclaim`;
+    rejectSymlink(reclaimFile);
+    let reclaim: ReturnType<typeof acquireProcessLock>;
+    try {
+      reclaim = acquireProcessLock(reclaimFile, path.basename(process.execPath), {
+        malformedGraceMs: INBOX_MALFORMED_LOCK_GRACE_MS,
+      });
+    } catch (error) {
+      if (/lock 已被|无法取得 lock|正在创建|暂不能接管/.test(error instanceof Error ? error.message : String(error))) return false;
       throw error;
     }
     try {
@@ -280,8 +317,7 @@ export class AgentStateStore {
       fs.rmdirSync(lockDir);
       return true;
     } finally {
-      try { fs.rmdirSync(reclaimDir); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      reclaim.release();
     }
   }
 
@@ -292,15 +328,26 @@ export class AgentStateStore {
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
       throw new Error(`inbox lock escapes Agent root: ${lockDir}`);
     }
-    const reclaimDir = `${lockDir}.reclaim`;
+    const reclaimFile = `${lockDir}.reclaim`;
     const deadline = Date.now() + INBOX_LOCK_TIMEOUT_MS;
-    const owner = newInboxLockOwner();
+    const owner = newInboxLockOwner(this.inspect);
     let acquired = false;
     for (;;) {
       rejectSymlink(lockDir);
-      rejectSymlink(reclaimDir);
+      rejectSymlink(reclaimFile);
+      const reclaimStat = lstatIfExists(reclaimFile);
+      if (reclaimStat) {
+        if (!reclaimStat.isFile() || (typeof process.getuid === "function" && reclaimStat.uid !== process.getuid())) {
+          throw new Error(`invalid inbox reclaim lock path: ${reclaimFile}`);
+        }
+        this.tryReclaimInboxLock(lockDir);
+        if (lstatIfExists(reclaimFile)) {
+          if (Date.now() >= deadline) throw new Error("Inbox 锁等待超时");
+          sleepSync(50);
+          continue;
+        }
+      }
       try {
-        if (lstatIfExists(reclaimDir)) throw Object.assign(new Error("Inbox lock 正在回收"), { code: "EEXIST" });
         fs.mkdirSync(lockDir, { mode: 0o700 });
         const stat = fs.lstatSync(lockDir);
         if (!stat.isDirectory() || stat.isSymbolicLink() ||
@@ -313,7 +360,7 @@ export class AgentStateStore {
           fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`);
           fs.fsyncSync(fd);
         } finally { fs.closeSync(fd); }
-        if (lstatIfExists(reclaimDir)) {
+        if (lstatIfExists(reclaimFile)) {
           this.removeInboxLockIfOwned(lockDir, owner);
           throw Object.assign(new Error("Inbox lock 正在回收"), { code: "EEXIST" });
         }
@@ -648,7 +695,9 @@ export class AgentStateStore {
   withFreshnessGate<T>(input: { target: string; argv: readonly string[]; now?: number;
     commitDraftId?: string; providerSucceeded?(result: T): boolean }, perform: (intentId: string) => T): FreshnessGateResult<T> {
     const file = this.file("inbox");
-    return this.withInboxLock(file, () => {
+    type Preflight = Extract<FreshnessGateResult<T>, { status: "held" }>
+      | { status: "ready"; intentId: string; commitDraftId?: string };
+    const preflight: Preflight = this.withInboxLock(file, (): Preflight => {
       const state = this.inboxState();
       const rows = this.reconcileInboxRows(this.readNdjson<InboxEnvelope>("inbox"), state);
       const pendingLatest = rows.filter((row) => row.target === input.target)
@@ -673,7 +722,7 @@ export class AgentStateStore {
         return { status: "held", target: input.target, latest_received_seq: target.latest_received_seq,
           model_seen_seq: target.model_seen_seq, draft };
       }
-      let commitDraft: InboxDraft | undefined;
+      let commitDraftId: string | undefined;
       if (input.commitDraftId) {
         if (!input.providerSucceeded) throw new Error("commitDraftId requires providerSucceeded");
         const draft = state.drafts[input.commitDraftId];
@@ -681,17 +730,44 @@ export class AgentStateStore {
             || JSON.stringify(draft.argv) !== JSON.stringify(input.argv)) {
           throw new Error(`held draft 与 freshness intent 不匹配：${input.commitDraftId}`);
         }
-        commitDraft = draft;
+        commitDraftId = draft.draft_id;
       }
+      const committedAt = new Date(input.now ?? Date.now()).toISOString();
+      const existingIntent = state.intents[intentId];
+      state.intents[intentId] = existingIntent ?? {
+        intent_id: intentId,
+        target: input.target,
+        argv: [...input.argv],
+        latest_received_seq: target.latest_received_seq,
+        model_seen_seq: target.model_seen_seq,
+        committed_at: committedAt,
+        ...(commitDraftId ? { draft_id: commitDraftId } : {}),
+      };
+      const intentIds = Object.keys(state.intents)
+        .sort((left, right) => state.intents[left].committed_at.localeCompare(state.intents[right].committed_at));
+      for (const stale of intentIds.slice(0, Math.max(0, intentIds.length - 2_048))) delete state.intents[stale];
       this.writeJson("inboxState", state);
-      const result = perform(intentId);
-      if (commitDraft && input.providerSucceeded?.(result)) {
-        const at = new Date(input.now ?? Date.now()).toISOString();
-        state.drafts[commitDraft.draft_id] = { ...commitDraft, status: "sent", updated_at: at };
-        this.writeJson("inboxState", state);
-      }
-      return { status: "ready", target: input.target, intentId, result };
+      return { status: "ready" as const, intentId, commitDraftId };
     });
+    if (preflight.status === "held") return preflight;
+    // Provider/network work starts only after the durable intent commit has
+    // released the Inbox lock. That commit is the local receive boundary.
+    const result = perform(preflight.intentId);
+    if (preflight.commitDraftId && input.providerSucceeded?.(result)) {
+      this.withInboxLock(file, () => {
+        const state = this.inboxState();
+        const draft = state.drafts[preflight.commitDraftId!];
+        if (!draft || draft.status !== "held" || draft.target !== input.target
+            || JSON.stringify(draft.argv) !== JSON.stringify(input.argv)) {
+          throw new Error(`held draft finalize 状态不一致：${preflight.commitDraftId}`);
+        }
+        state.drafts[draft.draft_id] = {
+          ...draft, status: "sent", updated_at: new Date(input.now ?? Date.now()).toISOString(),
+        };
+        this.writeJson("inboxState", state);
+      });
+    }
+    return { status: "ready", target: input.target, intentId: preflight.intentId, result };
   }
 
   /**
@@ -718,6 +794,8 @@ export class AgentStateStore {
   }
 }
 
-export function createAgentStateStore(root: string, agentId: string): AgentStateStore {
-  return new AgentStateStore(TargetRootLayout.fromConfigDir(root), agentId);
+export function createAgentStateStore(
+  root: string, agentId: string, dependencies: AgentStateStoreDependencies = {},
+): AgentStateStore {
+  return new AgentStateStore(TargetRootLayout.fromConfigDir(root), agentId, dependencies);
 }

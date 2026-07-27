@@ -70,6 +70,23 @@ function nativeArgvBeforeBoundary(argv: readonly string[]): readonly string[] {
   return argv.slice(0, boundary < 0 ? argv.length : boundary);
 }
 
+function hasCanonicalUnprotectedCommandPath(argv: readonly string[]): boolean {
+  const nativeArgv = nativeArgvBeforeBoundary(argv);
+  const service = nativeArgv[0];
+  const command = nativeArgv[1];
+  if (!service || service.startsWith("-") || !command || command.startsWith("-")) return false;
+  if (service !== "im") return service !== "api" && service !== "larkin-draft";
+  if (command === "+messages-send" || command === "+messages-reply" || command === "api" || command === "larkin-draft") {
+    return false;
+  }
+  if (command.startsWith("+")) return true;
+  const operation = nativeArgv[2];
+  if (!operation || operation.startsWith("-") || operation === "api" || operation === "larkin-draft") return false;
+  if (command === "messages" && RAW_IM_WRITE_OPERATIONS.has(operation)) return false;
+  if (command === "threads" && (operation === "forward" || operation === "merge_forward")) return false;
+  return true;
+}
+
 function protectedSyntaxTokens(argv: readonly string[]): string[] {
   const tokens: string[] = [];
   const nativeArgv = nativeArgvBeforeBoundary(argv);
@@ -163,7 +180,6 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   const parsed = parsePolicyArgv(argv);
   if (parsed.help) return { kind: "passthrough" };
   if (parsed.error) return { kind: "denied", reason: `参数边界：${parsed.error}` };
-  const protectedPaths = protectedOperations(argv);
   for (const flag of ["--profile", "--config-dir", "--agent"]) {
     if (parsed.flags.has(flag)) return { kind: "denied", reason: `身份边界：${flag} 由 Larkin Runtime 锁定` };
   }
@@ -173,6 +189,8 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (MANAGEMENT_COMMANDS.has(command)) return { kind: "denied", reason: `身份边界：Runtime 不开放 lark-cli ${command} 管理命令` };
   if (command === "event") return { kind: "denied", reason: "Runtime 不允许另开 event 连接与 Host 争抢事件流" };
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
+  if (hasCanonicalUnprotectedCommandPath(argv)) return { kind: "passthrough" };
+  const protectedPaths = protectedOperations(argv);
   if (exactPath(parsed.commandArgv, ["larkin-draft", "list"])) return uniqueProtectedOperation(protectedPaths, "draft")
     ? { kind: "runtime-owned", operation: "draft-list" } : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["larkin-draft", "send"])) return uniqueProtectedOperation(protectedPaths, "draft")

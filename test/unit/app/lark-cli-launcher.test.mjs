@@ -96,6 +96,24 @@ test("launcher forwards native help, output, stderr, exit code, and fixed packag
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("canonical read paths treat protected-looking flag values as opaque provider argv", () => {
+  const f = fixture();
+  try {
+    f.setSpawnStatus(0);
+    const readCommands = [
+      ["docs", "+fetch", "--doc", "api"],
+      ["docs", "+fetch", "--keyword", "api"],
+      ["docs", "+fetch", "--doc", "larkin-draft"],
+      ["im", "+chat-list", "--page-token", "api"],
+    ];
+    for (const argv of readCommands) assert.equal(f.run(argv).code, 0, argv.join(" "));
+    assert.deepEqual(f.calls.map((call) => call.args.slice(1)), readCommands,
+      "read argv must reach the pinned provider byte-for-byte");
+    assert.equal(fs.existsSync(f.store.paths.inboxState), false,
+      "read classification must not create freshness or draft state");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("normalized policy flags cannot bypass guarded targets or generic API denial", () => {
   const f = fixture();
   try {

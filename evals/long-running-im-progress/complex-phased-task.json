@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "complex-phased-task",
+  "title": "复杂任务按大阶段有界汇报",
+  "task": "依次完成准备、分析和交付三个阶段的检查，并在全部完成后向当前会话说明结果。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "prepare-fetch", "phase": "prepare", "slow": true, "outcome": "success", "output": "source data fetched" },
+    { "id": "prepare-normalize", "phase": "prepare", "slow": false, "outcome": "success", "output": "source data normalized" },
+    { "id": "analyze-primary", "phase": "analyze", "slow": false, "outcome": "failure", "output": "analysis attempt hit a simulated transient conflict" },
+    { "id": "analyze-retry", "phase": "analyze", "slow": false, "outcome": "success", "output": "analysis retry completed" },
+    { "id": "analyze-aggregate", "phase": "analyze", "slow": true, "outcome": "success", "output": "analysis aggregate completed" },
+    { "id": "deliver-primary", "phase": "deliver", "slow": true, "outcome": "failure", "output": "primary delivery path rejected the package" },
+    { "id": "deliver-fallback", "phase": "deliver", "slow": true, "outcome": "success", "output": "fallback delivery path created the package" },
+    { "id": "deliver-verify", "phase": "deliver", "slow": false, "outcome": "success", "output": "delivery package verified" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": true,
+    "terminal_im_after_work": true,
+    "progress_after_repeated_failure": false,
+    "progress_before_steps": ["deliver-fallback"],
+    "max_im_messages": 5,
+    "short_task_terminal_only": false,
+    "silent_failure_retry_pairs": [
+      { "failure_step_id": "analyze-primary", "retry_step_id": "analyze-retry" }
+    ],
+    "forbidden_sentinels": []
+  }
+}

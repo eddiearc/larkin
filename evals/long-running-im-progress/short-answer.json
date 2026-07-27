@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "short-answer",
+  "title": "无需机械首响的短任务",
+  "task": "计算 2 + 2，并直接把结果发到当前会话。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [],
+  "expectations": {
+    "ack_before_first_slow_work": false,
+    "terminal_im_after_work": false,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 1,
+    "short_task_terminal_only": true,
+    "forbidden_sentinels": []
+  }
+}

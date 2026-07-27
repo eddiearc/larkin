@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "repeated-tool-failure",
+  "title": "连续外部步骤失败",
+  "task": "检查主路径和备用路径的服务状态。即使主路径失败，也必须继续执行备用路径；最后向当前会话说明结果。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "primary", "slow": true, "outcome": "failure", "output": "primary check failed: simulated timeout" },
+    { "id": "fallback", "slow": true, "outcome": "failure", "output": "fallback check failed: simulated authorization expiry" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": true,
+    "terminal_im_after_work": true,
+    "progress_after_repeated_failure": true,
+    "progress_before_steps": ["fallback"],
+    "max_im_messages": 4,
+    "short_task_terminal_only": false,
+    "forbidden_sentinels": []
+  }
+}

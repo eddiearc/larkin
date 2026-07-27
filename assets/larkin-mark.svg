@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">LARKIN</title>
+  <desc id="desc">A swift lark built from three folded ribbons.</desc>
+  <path fill="#00B8D9" d="M8 35.5C11.2 20.8 22.4 9.8 39.8 6l-9.4 18.2-13.2 15Z"/>
+  <path fill="#1456F0" d="M8 35.5c11.8 8.2 24.7 8.7 35.4-.6L56 23.8l-5.1 17.8C39.3 54.4 22.2 56.8 8 47.4Z"/>
+  <path fill="#A3402C" d="M13.8 38.2c3.7-10.4 12.1-18.3 25.4-21.7l-7.1 13.8-9.3 11.2c-3.1-.6-6.1-1.7-9-3.3Z"/>
+</svg>

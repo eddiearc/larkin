@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "successful-long-task",
+  "title": "正常长任务",
+  "task": "依次执行 inventory 和 summary 两个检查步骤，并把最终结论发到当前会话。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "inventory", "slow": true, "outcome": "success", "output": "inventory: 3 healthy items" },
+    { "id": "summary", "slow": true, "outcome": "success", "output": "summary: all checks passed" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": true,
+    "terminal_im_after_work": true,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 3,
+    "short_task_terminal_only": false,
+    "forbidden_sentinels": []
+  }
+}

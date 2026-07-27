@@ -1,0 +1,76 @@
+{
+  "quota": {
+    "role": "assistant",
+    "content": [],
+    "api": "pi-messages",
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol",
+    "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 } },
+    "stopReason": "error",
+    "errorMessage": "429 Too Many Requests: Monthly allowance exhausted (insufficient_quota)",
+    "timestamp": 1784995200000,
+    "diagnostics": [{
+      "type": "pi_messages_response_failure",
+      "timestamp": 1784995200000,
+      "error": { "name": "PiMessagesResponseError", "message": "429 Too Many Requests: Monthly allowance exhausted (insufficient_quota)", "code": "insufficient_quota" },
+      "details": {
+        "version": 1,
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "url": "https://example.invalid/v1/messages",
+        "status": 429,
+        "statusText": "Too Many Requests",
+        "error": { "message": "Monthly allowance exhausted", "type": "insufficient_quota", "code": "insufficient_quota" },
+        "timestampMs": 1784995200000
+      }
+    }]
+  },
+  "unknown403": {
+    "role": "assistant",
+    "content": [],
+    "api": "pi-messages",
+    "provider": "custom-gateway",
+    "model": "custom-model",
+    "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 } },
+    "stopReason": "error",
+    "errorMessage": "403 Forbidden: billing policy review; request body: {\"description\":\"workspace is not enabled\",\"api_key\":\"fixture-secret\"}; Authorization: Bearer fixture-bearer; Cookie: session=fixture-cookie",
+    "timestamp": 1784995200000,
+    "diagnostics": [{
+      "type": "pi_messages_response_failure",
+      "timestamp": 1784995200000,
+      "error": { "name": "PiMessagesResponseError", "message": "403 Forbidden: workspace is not enabled", "code": "workspace_disabled" },
+      "details": {
+        "version": 1,
+        "provider": "custom-gateway",
+        "model": "custom-model",
+        "status": 403,
+        "statusText": "Forbidden",
+        "error": { "message": "Workspace is not enabled; request body description remains useful; api_key=fixture-secret", "type": "policy_error", "code": "workspace_disabled" },
+        "timestampMs": 1784995200000
+      }
+    }]
+  },
+  "authKeyCommand": {
+    "role": "assistant",
+    "content": [],
+    "api": "anthropic-messages",
+    "provider": "bigmodel-anthropic",
+    "model": "glm-5.2",
+    "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 } },
+    "stopReason": "error",
+    "errorMessage": "provider: API key auth failed for provider bigmodel-anthropic: Failed to resolve API key from shell command: /Users/example/.pi/agent/bin/cc-switch-token 'Zhipu GLM'; api_key=fixture-secret",
+    "timestamp": 1784995200000,
+    "diagnostics": [{
+      "type": "provider_auth_failure",
+      "timestamp": 1784995200000,
+      "error": { "name": "ProviderAuthError", "message": "Failed to resolve API key", "code": "key_command_failed" },
+      "details": {
+        "version": 1,
+        "provider": "bigmodel-anthropic",
+        "model": "glm-5.2",
+        "error": { "message": "API key auth failed: resolver command exited nonzero at /Users/example/.pi/agent/bin/cc-switch-token; api_key=fixture-secret", "type": "provider_auth_error", "code": "key_command_failed" },
+        "timestampMs": 1784995200000
+      }
+    }]
+  }
+}

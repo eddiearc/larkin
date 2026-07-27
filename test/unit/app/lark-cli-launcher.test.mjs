@@ -47,8 +47,12 @@ test("launcher classifies exact command paths without substring policy", () => {
   assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "create", "--data", "{}"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["api", "POST", "/open-apis/im/v1/messages"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["api", "GET", "/open-apis/im/v1/messages", "--method", "POST"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "forward", "--message-id", "om_x"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "merge_forward", "--message-id", "om_x"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["docs", "+fetch", "--token", "contains-auth-and-messages-send"]).kind, "passthrough");
   assert.equal(launcher.classifyLarkCliCommand(["auth", "--help"]).kind, "passthrough", "native help is never rewritten or denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--chat-id", "oc_a", "--", "--help"]).kind, "guarded");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--help", "--", "--chat-id", "oc_a"]).kind, "passthrough");
 });
 
 test("launcher forwards native help, output, stderr, exit code, and fixed package entry", () => {
@@ -142,12 +146,36 @@ test("launcher rejects identity switches and generic write bypasses before spawn
       ["im", "+chat-list", "--profile", "other", "--help"],
       ["im", "+messages-send", "--chat-id", "oc_x", "--as", "user", "--text", "x"],
       ["im", "+messages-send", "--user-id", "ou_x", "--text", "x"],
+      ["im", "+messages-send", "--chat-id", "oc_a", "--chat-id=oc_b", "--text", "x"],
+      ["im", "+messages-send", "--chat-id", "oc_a", "--idempotency-key=one", "--idempotency-key", "two", "--text", "x"],
+      ["im", "+messages-reply", "--message-id", "om_a", "--message-id=om_b", "--text", "x"],
+      ["im", "+messages-send", "--chat-id", "oc_a", "--as", "bot", "--as=user", "--text", "x"],
+      ["im", "+messages-send", "--chat-id", "oc_a", "--as=bot", "--as", "user", "--help"],
+      ["im", "+messages-send", "--chat-id", "-h", "--text", "x"],
+      ["im", "+messages-send", "--chat-id=oc_a", "--as=-h", "--text", "x"],
       ["api", "POST", "/open-apis/im/v1/messages", "--data", "{}"],
       ["im", "messages", "create", "--data", "{}"],
+      ["im", "messages", "forward", "--message-id", "om_a"],
+      ["im", "messages", "merge_forward", "--message-id", "om_a"],
     ]) {
       const rejected = f.run(argv);
       assert.equal(rejected.code, 2, `${argv.join(" ")} unexpectedly succeeded`);
     }
     assert.equal(f.calls.length, 0);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("flags after -- cannot change the freshness target or receive injected identity", () => {
+  const f = fixture();
+  try {
+    const result = f.run(["im", "+messages-send", "--chat-id", "oc_exact", "--text", "x", "--", "--chat-id", "oc_positional", "--as", "user", "--help"]);
+    assert.equal(result.code, 7, result.stderr);
+    assert.equal(f.calls.length, 1);
+    const upstream = f.calls[0].args.slice(1);
+    const boundary = upstream.indexOf("--");
+    assert.deepEqual(upstream.slice(0, boundary), [
+      "im", "+messages-send", "--chat-id", "oc_exact", "--text", "x", "--as", "bot", "--idempotency-key", upstream[9],
+    ]);
+    assert.deepEqual(upstream.slice(boundary + 1), ["--chat-id", "oc_positional", "--as", "user", "--help"]);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });

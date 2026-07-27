@@ -215,6 +215,28 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     await waitFor(() => new RegExp(`bot 身份就绪\\(channel\\).*${appId}`).test(stderr), "Agent control-plane readiness")
       .catch((error) => { throw new Error(`${error.message}\n${output()}`); });
 
+    const runtimeBin = path.join(configDir, "state", "agents", appId, "runtime-bin");
+    const runtimeLarkCli = path.join(runtimeBin, "lark-cli");
+    assert.equal(fs.statSync(runtimeLarkCli).mode & 0o077, 0, "standalone Runtime shim must remain private");
+    const nativeVersion = checked(spawnSync(runtimeLarkCli, ["--version"], {
+      cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
+    }), "standalone Runtime pinned lark-cli version");
+    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.57/);
+    const nativeHelp = checked(spawnSync(runtimeLarkCli, ["im", "+messages-send", "--help"], {
+      cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
+    }), "standalone Runtime pinned lark-cli help");
+    assert.match(nativeHelp.stdout, /Send a message|Usage|messages-send/i);
+    const runtimeIdentityEscape = spawnSync(runtimeLarkCli, ["im", "+chat-list", "--profile", otherAgentId], {
+      cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
+    });
+    assert.equal(runtimeIdentityEscape.status, 2);
+    assert.match(runtimeIdentityEscape.stderr, /身份边界|--profile/);
+    assert.equal(fs.existsSync(larkMarker), false, "standalone Runtime must not resolve ambient PATH lark-cli");
+    const nativeProfile = JSON.parse(fs.readFileSync(path.join(configDir, "state", "agents", appId, "lark-cli-config", "config.json"), "utf8"));
+    assert.deepEqual(nativeProfile.apps.map((entry) => ({
+      appId: entry.appId, name: entry.name, defaultAs: entry.defaultAs, strictMode: entry.strictMode, users: entry.users,
+    })), [{ appId, name: appId, defaultAs: "bot", strictMode: "bot", users: [] }]);
+
     checked(runCli(["config", "model", "default", "--agent", appId], serviceEnv), "save pending config");
     assert.match(checked(runCli(["config", "apply", "--agent", appId], serviceEnv), "authenticated public apply").stdout, /"applyState": "applied"/);
     assert.equal(JSON.parse(checked(runAgentCli(["config", "apply"], serviceEnv), "authenticated Agent apply").stdout).applyState, "applied");

@@ -349,26 +349,32 @@ test("current Agent-facing docs and prompts do not teach removed Agent commands"
   }
 });
 
-test("Inbox poll serializes a cross-process append into the next batch", async () => {
+test("an artificially old but live Inbox lock cannot be reclaimed by a cross-process append", async () => {
   const f = fixture();
   const marker = path.join(f.root, "append-started");
+  const appended = path.join(f.root, "append-complete");
   const moduleFile = path.join(ROOT, "dist/agent/agent-state-store.cjs");
   let child;
   try {
     f.store.appendNdjson("inbox", { message_id: "om_old" });
     const drained = f.store.pollInbox({
       afterRead() {
+        const old = new Date(Date.now() - 60_000);
+        fs.utimesSync(`${f.store.paths.inbox}.lock`, old, old);
         child = spawn(process.execPath, ["-e", `
 const fs = require("node:fs");
 const { createAgentStateStore } = require(process.argv[1]);
 fs.writeFileSync(process.argv[4], "started");
 createAgentStateStore(process.argv[2], process.argv[3]).appendNdjson("inbox", { message_id: "om_new" });
-`, moduleFile, f.root, f.agentId, marker], { stdio: "ignore" });
+fs.writeFileSync(process.argv[5], "complete");
+`, moduleFile, f.root, f.agentId, marker, appended], { stdio: "ignore" });
         const deadline = Date.now() + 2_000;
         while (!fs.existsSync(marker) && Date.now() < deadline) {
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
         }
         assert.equal(fs.existsSync(marker), true, "child must attempt append while drain owns the lock");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+        assert.equal(fs.existsSync(appended), false, "live owner must win even when lock mtime exceeds the former stale threshold");
       },
     });
     assert.deepEqual(drained.envelopes.map((row) => row.message_id), ["om_old"]);

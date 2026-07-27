@@ -21,6 +21,9 @@ test("fixed runtime Agent interface eval registers dataset, rubric, grader, thre
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "new-message", "busy-update", "check-only", "poll-complete", "held-draft", "repeated-update", "target-isolation",
   ]);
+  for (const scenario of DATASET.scenarios) {
+    assert.deepEqual(scenario.required_actions, scenario.trace.map((event) => event.action));
+  }
 });
 
 test("golden traces reach the registered threshold", () => {
@@ -45,6 +48,17 @@ test("grader rejects check body disclosure, stale provider writes, busy cancella
     { action: "provider_write", target: "chat:oc_eval_b", based_on_seq: 0 },
   ]);
   assert.deepEqual(new Set(result.failures.map((failure) => failure.rule)), new Set([
-    "check_content_light", "poll_direct_ack", "busy_update_no_cancel", "freshness_before_provider",
+    "check_content_light", "poll_direct_ack", "busy_update_no_cancel", "freshness_before_provider", "required_actions",
   ]));
+});
+
+test("grader rejects empty traces even when a scenario expects no provider writes", () => {
+  for (const id of ["check-only", "poll-complete"]) {
+    const scenario = DATASET.scenarios.find((item) => item.id === id);
+    const result = gradeRuntimeAgentInterfaceTrace(scenario, []);
+    assert.equal(result.passed, false);
+    assert.equal(result.failures.some((failure) => failure.rule === "required_actions"), true, id);
+  }
+  const empty = Object.fromEntries(DATASET.scenarios.map((scenario) => [scenario.id, []]));
+  assert.equal(summarizeRuntimeAgentInterfaceEval(DATASET, empty).passed, false);
 });

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.js";
+import { inspectProcess } from "../platform/process-state.js";
 import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
@@ -13,7 +14,8 @@ const JSON_KEYS: ReadonlySet<string> = new Set([
 ]);
 const NDJSON_KEYS: ReadonlySet<string> = new Set(["conversation", "inbox"]);
 const INBOX_LOCK_TIMEOUT_MS = 2_000;
-const INBOX_STALE_LOCK_MS = 10_000;
+const INBOX_MALFORMED_LOCK_GRACE_MS = 5_000;
+const INBOX_LOCK_OWNER_FILE = "owner.json";
 
 function lstatIfExists(file: string): fs.Stats | null {
   try { return fs.lstatSync(file); }
@@ -162,6 +164,31 @@ interface RuntimeDeliveryStore extends Record<string, unknown> {
   records?: unknown;
 }
 
+interface InboxLockOwner {
+  version: 1;
+  pid: number;
+  processStartToken: string;
+  nonce: string;
+}
+
+type InboxLockState = "active" | "unknown" | "reclaimable";
+
+function newInboxLockOwner(): InboxLockOwner {
+  const inspected = inspectProcess(process.pid);
+  if (!inspected.ok || !inspected.startToken) {
+    throw new Error(`无法读取 Inbox lock owner 身份：${inspected.reason || "metadata incomplete"}`);
+  }
+  return { version: 1, pid: process.pid, processStartToken: inspected.startToken, nonce: crypto.randomUUID() };
+}
+
+function validInboxLockOwner(value: unknown): value is InboxLockOwner {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const owner = value as Partial<InboxLockOwner>;
+  return owner.version === 1 && Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0
+    && typeof owner.processStartToken === "string" && !!owner.processStartToken
+    && typeof owner.nonce === "string" && /^[0-9a-f-]{36}$/i.test(owner.nonce);
+}
+
 export type InboxDeliveryPreparation = "appended" | "present" | "active" | "terminal_error" | "consumed";
 
 export class AgentStateStore {
@@ -186,6 +213,78 @@ export class AgentStateStore {
     rejectSymlink(file);
   }
 
+  private readInboxLockOwner(lockDir: string): InboxLockOwner | null {
+    const ownerFile = path.join(lockDir, INBOX_LOCK_OWNER_FILE);
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(ownerFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) {
+        throw new Error(`Inbox lock owner 文件不安全：${ownerFile}`);
+      }
+      const value = JSON.parse(fs.readFileSync(fd, "utf8")) as unknown;
+      return validInboxLockOwner(value) ? value : null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return null;
+      throw error;
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
+    }
+  }
+
+  private inboxLockState(lockDir: string): InboxLockState {
+    const owner = this.readInboxLockOwner(lockDir);
+    if (!owner) {
+      const age = Date.now() - fs.lstatSync(lockDir).mtimeMs;
+      return age >= INBOX_MALFORMED_LOCK_GRACE_MS ? "reclaimable" : "unknown";
+    }
+    const inspected = inspectProcess(owner.pid);
+    if (!inspected.ok) return inspected.dead ? "reclaimable" : "unknown";
+    if (!inspected.startToken) return "unknown";
+    return inspected.startToken === owner.processStartToken ? "active" : "reclaimable";
+  }
+
+  private removeInboxLockIfOwned(lockDir: string, owner: InboxLockOwner): void {
+    const current = this.readInboxLockOwner(lockDir);
+    if (!current || current.pid !== owner.pid || current.nonce !== owner.nonce
+        || current.processStartToken !== owner.processStartToken) return;
+    fs.unlinkSync(path.join(lockDir, INBOX_LOCK_OWNER_FILE));
+    fs.rmdirSync(lockDir);
+  }
+
+  private tryReclaimInboxLock(lockDir: string): boolean {
+    const reclaimDir = `${lockDir}.reclaim`;
+    try { fs.mkdirSync(reclaimDir, { mode: 0o700 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+    try {
+      let stat: fs.Stats;
+      try { stat = fs.lstatSync(lockDir); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
+      if (!stat.isDirectory() || stat.isSymbolicLink()
+          || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+        throw new Error(`invalid inbox lock path: ${lockDir}`);
+      }
+      if (this.inboxLockState(lockDir) !== "reclaimable") return false;
+      const entries = fs.readdirSync(lockDir);
+      if (entries.some((entry) => entry !== INBOX_LOCK_OWNER_FILE)) {
+        throw new Error(`Inbox lock 包含未知内容，拒绝回收：${lockDir}`);
+      }
+      if (entries.includes(INBOX_LOCK_OWNER_FILE)) {
+        const ownerStat = fs.lstatSync(path.join(lockDir, INBOX_LOCK_OWNER_FILE));
+        if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) throw new Error(`Inbox lock owner 路径无效：${lockDir}`);
+        fs.unlinkSync(path.join(lockDir, INBOX_LOCK_OWNER_FILE));
+      }
+      fs.rmdirSync(lockDir);
+      return true;
+    } finally {
+      try { fs.rmdirSync(reclaimDir); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  }
+
   private withInboxLock<T>(file: string, operation: () => T): T {
     this.prepare(file);
     const lockDir = `${file}.lock`;
@@ -193,39 +292,55 @@ export class AgentStateStore {
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
       throw new Error(`inbox lock escapes Agent root: ${lockDir}`);
     }
+    const reclaimDir = `${lockDir}.reclaim`;
     const deadline = Date.now() + INBOX_LOCK_TIMEOUT_MS;
+    const owner = newInboxLockOwner();
+    let acquired = false;
     for (;;) {
       rejectSymlink(lockDir);
+      rejectSymlink(reclaimDir);
       try {
+        if (lstatIfExists(reclaimDir)) throw Object.assign(new Error("Inbox lock 正在回收"), { code: "EEXIST" });
         fs.mkdirSync(lockDir, { mode: 0o700 });
         const stat = fs.lstatSync(lockDir);
         if (!stat.isDirectory() || stat.isSymbolicLink() ||
             (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
           throw new Error(`inbox lock is not an owned directory: ${lockDir}`);
         }
+        const ownerFile = path.join(lockDir, INBOX_LOCK_OWNER_FILE);
+        const fd = fs.openSync(ownerFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+        try {
+          fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`);
+          fs.fsyncSync(fd);
+        } finally { fs.closeSync(fd); }
+        if (lstatIfExists(reclaimDir)) {
+          this.removeInboxLockIfOwned(lockDir, owner);
+          throw Object.assign(new Error("Inbox lock 正在回收"), { code: "EEXIST" });
+        }
+        const current = this.readInboxLockOwner(lockDir);
+        if (!current || current.nonce !== owner.nonce || current.pid !== owner.pid) {
+          throw new Error("Inbox lock owner 发布后不一致");
+        }
+        acquired = true;
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const stat = fs.lstatSync(lockDir);
-        if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`invalid inbox lock path: ${lockDir}`);
-        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-          throw new Error(`inbox lock is not owned by current user: ${lockDir}`);
-        }
-        if (Date.now() - stat.mtimeMs > INBOX_STALE_LOCK_MS) {
-          try { fs.rmdirSync(lockDir); } catch (reclaimError) {
-            if (!(["ENOENT", "ENOTEMPTY"] as Array<string | undefined>).includes((reclaimError as NodeJS.ErrnoException).code)) throw reclaimError;
+        const stat = lstatIfExists(lockDir);
+        if (stat) {
+          if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`invalid inbox lock path: ${lockDir}`);
+          if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+            throw new Error(`inbox lock is not owned by current user: ${lockDir}`);
           }
-          continue;
+          if (this.inboxLockState(lockDir) === "reclaimable" && this.tryReclaimInboxLock(lockDir)) continue;
         }
         if (Date.now() >= deadline) throw new Error("Inbox 锁等待超时");
-        sleepSync(15);
+        sleepSync(50);
       }
     }
     try {
       return operation();
     } finally {
-      try { fs.rmdirSync(lockDir); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (acquired) this.removeInboxLockIfOwned(lockDir, owner);
     }
   }
 

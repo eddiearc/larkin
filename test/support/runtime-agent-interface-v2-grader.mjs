@@ -26,6 +26,10 @@ export function loadRuntimeAgentInterfaceEval(file) {
     ids.add(id);
     nonempty(scenario.task, `${prefix}.task`);
     nonempty(scenario.target, `${prefix}.target`);
+    if (!Array.isArray(scenario.required_actions) || !scenario.required_actions.length
+        || scenario.required_actions.some((action) => typeof action !== "string" || !action)) {
+      throw new Error(`${prefix}.required_actions must be a non-empty action list`);
+    }
     if (!Array.isArray(scenario.trace) || !scenario.trace.length) throw new Error(`${prefix}.trace must be non-empty`);
     if (!Number.isSafeInteger(scenario.expected_provider_writes) || scenario.expected_provider_writes < 0) {
       throw new Error(`${prefix}.expected_provider_writes must be a non-negative integer`);
@@ -40,7 +44,9 @@ export function gradeRuntimeAgentInterfaceTrace(scenario, trace) {
   const targets = new Map();
   let busy = false;
   let providerWrites = 0;
+  const actualActions = new Map();
   for (const [index, event] of trace.entries()) {
+    actualActions.set(event.action, (actualActions.get(event.action) || 0) + 1);
     const target = event.target || scenario.target;
     const state = targets.get(target) || { latest: 0, seen: 0 };
     if (event.action === "update") {
@@ -68,6 +74,12 @@ export function gradeRuntimeAgentInterfaceTrace(scenario, trace) {
   }
   if (providerWrites !== scenario.expected_provider_writes) {
     fail("provider_write_count", `expected ${scenario.expected_provider_writes}, got ${providerWrites}`);
+  }
+  const requiredActions = new Map();
+  for (const action of scenario.required_actions || []) requiredActions.set(action, (requiredActions.get(action) || 0) + 1);
+  for (const [action, count] of requiredActions) {
+    const actual = actualActions.get(action) || 0;
+    if (actual < count) fail("required_actions", `${action}: expected at least ${count}, got ${actual}`);
   }
   return { passed: failures.length === 0, failures };
 }

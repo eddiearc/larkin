@@ -118,3 +118,20 @@ test("Inbox delivery preparation treats consumed Runtime ownership as final acro
     assert.equal(store.readNdjson("inbox").length, 0);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("Inbox lock reclaims a verifiably dead owner record", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-dead-lock-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateDeadLockA1");
+    store.writeJson("status", { prepared: true });
+    const lockDir = `${store.paths.inbox}.lock`;
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
+      version: 1, pid: 2_147_483_647, processStartToken: "dead-process", nonce: "00000000-0000-4000-8000-000000000000",
+    })}\n`, { mode: 0o600 });
+    store.appendNdjson("inbox", { message_id: "om_after_dead_lock", chat_id: "oc_lock" });
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_after_dead_lock"]);
+    assert.equal(fs.existsSync(lockDir), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

@@ -89,11 +89,22 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
     const runtimeEnv = { ...isolatedEnv, LARKIN_CONFIG_DIR: importConfigDir, LARKIN_AGENT_ID: "cli_test" };
     const inboxDir = path.join(importConfigDir, "state", "agents", "cli_test");
     fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
-    const shimResult = checked(process.execPath, ["--eval", `
-      const runtimeConfig = await import(${JSON.stringify(pathToFileURL(path.join(installed, "dist", "app", "runtime-agent-config.mjs")).href)});
-      process.stdout.write(runtimeConfig.installRuntimeCommandShims({ stateDir: ${JSON.stringify(inboxDir)} }));
-    `], { cwd: consumer, env: runtimeEnv, timeout: 15_000 }, "install Runtime private command shims");
-    const runtimeBin = shimResult.stdout.trim();
+    const botsDir = path.join(importConfigDir, "bots");
+    fs.mkdirSync(botsDir, { mode: 0o700 });
+    fs.writeFileSync(path.join(botsDir, "cli_test.json"), JSON.stringify({
+      appId: "cli_test", appSecret: "installed-fixture-secret", tenant: "feishu",
+    }), { mode: 0o600 });
+    const syncResult = checked(process.execPath, ["--eval", `
+      const runtimeProcess = await import(${JSON.stringify(pathToFileURL(path.join(installed, "dist", "app", "runtime-process.mjs")).href)});
+      const agent = runtimeProcess.loadAndSyncRuntimeAgent(process.env, "cli_test");
+      process.stdout.write(agent.stateDir);
+    `], { cwd: consumer, env: runtimeEnv, timeout: 30_000 }, "sync installed package-local Bot-only profile");
+    assert.equal(syncResult.stdout.trim(), inboxDir);
+    const installedProfile = JSON.parse(fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json"), "utf8"));
+    assert.deepEqual(installedProfile.apps.map((app) => ({
+      appId: app.appId, name: app.name, defaultAs: app.defaultAs, strictMode: app.strictMode, users: app.users,
+    })), [{ appId: "cli_test", name: "cli_test", defaultAs: "bot", strictMode: "bot", users: [] }]);
+    const runtimeBin = path.join(inboxDir, "runtime-bin");
     const runtimeLarkin = path.join(runtimeBin, "larkin");
     const runtimeLarkCli = path.join(runtimeBin, "lark-cli");
     assert.equal(fs.statSync(runtimeLarkin).mode & 0o077, 0);
@@ -131,6 +142,16 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
     });
     assert.equal(identityEscape.status, 2);
     assert.match(identityEscape.stderr, /身份边界|--profile/);
+    const duplicateTarget = spawnSync(runtimeLarkCli, ["im", "+messages-send", "--chat-id", "oc_first", "--chat-id=oc_last", "--help"], {
+      cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
+    });
+    assert.equal(duplicateTarget.status, 2);
+    assert.match(duplicateTarget.stderr, /--chat-id.*重复|参数边界/);
+    const unsafeForward = spawnSync(runtimeLarkCli, ["im", "messages", "forward", "--message-id", "om_installed_1"], {
+      cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
+    });
+    assert.equal(unsafeForward.status, 2);
+    assert.match(unsafeForward.stderr, /target freshness/);
     const importedTransport = checked(process.execPath, ["--eval", `
       const transport = await import(${JSON.stringify(pathToFileURL(transport).href)});
       if (typeof transport.createAgentTransport !== "function") {

@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
 import * as larkinConfig from "../platform/config.js";
+import { resolvePinnedLarkCliCommand, type PinnedLarkCliCommand } from "./runtime-agent-config.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -18,6 +19,7 @@ export interface LarkCliLauncherDependencies {
   io?: LarkCliIo;
   spawn?: typeof spawnSync;
   upstreamScript?: string;
+  nativeCommand?: PinnedLarkCliCommand;
   stateStore?: AgentStateStore;
   now?(): number;
 }
@@ -31,6 +33,16 @@ export type LarkCliCommandDecision =
 const HELP_FLAGS = new Set(["--help", "-h"]);
 const MANAGEMENT_COMMANDS = new Set(["auth", "config", "profile", "update", "install"]);
 const USER_ONLY_COMMANDS = new Set(["attendance", "mail", "okr"]);
+const POLICY_VALUE_FLAGS = new Set([
+  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--draft-id",
+]);
+
+interface PolicyArgv {
+  commandArgv: readonly string[];
+  flags: ReadonlyMap<string, string>;
+  help: boolean;
+  error: string | null;
+}
 
 function defaultIo(): LarkCliIo {
   return { stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) };
@@ -40,27 +52,43 @@ function exactPath(argv: readonly string[], pathSegments: readonly string[]): bo
   return pathSegments.every((segment, index) => argv[index] === segment);
 }
 
-function hasFlag(argv: readonly string[], flag: string): boolean {
-  return argv.some((argument) => argument === flag || argument.startsWith(`${flag}=`));
+function parsePolicyArgv(argv: readonly string[]): PolicyArgv {
+  const boundary = argv.indexOf("--");
+  const commandArgv = argv.slice(0, boundary < 0 ? argv.length : boundary);
+  const flags = new Map<string, string>();
+  for (let index = 0; index < commandArgv.length; index += 1) {
+    const argument = argv[index];
+    const inlineFlag = [...POLICY_VALUE_FLAGS].find((flag) => argument.startsWith(`${flag}=`));
+    const flag = POLICY_VALUE_FLAGS.has(argument) ? argument : inlineFlag;
+    if (!flag) continue;
+    const value = inlineFlag ? argument.slice(flag.length + 1) : commandArgv[index + 1];
+    if (!inlineFlag) index += 1;
+    if (!value || value.startsWith("-")) return { commandArgv, flags, help: commandArgv.some((item) => HELP_FLAGS.has(item)), error: `${flag} 缺少有效值` };
+    if (flags.has(flag)) return { commandArgv, flags, help: commandArgv.some((item) => HELP_FLAGS.has(item)), error: `${flag} 不允许重复或冲突赋值` };
+    flags.set(flag, value);
+  }
+  return { commandArgv, flags, help: commandArgv.some((argument) => HELP_FLAGS.has(argument)), error: null };
 }
 
-function flagValue(argv: readonly string[], flag: string): string | null {
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === flag) return argv[index + 1] || null;
-    if (argument.startsWith(`${flag}=`)) return argument.slice(flag.length + 1) || null;
-  }
-  return null;
+function resolveUpstreamScript(): string {
+  const require = createRequire(import.meta.url);
+  return path.join(path.dirname(require.resolve("@larksuite/cli/package.json")), "scripts", "run.js");
+}
+
+function policyFlagValue(argv: readonly string[], flag: string): string | null {
+  return parsePolicyArgv(argv).flags.get(flag) ?? null;
 }
 
 export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandDecision {
+  const parsed = parsePolicyArgv(argv);
+  if (parsed.error) return { kind: "denied", reason: `参数边界：${parsed.error}` };
   for (const flag of ["--profile", "--config-dir", "--agent"]) {
-    if (hasFlag(argv, flag)) return { kind: "denied", reason: `身份边界：${flag} 由 Larkin Runtime 锁定` };
+    if (parsed.flags.has(flag)) return { kind: "denied", reason: `身份边界：${flag} 由 Larkin Runtime 锁定` };
   }
-  const as = flagValue(argv, "--as");
+  const as = parsed.flags.get("--as");
   if (as && as !== "bot") return { kind: "denied", reason: "身份边界：Runtime 内 lark-cli 只允许 Bot identity" };
-  if (argv.some((argument) => HELP_FLAGS.has(argument))) return { kind: "passthrough" };
-  const command = argv[0] || "";
+  if (parsed.help) return { kind: "passthrough" };
+  const command = parsed.commandArgv[0] || "";
   if (MANAGEMENT_COMMANDS.has(command)) return { kind: "denied", reason: `身份边界：Runtime 不开放 lark-cli ${command} 管理命令` };
   if (command === "event") return { kind: "denied", reason: "Runtime 不允许另开 event 连接与 Host 争抢事件流" };
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
@@ -75,21 +103,21 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (exactPath(argv, ["im", "messages", "create"]) || exactPath(argv, ["im", "messages", "reply"])) {
     return { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" };
   }
+  if (["forward", "merge_forward", "delete", "urgent_app", "urgent_phone", "urgent_sms"]
+    .some((operation) => exactPath(parsed.commandArgv, ["im", "messages", operation]))) {
+    return { kind: "denied", reason: "该 IM 写入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" };
+  }
   if (command === "api") return { kind: "denied", reason: "generic API 会旁路 Runtime identity/freshness policy" };
   return { kind: "passthrough" };
-}
-
-function resolveUpstreamScript(): string {
-  const require = createRequire(import.meta.url);
-  return path.join(path.dirname(require.resolve("@larksuite/cli/package.json")), "scripts", "run.js");
 }
 
 function spawnNative(
   argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies,
 ): number {
+  const native = dependencies.nativeCommand;
   const result = (dependencies.spawn ?? spawnSync)(
-    process.execPath,
-    [dependencies.upstreamScript ?? resolveUpstreamScript(), ...argv],
+    native?.command ?? process.execPath,
+    [...(native?.argsPrefix ?? [dependencies.upstreamScript ?? resolveUpstreamScript()]), ...argv],
     { encoding: "utf8", env: { ...process.env, ...env } },
   ) as SpawnSyncReturns<string>;
   if (result.stdout) io.stdout(result.stdout);
@@ -103,12 +131,12 @@ function spawnNative(
 
 function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarded" }>, argv: readonly string[], store: AgentStateStore): string {
   if (decision.operation === "send") {
-    const chatId = flagValue(argv, "--chat-id");
-    const userId = flagValue(argv, "--user-id");
+    const chatId = policyFlagValue(argv, "--chat-id");
+    const userId = policyFlagValue(argv, "--user-id");
     if (!chatId || userId) throw new Error("Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
     return `chat:${chatId}`;
   }
-  const messageId = flagValue(argv, "--message-id");
+  const messageId = policyFlagValue(argv, "--message-id");
   if (!messageId) throw new Error(`${decision.operation} 写入缺少 --message-id`);
   const target = store.resolveInboxMessageTarget(messageId);
   if (!target) throw new Error(`无法从 Inbox 状态确定 ${messageId} 的 target；先 poll 对应消息，禁止旁路 freshness`);
@@ -117,8 +145,13 @@ function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarde
 
 function botArgv(argv: readonly string[], intentId: string): string[] {
   const next = [...argv];
-  if (!hasFlag(next, "--as")) next.push("--as", "bot");
-  if (!hasFlag(next, "--idempotency-key")) next.push("--idempotency-key", intentId);
+  const parsed = parsePolicyArgv(next);
+  const boundary = next.indexOf("--");
+  const insertion = boundary < 0 ? next.length : boundary;
+  const injected: string[] = [];
+  if (!parsed.flags.has("--as")) injected.push("--as", "bot");
+  if (!parsed.flags.has("--idempotency-key")) injected.push("--idempotency-key", intentId);
+  next.splice(insertion, 0, ...injected);
   return next;
 }
 
@@ -138,6 +171,9 @@ export function runLarkCli(
     return 2;
   }
   const privateEnv = { ...env, LARKIN_AGENT_ID: agent.agentId, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
+  const nativeDependencies = dependencies.nativeCommand || dependencies.upstreamScript
+    ? dependencies
+    : { ...dependencies, nativeCommand: resolvePinnedLarkCliCommand(agent.stateDir) };
   const decision = classifyLarkCliCommand(argv);
   if (decision.kind === "denied") {
     io.stderr(`lark-cli: ${decision.reason}\n`);
@@ -145,7 +181,7 @@ export function runLarkCli(
   }
   if (decision.kind === "runtime-owned") {
     const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
-    const draftId = flagValue(argv, "--draft-id");
+    const draftId = policyFlagValue(argv, "--draft-id");
     try {
       if (decision.operation === "draft-list") {
         io.stdout(`${JSON.stringify({ drafts: store.listInboxDrafts() }, null, 2)}\n`);
@@ -170,7 +206,7 @@ export function runLarkCli(
         providerSucceeded: (code) => code === 0,
         ...(dependencies.now ? { now: dependencies.now() } : {}),
       }, (intentId) => {
-        exitCode = spawnNative(botArgv(draft.argv, intentId), privateEnv, io, dependencies);
+        exitCode = spawnNative(botArgv(draft.argv, intentId), privateEnv, io, nativeDependencies);
         return exitCode;
       });
       if (gated.status === "held") {
@@ -185,13 +221,13 @@ export function runLarkCli(
       return 2;
     }
   }
-  if (decision.kind === "passthrough") return spawnNative(argv, privateEnv, io, dependencies);
+  if (decision.kind === "passthrough") return spawnNative(argv, privateEnv, io, nativeDependencies);
   const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
   try {
     const target = guardedTarget(decision, argv, store);
     let exitCode = 1;
     const gated = store.withFreshnessGate({ target, argv, ...(dependencies.now ? { now: dependencies.now() } : {}) }, (intentId) => {
-      exitCode = spawnNative(botArgv(argv, intentId), privateEnv, io, dependencies);
+      exitCode = spawnNative(botArgv(argv, intentId), privateEnv, io, nativeDependencies);
       return exitCode;
     });
     if (gated.status === "held") {

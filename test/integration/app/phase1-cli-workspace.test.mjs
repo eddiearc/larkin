@@ -87,9 +87,19 @@ childProcess.spawn = function capture(command, args, options = {}) {
   }));
   return new FakeChild();
 };
-childProcess.spawnSync = function(command, args) {
-  if (command !== "lark-cli") return originalSpawnSync.apply(this, arguments);
-  if (command === "lark-cli" && args.includes("+chat-list")) return { status: 0, stdout: JSON.stringify({ ok: true, identity: "bot" }), stderr: "" };
+childProcess.spawnSync = function(command, args, options = {}) {
+  const pinned = command === process.execPath && String(args?.[0] || "").includes("@larksuite/cli/scripts/run.js");
+  if (!pinned) return originalSpawnSync.apply(this, arguments);
+  const cli = args.slice(1), file = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "config.json");
+  if (cli[0] === "config" && cli[1] === "init") {
+    const appId = cli[cli.indexOf("--app-id") + 1], name = cli[cli.indexOf("--name") + 1];
+    fs.writeFileSync(file, JSON.stringify({ apps: [{ appId, name, appSecret: options.input, brand: "feishu", defaultAs: "auto", strictMode: "off", users: [] }] }), { mode: 0o600 });
+  } else {
+    const value = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (cli.includes("default-as")) value.apps[0].defaultAs = "bot";
+    if (cli.includes("strict-mode")) value.apps[0].strictMode = "bot";
+    fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
+  }
   return { status: 0, stdout: "", stderr: "" };
 };
 Module.syncBuiltinESMExports();

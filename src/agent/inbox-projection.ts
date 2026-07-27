@@ -1,11 +1,26 @@
 export interface InboxEnvelope {
+  envelope_version?: unknown;
   message_id?: unknown;
   seq?: unknown;
+  target?: unknown;
+  target_seq?: unknown;
+  chat_id?: unknown;
+  thread_id?: unknown;
   channel_type?: unknown;
   channel_name?: unknown;
   parent_channel_type?: unknown;
   parent_channel_name?: unknown;
   [key: string]: unknown;
+}
+
+export function targetKeyOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string {
+  if (!envelope) return "runtime:unknown";
+  if (typeof envelope.chat_id === "string" && envelope.chat_id) {
+    return typeof envelope.thread_id === "string" && envelope.thread_id
+      ? `thread:${envelope.chat_id}:${envelope.thread_id}`
+      : `chat:${envelope.chat_id}`;
+  }
+  return targetOfInboxEnvelope(envelope) || "runtime:system";
 }
 
 export interface AgentEventsProjection {
@@ -16,6 +31,14 @@ export interface AgentEventsProjection {
   pending_notice_ids: never[];
   wake_reason: null;
   has_more: false;
+}
+
+export interface InboxTargetSummary {
+  target: string;
+  pending_count: number;
+  latest_received_seq: number;
+  first_message_id: string | null;
+  last_message_id: string | null;
 }
 
 export interface InboxLocators {
@@ -64,5 +87,38 @@ export function projectInboxEvents(envelopes: InboxEnvelope[]): AgentEventsProje
     pending_notice_ids: [],
     wake_reason: null,
     has_more: false,
+  };
+}
+
+/** Bounded, content-light and deterministic projection for the read-only check command. */
+export function projectInboxCheck(envelopes: InboxEnvelope[], onlyTarget?: string): {
+  version: 2;
+  targets: InboxTargetSummary[];
+  pending_total: number;
+  has_more: boolean;
+} {
+  const byTarget = new Map<string, InboxEnvelope[]>();
+  for (const envelope of envelopes) {
+    const target = typeof envelope.target === "string" && envelope.target ? envelope.target : targetKeyOfInboxEnvelope(envelope);
+    if (onlyTarget && onlyTarget !== target) continue;
+    const rows = byTarget.get(target) ?? [];
+    rows.push(envelope);
+    byTarget.set(target, rows);
+  }
+  const allTargets = [...byTarget.entries()].map(([target, rows]) => ({
+    target,
+    pending_count: rows.length,
+    latest_received_seq: rows.reduce((latest, row, index) => {
+      const seq = Number(row.target_seq);
+      return Number.isSafeInteger(seq) && seq > 0 ? Math.max(latest, seq) : Math.max(latest, index + 1);
+    }, 0),
+    first_message_id: typeof rows[0]?.message_id === "string" ? rows[0].message_id : null,
+    last_message_id: typeof rows.at(-1)?.message_id === "string" ? rows.at(-1)!.message_id as string : null,
+  })).sort((left, right) => left.target.localeCompare(right.target, "en"));
+  return {
+    version: 2,
+    targets: allTargets.slice(0, 50),
+    pending_total: allTargets.reduce((count, row) => count + row.pending_count, 0),
+    has_more: allTargets.length > 50,
   };
 }

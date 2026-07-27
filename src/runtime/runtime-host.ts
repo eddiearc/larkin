@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { agentCliPromptCapabilities, resolveAgentCliExecutable } from "../agent/agent-cli-capabilities.js";
+import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
 import type { ContextPromptBuilder } from "../agent/context-prompt.js";
 import type {
   NormalizedRuntimeEvent, RuntimeAdapter, RuntimeInput, RuntimeInputResult, RuntimeSession,
@@ -16,6 +16,7 @@ export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
   runtime: string; model: string; effort?: string | null; workspaceDir: string;
   stateDir?: string; sessionId?: string | null;
+  larkConfigDir?: string;
 }
 
 export type DeliveryStatus = "pending" | "submitting" | "accepted" | "consumed" | "error";
@@ -142,7 +143,6 @@ export function createRuntimeHost(options: {
   adapterFor(runtime: string): RuntimeAdapter; promptBuilder: ContextPromptBuilder; log?: (...parts: unknown[]) => void;
   stateStoreFor?(agentId: string): DeliveryStateStore;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
-  agentCliPath?: string;
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
   const listeners = new Set<(event: RuntimeHostEvent) => void>();
@@ -459,11 +459,10 @@ export function createRuntimeHost(options: {
       : { runtime: agent.adapter.id, state: "ready" as const };
     if (!agent.authFailureActive) agent.readiness = readiness;
     if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
-    const executable = resolveAgentCliExecutable(options.agentCliPath);
     const standingPrompt = options.promptBuilder.build({
       agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
       description: agent.config.description || "", runtime: agent.adapter.id,
-      cli: agentCliPromptCapabilities(executable),
+      cli: agentCliPromptCapabilities("larkin"),
     });
     const generation = ++agent.generation;
     let completedSession: RuntimeSession | null = null;
@@ -471,9 +470,10 @@ export function createRuntimeHost(options: {
       agentId: agent.config.agentId, model: agent.config.model, reasoningEffort: agent.config.effort || null,
       workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
       resumeSessionId: agent.config.sessionId || null, standingPrompt,
-      env: { LARKIN_AGENT_ID: agent.config.agentId, LARKIN_RUNTIME_AGENT_ID: agent.config.agentId, LARKIN_COMPUTER_CLI_PATH: process.env.LARKIN_COMPUTER_CLI_PATH,
+      env: { LARKIN_AGENT_ID: agent.config.agentId,
         LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR, LARKIN_HOME: process.env.LARKIN_HOME,
-        LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR },
+        PATH: [agent.config.stateDir ? path.join(agent.config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
+        LARKSUITE_CLI_CONFIG_DIR: agent.config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR },
     }).then((session) => {
       completedSession = session;
       if (agent.stopped || generation !== agent.generation) { void session.close("stale creation"); throw new Error("stale runtime session creation"); }
@@ -524,16 +524,16 @@ export function createRuntimeHost(options: {
       const standingPrompt = options.promptBuilder.build({
         agentId: config.agentId, name: config.displayName || config.name,
         description: config.description || "", runtime: adapter.id,
-        cli: agentCliPromptCapabilities(resolveAgentCliExecutable(options.agentCliPath)),
+        cli: agentCliPromptCapabilities("larkin"),
       });
       const session = await adapter.createSession({
         agentId: config.agentId, model: config.model, reasoningEffort: config.effort || null,
         workspaceDir: config.workspaceDir, stateDir: config.stateDir,
         resumeSessionId: config.sessionId || null, standingPrompt,
-        env: { LARKIN_AGENT_ID: config.agentId, LARKIN_RUNTIME_AGENT_ID: config.agentId,
-          LARKIN_COMPUTER_CLI_PATH: process.env.LARKIN_COMPUTER_CLI_PATH,
+        env: { LARKIN_AGENT_ID: config.agentId,
           LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR, LARKIN_HOME: process.env.LARKIN_HOME,
-          LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR },
+          PATH: [config.stateDir ? path.join(config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
+          LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR },
       });
       let state: "staged" | "committed" | "rolled_back" = "staged";
       const rollback = async (reason: string): Promise<void> => {
@@ -661,7 +661,8 @@ export function createRuntimeHost(options: {
       const busy = agent.busy || agent.submitting;
       const input: RuntimeInput = { inputId: deliveryId, deliveryId, kind: busy ? "inbox_update" : "wake",
         text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId,
-          executable: resolveAgentCliExecutable(options.agentCliPath) }), attempt: 0 };
+          ...(typeof envelope.target === "string" ? { target: envelope.target } : {}),
+          ...(typeof envelope.wake_reason === "string" ? { wakeReason: envelope.wake_reason } : {}) }), attempt: 0 };
       const record: DeliveryRecord = { deliveryId, messageId, status: "pending", input, updatedAt: now() };
       agent.records.set(deliveryId, record); agent.byMessage.set(messageId, deliveryId); persist(agent);
       if (agent.disabledReason) {

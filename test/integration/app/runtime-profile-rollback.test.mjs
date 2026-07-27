@@ -12,10 +12,10 @@ test("runtime-process profile seam restores only the target after init succeeds 
   fs.chmodSync(root, 0o700);
   const target = "cli_targetProfileA1";
   const other = "cli_otherProfileB2";
-  const profileDir = path.join(root, "lark-cli-config");
+  const profileDir = path.join(root, "state", "agents", target, "lark-cli-config");
   const botsDir = path.join(root, "bots");
   const binDir = path.join(root, "bin");
-  fs.mkdirSync(profileDir, { mode: 0o700 });
+  fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(botsDir, { mode: 0o700 });
   fs.mkdirSync(binDir, { mode: 0o700 });
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
@@ -64,10 +64,10 @@ test("runtime-process profile seam restores target after config init partially w
   fs.chmodSync(root, 0o700);
   const target = "cli_partialTargetA1";
   const other = "cli_partialOtherB2";
-  const profileDir = path.join(root, "lark-cli-config");
+  const profileDir = path.join(root, "state", "agents", target, "lark-cli-config");
   const botsDir = path.join(root, "bots");
   const binDir = path.join(root, "bin");
-  fs.mkdirSync(profileDir, { mode: 0o700 });
+  fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(botsDir, { mode: 0o700 });
   fs.mkdirSync(binDir, { mode: 0o700 });
   fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
@@ -114,10 +114,10 @@ for (const mode of ["sync-truncated", "sync-malformed", "verify-truncated"]) {
     fs.chmodSync(root, 0o700);
     const target = "cli_corruptTargetA1";
     const other = "cli_corruptOtherB2";
-    const profileDir = path.join(root, "lark-cli-config");
+    const profileDir = path.join(root, "state", "agents", target, "lark-cli-config");
     const botsDir = path.join(root, "bots");
     const binDir = path.join(root, "bin");
-    fs.mkdirSync(profileDir, { mode: 0o700 });
+    fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(botsDir, { mode: 0o700 });
     fs.mkdirSync(binDir, { mode: 0o700 });
     fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
@@ -160,10 +160,10 @@ test("invalid prior profile fails before lark-cli mutation and releases the prof
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-profile-invalid-before-"));
   fs.chmodSync(root, 0o700);
   const target = "cli_invalidBeforeA1";
-  const profileDir = path.join(root, "lark-cli-config");
+  const profileDir = path.join(root, "state", "agents", target, "lark-cli-config");
   const botsDir = path.join(root, "bots");
   const binDir = path.join(root, "bin");
-  fs.mkdirSync(profileDir, { mode: 0o700 });
+  fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(botsDir, { mode: 0o700 });
   fs.mkdirSync(binDir, { mode: 0o700 });
   fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
@@ -198,10 +198,10 @@ for (const nonempty of [false, true]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-profile-directory-${nonempty ? "nonempty" : "empty"}-`));
     fs.chmodSync(root, 0o700);
     const target = "cli_directoryTargetA1";
-    const profileDir = path.join(root, "lark-cli-config");
+    const profileDir = path.join(root, "state", "agents", target, "lark-cli-config");
     const botsDir = path.join(root, "bots");
     const binDir = path.join(root, "bin");
-    fs.mkdirSync(profileDir, { mode: 0o700 });
+    fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(botsDir, { mode: 0o700 });
     fs.mkdirSync(binDir, { mode: 0o700 });
     fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({

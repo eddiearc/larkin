@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "bun:test";
 import { createAgentStateStore } from "../../dist/agent/agent-state-store.mjs";
 import { runAgentCli } from "../../dist/app/agent-cli.mjs";
+import { runLarkCli } from "../../dist/app/lark-cli.mjs";
 import { ContextPromptBuilder } from "../../dist/agent/context-prompt.mjs";
 import { createHostShell, memberNamesFromPayloads } from "../../dist/feishu/host-shell.mjs";
 import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
@@ -104,11 +105,21 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
     const run = machine.snapshot().runs[0];
 
     let stdout = "", stderr = "";
-    const drainCode = runAgentCli(["inbox", "check"], { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, {
+    const checkCode = runAgentCli(["inbox", "check"], { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, {
       stateStore: store, io: { stdout: (value) => { stdout += value; }, stderr: (value) => { stderr += value; } },
     });
-    assert.equal(drainCode, 0, stderr);
-    assert.equal(JSON.parse(stdout).events.filter((event) => event.interaction_run_id === run.run_id).length, 1);
+    assert.equal(checkCode, 0, stderr);
+    const checkedInbox = JSON.parse(stdout);
+    assert.equal(checkedInbox.targets.find((target) => target.target === "chat:oc_interaction").pending_count, 1);
+    assert.equal("events" in checkedInbox, false, "check remains content-light and non-destructive");
+    stdout = ""; stderr = "";
+    const pollCode = runAgentCli(["inbox", "poll", "--target", "chat:oc_interaction"], {
+      LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId,
+    }, { stateStore: store, io: { stdout: (value) => { stdout += value; }, stderr: (value) => { stderr += value; } } });
+    assert.equal(pollCode, 0, stderr);
+    const polledInbox = JSON.parse(stdout);
+    assert.equal(polledInbox.delivery, "direct_ack");
+    assert.equal(polledInbox.events.filter((event) => event.interaction_run_id === run.run_id).length, 1);
     stdout = ""; stderr = "";
     const resolveCode = runAgentCli(["interaction", "resolve", "--run-id", run.run_id, "--expected-version", "2", "--status", "succeeded", "--summary", "Mock E2E completed"], {
       LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId,
@@ -125,7 +136,7 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
 });
 
 for (const runtime of ["codex", "claude", "pi"]) {
-  test(`synthetic Feishu → production HostShell → fake ${runtime} → transactional CLI drain`, async () => {
+  test(`synthetic Feishu → production HostShell → fake ${runtime} → freshness-gated poll and send`, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-production-${runtime}-`));
     const agentId = `cli_mock${runtime[0].toUpperCase()}A1`;
     const workspaceDir = path.join(root, "agents", agentId);
@@ -179,18 +190,58 @@ for (const runtime of ["codex", "claude", "pi"]) {
         ["im", "chat.members", "bots", "--chat-id"],
       ]);
 
+      const runtimeEnv = { ...env, LARKIN_AGENT_ID: agentId };
+      const target = `chat:oc_${runtime}`;
+      const sent = [];
+      let guardedStdout = "", guardedStderr = "";
+      const guardedDependencies = {
+        stateStore: store,
+        upstreamScript: "/fixture/@larksuite/cli/scripts/run.js",
+        spawn(command, args, options) {
+          sent.push({ command, args, options });
+          return { status: 0, stdout: "{\"ok\":true}\n", stderr: "", error: undefined };
+        },
+        io: { stdout: (text) => { guardedStdout += text; }, stderr: (text) => { guardedStderr += text; } },
+      };
+      const sendArgv = ["im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text", "fresh response"];
+      assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
+      const held = JSON.parse(guardedStdout);
+      assert.equal(held.status, "held");
+      assert.equal(held.target, target);
+      assert.equal(sent.length, 0, "a stale target must never reach the provider");
+
       let stdout = "", stderr = "";
-      const code = runAgentCli(["inbox", "check"], { ...env, LARKIN_AGENT_ID: agentId }, {
+      const code = runAgentCli(["inbox", "check"], runtimeEnv, {
         stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
       });
       assert.equal(code, 0, stderr);
+      const checkedInbox = JSON.parse(stdout);
+      assert.equal(checkedInbox.targets.find((row) => row.target === target).pending_count, 2);
+      assert.equal("events" in checkedInbox, false);
+      assert.equal(store.readNdjson("inbox").length, 2, "check must not consume the batch");
+
+      stdout = ""; stderr = "";
+      const pollCode = runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
+        stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      });
+      assert.equal(pollCode, 0, stderr);
       const drained = JSON.parse(stdout);
+      assert.equal(drained.delivery, "direct_ack");
+      assert.equal(drained.at_most_once, true);
       assert.equal(drained.events.length, 2);
       assert.deepEqual(
         Object.fromEntries(["chat_id", "message_id", "thread_id", "sender_id", "content"].map((key) => [key, drained.events[0][key]])),
         { chat_id: `oc_${runtime}`, message_id: `om_${runtime}_1`, thread_id: null, sender_id: "ou_sender", content: "first" },
       );
       assert.deepEqual(new Set(drained.consumed_delivery_ids), new Set([session.prompts[0].inputId, session.busyInputs[0].inputId]));
+      guardedStdout = ""; guardedStderr = "";
+      assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
+      assert.equal(sent.length, 1, "the provider is called once after the target is current");
+      assert.deepEqual(sent[0].args.slice(0, 6), [
+        "/fixture/@larksuite/cli/scripts/run.js", "im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text",
+      ]);
+      assert.ok(sent[0].args.includes("--as") && sent[0].args.includes("bot"));
+      assert.ok(sent[0].args.includes("--idempotency-key"));
       await new Promise((resolve) => setTimeout(resolve, 300));
       assert.equal(runtimeEvents.filter((event) => event.type === "delivery" && event.status === "consumed").length, 2);
 

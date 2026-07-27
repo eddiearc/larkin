@@ -103,8 +103,7 @@ export function createAgentTransport(env: Record<string, string | undefined> = p
     if (p.includes("/events") || p.includes("/inbox")) {
       let envelopes: InboxEnvelope[] = [];
       try {
-        envelopes = stateStore.readNdjson<InboxEnvelope>("inbox");
-        if (envelopes.length) stateStore.clearNdjson("inbox");
+        envelopes = stateStore.pollInbox<InboxEnvelope>().envelopes;
       } catch { /* preserve legacy: malformed/unreadable inbox returns empty and is not cleared */ }
       return { ok: true, status: 200, data: projectInboxEvents(envelopes) };
     }

@@ -7,7 +7,7 @@ Larkin itself is licensed under Apache-2.0. Every locked dependency is listed be
 bundled and platform-specific packages. License-file texts are deduplicated by SHA-256 and reproduced
 after the inventory.
 
-Locked package versions: **291**
+Locked package versions: **298**
 
 | Package | Version | Relationship | Declared license | Bundled license files (SHA-256) |
 | --- | ---: | --- | --- | --- |
@@ -20,6 +20,8 @@ Locked package versions: **291**
 | `@babel/helper-validator-identifier` | 7.29.7 | transitive | MIT | `LICENSE` `117da2af0d4ce0fe1c8e19b5cff9dcd806adf973d328d27b11d4448c4ff24f76` |
 | `@babel/runtime` | 7.29.7 | transitive | MIT | `LICENSE` `117da2af0d4ce0fe1c8e19b5cff9dcd806adf973d328d27b11d4448c4ff24f76` |
 | `@bramus/specificity` | 2.4.2 | transitive | MIT | `LICENSE` `ae842a63dd9bc829c95a2ec22dda25a08e422a368b71dbca67a45cde7c4a4b81` |
+| `@clack/core` | 1.4.3 | transitive | MIT | `LICENSE` `3e873d2aba8b76bcbe151ba558506ca6bfa8437db9323fa87086c5a7fcf10f42` |
+| `@clack/prompts` | 1.7.0 | transitive | MIT | `LICENSE` `3e873d2aba8b76bcbe151ba558506ca6bfa8437db9323fa87086c5a7fcf10f42` |
 | `@csstools/color-helpers` | 6.1.0 | transitive | MIT-0 | `LICENSE.md` `947e32047a166cd05f04e45938d172b412c07cbee0b9735afd14bae30e02c2f6` |
 | `@csstools/css-calc` | 3.3.0 | transitive | MIT | `LICENSE.md` `d00d032f517721b45c56c70c46bf904ebb71ad313df4d4db7722266b38069665` |
 | `@csstools/css-color-parser` | 4.1.10 | transitive | MIT | `LICENSE.md` `d00d032f517721b45c56c70c46bf904ebb71ad313df4d4db7722266b38069665` |
@@ -39,6 +41,7 @@ Locked package versions: **291**
 | `@jridgewell/sourcemap-codec` | 1.5.5 | transitive | MIT | `LICENSE` `769d154fbde32a915af110b1123650bc79f4cbe675acc66e005265bf069c6c6c` |
 | `@jridgewell/trace-mapping` | 0.3.31 | transitive | MIT | `LICENSE` `769d154fbde32a915af110b1123650bc79f4cbe675acc66e005265bf069c6c6c` |
 | `@larksuite/channel` | 0.4.1 | runtime direct | MIT | `LICENSE` `c969fc7e3af68e6bf40b0d8dd9c3dcc377eb685a2139535b203b39fdcad739ee` |
+| `@larksuite/cli` | 1.0.57 | runtime direct | MIT | `LICENSE` `c969fc7e3af68e6bf40b0d8dd9c3dcc377eb685a2139535b203b39fdcad739ee` |
 | `@larksuiteoapi/node-sdk` | 1.71.1 | transitive | MIT | `LICENSE` `81f1894dbe3c15ce42310bdc8a39c664f270328b82e8c64c03f55de6aac626ac` |
 | `@napi-rs/wasm-runtime` | 1.1.6 | transitive | MIT | (none bundled) |
 | `@opentelemetry/api` | 1.9.0 | transitive | Apache-2.0 | `LICENSE` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4` |
@@ -178,6 +181,9 @@ Locked package versions: **291**
 | `es-set-tostringtag` | 2.1.0 | transitive | MIT | `LICENSE` `1a3aeb1f1398bd697d57c3c585faadf59d825aca6e3162cd7eeb72ff76eb2466` |
 | `estree-walker` | 3.0.3 | transitive | MIT | `LICENSE` `dc63692c70bf95b67d9059b0fa660a9189a0cfa054e9d5fda89ed35aca262901` |
 | `expect-type` | 1.4.0 | transitive | Apache-2.0 | `LICENSE` `7c6cc83c84eaa249a85bf12fe3eedd831bb50c696e8890b5248223ae68c7b408` |
+| `fast-string-truncated-width` | 3.0.3 | transitive | MIT | `license` `2547dead17a32b1e49a588e943d52420b4d75f1349d9afd9ecb567b2dc8911c0` |
+| `fast-string-width` | 3.0.2 | transitive | MIT | `license` `2547dead17a32b1e49a588e943d52420b4d75f1349d9afd9ecb567b2dc8911c0` |
+| `fast-wrap-ansi` | 0.2.2 | transitive | MIT | `LICENSE` `9235f5ebfd80d41920fae7a0317caa3914f2a9249837bc486d7706f73080e375` |
 | `fdir` | 6.5.0 | transitive | MIT | `LICENSE` `9a39f2aadab11a3697edd668ff2d8ad885b649737b7ab4d3bf12b34e5ada0c86` |
 | `follow-redirects` | 1.16.0 | transitive | MIT | `LICENSE` `bfa8a54bb952ccda79f0f1889721d108f5b605babbb2b8a3705ffb52f4132eb7` |
 | `form-data` | 4.0.6 | transitive | MIT | `License` `e5b780d4f38d1d3328e3e53186c4e62d3fa149ea6f2bacd5de5ad0c30ac85343` |
@@ -269,6 +275,7 @@ Locked package versions: **291**
 | `side-channel-map` | 1.0.1 | transitive | MIT | `LICENSE` `5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292` |
 | `side-channel-weakmap` | 1.0.2 | transitive | MIT | `LICENSE` `cfc3f455254c0af0655cc3ff46a41ed644b67599f6043346169d285bf2b3cf3b` |
 | `siginfo` | 2.0.0 | transitive | ISC | `LICENSE` `3bdddf0b9b08aaa2fe4365b803fc958ed32c0597ca0bd727be8d9fcb8b248d18` |
+| `sisteransi` | 1.0.5 | transitive | MIT | `license` `ade66f698fd417addc4d948a85ef33e8abb302daff6453feda18b191d250e54d` |
 | `source-map-js` | 1.2.1 | transitive | BSD-3-Clause | `LICENSE` `6cb0631f71c7749763fd3dd1d5bee52dd1070ec17f2edc1710079ad070bd2fbd` |
 | `stackback` | 0.0.2 | transitive | MIT | (none bundled) |
 | `std-env` | 4.2.0 | transitive | MIT | `LICENCE` `46231df5a7733c3f52f11b71f3df61813007745b62b09031acfb45fb42d75082` |
@@ -835,6 +842,32 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### SHA-256 `2547dead17a32b1e49a588e943d52420b4d75f1349d9afd9ecb567b2dc8911c0`
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2024-present Fabio Spampinato
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### SHA-256 `29b68325fe026047d13e187b44c33b2acacf7dc647dec4583702e59f235e13b5`
 
 ```text
@@ -1222,6 +1255,20 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+### SHA-256 `3e873d2aba8b76bcbe151ba558506ca6bfa8437db9323fa87086c5a7fcf10f42`
+
+```text
+MIT License
+
+MIT License Copyright (c) 2025-Present [Bombshell contributors](https://bomb.sh/team)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### SHA-256 `433fc9dfe659dbfb1e91eed8351f13651e97bfa3ac6d03394c3d63f61d4bbc80`
@@ -3836,6 +3883,34 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### SHA-256 `9235f5ebfd80d41920fae7a0317caa3914f2a9249837bc486d7706f73080e375`
+
+```text
+MIT License
+
+Copyright (c) 2025 James Garbutt
+
+Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (https://sindresorhus.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### SHA-256 `93d6a2bffb76c50ca1db449dc3c8f05dbd6e47bd3b0c6b7bdbdf2c33c5ca0490`
@@ -6784,6 +6859,32 @@ OTHER DEALINGS IN THE SOFTWARE.
 MIT License
 
 Copyright (c) 2020 Anton Korzunov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### SHA-256 `ade66f698fd417addc4d948a85ef33e8abb302daff6453feda18b191d250e54d`
+
+```text
+MIT License
+
+Copyright (c) 2018 Terkel Gjervig Nielsen
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -51,7 +51,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
   const adapters = new Map<string, ReturnType<typeof createNativeRuntimeAdapter>>();
   const runtimeHost = overrides.runtimeHost ?? createRuntimeHost({
     promptBuilder: new ContextPromptBuilder(),
-    agentCliPath: env.LARKIN_COMPUTER_CLI_PATH,
     stateStoreFor(agentId) {
       if (!env.LARKIN_HOME) throw new Error("LARKIN_HOME is required for Runtime delivery state");
       return createAgentStateStore(env.LARKIN_HOME, agentId);

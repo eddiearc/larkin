@@ -170,25 +170,17 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
   }
 });
 
-test("public config CLI permits global mutation with one Runtime marker and rejects conflicting markers", () => {
+test("public config CLI uses LARKIN_AGENT_ID as its only Runtime marker", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-authority-"));
   const app = "cli_runtimeAuthorityA1";
   const file = path.join(temp, "config.json");
   try {
     fs.writeFileSync(file, `${JSON.stringify({ version: 4, serverId: "server-authority", mentionPolicy: "require", activeAgent: app, agents: { [app]: { runtime: "pi", model: "default" } } })}\n`, { mode: 0o600 });
     const markerOnly = spawnSync(process.execPath, [PUBLIC_ENTRY, "config", "mention", "global", "free"], {
-      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: undefined, LARKIN_RUNTIME_AGENT_ID: app },
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: app },
     });
     assert.equal(markerOnly.status, 0, markerOnly.stderr);
     assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).mentionPolicy, "free");
-    const beforeConflict = fs.readFileSync(file, "utf8");
-
-    const conflicting = spawnSync(process.execPath, [PUBLIC_ENTRY, "config", "show"], {
-      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: app, LARKIN_RUNTIME_AGENT_ID: "cli_runtimeAuthorityB2" },
-    });
-    assert.notEqual(conflicting.status, 0);
-    assert.match(conflicting.stderr, /冲突/);
-    assert.equal(fs.readFileSync(file, "utf8"), beforeConflict);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
@@ -289,7 +281,7 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
     assert.equal(run("config", "mention", "agent", "require", "--agent", app).status, 0);
     assert.equal(run("config", "mention", "chat", "oc_legacy", "inherit", "--agent", app).status, 0);
     const runtimeCross = spawnSync(process.execPath, [ENTRY, "config", "mention", "agent", "free", "--agent", other], {
-      cwd: ROOT, encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: app, LARKIN_RUNTIME_AGENT_ID: app },
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: app },
     });
     assert.equal(runtimeCross.status, 0, runtimeCross.stderr);
     const inherited = JSON.parse(run("config", "show", "--agent", app, "--chat", "oc_legacy", "--json").stdout);

@@ -366,6 +366,10 @@ export class HostEnvelopeProjector {
     return `${this.agentCliExecutable} ${suffix}`;
   }
 
+  private larkCommand(suffix: string): string {
+    return `lark-cli ${suffix}`;
+  }
+
   private nextSequence(agentId: string): number {
     const next = (this.sequenceByAgent.get(agentId) || 0) + 1;
     this.sequenceByAgent.set(agentId, next);
@@ -413,15 +417,15 @@ export class HostEnvelopeProjector {
       overdueMs > 120_000 ? `注意: 原定时间已过 ${Math.round(overdueMs / 60_000)} 分钟（Runtime Host 离线期间错过，现补触发）` : null,
       anchorMessageId ? `锚定消息: ${anchorMessageId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是飞书 om_ message_id，不能用于回复` : null,
       anchorMessageId
-        ? `回复原会话: ${this.agentCommand(`im +messages-reply --message-id ${anchorMessageId} ...`)}`
+        ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId} ...`)}`
         : null,
       reminder.channel && /^oc_[A-Za-z0-9_-]+$/.test(reminder.channel)
-        ? `发送到原群: ${this.agentCommand(`im +messages-send --chat-id ${reminder.channel} ...`)}`
+        ? `发送到原群: ${this.larkCommand(`im +messages-send --chat-id ${reminder.channel} ...`)}`
         : reminder.channel
-          ? `历史目标 ${reminder.channel} 不是 chat_id；${anchorMessageId ? "若不回复锚定消息，" : ""}先用 ${this.agentCommand("im +chat-search")} 查询并确认 oc_ chat_id，禁止按名称猜测发送目标`
+          ? `历史目标 ${reminder.channel} 不是 chat_id；${anchorMessageId ? "若不回复锚定消息，" : ""}先用 ${this.larkCommand("im +chat-search")} 查询并确认 oc_ chat_id，禁止按名称猜测发送目标`
           : anchorMessageId
             ? null
-            : `本条存量提醒缺少可用的飞书 message_id/chat_id，无法安全推断原会话；请先用 ${this.agentCommand("im +chat-search")} 确认目标，禁止猜测发送`,
+            : `本条存量提醒缺少可用的飞书 message_id/chat_id，无法安全推断原会话；请先用 ${this.larkCommand("im +chat-search")} 确认目标，禁止猜测发送`,
       `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
     ].filter((line): line is string => Boolean(line));
     return {
@@ -447,7 +451,7 @@ export class HostEnvelopeProjector {
       sender_type: "system",
       channel_type: "dm",
       channel_name: "system",
-      content: `[启动补投] 服务重启期间有 ${wakeCount} 条本应唤醒你的消息未被读取（可能包含用户消息、@提及或定时提醒）。请立即用 ${this.agentCommand("inbox check")} 读取收件箱并逐条处理；仅当 message_id 以 om_ 开头时才用 ${this.agentCommand("im +messages-reply")}，系统 rem_/redeliver_ ID 不可回复；有 chat_id 时可用 ${this.agentCommand("im +messages-send")}，否则先查询确认目标，禁止猜测。`,
+      content: `[启动补投] 服务重启期间有 ${wakeCount} 条本应唤醒你的消息未被读取（可能包含用户消息、@提及或定时提醒）。请先用 ${this.agentCommand("inbox check")} 看目标摘要，再用 ${this.agentCommand("inbox poll")} 领取完整消息；仅当 message_id 以 om_ 开头时才用 ${this.larkCommand("im +messages-reply")}，系统 rem_/redeliver_ ID 不可回复；有 chat_id 时可用 ${this.larkCommand("im +messages-send")}，否则先查询确认目标，禁止猜测。`,
       timestamp: this.now().toISOString(),
       thread_id: null,
     };

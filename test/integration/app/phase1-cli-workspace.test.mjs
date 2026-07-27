@@ -39,7 +39,7 @@ function strictRuntimeAgent(root) {
     createdAt: "2026-07-15T00:00:00.000Z",
     workspaceDir: path.join(root, "agents", APP),
     stateDir: path.join(root, "state", "agents", APP),
-    larkConfigDir: path.join(root, "lark-cli-config"),
+    larkConfigDir: path.join(root, "state", "agents", APP, "lark-cli-config"),
   };
 }
 

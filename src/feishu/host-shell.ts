@@ -16,8 +16,7 @@ import {
   shouldPreventiveReconnect,
 } from "./host-business-state.js";
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
-import { resolveAgentCliExecutable } from "../agent/agent-cli-capabilities.js";
-import { projectInboxEnvelope } from "../agent/inbox-projection.js";
+import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
@@ -295,7 +294,7 @@ export function createHostShell({
     (agent, chatId, senderId) => senderIdentity.noteUnknownSender(agent, chatId, senderId),
     undefined,
     undefined,
-    resolveAgentCliExecutable(env.LARKIN_COMPUTER_CLI_PATH),
+    "larkin",
   );
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
@@ -327,6 +326,7 @@ export function createHostShell({
         event._sender_is_bot ? Promise.resolve(null) : senderIdentity.ensureSenderSignature(agent, event.sender_id, 3_000),
       ]);
       const envelope = envelopeProjector.projectInbound(agent, event, { anchorReply: wake, names, signature }) as unknown as Record<string, unknown>;
+      envelope.target = targetKeyOfInboxEnvelope({ ...envelope, chat_id: event.chat_id, thread_id: event.thread_id });
       if (wake) envelope.wake = true;
       const inboxEnvelope = projectInboxEnvelope(envelope, {
         chat_id: event.chat_id,

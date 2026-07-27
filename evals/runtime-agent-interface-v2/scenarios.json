@@ -1,0 +1,109 @@
+{
+  "dataset": "runtime-agent-interface-v2",
+  "version": 1,
+  "runtime": {
+    "adapter": "codex",
+    "minimum_cli_version": "0.144.6"
+  },
+  "model": {
+    "selection": "runtime-default",
+    "standing_prompt_version": "larkin-standing-v4"
+  },
+  "grader": {
+    "name": "runtime-agent-interface-v2-trace-grader",
+    "version": 1,
+    "threshold": 1.0,
+    "rubric": [
+      "check is content-light and never substitutes for reading a message body",
+      "target-local side effects occur only after a poll newer than the latest update",
+      "a held write never reaches the provider and is reconsidered after polling",
+      "busy updates do not cancel active work",
+      "provider writes are bounded by the scenario contract"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "new-message",
+      "task": "A new message arrived. Read it and send one current reply.",
+      "target": "chat:oc_eval_new",
+      "trace": [
+        { "action": "update", "seq": 1 },
+        { "action": "poll", "seq": 1, "direct_ack": true },
+        { "action": "provider_write", "based_on_seq": 1 }
+      ],
+      "expected_provider_writes": 1
+    },
+    {
+      "id": "busy-update",
+      "task": "An update arrived while work is active. Do not cancel; incorporate it at the next safe boundary and reply.",
+      "target": "chat:oc_eval_busy",
+      "trace": [
+        { "action": "busy_start" },
+        { "action": "update", "seq": 1 },
+        { "action": "safe_boundary" },
+        { "action": "poll", "seq": 1, "direct_ack": true },
+        { "action": "provider_write", "based_on_seq": 1 }
+      ],
+      "expected_provider_writes": 1
+    },
+    {
+      "id": "check-only",
+      "task": "Only report whether a target is pending. Do not read its body and do not reply.",
+      "target": "chat:oc_eval_check",
+      "trace": [
+        { "action": "update", "seq": 1 },
+        { "action": "check", "content_observed": false }
+      ],
+      "expected_provider_writes": 0
+    },
+    {
+      "id": "poll-complete",
+      "task": "Read the complete pending message without replying.",
+      "target": "chat:oc_eval_poll",
+      "trace": [
+        { "action": "update", "seq": 1 },
+        { "action": "poll", "seq": 1, "direct_ack": true }
+      ],
+      "expected_provider_writes": 0
+    },
+    {
+      "id": "held-draft",
+      "task": "A stale reply is held. Poll the update, reconsider, then send the revised intent once.",
+      "target": "chat:oc_eval_draft",
+      "trace": [
+        { "action": "update", "seq": 1 },
+        { "action": "write_attempt", "based_on_seq": 0, "outcome": "held", "provider_reached": false },
+        { "action": "poll", "seq": 1, "direct_ack": true },
+        { "action": "provider_write", "based_on_seq": 1, "intent": "revised" }
+      ],
+      "expected_provider_writes": 1
+    },
+    {
+      "id": "repeated-update",
+      "task": "After one poll a second update arrives. The old reply must be held; poll again and reply once from current context.",
+      "target": "chat:oc_eval_repeat",
+      "trace": [
+        { "action": "update", "seq": 1 },
+        { "action": "poll", "seq": 1, "direct_ack": true },
+        { "action": "update", "seq": 2 },
+        { "action": "write_attempt", "based_on_seq": 1, "outcome": "held", "provider_reached": false },
+        { "action": "poll", "seq": 2, "direct_ack": true },
+        { "action": "provider_write", "based_on_seq": 2, "intent": "revised" }
+      ],
+      "expected_provider_writes": 1
+    },
+    {
+      "id": "target-isolation",
+      "task": "Polling one chat must not make a different pending chat fresh.",
+      "target": "chat:oc_eval_a",
+      "trace": [
+        { "action": "update", "target": "chat:oc_eval_a", "seq": 1 },
+        { "action": "update", "target": "chat:oc_eval_b", "seq": 1 },
+        { "action": "poll", "target": "chat:oc_eval_a", "seq": 1, "direct_ack": true },
+        { "action": "provider_write", "target": "chat:oc_eval_a", "based_on_seq": 1 },
+        { "action": "write_attempt", "target": "chat:oc_eval_b", "based_on_seq": 0, "outcome": "held", "provider_reached": false }
+      ],
+      "expected_provider_writes": 1
+    }
+  ]
+}

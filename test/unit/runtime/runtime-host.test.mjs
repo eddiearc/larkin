@@ -117,16 +117,15 @@ for (const [runtime, intermediates] of [
 
 test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary retry without cancel", async () => {
   const session = new FakeSession();
-  const agentCliPath = "/installed/larkin/dist/app/agent-cli.mjs";
-  const exactInboxCommand = `'${process.execPath}' '${agentCliPath}' inbox check`;
   const adapter = { id: "codex", capabilities: { standingPrompt: "append", sessionResume: true, busyInput: "direct", cancel: true }, async createSession(input) {
     assert.match(input.standingPrompt.content, /inbox check/);
-    assert.ok(input.standingPrompt.content.includes(exactInboxCommand));
+    assert.match(input.standingPrompt.content, /larkin inbox poll/);
+    assert.match(input.standingPrompt.content, /lark-cli im \+messages-send/);
     assert.equal(input.resumeSessionId, "old-session");
     return session;
   } };
   const events = [];
-  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), agentCliPath });
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
   host.subscribe((event) => events.push(event));
   await host.start([{ agentId: "cli_hostA1", name: "cli_hostA1", runtime: "codex", model: "gpt", workspaceDir: "/tmp", sessionId: "old-session" }]);
 
@@ -134,8 +133,7 @@ test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary r
   assert.equal(first.status, "accepted");
   assert.equal(session.prompts.length, 1);
   assert.match(session.prompts[0].text, /Inbox changed/);
-  assert.ok(session.prompts[0].text.includes(exactInboxCommand));
-  assert.match(session.prompts[0].text, /First, before any IM send or reply/);
+  assert.match(session.prompts[0].text, /Poll that target/);
   assert.doesNotMatch(session.prompts[0].text, /larkin message check/);
   assert.deepEqual(await host.deliver("cli_hostA1", { message_id: "om_1", seq: 1 }), { status: "duplicate", deliveryId: first.deliveryId });
 

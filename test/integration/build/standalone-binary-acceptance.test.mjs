@@ -162,18 +162,19 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       timeout: 15_000,
     });
     const capabilities = JSON.parse(checked(runAgentCli(["--help"]), "Agent capabilities").stdout).capabilities;
-    assert.deepEqual(Object.keys(capabilities.commands), ["inbox", "reminder", "interaction", "profile", "config", "im"]);
+    assert.deepEqual(Object.keys(capabilities.commands), ["inbox", "reminder", "interaction", "profile", "config"]);
     assert.equal(capabilities.commands.config.includes("apply"), true);
     assert.equal("removed" in capabilities, false);
     assert.equal(JSON.parse(checked(runAgentCli(["config", "--help"]), "Agent config help").stdout).usage.some((line) => line.includes("config apply")), true);
     fs.rmSync(larkMarker, { force: true });
     const identityEscape = runAgentCli(["im", "+chat-list", "--agent", otherAgentId]);
     assert.equal(identityEscape.status, 2);
-    assert.match(identityEscape.stderr, /身份边界|--agent/);
+    assert.match(identityEscape.stderr, /native lark-cli|迁移/);
     assert.equal(fs.existsSync(larkMarker), false, "identity rejection must precede lark-cli spawn");
-    assert.match(checked(runAgentCli(["im", "+chat-list"]), "identity-locked IM").stdout, /"identity":"bot"/);
-    assert.match(fs.readFileSync(larkMarker, "utf8"), new RegExp(`--profile ${appId} im \\+chat-list`));
-    fs.rmSync(larkMarker, { force: true });
+    const removedIm = runAgentCli(["im", "+chat-list"]);
+    assert.equal(removedIm.status, 2);
+    assert.match(removedIm.stderr, /native lark-cli|迁移/);
+    assert.equal(fs.existsSync(larkMarker), false, "removed Agent IM shim must not spawn ambient lark-cli");
     assert.match(checked(runAgentCli(["profile", "show", "--json"]), "local profile show").stdout, new RegExp(appId));
     assert.equal(fs.existsSync(larkMarker), false, "profile show must remain local");
 

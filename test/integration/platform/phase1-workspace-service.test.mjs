@@ -101,12 +101,12 @@ function assertOwnerPlatformRules(managed) {
   assert.match(managed, /不设[^\n]*(?:冷却|频率闸门)|无(?:冷却|频率闸门)/);
   assert.match(managed, /(?:非必要|除非确实需要)[^\n]*(?:不回|不要再)\s*@/);
   assert.match(managed, /commentary.*final_answer.*(?:不可见|不等于飞书出站)/);
-  assert.match(managed, /只有[^\n]*成功调用[^\n]*身份锁定[^\n]*im[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/);
+  assert.match(managed, /只有[^\n]*成功调用[^\n]*lark-cli[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/);
   assert.match(managed, /多个外部步骤[^\n]*(?:首个|第一个)[^\n]*(?:外部|耗时)步骤前[^\n]*(?:简短确认|首响)/);
   assert.match(managed, /用户[^\n]*步骤顺序[^\n]*(?:严格|必须)[^\n]*顺序[^\n]*不得[^\n]*(?:fallback|重排|重复)/);
   assert.match(managed, /进度[^\n]*用户[^\n]*大阶段[^\n]*(?:而非|不按)[^\n]*(?:工具|小步骤)[^\n]*(?:仅在|只在)[^\n]*阶段变化[^\n]*明显延迟[^\n]*需要用户动作[^\n]*用户可感知阻塞[^\n]*同一阶段[^\n]*同一阻塞[^\n]*(?:不重复|只发送一次)/);
-  assert.match(managed, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止发送[^\n]*(?:im|IM)[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先[^\n]*(?:im|IM)[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/);
-  assert.match(managed, /(?:完成|无法继续|需要用户动作)[^\n]*im[^\n]*(?:最终结论|明确请求)/);
+  assert.match(managed, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止重复发送[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先用 lark-cli[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/);
+  assert.match(managed, /(?:完成|无法继续|需要用户动作)[^\n]*lark-cli[^\n]*(?:最终结论|明确请求)/);
   assert.match(managed, /不得泄露[^\n]*thinking[^\n]*凭证[^\n]*原始工具输出[^\n]*内部路径/);
 }
 

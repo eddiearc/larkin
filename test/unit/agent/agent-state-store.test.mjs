@@ -24,6 +24,7 @@ test("Agent state layout owns every canonical persistence path", async () => {
       readReceipts: "feishu-read.json",
       pendingReact: "feishu-pending-react.json",
       runtimeDeliveries: "runtime-deliveries.json",
+      inboxState: "inbox-state.json",
       interactions: "interactions.json",
       conversation: "conversation.ndjson",
       inbox: "feishu-inbox.ndjson",

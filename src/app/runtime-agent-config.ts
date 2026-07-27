@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { HydratedAgent } from "../platform/config.js";
 import { acquireProcessLock } from "../platform/process-state.js";
 import {
@@ -139,8 +140,38 @@ export function hydrateRuntimeAgent(configDir: string, agent: HydratedAgent): Ru
   };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">): string {
+  const stateDir = path.resolve(agent.stateDir);
+  const commandDir = path.join(stateDir, "runtime-bin");
+  fs.mkdirSync(commandDir, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(commandDir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+    throw new Error("Runtime command shim 目录不安全");
+  }
+  fs.chmodSync(commandDir, 0o700);
+  const standalone = process.env.LARKIN_STANDALONE === "1";
+  const binaryEntry = fileURLToPath(new URL("./binary-entry.mjs", import.meta.url));
+  for (const [name, argumentsPrefix] of [
+    ["larkin", standalone ? [] : [binaryEntry]],
+    ["lark-cli", standalone ? ["__internal", "lark-cli"] : [binaryEntry, "__internal", "lark-cli"]],
+  ] as const) {
+    const file = path.join(commandDir, name);
+    const temporary = path.join(commandDir, `.${name}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    const command = [process.execPath, ...argumentsPrefix].map(shellQuote).join(" ");
+    fs.writeFileSync(temporary, `#!/bin/sh\nexec ${command} "$@"\n`, { mode: 0o700, flag: "wx" });
+    fs.renameSync(temporary, file);
+    fs.chmodSync(file, 0o700);
+  }
+  return commandDir;
+}
+
 export function syncAgentProfile(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): void {
-  const expected = path.join(path.resolve(env.LARKIN_CONFIG_DIR || ""), "lark-cli-config");
+  const expected = path.join(path.resolve(env.LARKIN_CONFIG_DIR || ""), "state", "agents", agent.agentId, "lark-cli-config");
   if (path.resolve(agent.larkConfigDir) !== expected) throw new Error("lark-cli profile 路径不是 canonical contained 路径");
   fs.mkdirSync(expected, { recursive: true, mode: 0o700 });
   assertSecureProfileDirectory(expected);
@@ -168,6 +199,7 @@ export function syncAgentProfile(agent: RuntimeAgentConfig, env: NodeJS.ProcessE
       if (verify.status !== 0 || payload?.ok !== true || payload.identity !== "bot") {
         throw new Error(`Agent ${agent.agentId} profile verify failed`);
       }
+      installRuntimeCommandShims(agent);
     } catch (error) {
       const message = error instanceof Error ? error.message : `Agent ${agent.agentId} profile ${stage} failed`;
       try { restoreTargetProfile(configFile, agent.feishuAppId, before); }

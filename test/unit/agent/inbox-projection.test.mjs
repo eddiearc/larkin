@@ -73,8 +73,7 @@ test("state store preserves read-then-clear semantics without following inbox sy
 
 test("production events route uses typed storage and projection without moving its API boundary", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/agent/agent-transport.ts"), "utf8");
-  assert.match(source, /stateStore\.readNdjson<InboxEnvelope>\("inbox"\)/);
-  assert.match(source, /stateStore\.clearNdjson\("inbox"\)/);
+  assert.match(source, /stateStore\.pollInbox<InboxEnvelope>\(\)/);
   assert.match(source, /data: projectInboxEvents\(envelopes\)/);
   assert.match(source, /request: \(input: AgentTransportInput\) => handle\(input\)/);
   assert.match(source, /globalThis\.__LARKIN_AGENT_TRANSPORT/);

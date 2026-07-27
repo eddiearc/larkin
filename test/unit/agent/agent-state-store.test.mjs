@@ -60,6 +60,31 @@ test("typed store atomically writes JSON and appends strict NDJSON with private 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Inbox draft schema preserves legacy held drafts and safely downgrades incomplete sending records", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-draft-migration-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_draftMigrationA1");
+    const base = {
+      version: 2, targets: {}, messages: {}, intents: {}, drafts: {
+        draft_legacy: {
+          draft_id: "draft_legacy", target: "chat:oc_legacy", argv: ["im", "+messages-send", "--chat-id", "oc_legacy", "--text", "legacy"],
+          status: "held", held_at_seq: 1, created_at: "2026-07-28T00:00:00.000Z", updated_at: "2026-07-28T00:00:00.000Z",
+        },
+        draft_interrupted_migration: {
+          draft_id: "draft_interrupted_migration", target: "chat:oc_old", argv: ["im", "+messages-send", "--chat-id", "oc_old", "--text", "old"],
+          status: "sending", held_at_seq: 2, created_at: "2026-07-28T00:00:00.000Z", updated_at: "2026-07-28T00:00:00.000Z",
+        },
+      },
+    };
+    store.writeJson("inboxState", base);
+    assert.equal(store.readInboxDraft("draft_legacy").status, "held");
+    assert.equal(store.readInboxDraft("draft_interrupted_migration").status, "held",
+      "pre-migration sending without a durable intent boundary must fail safely to retryable held");
+    assert.deepEqual(store.listInboxDrafts().map((draft) => draft.draft_id).sort(), ["draft_interrupted_migration", "draft_legacy"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("typed store rejects symlinked Agent directories and files", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-symlink-"));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-outside-"));

@@ -36,6 +36,19 @@ const USER_ONLY_COMMANDS = new Set(["attendance", "mail", "okr"]);
 const POLICY_VALUE_FLAGS = new Set([
   "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--draft-id",
 ]);
+const PROTECTED_VALUE_FLAGS = new Set([
+  ...POLICY_VALUE_FLAGS,
+  "--text", "--markdown", "--content", "--image", "--file", "--video", "--video-cover", "--audio", "--msg-type",
+  "--format", "--jq", "-q", "--output", "-o", "--data", "--params", "--receive-id-type", "--thread-id", "--uuid",
+  "--page-delay", "--page-limit", "--page-size",
+]);
+const RAW_IM_WRITE_OPERATIONS = new Set([
+  "create", "reply", "patch", "update", "forward", "merge_forward", "delete", "urgent_app", "urgent_phone", "urgent_sms",
+]);
+
+type ProtectedOperation = "send" | "reply" | "card-patch" | "card-update" | "raw-create" | "raw-reply"
+  | "raw-forward" | "raw-merge_forward" | "raw-delete" | "raw-urgent_app" | "raw-urgent_phone" | "raw-urgent_sms"
+  | "thread-forward" | "thread-merge_forward" | "api" | "draft";
 
 interface PolicyArgv {
   commandArgv: readonly string[];
@@ -52,10 +65,69 @@ function exactPath(argv: readonly string[], pathSegments: readonly string[]): bo
   return pathSegments.every((segment, index) => argv[index] === segment);
 }
 
-function parsePolicyArgv(argv: readonly string[]): PolicyArgv {
+function nativeArgvBeforeBoundary(argv: readonly string[]): readonly string[] {
   const boundary = argv.indexOf("--");
-  const nativeArgv = argv.slice(0, boundary < 0 ? argv.length : boundary);
-  const help = nativeArgv.some((argument) => HELP_FLAGS.has(argument));
+  return argv.slice(0, boundary < 0 ? argv.length : boundary);
+}
+
+function protectedSyntaxTokens(argv: readonly string[]): string[] {
+  const tokens: string[] = [];
+  const nativeArgv = nativeArgvBeforeBoundary(argv);
+  for (let index = 0; index < nativeArgv.length; index += 1) {
+    const argument = nativeArgv[index];
+    const inlineFlag = [...PROTECTED_VALUE_FLAGS].find((flag) => argument.startsWith(`${flag}=`));
+    if (inlineFlag) {
+      tokens.push(inlineFlag);
+      continue;
+    }
+    tokens.push(argument);
+    if (PROTECTED_VALUE_FLAGS.has(argument) && index + 1 < nativeArgv.length) index += 1;
+  }
+  return tokens;
+}
+
+function hasNativeHelpFlag(argv: readonly string[]): boolean {
+  return protectedSyntaxTokens(argv).some((argument) => HELP_FLAGS.has(argument));
+}
+
+function protectedOperations(argv: readonly string[]): ProtectedOperation[] {
+  const tokens = protectedSyntaxTokens(argv);
+  const operations: ProtectedOperation[] = [];
+  for (const token of tokens) {
+    if (token === "+messages-send") operations.push("send");
+    else if (token === "+messages-reply") operations.push("reply");
+    else if (token === "api") operations.push("api");
+    else if (token === "larkin-draft") operations.push("draft");
+  }
+  const hasIm = tokens.includes("im");
+  if (hasIm && tokens.includes("messages")) {
+    for (const token of tokens) {
+      if (!RAW_IM_WRITE_OPERATIONS.has(token)) continue;
+      operations.push((token === "patch" || token === "update" ? `card-${token}` : `raw-${token}`) as ProtectedOperation);
+    }
+  }
+  if (hasIm && tokens.includes("threads")) {
+    for (const token of tokens) {
+      if (token === "forward" || token === "merge_forward") operations.push(`thread-${token}` as ProtectedOperation);
+    }
+  }
+  return operations;
+}
+
+function uniqueProtectedOperation(operations: readonly ProtectedOperation[], expected: ProtectedOperation): boolean {
+  return operations.length === 1 && operations[0] === expected;
+}
+
+function noncanonicalProtectedDecision(): LarkCliCommandDecision {
+  return {
+    kind: "denied",
+    reason: "受保护的 write/API 命令路径不明确；请把 service/subcommand 放在前面，再按原生 --help 提示传入 flags",
+  };
+}
+
+function parsePolicyArgv(argv: readonly string[]): PolicyArgv {
+  const nativeArgv = nativeArgvBeforeBoundary(argv);
+  const help = hasNativeHelpFlag(argv);
   // Native help is an observational path. It must reach Cobra byte-for-byte even
   // when the surrounding argv would be rejected for a real operation.
   if (help) return { commandArgv: nativeArgv, flags: new Map(), help: true, error: null };
@@ -91,6 +163,7 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   const parsed = parsePolicyArgv(argv);
   if (parsed.help) return { kind: "passthrough" };
   if (parsed.error) return { kind: "denied", reason: `参数边界：${parsed.error}` };
+  const protectedPaths = protectedOperations(argv);
   for (const flag of ["--profile", "--config-dir", "--agent"]) {
     if (parsed.flags.has(flag)) return { kind: "denied", reason: `身份边界：${flag} 由 Larkin Runtime 锁定` };
   }
@@ -100,26 +173,44 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (MANAGEMENT_COMMANDS.has(command)) return { kind: "denied", reason: `身份边界：Runtime 不开放 lark-cli ${command} 管理命令` };
   if (command === "event") return { kind: "denied", reason: "Runtime 不允许另开 event 连接与 Host 争抢事件流" };
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
-  if (exactPath(parsed.commandArgv, ["larkin-draft", "list"])) return { kind: "runtime-owned", operation: "draft-list" };
-  if (exactPath(parsed.commandArgv, ["larkin-draft", "send"])) return { kind: "runtime-owned", operation: "draft-send" };
-  if (exactPath(parsed.commandArgv, ["larkin-draft", "abandon"])) return { kind: "runtime-owned", operation: "draft-abandon" };
-  if (exactPath(parsed.commandArgv, ["im", "+messages-send"])) return { kind: "guarded", operation: "send" };
-  if (exactPath(parsed.commandArgv, ["im", "+messages-reply"])) return { kind: "guarded", operation: "reply" };
+  if (exactPath(parsed.commandArgv, ["larkin-draft", "list"])) return uniqueProtectedOperation(protectedPaths, "draft")
+    ? { kind: "runtime-owned", operation: "draft-list" } : noncanonicalProtectedDecision();
+  if (exactPath(parsed.commandArgv, ["larkin-draft", "send"])) return uniqueProtectedOperation(protectedPaths, "draft")
+    ? { kind: "runtime-owned", operation: "draft-send" } : noncanonicalProtectedDecision();
+  if (exactPath(parsed.commandArgv, ["larkin-draft", "abandon"])) return uniqueProtectedOperation(protectedPaths, "draft")
+    ? { kind: "runtime-owned", operation: "draft-abandon" } : noncanonicalProtectedDecision();
+  if (exactPath(parsed.commandArgv, ["im", "+messages-send"])) return uniqueProtectedOperation(protectedPaths, "send")
+    ? { kind: "guarded", operation: "send" } : noncanonicalProtectedDecision();
+  if (exactPath(parsed.commandArgv, ["im", "+messages-reply"])) return uniqueProtectedOperation(protectedPaths, "reply")
+    ? { kind: "guarded", operation: "reply" } : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
-    return { kind: "guarded", operation: "card" };
+    const expected = parsed.commandArgv[2] === "patch" ? "card-patch" : "card-update";
+    return uniqueProtectedOperation(protectedPaths, expected) ? { kind: "guarded", operation: "card" } : noncanonicalProtectedDecision();
   }
   if (exactPath(parsed.commandArgv, ["im", "messages", "create"]) || exactPath(parsed.commandArgv, ["im", "messages", "reply"])) {
-    return { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" };
+    const expected = parsed.commandArgv[2] === "create" ? "raw-create" : "raw-reply";
+    return uniqueProtectedOperation(protectedPaths, expected)
+      ? { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" }
+      : noncanonicalProtectedDecision();
   }
   if (["forward", "merge_forward", "delete", "urgent_app", "urgent_phone", "urgent_sms"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "messages", operation]))) {
-    return { kind: "denied", reason: "该 IM 写入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" };
+    const expected = `raw-${parsed.commandArgv[2]}` as ProtectedOperation;
+    return uniqueProtectedOperation(protectedPaths, expected)
+      ? { kind: "denied", reason: "该 IM 写入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" }
+      : noncanonicalProtectedDecision();
   }
   if (["forward", "merge_forward"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "threads", operation]))) {
-    return { kind: "denied", reason: "该 IM forwarding 入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" };
+    const expected = `thread-${parsed.commandArgv[2]}` as ProtectedOperation;
+    return uniqueProtectedOperation(protectedPaths, expected)
+      ? { kind: "denied", reason: "该 IM forwarding 入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" }
+      : noncanonicalProtectedDecision();
   }
-  if (command === "api") return { kind: "denied", reason: "generic API 会旁路 Runtime identity/freshness policy" };
+  if (command === "api") return uniqueProtectedOperation(protectedPaths, "api")
+    ? { kind: "denied", reason: "generic API 会旁路 Runtime identity/freshness policy" }
+    : noncanonicalProtectedDecision();
+  if (protectedPaths.length > 0) return noncanonicalProtectedDecision();
   return { kind: "passthrough" };
 }
 
@@ -205,7 +296,9 @@ export function runLarkCli(
         return 0;
       }
       const draft = store.readInboxDraft(draftId);
-      if (!draft || draft.status !== "held") throw new Error(`held draft 不存在：${draftId}`);
+      if (!draft || (draft.status !== "held" && draft.status !== "sending")) {
+        throw new Error(`held/sending draft 不存在：${draftId}`);
+      }
       const draftDecision = classifyLarkCliCommand(draft.argv);
       if (draftDecision.kind !== "guarded" || guardedTarget(draftDecision, draft.argv, store) !== draft.target) {
         throw new Error(`held draft target/command 不一致：${draftId}`);

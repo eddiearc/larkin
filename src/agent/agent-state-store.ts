@@ -96,10 +96,13 @@ export interface InboxDraft {
   draft_id: string;
   target: string;
   argv: string[];
-  status: "held" | "sent" | "abandoned";
+  status: "held" | "sending" | "sent" | "abandoned";
   held_at_seq: number;
   created_at: string;
   updated_at: string;
+  intent_id?: string;
+  intent_model_seen_seq?: number;
+  sending_at?: string;
 }
 
 interface InboxSendIntent {
@@ -157,8 +160,17 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
       const draft = candidate as InboxDraft;
       if (draft.draft_id === draftId && typeof draft.target === "string" && Array.isArray(draft.argv)
-        && draft.argv.every((argument) => typeof argument === "string") && ["held", "sent", "abandoned"].includes(draft.status)) {
-        state.drafts[draftId] = { ...draft, argv: [...draft.argv] };
+        && draft.argv.every((argument) => typeof argument === "string") && ["held", "sending", "sent", "abandoned"].includes(draft.status)) {
+        const normalized = { ...draft, argv: [...draft.argv] };
+        if (normalized.status === "sending" && (typeof normalized.intent_id !== "string" || !normalized.intent_id
+            || !Number.isSafeInteger(normalized.intent_model_seen_seq) || Number(normalized.intent_model_seen_seq) < 0
+            || typeof normalized.sending_at !== "string" || !normalized.sending_at)) {
+          normalized.status = "held";
+          delete normalized.intent_id;
+          delete normalized.intent_model_seen_seq;
+          delete normalized.sending_at;
+        }
+        state.drafts[draftId] = normalized;
       }
     }
   }
@@ -663,7 +675,7 @@ export class AgentStateStore {
 
   listInboxDrafts(): InboxDraft[] {
     return this.withInboxLock(this.file("inbox"), () => Object.values(this.inboxState().drafts)
-      .filter((draft) => draft.status === "held")
+      .filter((draft) => draft.status === "held" || draft.status === "sending")
       .sort((left, right) => left.created_at.localeCompare(right.created_at)));
   }
 
@@ -676,6 +688,7 @@ export class AgentStateStore {
       const state = this.inboxState();
       const draft = state.drafts[draftId];
       if (!draft) throw new Error(`draft 不存在：${draftId}`);
+      if (draft.status === "sending") throw new Error(`draft ${draftId} 正在发送，too late to abandon；可重试 send 以同一幂等键恢复`);
       if (draft.status !== "held") throw new Error(`draft ${draftId} 已是 ${draft.status}`);
       const updated = { ...draft, status, updated_at: new Date(now).toISOString() };
       state.drafts[draftId] = updated;
@@ -705,12 +718,38 @@ export class AgentStateStore {
       const target = state.targets[input.target] ?? { latest_received_seq: pendingLatest, model_seen_seq: 0 };
       target.latest_received_seq = Math.max(target.latest_received_seq, pendingLatest);
       state.targets[input.target] = target;
-      const fingerprint = crypto.createHash("sha256").update(JSON.stringify([input.target, input.argv])).digest("hex");
-      const intentId = `larkin-${fingerprint.slice(0, 32)}`;
+      const draftFingerprint = crypto.createHash("sha256").update(JSON.stringify([input.target, input.argv])).digest("hex");
+      let commitDraft: InboxDraft | undefined;
+      if (input.commitDraftId) {
+        if (!input.providerSucceeded) throw new Error("commitDraftId requires providerSucceeded");
+        const draft = state.drafts[input.commitDraftId];
+        if (!draft || (draft.status !== "held" && draft.status !== "sending") || draft.target !== input.target
+            || JSON.stringify(draft.argv) !== JSON.stringify(input.argv)) {
+          throw new Error(`held/sending draft 与 freshness intent 不匹配：${input.commitDraftId}`);
+        }
+        commitDraft = draft;
+        if (draft.status === "sending") {
+          const intentId = draft.intent_id!;
+          const existingIntent = state.intents[intentId];
+          state.intents[intentId] = existingIntent ?? {
+            intent_id: intentId, target: input.target, argv: [...input.argv],
+            latest_received_seq: draft.intent_model_seen_seq!, model_seen_seq: draft.intent_model_seen_seq!,
+            committed_at: draft.sending_at!, draft_id: draft.draft_id,
+          };
+          this.writeJson("inboxState", state);
+          return { status: "ready", intentId, commitDraftId: draft.draft_id };
+        }
+      }
       if (target.latest_received_seq > target.model_seen_seq) {
-        const draftId = `draft_${fingerprint.slice(0, 24)}`;
+        let draftId = commitDraft?.draft_id ?? `draft_${draftFingerprint.slice(0, 24)}`;
         const at = new Date(input.now ?? Date.now()).toISOString();
-        const existing = state.drafts[draftId];
+        let existing = state.drafts[draftId];
+        if (!commitDraft && existing && existing.status !== "held") {
+          const boundaryFingerprint = crypto.createHash("sha256")
+            .update(JSON.stringify([input.target, input.argv, target.latest_received_seq])).digest("hex");
+          draftId = `draft_${boundaryFingerprint.slice(0, 24)}`;
+          existing = state.drafts[draftId];
+        }
         const draft: InboxDraft = existing?.status === "held" ? {
           ...existing, held_at_seq: target.latest_received_seq, updated_at: at,
         } : {
@@ -722,19 +761,21 @@ export class AgentStateStore {
         return { status: "held", target: input.target, latest_received_seq: target.latest_received_seq,
           model_seen_seq: target.model_seen_seq, draft };
       }
-      let commitDraftId: string | undefined;
-      if (input.commitDraftId) {
-        if (!input.providerSucceeded) throw new Error("commitDraftId requires providerSucceeded");
-        const draft = state.drafts[input.commitDraftId];
-        if (!draft || draft.status !== "held" || draft.target !== input.target
-            || JSON.stringify(draft.argv) !== JSON.stringify(input.argv)) {
-          throw new Error(`held draft 与 freshness intent 不匹配：${input.commitDraftId}`);
-        }
-        commitDraftId = draft.draft_id;
-      }
+      const fingerprint = crypto.createHash("sha256")
+        .update(JSON.stringify([input.target, input.argv, target.model_seen_seq])).digest("hex");
+      const intentId = `larkin-${fingerprint.slice(0, 32)}`;
+      const commitDraftId = commitDraft?.draft_id;
       const committedAt = new Date(input.now ?? Date.now()).toISOString();
+      if (commitDraft) {
+        state.drafts[commitDraft.draft_id] = {
+          ...commitDraft, status: "sending", intent_id: intentId,
+          intent_model_seen_seq: target.model_seen_seq, sending_at: committedAt, updated_at: committedAt,
+        };
+      }
       const existingIntent = state.intents[intentId];
-      state.intents[intentId] = existingIntent ?? {
+      state.intents[intentId] = existingIntent ? {
+        ...existingIntent, ...(commitDraftId ? { draft_id: commitDraftId } : {}),
+      } : {
         intent_id: intentId,
         target: input.target,
         argv: [...input.argv],
@@ -752,21 +793,36 @@ export class AgentStateStore {
     if (preflight.status === "held") return preflight;
     // Provider/network work starts only after the durable intent commit has
     // released the Inbox lock. That commit is the local receive boundary.
-    const result = perform(preflight.intentId);
-    if (preflight.commitDraftId && input.providerSucceeded?.(result)) {
+    const finalizeDraft = (succeeded: boolean): void => {
+      if (!preflight.commitDraftId) return;
       this.withInboxLock(file, () => {
         const state = this.inboxState();
         const draft = state.drafts[preflight.commitDraftId!];
-        if (!draft || draft.status !== "held" || draft.target !== input.target
-            || JSON.stringify(draft.argv) !== JSON.stringify(input.argv)) {
+        if (succeeded && draft?.status === "sent" && draft.intent_id === preflight.intentId) return;
+        if (!draft || draft.status !== "sending" || draft.intent_id !== preflight.intentId
+            || draft.target !== input.target || JSON.stringify(draft.argv) !== JSON.stringify(input.argv)) {
           throw new Error(`held draft finalize 状态不一致：${preflight.commitDraftId}`);
         }
-        state.drafts[draft.draft_id] = {
-          ...draft, status: "sent", updated_at: new Date(input.now ?? Date.now()).toISOString(),
-        };
+        const updatedAt = new Date(input.now ?? Date.now()).toISOString();
+        if (succeeded) state.drafts[draft.draft_id] = { ...draft, status: "sent", updated_at: updatedAt };
+        else {
+          const latest = state.targets[draft.target]?.latest_received_seq ?? draft.held_at_seq;
+          const { intent_id: _intentId, intent_model_seen_seq: _boundary, sending_at: _sendingAt, ...retryable } = draft;
+          state.drafts[draft.draft_id] = {
+            ...retryable, status: "held", held_at_seq: Math.max(draft.held_at_seq, latest), updated_at: updatedAt,
+          };
+        }
         this.writeJson("inboxState", state);
       });
+    };
+    let result: T;
+    try {
+      result = perform(preflight.intentId);
+    } catch (error) {
+      finalizeDraft(false);
+      throw error;
     }
+    finalizeDraft(Boolean(input.providerSucceeded?.(result)));
     return { status: "ready", target: input.target, intentId: preflight.intentId, result };
   }
 

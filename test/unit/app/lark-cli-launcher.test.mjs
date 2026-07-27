@@ -56,8 +56,19 @@ test("launcher classifies exact command paths without substring policy", () => {
   assert.equal(launcher.classifyLarkCliCommand(["im", "threads", "forward", "--message-id", "om_x"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["im", "threads", "merge_forward", "--message-id", "om_x"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["--as", "bot", "api", "POST", "/open-apis/im/v1/messages"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["--text", "stale", "im", "+messages-send", "--chat-id", "oc_x"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "--text", "stale", "+messages-send", "--chat-id", "oc_x"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["-q", ".", "im", "+messages-send", "--chat-id", "oc_x"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["docs", "+fetch", "--token", "contains-auth-and-messages-send"]).kind, "passthrough");
+  assert.equal(launcher.classifyLarkCliCommand(["docs", "+fetch", "--text", "api"]).kind, "passthrough",
+    "a protected-looking value consumed by a pinned value flag is not command syntax");
   assert.equal(launcher.classifyLarkCliCommand(["auth", "--help"]).kind, "passthrough", "native help is never rewritten or denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--text", "-h"]).kind, "guarded",
+    "-h consumed as text is not native help");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--chat-id", "-h"]).kind, "denied",
+    "-h consumed as a target value is not native help");
+  assert.equal(launcher.classifyLarkCliCommand(["larkin-draft", "send", "--draft-id", "-h"]).kind, "denied",
+    "-h consumed as a draft id is not native help");
   assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--chat-id", "oc_a", "--", "--help"]).kind, "guarded");
   assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--help", "--", "--chat-id", "oc_a"]).kind, "passthrough");
 });
@@ -77,12 +88,18 @@ test("launcher forwards native help, output, stderr, exit code, and fixed packag
     assert.equal(f.calls[0].options.env.LARKIN_AGENT_ID, f.agentId);
     assert.deepEqual(fs.readFileSync(path.join(f.root, "config.json")), beforeConfig, "native help must not mutate Runtime config");
     assert.equal(fs.existsSync(f.store.paths.inboxState), false, "native help must not create Agent state");
+
+    const contentThenHelp = ["im", "+messages-send", "--text", "stale", "--help"];
+    const contentHelpResult = f.run(contentThenHelp);
+    assert.equal(contentHelpResult.code, 7);
+    assert.deepEqual(f.calls[1].args, ["/fixed/@larksuite/cli/scripts/run.js", ...contentThenHelp]);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("normalized policy flags cannot bypass guarded targets or generic API denial", () => {
   const f = fixture();
   try {
+    f.setSpawnStatus(0);
     f.store.appendNdjson("inbox", { message_id: "om_prefix", chat_id: "oc_prefix", content: "unseen" });
     for (const argv of [
       ["--chat-id", "oc_prefix", "im", "+messages-send", "--text", "old"],
@@ -178,7 +195,7 @@ fs.writeFileSync(process.argv[4], "complete");
   }
 });
 
-test("saved draft send commits atomically after provider success and cannot be retried", () => {
+test("saved draft send returns provider failure to held, reuses its idempotency key, and commits only on success", () => {
   const f = fixture();
   try {
     f.store.appendNdjson("inbox", { message_id: "om_draft", chat_id: "oc_draft", content: "new context" });
@@ -194,31 +211,113 @@ test("saved draft send commits atomically after provider success and cannot be r
     assert.equal(f.calls.length, 0, "unseen target update must block saved draft provider call");
 
     assert.equal(f.poll("--target", "chat:oc_draft"), 0);
-    f.setSpawnStatus(0);
-    const sent = f.run(["larkin-draft", "send", "--draft-id", held.draft_id]);
-    assert.equal(sent.code, 0, sent.stderr);
+    const failed = f.run(["larkin-draft", "send", "--draft-id", held.draft_id]);
+    assert.equal(failed.code, 7, failed.stderr);
     assert.equal(f.calls.length, 1);
     assert.deepEqual(f.calls[0].args.slice(1, 7), ["im", "+messages-send", "--chat-id", "oc_draft", "--text", "held answer"]);
     assert.equal(f.calls[0].args.includes("--as"), true);
     assert.equal(f.calls[0].args.includes("--idempotency-key"), true);
+    assert.equal(f.store.readInboxDraft(held.draft_id).status, "held", "provider failure must make the draft retryable");
+    const failedKey = f.calls[0].args[f.calls[0].args.indexOf("--idempotency-key") + 1];
+
+    f.setSpawnStatus(0);
+    const sent = f.run(["larkin-draft", "send", "--draft-id", held.draft_id]);
+    assert.equal(sent.code, 0, sent.stderr);
+    assert.equal(f.calls.length, 2);
+    const retriedKey = f.calls[1].args[f.calls[1].args.indexOf("--idempotency-key") + 1];
+    assert.equal(retriedKey, failedKey, "the same saved intent and seen boundary must reuse one provider idempotency key");
     assert.equal(f.store.readInboxDraft(held.draft_id).status, "sent");
 
     const retry = f.run(["larkin-draft", "send", "--draft-id", held.draft_id]);
     assert.equal(retry.code, 2);
-    assert.equal(f.calls.length, 1, "sent draft must not reach provider twice");
+    assert.equal(f.calls.length, 2, "sent draft must not reach provider again");
 
     f.store.appendNdjson("inbox", { message_id: "om_abandon", chat_id: "oc_draft", content: "newer context" });
     const abandonedDraft = JSON.parse(f.run(["im", "+messages-send", "--chat-id", "oc_draft", "--text", "discard me"]).stdout);
     const abandoned = JSON.parse(f.run(["larkin-draft", "abandon", "--draft-id", abandonedDraft.draft_id]).stdout);
     assert.equal(abandoned.status, "abandoned");
     assert.equal(f.run(["larkin-draft", "send", "--draft-id", abandonedDraft.draft_id]).code, 2);
-    assert.equal(f.calls.length, 1, "abandoned draft must not reach provider");
+    assert.equal(f.calls.length, 2, "abandoned draft must not reach provider");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("an interrupted draft provider leaves sending durable, refuses abandon, and recovers with the same key", async () => {
+  const f = fixture();
+  const launcherFile = path.join(ROOT, "dist/app/lark-cli.mjs");
+  const stateFile = path.join(ROOT, "dist/agent/agent-state-store.mjs");
+  const marker = path.join(f.root, "crashed-provider-argv.json");
+  try {
+    f.store.appendNdjson("inbox", { message_id: "om_crash", chat_id: "oc_crash", content: "new context" });
+    const held = JSON.parse(f.run(["im", "+messages-send", "--chat-id", "oc_crash", "--text", "recover me"]).stdout);
+    assert.equal(f.poll("--target", "chat:oc_crash"), 0);
+    const child = spawn(process.execPath, ["--input-type=module", "-e", `
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const launcher = await import(pathToFileURL(process.argv[2]).href);
+const state = await import(pathToFileURL(process.argv[3]).href);
+const root = process.argv[4];
+const agent = process.argv[5];
+const draft = process.argv[6];
+const marker = process.argv[7];
+launcher.runLarkCli(["larkin-draft", "send", "--draft-id", draft], {
+  LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agent,
+}, {
+  stateStore: state.createAgentStateStore(root, agent),
+  upstreamScript: "/fixed/@larksuite/cli/scripts/run.js",
+  spawn(_command, args) {
+    fs.writeFileSync(marker, JSON.stringify(args));
+    process.exit(91);
+  },
+});
+`, "draft-crash-harness", launcherFile, stateFile, f.root, f.agentId, held.draft_id, marker], { stdio: ["ignore", "pipe", "pipe"] });
+    let childStderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { childStderr += chunk; });
+    await once(child, "exit");
+    assert.equal(child.exitCode, 91, childStderr);
+    assert.equal(f.store.readInboxDraft(held.draft_id).status, "sending");
+    const listed = JSON.parse(f.run(["larkin-draft", "list"]).stdout);
+    assert.deepEqual(listed.drafts.map((draft) => draft.status), ["sending"]);
+
+    const abandoned = f.run(["larkin-draft", "abandon", "--draft-id", held.draft_id]);
+    assert.equal(abandoned.code, 2);
+    assert.match(abandoned.stderr, /too late to abandon/);
+    assert.equal(f.store.readInboxDraft(held.draft_id).status, "sending");
+
+    const crashedArgv = JSON.parse(fs.readFileSync(marker, "utf8"));
+    const crashedKey = crashedArgv[crashedArgv.indexOf("--idempotency-key") + 1];
+    f.setSpawnStatus(0);
+    const recovered = f.run(["larkin-draft", "send", "--draft-id", held.draft_id]);
+    assert.equal(recovered.code, 0, recovered.stderr);
+    const recoveredArgv = f.calls.at(-1).args;
+    assert.equal(recoveredArgv[recoveredArgv.indexOf("--idempotency-key") + 1], crashedKey);
+    assert.equal(f.store.readInboxDraft(held.draft_id).status, "sent");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("provider idempotency is stable within one model-seen boundary and rotates after the next poll", () => {
+  const f = fixture();
+  try {
+    f.setSpawnStatus(0);
+    const argv = ["im", "+messages-send", "--chat-id", "oc_boundary", "--text", "same intent"];
+    assert.equal(f.run(argv).code, 0);
+    assert.equal(f.run(argv).code, 0);
+    const keyAt = (index) => f.calls[index].args[f.calls[index].args.indexOf("--idempotency-key") + 1];
+    assert.equal(keyAt(1), keyAt(0), "local provider replay at the same seen boundary must use the same key");
+
+    f.store.appendNdjson("inbox", { message_id: "om_boundary", chat_id: "oc_boundary", content: "new context" });
+    assert.equal(f.poll("--target", "chat:oc_boundary"), 0);
+    assert.equal(f.run(argv).code, 0);
+    assert.notEqual(keyAt(2), keyAt(0), "polling a newer receive boundary must create a new intent key");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("launcher rejects identity switches and generic write bypasses before spawn", () => {
   const f = fixture();
   try {
+    const noncanonical = f.run(["--text", "stale", "im", "+messages-send", "--chat-id", "oc_x"]);
+    assert.equal(noncanonical.code, 2);
+    assert.match(noncanonical.stderr, /把 service\/subcommand 放在前面/);
     for (const argv of [
       ["im", "+chat-list", "--profile", "other"],
       ["im", "+chat-list", "--config-dir", "/tmp/escape"],
@@ -229,6 +328,10 @@ test("launcher rejects identity switches and generic write bypasses before spawn
       ["im", "+messages-reply", "--message-id", "om_a", "--message-id=om_b", "--text", "x"],
       ["im", "+messages-send", "--chat-id", "oc_a", "--as", "bot", "--as=user", "--text", "x"],
       ["im", "+messages-send", "--chat-id=oc_a", "--as=-h", "--text", "x"],
+      ["im", "--text", "stale", "+messages-send", "--chat-id", "oc_x"],
+      ["-q", ".", "im", "+messages-send", "--chat-id", "oc_x"],
+      ["im", "+messages-send", "--text", "-h"],
+      ["im", "+messages-send", "--chat-id", "-h"],
       ["api", "POST", "/open-apis/im/v1/messages", "--data", "{}"],
       ["im", "messages", "create", "--data", "{}"],
       ["im", "messages", "forward", "--message-id", "om_a"],

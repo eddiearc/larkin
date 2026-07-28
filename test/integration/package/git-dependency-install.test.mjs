@@ -160,6 +160,14 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
     assert.deepEqual(fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json")), beforeHelpConfig);
     assert.deepEqual(fs.readFileSync(path.join(inboxDir, "inbox-state.json")), beforeHelpState);
 
+    const boundedHistory = checked(runtimeLarkCli, [
+      "im", "+chat-messages-list", "--chat-id", "oc_installed_window", "--dry-run", "--json",
+    ], {
+      cwd: consumer, env: runtimeEnv, timeout: 15_000,
+    }, "run installed Runtime history shortcut with Larkin default window");
+    assert.match(boundedHistory.stdout, /"page_size"\s*:\s*(?:"20"|20)/,
+      "installed Runtime wrapper must override the pinned shortcut default 50 with 20");
+
     for (const dryRunArgv of [
       ["--chat-id", "oc_native_order", "im", "+messages-send", "--text", "native prefix", "--dry-run"],
       ["im", "--chat-id", "oc_native_order", "+messages-send", "--text", "native middle", "--dry-run"],

@@ -416,6 +416,8 @@ test("formatted public chat/thread shortcuts preserve stdout and advance only af
       const read = f.lark(readArgv, { LARKIN_TEST_PROVIDER_HISTORY_SEQUENCE: JSON.stringify([formatted, raw]) });
       assert.equal(read.status, 0, read.stderr);
       assert.equal(read.stdout, formatted, "formatted shortcut bytes must be preserved exactly");
+      const shortcut = f.calls().find((call) => call.argv[1] === (kind === "chat" ? "+chat-messages-list" : "+threads-messages-list"));
+      assert.equal(shortcut.argv[shortcut.argv.indexOf("--page-size") + 1], "20");
       const targetKey = kind === "chat" ? `feishu.im/chat/${chatId}` : `feishu.im/thread/${chatId}/${threadId}`;
       assert.equal(JSON.parse(fs.readFileSync(path.join(f.stateDir, "freshness-state.json"), "utf8"))
         .cursors[targetKey].cursor.revisionTime, "1261");

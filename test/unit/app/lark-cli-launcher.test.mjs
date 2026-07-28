@@ -103,6 +103,38 @@ test("native help and safe reads remain byte-preserving passthroughs", () => {
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("Runtime-bound history shortcuts default to 20 while preserving explicit page sizes", () => {
+  const f = fixture();
+  try {
+    for (const argv of [
+      ["im", "+chat-messages-list", "--chat-id", "oc_default", "--order", "desc", "--json"],
+      ["im", "+threads-messages-list", "--thread", "omt_default", "--order", "desc", "--json"],
+    ]) {
+      const before = f.calls.length;
+      f.run(argv);
+      const shortcut = f.calls.slice(before).find((call) => call.args[2] === argv[1]).args.slice(1);
+      assert.equal(shortcut[shortcut.indexOf("--page-size") + 1], "20");
+    }
+
+    const explicitBefore = f.calls.length;
+    f.run(["im", "+chat-messages-list", "--chat-id", "oc_explicit", "--page-size", "7", "--json"]);
+    const explicit = f.calls.slice(explicitBefore).find((call) => call.args[2] === "+chat-messages-list").args.slice(1);
+    assert.equal(explicit[explicit.indexOf("--page-size") + 1], "7");
+    assert.equal(explicit.filter((argument) => argument === "--page-size").length, 1);
+
+    f.run(["im", "+threads-messages-list", "--thread", "omt_inline", "--page-size=9", "--json"]);
+    const inline = f.calls.at(-1).args.slice(1);
+    assert.equal(inline.includes("--page-size=9"), true);
+    assert.equal(inline.includes("20"), false);
+
+    const boundaryBefore = f.calls.length;
+    f.run(["im", "+chat-messages-list", "--chat-id", "oc_boundary", "--json", "--", "--page-size", "99"]);
+    const bounded = f.calls.slice(boundaryBefore).find((call) => call.args[2] === "+chat-messages-list").args.slice(1);
+    const boundary = bounded.indexOf("--");
+    assert.deepEqual(bounded.slice(boundary - 2), ["--page-size", "20", "--", "--page-size", "99"]);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("normalized and prefixed policy syntax cannot bypass the authoritative gate", () => {
   assert.equal(launcher.classifyLarkCliCommand(["--chat-id", "oc_x", "im", "+messages-send", "--text", "x"]).kind, "guarded");
   assert.equal(launcher.classifyLarkCliCommand(["im", "--chat-id", "oc_x", "+messages-send", "--text", "x"]).kind, "guarded");

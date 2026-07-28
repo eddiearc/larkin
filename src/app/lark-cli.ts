@@ -371,6 +371,18 @@ function rawFlagValue(argv: readonly string[], flag: string): string | null {
   return inline ? inline.slice(flag.length + 1) : null;
 }
 
+function boundedHistoryArgv(argv: readonly string[]): string[] {
+  if (!exactPath(argv, ["im", "+chat-messages-list"])
+      && !exactPath(argv, ["im", "+threads-messages-list"])) return [...argv];
+  const boundary = argv.indexOf("--");
+  const commandArgv = boundary < 0 ? argv : argv.slice(0, boundary);
+  if (commandArgv.includes("--page-size")
+      || commandArgv.some((argument) => argument.startsWith("--page-size="))) return [...argv];
+  const next = [...argv];
+  next.splice(boundary < 0 ? next.length : boundary, 0, "--page-size", "20");
+  return next;
+}
+
 function conditionalHeadReadTarget(argv: readonly string[]): FreshnessTarget | null {
   if (["--page-token", "--start", "--end", "--jq", "-q"].some((flag) => argv.includes(flag)
       || argv.some((argument) => argument.startsWith(`${flag}=`)))) return null;
@@ -416,9 +428,10 @@ function displayedHeadIds(result: SpawnSyncReturns<string>, target: FreshnessTar
 function passthroughWithObservation(
   argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
 ): number {
-  const result = callNative(argv, env, io, dependencies);
-  let target = conditionalHeadReadTarget(argv);
-  const threadLocator = eligibleThreadHeadRead(argv);
+  const effectiveArgv = boundedHistoryArgv(argv);
+  const result = callNative(effectiveArgv, env, io, dependencies);
+  let target = conditionalHeadReadTarget(effectiveArgv);
+  const threadLocator = eligibleThreadHeadRead(effectiveArgv);
   if (!target && threadLocator && !result.error && result.status === 0) {
     try {
       const value = JSON.parse(result.stdout || "") as { ok?: unknown; data?: { messages?: unknown; items?: unknown } };

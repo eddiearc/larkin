@@ -120,7 +120,7 @@ test("nonzero provider diagnostics expose only validated error categories, scope
     }),
   });
   assert.deepEqual(result, {
-    error: { type: "api_error", subtype: "app_scope_not_applied", code: 99991672 },
+    error: { type: "api_error", subtype: "app_scope_not_applied" },
     missing_scopes: ["im:message", "im:message.send_as_user"],
     identity: "user",
   });
@@ -134,7 +134,7 @@ test("nonzero provider diagnostics expose only validated error categories, scope
   }
 });
 
-test("pure-alphanumeric synthetic secrets cannot masquerade as failure categories or scopes", () => {
+test("pure-alphanumeric and in-range numeric secrets cannot masquerade as failure diagnostics", () => {
   const syntheticSecret = "syntheticsecret987654321";
   const processResult = {
     stdout: JSON.stringify({
@@ -142,7 +142,7 @@ test("pure-alphanumeric synthetic secrets cannot masquerade as failure categorie
       error: {
         type: syntheticSecret,
         subtype: syntheticSecret,
-        code: 1_000_000_000,
+        code: 123456789,
         missing_scopes: [`im:${syntheticSecret}`],
       },
     }),

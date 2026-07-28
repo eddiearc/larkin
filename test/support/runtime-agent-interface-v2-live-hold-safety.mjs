@@ -68,11 +68,6 @@ function safeCategory(value, allowed) {
   return typeof value === "string" && allowed.has(value) ? value : undefined;
 }
 
-function safeCode(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 999_999_999
-    ? value : undefined;
-}
-
 function safeScopes(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((scope) => typeof scope === "string" && SAFE_MISSING_SCOPES.has(scope)))];
@@ -89,10 +84,8 @@ export function redactedProcessFailureDiagnostic(result) {
     const error = {};
     const type = safeCategory(sourceError.type, SAFE_ERROR_TYPES);
     const subtype = safeCategory(sourceError.subtype, SAFE_ERROR_SUBTYPES);
-    const code = safeCode(sourceError.code);
     if (type !== undefined) error.type = type;
     if (subtype !== undefined) error.subtype = subtype;
-    if (code !== undefined) error.code = code;
     if (Object.keys(error).length > 0) {
       diagnostic.error ||= {};
       for (const [key, value] of Object.entries(error)) {

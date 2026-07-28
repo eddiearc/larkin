@@ -9,6 +9,11 @@ const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
 test("release platform CI strictly builds and smokes every supported runner architecture", () => {
   const workflow = read(".github/workflows/release-platform-smoke.yml");
   const smoke = read("scripts/release/smoke.ts");
+  assert.equal(
+    read(".gitleaksignore"),
+    "1e12236e5462a361cf45e1b1b218aae035ed7451:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:138\n",
+    "the synthetic-secret exception must remain one exact historical fingerprint",
+  );
   for (const [runner, target] of [
     ["ubuntu-24.04", "linux-x64"],
     ["ubuntu-24.04-arm", "linux-arm64"],

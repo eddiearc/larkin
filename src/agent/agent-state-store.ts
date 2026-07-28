@@ -6,11 +6,11 @@ import { acquireProcessLock, inspectProcess } from "../platform/process-state.js
 import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
-  "senderProfiles" | "readReceipts" | "pendingReact" | "runtimeDeliveries" | "inboxState" | "reminders" | "interactions";
+  "senderProfiles" | "readReceipts" | "pendingReact" | "runtimeDeliveries" | "inboxState" | "freshnessState" | "reminders" | "interactions";
 export type NdjsonStateKey = "conversation" | "inbox";
 
 const JSON_KEYS: ReadonlySet<string> = new Set([
-  "agentState", "status", "map", "replyctx", "botIdentity", "senderProfiles", "readReceipts", "pendingReact", "runtimeDeliveries", "inboxState", "reminders", "interactions",
+  "agentState", "status", "map", "replyctx", "botIdentity", "senderProfiles", "readReceipts", "pendingReact", "runtimeDeliveries", "inboxState", "freshnessState", "reminders", "interactions",
 ]);
 const NDJSON_KEYS: ReadonlySet<string> = new Set(["conversation", "inbox"]);
 const INBOX_LOCK_TIMEOUT_MS = 2_000;
@@ -410,6 +410,28 @@ export class AgentStateStore {
 
   private inboxState(): InboxStateFile {
     return normalizeInboxState(this.readJson<unknown>("inboxState", emptyInboxState()));
+  }
+
+  readFreshnessCursor<T>(target: string, generation = "external"): T | null {
+    const state = this.readJson<{ version?: unknown; cursors?: unknown }>("freshnessState", { version: 1, cursors: {} });
+    if (state.version !== 1 || !state.cursors || typeof state.cursors !== "object" || Array.isArray(state.cursors)) return null;
+    const record = (state.cursors as Record<string, unknown>)[target];
+    if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+    const row = record as { generation?: unknown; cursor?: unknown };
+    return row.generation === generation && row.cursor !== undefined ? row.cursor as T : null;
+  }
+
+  mergeFreshnessCursor<T>(target: string, cursor: T, merge: (previous: T | null, current: T) => T, generation = "external"): T {
+    return this.mutateJson("freshnessState", { version: 1, cursors: {} as Record<string, { generation: string; cursor: T }> }, (state) => {
+      if (state.version !== 1 || !state.cursors || typeof state.cursors !== "object" || Array.isArray(state.cursors)) {
+        state.version = 1;
+        state.cursors = {};
+      }
+      const previous = state.cursors[target];
+      const next = merge(previous?.generation === generation ? previous.cursor : null, cursor);
+      state.cursors[target] = { generation, cursor: next };
+      return next;
+    });
   }
 
   private normalizeInboxEnvelope(value: unknown, state: InboxStateFile): InboxEnvelope {

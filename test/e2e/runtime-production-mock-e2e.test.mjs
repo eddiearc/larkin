@@ -198,16 +198,25 @@ for (const runtime of ["codex", "claude", "pi"]) {
         stateStore: store,
         upstreamScript: "/fixture/@larksuite/cli/scripts/run.js",
         spawn(command, args, options) {
+          if (["+chat-messages-list", "+threads-messages-list"].includes(args[2])
+              || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages")) {
+            return { status: 0, stdout: JSON.stringify({ ok: true, identity: "bot", data: { messages: [
+              { message_id: `om_${runtime}_1`, chat_id: `oc_${runtime}`, create_time: "1784160000000", content: "first" },
+              { message_id: `om_${runtime}_2`, chat_id: `oc_${runtime}`, create_time: "1784160001000", content: "second" },
+            ] } }), stderr: "", error: undefined };
+          }
           sent.push({ command, args, options });
-          return { status: 0, stdout: "{\"ok\":true}\n", stderr: "", error: undefined };
+          return { status: 0, stdout: JSON.stringify({ ok: true, data: {
+            message_id: `om_${runtime}_2`, chat_id: `oc_${runtime}`, create_time: "1784160001000",
+          } }), stderr: "", error: undefined };
         },
         io: { stdout: (text) => { guardedStdout += text; }, stderr: (text) => { guardedStderr += text; } },
       };
       const sendArgv = ["im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text", "fresh response"];
-      assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
-      const held = JSON.parse(guardedStdout);
-      assert.equal(held.status, "held");
-      assert.equal(held.target, target);
+      assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 3, guardedStderr);
+      const conflict = JSON.parse(guardedStderr);
+      assert.equal(conflict.error.subtype, "freshness_conflict");
+      assert.equal(conflict.target, `feishu.im/chat/oc_${runtime}`);
       assert.equal(sent.length, 0, "a stale target must never reach the provider");
 
       let stdout = "", stderr = "";

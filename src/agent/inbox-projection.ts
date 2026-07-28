@@ -44,6 +44,8 @@ export interface InboxTargetSummary {
 export interface InboxLocators {
   chat_id: string;
   thread_id?: string | null;
+  create_time?: string;
+  update_time?: string;
   sender_id?: string | null;
   content?: string;
 }
@@ -57,6 +59,10 @@ export function projectInboxEnvelope(
     ...canonical,
     chat_id: locators.chat_id,
     thread_id: locators.thread_id !== undefined ? locators.thread_id : (typeof canonical.thread_id === "string" ? canonical.thread_id : null),
+    ...(locators.create_time !== undefined ? { create_time: locators.create_time }
+      : (typeof canonical.create_time === "string" ? { create_time: canonical.create_time } : {})),
+    ...(locators.update_time !== undefined ? { update_time: locators.update_time }
+      : (typeof canonical.update_time === "string" ? { update_time: canonical.update_time } : {})),
     sender_id: locators.sender_id !== undefined ? locators.sender_id : (typeof canonical.sender_id === "string" ? canonical.sender_id : null),
     content: locators.content !== undefined ? locators.content : (typeof canonical.content === "string" ? canonical.content : ""),
   };

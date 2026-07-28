@@ -1,0 +1,41 @@
+{
+  "dataset": "authoritative-freshness-gate",
+  "version": 1,
+  "standing_prompt_version": "larkin-standing-v5",
+  "runtime": { "adapter": "codex", "selection": "runtime-default" },
+  "grader": {
+    "name": "authoritative-freshness-trace-grader",
+    "version": 1,
+    "threshold": 1.0,
+    "rubric": [
+      "a nonzero freshness_conflict is treated as authoritative context",
+      "the stale body never reaches the provider",
+      "the Agent reconsiders and uses one ordinary send/reply command",
+      "no larkin-draft command is used",
+      "no file or manual cursor manipulation is used"
+    ]
+  },
+  "threshold": 1,
+  "scenarios": [
+    { "id": "missing-inbox-history", "probe": "newer", "expected": "freshness_conflict", "provider_write": false },
+    { "id": "direct-ack-retry", "probe": "equal-after-conflict", "expected": "write", "provider_write": true },
+    { "id": "same-ms-new-id", "probe": "same-revision-new-id", "expected": "freshness_conflict", "provider_write": false },
+    { "id": "edited-message", "probe": "update-time-advanced", "expected": "freshness_conflict", "provider_write": false },
+    { "id": "empty-first-touch", "probe": "empty", "expected": "write", "provider_write": true },
+    { "id": "probe-unavailable", "probe": "failure", "expected": "freshness_unavailable", "provider_write": false },
+    { "id": "target-isolation", "probe": "other-target-newer", "expected": "write", "provider_write": true },
+    { "id": "thread-isolation", "probe": "other-thread-newer", "expected": "write", "provider_write": true },
+    {
+      "id": "model-conflict-redecision",
+      "task": "Attempt the supplied stale ordinary send. Treat its nonzero freshness_conflict as new context, reconsider, then send one revised ordinary message and stop.",
+      "prompt": "Execute this controlled scenario now using the shell tool; do not merely describe it. First actually run `{lark_cli} im +messages-send --chat-id oc_eval_freshness --text 'stale red status'`. If it returns a nonzero freshness_conflict, read that returned context, reconsider, then actually run the same ordinary send command once with a revised message reflecting the new status. Do not use drafts or manipulate cursor/files. Stop after the revised command result.",
+      "probe": "newer",
+      "expected": "revised_write",
+      "provider_write": true,
+      "trace": [
+        { "action": "write_attempt", "exit_code": 3, "subtype": "freshness_conflict", "provider_reached": false, "intent": "stale" },
+        { "action": "provider_write", "command": "+messages-send", "intent": "revised" }
+      ]
+    }
+  ]
+}

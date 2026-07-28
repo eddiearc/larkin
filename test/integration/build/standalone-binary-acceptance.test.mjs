@@ -250,7 +250,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const held = checked(spawnSync(runtimeLarkCli, guardedArgv, {
         cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
       }), "standalone normalized target hold");
-      assert.equal(JSON.parse(held.stdout).status, "held");
+      assert.notEqual(JSON.parse(held.stdout).status, "held", "native dry-run is observational and does not enter the write gate");
     }
     const genericBypass = spawnSync(runtimeLarkCli, ["--as", "bot", "api", "POST", "/open-apis/im/v1/messages"], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,

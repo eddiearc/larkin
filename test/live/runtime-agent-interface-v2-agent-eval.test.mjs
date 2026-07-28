@@ -67,13 +67,18 @@ function initialState(scenario) {
   };
 }
 
-function scenarioInstruction(scenario) {
+function scenarioInstruction(scenario, binDir) {
   const chatId = scenario.target.replace(/^chat:/, "");
-  const exactSend = `lark-cli im +messages-send --chat-id ${chatId} --markdown "controlled reply"`;
-  if (scenario.id === "held-draft") return `${scenario.task} First run ${exactSend}; after it reports held, poll exactly ${scenario.target} and send one revised reply.`;
-  if (scenario.id === "repeated-update") return `${scenario.task} First poll exactly ${scenario.target}, then run ${exactSend}; the controlled launcher will expose the second update and hold that send, so poll again and send one revised reply.`;
-  if (scenario.id === "target-isolation") return `${scenario.task} Poll chat:oc_eval_a and send exactly one reply to oc_eval_a. Then attempt one reply to oc_eval_b without polling it; accept the held result and stop.`;
-  return `${scenario.task} Current target is ${scenario.target}.`;
+  const larkin = JSON.stringify(path.join(binDir, "larkin"));
+  const larkCli = JSON.stringify(path.join(binDir, "lark-cli"));
+  const exactSend = `${larkCli} im +messages-send --chat-id ${chatId} --markdown "controlled reply"`;
+  const exactPoll = `${larkin} inbox poll --target ${scenario.target}`;
+  if (scenario.id === "held-draft") return `${scenario.task} First run ${exactSend}; after it reports held, run ${exactPoll} and send one revised reply with ${larkCli}.`;
+  if (scenario.id === "repeated-update") return `${scenario.task} First run ${exactPoll}, then run ${exactSend}; the controlled launcher will expose the second update and hold that send, so run ${exactPoll} again and send one revised reply with ${larkCli}.`;
+  if (scenario.id === "target-isolation") return `${scenario.task} Use only ${larkin} and ${larkCli}. Poll chat:oc_eval_a and send exactly one reply to oc_eval_a. Then attempt one reply to oc_eval_b without polling it; accept the held result and stop.`;
+  if (scenario.id === "check-only") return `${scenario.task} Run exactly ${larkin} inbox check --target ${scenario.target} and stop.`;
+  if (scenario.id === "poll-complete") return `${scenario.task} Run exactly ${exactPoll} and stop.`;
+  return `${scenario.task} Run ${exactPoll}, then run ${exactSend}.`;
 }
 
 test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface eval threshold", { timeout: 20 * 60_000 }, async () => {
@@ -133,7 +138,7 @@ test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface e
       const afterCount = events.items.length;
       const accepted = await promptWhenReady(session, {
         inputId: `eval-${scenario.id}`, kind: "initial", attempt: 0,
-        text: `${scenarioInstruction(scenario)} Execute the controlled scenario now and stop after its requested outcome.`,
+        text: `${scenarioInstruction(scenario, binDir)} Execute the controlled scenario now and stop after its requested outcome.`,
       });
       assert.equal(accepted.status, "accepted");
       await waitForTurnEnd(events, afterCount);

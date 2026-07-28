@@ -1,10 +1,16 @@
 #!/usr/bin/env bun
 
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
+import { evaluateFreshness, type FreshnessTarget } from "../agent/freshness-gate.js";
+import {
+  feishuImFreshnessAdapter, feishuImTarget, mergeFeishuImCursor, serializeFeishuImTarget,
+  type FeishuImCursor, type FeishuImMessage, type FeishuImSnapshot,
+} from "../feishu/im-freshness-adapter.js";
 import * as larkinConfig from "../platform/config.js";
 import { resolvePinnedLarkCliCommand, type PinnedLarkCliCommand } from "./runtime-agent-config.js";
 
@@ -27,14 +33,13 @@ export interface LarkCliLauncherDependencies {
 export type LarkCliCommandDecision =
   | { kind: "passthrough" }
   | { kind: "guarded"; operation: "send" | "reply" | "card" }
-  | { kind: "runtime-owned"; operation: "draft-list" | "draft-send" | "draft-abandon" }
   | { kind: "denied"; reason: string };
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
 const MANAGEMENT_COMMANDS = new Set(["auth", "config", "profile", "update", "install"]);
 const USER_ONLY_COMMANDS = new Set(["attendance", "mail", "okr"]);
 const POLICY_VALUE_FLAGS = new Set([
-  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--draft-id",
+  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--thread-id",
 ]);
 const PROTECTED_VALUE_FLAGS = new Set([
   ...POLICY_VALUE_FLAGS,
@@ -48,7 +53,7 @@ const RAW_IM_WRITE_OPERATIONS = new Set([
 
 type ProtectedOperation = "send" | "reply" | "card-patch" | "card-update" | "raw-create" | "raw-reply"
   | "raw-forward" | "raw-merge_forward" | "raw-delete" | "raw-urgent_app" | "raw-urgent_phone" | "raw-urgent_sms"
-  | "thread-forward" | "thread-merge_forward" | "api" | "draft";
+  | "thread-forward" | "thread-merge_forward" | "api";
 
 interface PolicyArgv {
   commandArgv: readonly string[];
@@ -76,7 +81,7 @@ function hasCanonicalUnprotectedCommandPath(argv: readonly string[]): boolean {
   const command = nativeArgv[1];
   if (!service || service.startsWith("-") || !command || command.startsWith("-")) return false;
   if (service !== "im") return service !== "api" && service !== "larkin-draft";
-  if (command === "+messages-send" || command === "+messages-reply" || command === "api" || command === "larkin-draft") {
+  if (command === "+messages-send" || command === "+messages-reply" || command === "api") {
     return false;
   }
   if (command.startsWith("+")) return true;
@@ -114,7 +119,6 @@ function protectedOperations(argv: readonly string[]): ProtectedOperation[] {
     if (token === "+messages-send") operations.push("send");
     else if (token === "+messages-reply") operations.push("reply");
     else if (token === "api") operations.push("api");
-    else if (token === "larkin-draft") operations.push("draft");
   }
   const hasIm = tokens.includes("im");
   if (hasIm && tokens.includes("messages")) {
@@ -191,19 +195,20 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
   if (hasCanonicalUnprotectedCommandPath(argv)) return { kind: "passthrough" };
   const protectedPaths = protectedOperations(argv);
-  if (exactPath(parsed.commandArgv, ["larkin-draft", "list"])) return uniqueProtectedOperation(protectedPaths, "draft")
-    ? { kind: "runtime-owned", operation: "draft-list" } : noncanonicalProtectedDecision();
-  if (exactPath(parsed.commandArgv, ["larkin-draft", "send"])) return uniqueProtectedOperation(protectedPaths, "draft")
-    ? { kind: "runtime-owned", operation: "draft-send" } : noncanonicalProtectedDecision();
-  if (exactPath(parsed.commandArgv, ["larkin-draft", "abandon"])) return uniqueProtectedOperation(protectedPaths, "draft")
-    ? { kind: "runtime-owned", operation: "draft-abandon" } : noncanonicalProtectedDecision();
+  if (command === "larkin-draft") return { kind: "denied", reason: "larkin-draft 已移除；freshness conflict 后请重新判断并执行普通写命令" };
   if (exactPath(parsed.commandArgv, ["im", "+messages-send"])) return uniqueProtectedOperation(protectedPaths, "send")
-    ? { kind: "guarded", operation: "send" } : noncanonicalProtectedDecision();
+    ? (parsed.flags.has("--thread-id")
+      ? { kind: "denied", reason: "+messages-send 不支持 --thread-id；线程内写入请使用 +messages-reply --message-id ... --reply-in-thread" }
+      : parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "send" })
+    : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["im", "+messages-reply"])) return uniqueProtectedOperation(protectedPaths, "reply")
-    ? { kind: "guarded", operation: "reply" } : noncanonicalProtectedDecision();
+    ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "reply" })
+    : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
     const expected = parsed.commandArgv[2] === "patch" ? "card-patch" : "card-update";
-    return uniqueProtectedOperation(protectedPaths, expected) ? { kind: "guarded", operation: "card" } : noncanonicalProtectedDecision();
+    return uniqueProtectedOperation(protectedPaths, expected)
+      ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "card" })
+      : noncanonicalProtectedDecision();
   }
   if (exactPath(parsed.commandArgv, ["im", "messages", "create"]) || exactPath(parsed.commandArgv, ["im", "messages", "reply"])) {
     const expected = parsed.commandArgv[2] === "create" ? "raw-create" : "raw-reply";
@@ -232,15 +237,22 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   return { kind: "passthrough" };
 }
 
-function spawnNative(
+function callNative(
   argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies,
-): number {
+): SpawnSyncReturns<string> {
   const native = dependencies.nativeCommand;
   const result = (dependencies.spawn ?? spawnSync)(
     native?.command ?? process.execPath,
     [...(native?.argsPrefix ?? [dependencies.upstreamScript ?? resolveUpstreamScript()]), ...argv],
     { encoding: "utf8", env: { ...process.env, ...env } },
   ) as SpawnSyncReturns<string>;
+  return result;
+}
+
+function spawnNative(
+  argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies,
+): number {
+  const result = callNative(argv, env, io, dependencies);
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
@@ -250,18 +262,18 @@ function spawnNative(
   return result.status ?? 1;
 }
 
-function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarded" }>, argv: readonly string[], store: AgentStateStore): string {
+function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarded" }>, argv: readonly string[], store: AgentStateStore): FreshnessTarget {
   if (decision.operation === "send") {
     const chatId = policyFlagValue(argv, "--chat-id");
     const userId = policyFlagValue(argv, "--user-id");
     if (!chatId || userId) throw new Error("Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
-    return `chat:${chatId}`;
+    return feishuImTarget(`chat:${chatId}`);
   }
   const messageId = policyFlagValue(argv, "--message-id");
   if (!messageId) throw new Error(`${decision.operation} 写入缺少 --message-id`);
   const target = store.resolveInboxMessageTarget(messageId);
   if (!target) throw new Error(`无法从 Inbox 状态确定 ${messageId} 的 target；先 poll 对应消息，禁止旁路 freshness`);
-  return target;
+  return feishuImTarget(target);
 }
 
 function botArgv(argv: readonly string[], intentId: string): string[] {
@@ -274,6 +286,214 @@ function botArgv(argv: readonly string[], intentId: string): string[] {
   if (!parsed.flags.has("--idempotency-key")) injected.push("--idempotency-key", intentId);
   next.splice(insertion, 0, ...injected);
   return next;
+}
+
+function probeArgv(target: FreshnessTarget): string[] {
+  if (target.provider !== "feishu.im") throw new Error(`unsupported freshness provider: ${target.provider}`);
+  if (target.resourceKind === "chat") {
+    return ["api", "GET", "/open-apis/im/v1/messages", "--params", JSON.stringify({
+      container_id_type: "chat", container_id: target.resourceId, sort_type: "ByCreateTimeDesc", page_size: 20,
+    }), "--as", "bot"];
+  }
+  if (target.resourceKind === "thread") {
+    const slash = target.resourceId.indexOf("/");
+    const threadId = slash >= 0 ? target.resourceId.slice(slash + 1) : "";
+    if (!threadId) throw new Error("thread freshness target is malformed");
+    return ["api", "GET", "/open-apis/im/v1/messages", "--params", JSON.stringify({
+      container_id_type: "thread", container_id: threadId, sort_type: "ByCreateTimeDesc", page_size: 20,
+    }), "--as", "bot"];
+  }
+  throw new Error(`unsupported freshness resource: ${target.resourceKind}`);
+}
+
+function parseHistory(result: SpawnSyncReturns<string>, target: FreshnessTarget, requireBotIdentity = false): FeishuImSnapshot {
+  if (result.error) throw new Error(`authoritative history probe failed: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`authoritative history probe exited ${result.status ?? "without status"}: ${result.stderr || "no details"}`);
+  let value: unknown;
+  try { value = JSON.parse(result.stdout || ""); } catch { throw new Error("authoritative history probe returned non-JSON output"); }
+  const root = value as { ok?: unknown; identity?: unknown; data?: { messages?: unknown; items?: unknown } } | null;
+  if (!root || root.ok !== true || !root.data) throw new Error("authoritative history probe returned an unsuccessful payload");
+  if (requireBotIdentity && root.identity !== "bot") throw new Error("authoritative history probe did not confirm Bot identity");
+  const rows = root.data.messages ?? root.data.items;
+  if (!Array.isArray(rows)) throw new Error("authoritative history probe omitted messages");
+  const messages = rows as FeishuImMessage[];
+  for (const message of messages) {
+    if (!message || typeof message !== "object" || typeof message.message_id !== "string" || !message.message_id) {
+      throw new Error("authoritative history payload contained a message without message_id");
+    }
+    if (target.resourceKind === "chat" && message.chat_id !== target.resourceId) {
+      throw new Error("authoritative history payload crossed chat target boundary");
+    }
+    if (target.resourceKind === "thread") {
+      const [chatId, threadId] = target.resourceId.split("/", 2);
+      if (message.chat_id !== chatId || message.thread_id !== threadId) {
+        throw new Error("authoritative history payload crossed thread target boundary");
+      }
+    }
+  }
+  return { messages };
+}
+
+function intentId(target: string, cursor: FeishuImCursor | null, argv: readonly string[]): string {
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify([target, cursor, argv])).digest("hex");
+  return `larkin-${fingerprint.slice(0, 32)}`;
+}
+
+function emitFreshnessError(io: LarkCliIo, input: {
+  subtype: "freshness_conflict" | "freshness_unavailable";
+  target: string;
+  current?: FeishuImCursor;
+  messages?: FeishuImMessage[];
+  reason?: string;
+}): void {
+  io.stderr(`${JSON.stringify({
+    ok: false,
+    identity: "bot",
+    error: { type: input.subtype === "freshness_conflict" ? "conflict" : "unavailable", subtype: input.subtype,
+      ...(input.reason ? { message: input.reason } : {}) },
+    target: input.target,
+    ...(input.current ? { current_cursor: input.current } : {}),
+    ...(input.messages ? { unseen_messages: input.messages } : {}),
+    next: "Reconsider the returned context, then retry the ordinary send/reply/card command; history is probed again before every write.",
+  })}\n`);
+}
+
+function freshnessGeneration(env: Env): string {
+  return typeof env.LARKIN_RUNTIME_OBSERVATION_GENERATION === "string" && env.LARKIN_RUNTIME_OBSERVATION_GENERATION
+    ? env.LARKIN_RUNTIME_OBSERVATION_GENERATION : "external";
+}
+
+function rawFlagValue(argv: readonly string[], flag: string): string | null {
+  const direct = argv.indexOf(flag);
+  if (direct >= 0) return argv[direct + 1] ?? null;
+  const inline = argv.find((argument) => argument.startsWith(`${flag}=`));
+  return inline ? inline.slice(flag.length + 1) : null;
+}
+
+function conditionalHeadReadTarget(argv: readonly string[]): FreshnessTarget | null {
+  if (["--page-token", "--start", "--end", "--jq", "-q"].some((flag) => argv.includes(flag)
+      || argv.some((argument) => argument.startsWith(`${flag}=`)))) return null;
+  const format = rawFlagValue(argv, "--format");
+  if (format && format !== "json") return null;
+  if (exactPath(argv, ["im", "+chat-messages-list"])) {
+    const chatId = rawFlagValue(argv, "--chat-id");
+    const order = rawFlagValue(argv, "--order") ?? "desc";
+    return chatId && order === "desc" ? feishuImTarget(`chat:${chatId}`) : null;
+  }
+  return null;
+}
+
+function eligibleThreadHeadRead(argv: readonly string[]): string | null {
+  if (!exactPath(argv, ["im", "+threads-messages-list"])) return null;
+  if (["--page-token", "--jq", "-q"].some((flag) => argv.includes(flag)
+      || argv.some((argument) => argument.startsWith(`${flag}=`)))) return null;
+  const format = rawFlagValue(argv, "--format");
+  const order = rawFlagValue(argv, "--order") ?? "asc";
+  return (!format || format === "json") && order === "desc" ? rawFlagValue(argv, "--thread") : null;
+}
+
+function displayedHeadIds(result: SpawnSyncReturns<string>, target: FreshnessTarget): string[] {
+  if (result.error || result.status !== 0) throw new Error("displayed history read failed");
+  const value = JSON.parse(result.stdout || "") as { ok?: unknown; data?: { messages?: unknown; items?: unknown } };
+  const rows = value?.ok === true && value.data ? (value.data.messages ?? value.data.items) : null;
+  if (!Array.isArray(rows)) throw new Error("displayed history omitted messages");
+  const ids: string[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") throw new Error("displayed history contained a malformed message");
+    const message = row as { message_id?: unknown; chat_id?: unknown; thread_id?: unknown };
+    if (typeof message.message_id !== "string" || !message.message_id) throw new Error("displayed history omitted message_id");
+    if (target.resourceKind === "chat" && message.chat_id !== target.resourceId) throw new Error("displayed history crossed chat target boundary");
+    if (target.resourceKind === "thread") {
+      const [chatId, threadId] = target.resourceId.split("/", 2);
+      if (message.chat_id !== chatId || message.thread_id !== threadId) throw new Error("displayed history crossed thread target boundary");
+    }
+    ids.push(message.message_id);
+  }
+  return ids;
+}
+
+function passthroughWithObservation(
+  argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
+): number {
+  const result = callNative(argv, env, io, dependencies);
+  let target = conditionalHeadReadTarget(argv);
+  const threadLocator = eligibleThreadHeadRead(argv);
+  if (!target && threadLocator && !result.error && result.status === 0) {
+    try {
+      const value = JSON.parse(result.stdout || "") as { ok?: unknown; data?: { messages?: unknown; items?: unknown } };
+      const rows = value?.ok === true && value.data ? (value.data.messages ?? value.data.items) : null;
+      if (Array.isArray(rows) && rows.length > 0) {
+        const locators = new Set(rows.map((row) => {
+          if (!row || typeof row !== "object") return "";
+          const message = row as { chat_id?: unknown; thread_id?: unknown };
+          return typeof message.chat_id === "string" && typeof message.thread_id === "string"
+            ? `${message.chat_id}:${message.thread_id}` : "";
+        }));
+        if (locators.size === 1 && !locators.has("")) {
+          const [chatId, threadId] = [...locators][0].split(":", 2);
+          if (threadId === threadLocator || threadLocator.startsWith("om_")) target = feishuImTarget(`thread:${chatId}:${threadId}`);
+        }
+      }
+    } catch { /* non-JSON successful output cannot establish a head cursor */ }
+  }
+  if (target && !result.error && result.status === 0) {
+    try {
+      const displayedIds = displayedHeadIds(result, target);
+      const rawSnapshot = parseHistory(callNative(probeArgv(target), env, io, dependencies), target, true);
+      const rawIds = rawSnapshot.messages.map((message) => message.message_id);
+      if (displayedIds.length !== rawIds.length
+          || new Set(displayedIds).size !== displayedIds.length
+          || new Set(rawIds).size !== rawIds.length
+          || displayedIds.some((id) => !rawIds.includes(id))) {
+        throw new Error("displayed and raw history heads did not reconcile");
+      }
+      const cursor = feishuImFreshnessAdapter.cursor(rawSnapshot);
+      if (cursor) store.mergeFreshnessCursor(serializeFeishuImTarget(target), cursor, mergeFeishuImCursor, freshnessGeneration(env));
+    } catch { /* successful displayed bytes remain authoritative; failed raw reconciliation never advances seen */ }
+  }
+  if (result.stdout) io.stdout(result.stdout);
+  if (result.stderr) io.stderr(result.stderr);
+  if (result.error) {
+    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    return 1;
+  }
+  return result.status ?? 1;
+}
+
+function writeResponseMessage(result: SpawnSyncReturns<string>): FeishuImMessage | null {
+  try {
+    const value = JSON.parse(result.stdout || "") as { ok?: unknown; data?: unknown };
+    if (value?.ok !== true || !value.data || typeof value.data !== "object" || Array.isArray(value.data)) return null;
+    const data = value.data as Record<string, unknown>;
+    const candidate = data.message && typeof data.message === "object" && !Array.isArray(data.message)
+      ? data.message as FeishuImMessage : data as FeishuImMessage;
+    return typeof candidate.message_id === "string" && candidate.message_id ? candidate : null;
+  } catch { return null; }
+}
+
+function observeSuccessfulWrite(
+  result: SpawnSyncReturns<string>, target: FreshnessTarget, targetKey: string, store: AgentStateStore, generation: string,
+): boolean {
+  if (result.error || result.status !== 0) return false;
+  try {
+    const candidate = writeResponseMessage(result);
+    if (!candidate) return false;
+    const snapshot = parseHistory({ ...result, stdout: JSON.stringify({ ok: true, data: { messages: [candidate] } }) }, target);
+    const cursor = feishuImFreshnessAdapter.cursor(snapshot);
+    if (cursor) store.mergeFreshnessCursor(targetKey, cursor, mergeFeishuImCursor, generation);
+    return cursor !== null;
+  } catch { return false; }
+}
+
+function emitNativeResult(result: SpawnSyncReturns<string>, io: LarkCliIo): number {
+  if (result.stdout) io.stdout(result.stdout);
+  if (result.stderr) io.stderr(result.stderr);
+  if (result.error) {
+    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    return 1;
+  }
+  return result.status ?? 1;
 }
 
 export function runLarkCli(
@@ -300,66 +520,61 @@ export function runLarkCli(
     io.stderr(`lark-cli: ${decision.reason}\n`);
     return 2;
   }
-  if (decision.kind === "runtime-owned") {
-    const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
-    const draftId = policyFlagValue(argv, "--draft-id");
-    try {
-      if (decision.operation === "draft-list") {
-        io.stdout(`${JSON.stringify({ drafts: store.listInboxDrafts() }, null, 2)}\n`);
-        return 0;
-      }
-      if (!draftId) throw new Error(`${decision.operation} 需要 --draft-id`);
-      if (decision.operation === "draft-abandon") {
-        io.stdout(`${JSON.stringify(store.setInboxDraftStatus(draftId, "abandoned", dependencies.now?.()), null, 2)}\n`);
-        return 0;
-      }
-      const draft = store.readInboxDraft(draftId);
-      if (!draft || (draft.status !== "held" && draft.status !== "sending")) {
-        throw new Error(`held/sending draft 不存在：${draftId}`);
-      }
-      const draftDecision = classifyLarkCliCommand(draft.argv);
-      if (draftDecision.kind !== "guarded" || guardedTarget(draftDecision, draft.argv, store) !== draft.target) {
-        throw new Error(`held draft target/command 不一致：${draftId}`);
-      }
-      let exitCode = 1;
-      const gated = store.withFreshnessGate({
-        target: draft.target,
-        argv: draft.argv,
-        commitDraftId: draftId,
-        providerSucceeded: (code) => code === 0,
-        ...(dependencies.now ? { now: dependencies.now() } : {}),
-      }, (intentId) => {
-        exitCode = spawnNative(botArgv(draft.argv, intentId), privateEnv, io, nativeDependencies);
-        return exitCode;
-      });
-      if (gated.status === "held") {
-        io.stdout(`${JSON.stringify({ ok: false, status: "held", target: gated.target,
-          latest_received_seq: gated.latest_received_seq, model_seen_seq: gated.model_seen_seq,
-          draft_id: gated.draft.draft_id, next: `larkin inbox poll --target ${gated.target}` }, null, 2)}\n`);
-        return 0;
-      }
-      return exitCode;
-    } catch (error) {
-      io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
-      return 2;
-    }
-  }
-  if (decision.kind === "passthrough") return spawnNative(argv, privateEnv, io, nativeDependencies);
   const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
+  if (decision.kind === "passthrough") return passthroughWithObservation(argv, privateEnv, io, nativeDependencies, store);
   try {
     const target = guardedTarget(decision, argv, store);
-    let exitCode = 1;
-    const gated = store.withFreshnessGate({ target, argv, ...(dependencies.now ? { now: dependencies.now() } : {}) }, (intentId) => {
-      exitCode = spawnNative(botArgv(argv, intentId), privateEnv, io, nativeDependencies);
-      return exitCode;
+    const targetKey = serializeFeishuImTarget(target);
+    const generation = freshnessGeneration(privateEnv);
+    const seen = store.readFreshnessCursor<FeishuImCursor>(targetKey, generation);
+    const gated = evaluateFreshness({
+      seen,
+      adapter: feishuImFreshnessAdapter,
+      probe: () => parseHistory(callNative(probeArgv(target), privateEnv, io, nativeDependencies), target, true),
     });
-    if (gated.status === "held") {
-      io.stdout(`${JSON.stringify({ ok: false, status: "held", target: gated.target,
-        latest_received_seq: gated.latest_received_seq, model_seen_seq: gated.model_seen_seq,
-        draft_id: gated.draft.draft_id, next: `larkin inbox poll --target ${gated.target}` }, null, 2)}\n`);
-      return 0;
+    if (gated.status === "unavailable") {
+      emitFreshnessError(io, { subtype: "freshness_unavailable", target: targetKey, reason: gated.reason });
+      return 3;
     }
-    return exitCode;
+    if (gated.status === "conflict") {
+      emitFreshnessError(io, { subtype: "freshness_conflict", target: targetKey, current: gated.current, messages: gated.context });
+      store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, generation);
+      return 3;
+    }
+    const write = callNative(botArgv(argv, intentId(targetKey, gated.current, argv)), privateEnv, io, nativeDependencies);
+    if (!write.error && write.status === 0 && !observeSuccessfulWrite(write, target, targetKey, store, generation)) {
+      const responseMessage = writeResponseMessage(write);
+      try {
+        const postSnapshot = parseHistory(callNative(probeArgv(target), privateEnv, io, nativeDependencies), target, true);
+        const postCursor = feishuImFreshnessAdapter.cursor(postSnapshot);
+        const unseenAfterWrite = feishuImFreshnessAdapter.unseen(gated.current, postSnapshot);
+        const confirmedOwnWrite = responseMessage && postCursor
+          && unseenAfterWrite.some((message) => message.message_id === responseMessage.message_id)
+          && unseenAfterWrite.every((message) => message.message_id === responseMessage.message_id);
+        if (!confirmedOwnWrite) {
+          if (write.stdout) io.stdout(write.stdout);
+          if (write.stderr) io.stderr(write.stderr);
+          emitFreshnessError(io, {
+            subtype: "freshness_unavailable", target: targetKey, current: postCursor ?? undefined,
+            messages: unseenAfterWrite,
+            reason: responseMessage
+              ? "provider write succeeded but bounded post-write probe found an additional concurrent update; cursor was not advanced"
+              : "provider write succeeded without a message id/revision and bounded post-write probe could not identify the write; cursor was not advanced",
+          });
+          return 3;
+        }
+        store.mergeFreshnessCursor(targetKey, postCursor, mergeFeishuImCursor, generation);
+      } catch (error) {
+        if (write.stdout) io.stdout(write.stdout);
+        if (write.stderr) io.stderr(write.stderr);
+        emitFreshnessError(io, {
+          subtype: "freshness_unavailable", target: targetKey,
+          reason: `provider write succeeded but bounded post-write confirmation failed; cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return 3;
+      }
+    }
+    return emitNativeResult(write, io);
   } catch (error) {
     io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;

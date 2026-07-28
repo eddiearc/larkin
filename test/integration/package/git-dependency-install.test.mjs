@@ -188,7 +188,7 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
         cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,
       });
       assert.equal(held.status, 0, held.stderr);
-      assert.equal(JSON.parse(held.stdout).status, "held");
+      assert.notEqual(JSON.parse(held.stdout).status, "held", "native dry-run is observational and does not enter the write gate");
     }
     const duplicateTarget = spawnSync(runtimeLarkCli, ["im", "+messages-send", "--chat-id", "oc_first", "--chat-id=oc_last", "--text", "x"], {
       cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,

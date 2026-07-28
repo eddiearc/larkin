@@ -15,7 +15,9 @@
     "type": "git",
     "url": "git+https://github.com/eddiearc/larkin.git"
   },
-  "trustedDependencies": [],
+  "trustedDependencies": [
+    "@larksuite/cli"
+  ],
   "scripts": {
     "clean": "bun run scripts/clean.mjs",
     "typecheck": "bun run scripts/typecheck.mjs",

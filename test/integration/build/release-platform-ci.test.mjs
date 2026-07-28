@@ -20,7 +20,8 @@ test("release platform CI strictly builds and smokes every supported runner arch
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /permissions:\n\s+contents: read/);
+  assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/);
+  assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies, ["@larksuite/cli"]);
   assert.match(workflow, /bun-version: 1\.3\.14/);
   assert.match(workflow, /bun install --frozen-lockfile/);
   assert.match(workflow, /bun run licenses:check/);

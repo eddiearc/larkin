@@ -76,7 +76,7 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
       ? path.join(consumer, "node_modules", ".bin", "larkin-lark-cli.cmd")
       : path.join(consumer, "node_modules", ".bin", "larkin-lark-cli");
     assert.equal(fs.existsSync(larkBin), true, "installed package must expose its collision-free fixed lark-cli launcher");
-    assert.equal(JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).dependencies["@larksuite/cli"], "1.0.57");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).dependencies["@larksuite/cli"], "1.0.78");
     const importConfigDir = path.join(temp, "import-config");
     fs.mkdirSync(importConfigDir, { recursive: true });
     fs.writeFileSync(path.join(importConfigDir, "config.json"), `${JSON.stringify({

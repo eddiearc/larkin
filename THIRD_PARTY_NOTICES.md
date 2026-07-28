@@ -41,7 +41,7 @@ Locked package versions: **298**
 | `@jridgewell/sourcemap-codec` | 1.5.5 | transitive | MIT | `LICENSE` `769d154fbde32a915af110b1123650bc79f4cbe675acc66e005265bf069c6c6c` |
 | `@jridgewell/trace-mapping` | 0.3.31 | transitive | MIT | `LICENSE` `769d154fbde32a915af110b1123650bc79f4cbe675acc66e005265bf069c6c6c` |
 | `@larksuite/channel` | 0.4.1 | runtime direct | MIT | `LICENSE` `c969fc7e3af68e6bf40b0d8dd9c3dcc377eb685a2139535b203b39fdcad739ee` |
-| `@larksuite/cli` | 1.0.57 | runtime direct | MIT | `LICENSE` `c969fc7e3af68e6bf40b0d8dd9c3dcc377eb685a2139535b203b39fdcad739ee` |
+| `@larksuite/cli` | 1.0.78 | runtime direct | MIT | `LICENSE` `c969fc7e3af68e6bf40b0d8dd9c3dcc377eb685a2139535b203b39fdcad739ee` |
 | `@larksuiteoapi/node-sdk` | 1.71.1 | transitive | MIT | `LICENSE` `81f1894dbe3c15ce42310bdc8a39c664f270328b82e8c64c03f55de6aac626ac` |
 | `@napi-rs/wasm-runtime` | 1.1.6 | transitive | MIT | (none bundled) |
 | `@opentelemetry/api` | 1.9.0 | transitive | Apache-2.0 | `LICENSE` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4` |

@@ -62,7 +62,7 @@
     "test:eval:runtime-agent-interface-v2:native": "bun run build && LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_EVAL=1 bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-agent-eval.test.mjs"
   },
   "dependencies": {
-    "@larksuite/cli": "1.0.57",
+    "@larksuite/cli": "1.0.78",
     "@larksuite/channel": "^0.4.0",
     "@radix-ui/react-dialog": "^1.1.21",
     "lucide-react": "^1.26.0",

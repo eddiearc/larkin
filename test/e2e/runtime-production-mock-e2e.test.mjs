@@ -26,7 +26,7 @@ class FakeNativeSession {
   async cancel() {} async close() {}
 }
 
-test("member parser accepts the real lark-cli 1.0.57 get/bots shapes", () => {
+test("member parser accepts the real lark-cli 1.0.78 get/bots shapes", () => {
   assert.deepEqual(memberNamesFromPayloads([
     { ok: true, data: { items: [{ member_id: "ou_user", name: "User" }] } },
     { ok: true, data: { items: [{ bot_id: "cli_bot", bot_name: "Bot" }] } },

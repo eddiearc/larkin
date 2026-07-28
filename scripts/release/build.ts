@@ -85,7 +85,7 @@ for (const target of selected) {
   const output = path.join(outDir, file);
   const packageRoot = path.join(ROOT, "node_modules", "@larksuite", "cli");
   const packageManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version?: string };
-  if (packageManifest.version !== "1.0.57") throw new Error("standalone build requires @larksuite/cli 1.0.57");
+  if (packageManifest.version !== "1.0.78") throw new Error("standalone build requires @larksuite/cli 1.0.78");
   const nativeLarkCli = path.join(packageRoot, "bin", target.platform === "win32" ? "lark-cli.exe" : "lark-cli");
   if (!fs.statSync(nativeLarkCli).isFile()) throw new Error(`standalone lark-cli binary missing: ${target.platform}-${target.arch}`);
   const compileWrapper = path.join(outDir, `.standalone-entry-${target.platform}-${target.arch}-${process.pid}.ts`);

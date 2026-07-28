@@ -40,7 +40,7 @@ declare global {
   var __LARKIN_EMBEDDED_LARK_CLI__: string | undefined;
 }
 
-const PINNED_LARK_CLI_VERSION = "1.0.57";
+const PINNED_LARK_CLI_VERSION = "1.0.78";
 
 function assertSecureProfileDirectory(directory: string): void {
   const stat = fs.lstatSync(directory);
@@ -301,7 +301,7 @@ export function syncAgentProfile(
         input: agent.feishuAppSecret, encoding: "utf8", env: profileEnv,
       }, dependencies);
       if (sync.status !== 0 || sync.error) {
-        // Native 1.0.57 persists an exact local credential before its optional
+        // Native 1.0.78 persists an exact local credential before its optional
         // remote validation. Startup's real channel remains the credential
         // authority; accept the local write only when its bytes are exact.
         const local = captureProfileSnapshot(path.join(stagingDir, "config.json"));

@@ -6,7 +6,7 @@
       "name": "larkin",
       "dependencies": {
         "@larksuite/channel": "^0.4.0",
-        "@larksuite/cli": "1.0.57",
+        "@larksuite/cli": "1.0.78",
         "@radix-ui/react-dialog": "^1.1.21",
         "lucide-react": "^1.26.0",
         "qrcode-terminal": "^0.12.0",
@@ -32,6 +32,9 @@
       },
     },
   },
+  "trustedDependencies": [
+    "@larksuite/cli",
+  ],
   "packages": {
     "@adobe/css-tools": ["@adobe/css-tools@4.5.0", "https://registry.npmmirror.com/@adobe/css-tools/-/css-tools-4.5.0.tgz", {}, "sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q=="],
 
@@ -87,7 +90,7 @@
 
     "@larksuite/channel": ["@larksuite/channel@0.4.1", "https://registry.npmmirror.com/@larksuite/channel/-/channel-0.4.1.tgz", { "dependencies": { "@larksuiteoapi/node-sdk": "^1.67.0", "https-proxy-agent": "^9.0.0" } }, "sha512-9xklkzGEnME9MCCKlSzgG0FERJV4HlNX52hthytpxxP2oqH5S8lQBixPsHYU0AQ8SBfzP+LaGz5QaDOlP4EY0A=="],
 
-    "@larksuite/cli": ["@larksuite/cli@1.0.57", "https://registry.npmmirror.com/@larksuite/cli/-/cli-1.0.57.tgz", { "dependencies": { "@clack/prompts": "^1.2.0" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "lark-cli": "scripts/run.js" } }, "sha512-aSr8SI1x+mE7lBkqql8QYHzX3UotbEXJNlq67yZSJNJt2LtT0qg9w2kahLLHClO5CA8Rz2Pt/vQcNn21DuZxJQ=="],
+    "@larksuite/cli": ["@larksuite/cli@1.0.78", "https://registry.npmmirror.com/@larksuite/cli/-/cli-1.0.78.tgz", { "dependencies": { "@clack/prompts": "^1.2.0" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "lark-cli": "scripts/run.js" } }, "sha512-l4oQR7R37c3TNQmIOi0ULrMVqa8zYvVrTiXFto9faORGgcgtD4xcsV5HqtUow6qEb0pfNKNGwMV+8HR3RLLoUQ=="],
 
     "@larksuiteoapi/node-sdk": ["@larksuiteoapi/node-sdk@1.71.1", "https://registry.npmmirror.com/@larksuiteoapi/node-sdk/-/node-sdk-1.71.1.tgz", { "dependencies": { "axios": "^1.16.0", "lodash.identity": "^3.0.0", "lodash.merge": "^4.6.2", "lodash.pickby": "^4.6.0", "protobufjs": "^7.2.6", "qs": "^6.14.2", "ws": "^8.19.0" } }, "sha512-Z4cZmgWvwiE7tCHqGm+t7DKvbpNRRTH2HqVwcYiOMAwbjIytXSoQqWytsOVu3p+d0fIvrtyIPZok5HOV/VNxxw=="],
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,6 +9,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RUN = process.env.LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE === "1";
 const WRITE = RUN && process.env.LARKIN_LIVE_ALLOW_WRITE === "1";
+const NATIVE_CLI = process.env.LARKIN_LIVE_NATIVE_LARK_CLI || "lark-cli";
+const EXPECTED_USER_NAME = process.env.LARKIN_LIVE_EXPECTED_USER_NAME || "";
 
 function run(command, args, env = process.env, timeout = 30_000) {
   return spawnSync(command, args, { cwd: ROOT, env, encoding: "utf8", timeout });
@@ -24,6 +27,18 @@ function parseJson(result, label) {
   catch { throw new Error(`${label}: response was not JSON`); }
 }
 
+function externalUser(args, timeout) {
+  return run(NATIVE_CLI, args, process.env, timeout);
+}
+
+function requireExpectedUser() {
+  assert.ok(EXPECTED_USER_NAME.trim(), "LARKIN_LIVE_EXPECTED_USER_NAME must identify the authorized default user");
+  const status = parseJson(externalUser(["auth", "status", "--json"], 30_000), "default user auth status");
+  assert.equal(status.identity, "user");
+  assert.equal(status.identities?.user?.status, "ready");
+  assert.equal(status.identities?.user?.userName, EXPECTED_USER_NAME);
+}
+
 async function waitFor(read, predicate, label, timeoutMs = 45_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -38,37 +53,50 @@ function requireWriteEnvironment() {
   const configDir = process.env.LARKIN_LIVE_CONFIG_DIR;
   const agentId = process.env.LARKIN_LIVE_AGENT_ID;
   const chatId = process.env.LARKIN_LIVE_CHAT_ID;
-  const manualMarker = process.env.LARKIN_LIVE_MANUAL_TRIGGER_MARKER || "";
   assert.equal(process.env.LARKIN_LIVE_TARGET_IS_DEDICATED, "1",
     "write harness requires LARKIN_LIVE_TARGET_IS_DEDICATED=1");
   assert.match(configDir || "", /^\//, "LARKIN_LIVE_CONFIG_DIR must be an absolute path");
   assert.match(agentId || "", /^cli_[A-Za-z0-9]+$/, "LARKIN_LIVE_AGENT_ID must be an exact Agent App ID");
   assert.match(chatId || "", /^oc_[A-Za-z0-9]+$/, "LARKIN_LIVE_CHAT_ID must be an exact dedicated chat ID");
-  const markerMatch = /^\[larkin-runtime-interface-v2:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):manual-update\]$/.exec(manualMarker);
-  assert.ok(markerMatch, "LARKIN_LIVE_MANUAL_TRIGGER_MARKER must be the exact generated manual marker");
   const runtimeBin = path.join(configDir, "state", "agents", agentId, "runtime-bin");
   const larkin = path.join(runtimeBin, "larkin");
   const larkCli = path.join(runtimeBin, "lark-cli");
   assert.equal(fs.statSync(larkin).isFile(), true, "running Runtime larkin shim is missing");
   assert.equal(fs.statSync(larkCli).isFile(), true, "running Runtime lark-cli shim is missing");
-  return { configDir, agentId, chatId, manualMarker, nonce: markerMatch[1], larkin, larkCli };
+  return { configDir, agentId, chatId, larkin, larkCli };
 }
 
-test.skipIf(!WRITE)("manually triggered dedicated Feishu chat holds a stale Bot send, then polls and sends exactly once", { timeout: 180_000 }, async () => {
-  const { configDir, agentId, chatId, manualMarker, nonce, larkin, larkCli } = requireWriteEnvironment();
+test.skipIf(!RUN)("default external user identity and IM list capability are available", { timeout: 60_000 }, () => {
+  requireExpectedUser();
+  const payload = parseJson(externalUser(["im", "+chat-list", "--as", "user", "--json"], 60_000), "default user read-only chat list");
+  assert.equal(payload.ok, true);
+  assert.equal(payload.identity, "user");
+  assert.ok(Array.isArray(payload.data?.items) || Array.isArray(payload.data?.chats) || Array.isArray(payload.data));
+});
+
+test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls and sends exactly once", { timeout: 180_000 }, async () => {
+  requireExpectedUser();
+  const { configDir, agentId, chatId, larkin, larkCli } = requireWriteEnvironment();
   const runtimeEnv = { ...process.env, LARKIN_CONFIG_DIR: configDir, LARKIN_AGENT_ID: agentId };
+  const nonce = crypto.randomUUID();
+  const updateMarker = `[larkin-runtime-interface-v2:${nonce}:update]`;
   const staleMarker = `[larkin-runtime-interface-v2:${nonce}:stale-must-not-send]`;
   const currentMarker = `[larkin-runtime-interface-v2:${nonce}:current]`;
   const target = `chat:${chatId}`;
-  const history = () => parseJson(run(larkCli, [
-    "im", "+chat-messages-list", "--chat-id", chatId, "--page-size", "50", "--json",
-  ], runtimeEnv, 60_000), "Runtime Bot read-only message history");
+  const history = () => parseJson(externalUser([
+    "im", "+chat-messages-list", "--chat-id", chatId, "--page-size", "50", "--as", "user", "--json",
+  ], 60_000), "default user read-only message history");
   const markerCount = (payload, marker) => JSON.stringify(payload).split(marker).length - 1;
+
+  checked(externalUser([
+    "im", "+messages-send", "--chat-id", chatId, "--text", updateMarker, "--as", "user",
+    "--idempotency-key", `larkin-live-update-${nonce}`,
+  ], 60_000), "default user controlled update send");
 
   await waitFor(
     () => parseJson(run(larkin, ["inbox", "check", "--target", target], runtimeEnv), "Runtime inbox check"),
     (payload) => payload.targets?.some((row) => row.target === target && row.pending_count > 0),
-    "manually triggered Runtime callback ingestion",
+    "Runtime callback ingestion",
   );
 
   const held = parseJson(run(larkCli, [
@@ -81,12 +109,12 @@ test.skipIf(!WRITE)("manually triggered dedicated Feishu chat holds a stale Bot 
 
   const polled = await waitFor(
     () => parseJson(run(larkin, ["inbox", "poll", "--target", target], runtimeEnv), "Runtime target poll"),
-    (payload) => payload.events?.some((event) => String(event.content || "").trim() === manualMarker),
-    "exact manual marker poll",
+    (payload) => payload.events?.some((event) => String(event.content || "").trim() === updateMarker),
+    "exact controlled marker poll",
   );
   assert.equal(polled.delivery, "direct_ack");
   assert.equal(polled.at_most_once, true);
-  assert.ok(polled.events.some((event) => String(event.content || "").trim() === manualMarker));
+  assert.ok(polled.events.some((event) => String(event.content || "").trim() === updateMarker));
 
   checked(run(larkCli, [
     "im", "+messages-send", "--chat-id", chatId, "--text", currentMarker,

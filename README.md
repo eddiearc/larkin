@@ -27,8 +27,8 @@ bun run build
 bun test
 ```
 
-Use `bun run publication:check:tree` to verify the repository publication boundary and `bun run licenses:check` to verify third-party notices.
+Use `bun run publication:check:tree` to verify the repository publication boundary and `bun run licenses:check` to verify the runtime-only third-party notice generator.
 
 ## License and security
 
-Larkin is licensed under the [Apache License 2.0](./LICENSE). Dependency notices are recorded in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md). See [CONTRIBUTING.md](./CONTRIBUTING.md) before submitting changes and [SECURITY.md](./SECURITY.md) for private vulnerability reporting.
+Larkin is licensed under the [Apache License 2.0](./LICENSE). Runtime dependency notices are generated and included with every release. See [CONTRIBUTING.md](./CONTRIBUTING.md) before submitting changes and [SECURITY.md](./SECURITY.md) for private vulnerability reporting.

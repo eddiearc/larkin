@@ -28,7 +28,7 @@
     "release:smoke": "bun run scripts/release/smoke.ts",
     "publication:check": "bun run scripts/check-publication.mjs",
     "publication:check:tree": "bun run scripts/check-publication.mjs --tree-only",
-    "licenses:generate": "bun run scripts/generate-third-party-notices.mjs",
+    "licenses:generate": "bun run scripts/generate-third-party-notices.mjs --output artifacts/release/THIRD_PARTY_NOTICES.txt",
     "licenses:check": "bun run scripts/generate-third-party-notices.mjs --check",
     "test:standalone-acceptance": "LARKIN_RUN_STANDALONE_BINARY_ACCEPTANCE=1 bun test --max-concurrency 1 test/integration/build/standalone-binary-acceptance.test.mjs",
     "test:standalone-setup-workflow": "LARKIN_RUN_STANDALONE_SETUP_WORKFLOW=1 bun test --max-concurrency 1 test/integration/build/standalone-setup-workflow.test.mjs",

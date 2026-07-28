@@ -17,7 +17,7 @@ test("release x64 artifacts use Bun's pre-AVX2 baseline targets", async () => {
 });
 
 test("release artifact selection is allowlisted and checksum-verified", async () => {
-  const { artifactFilename, selectReleaseArtifact, sha256File, verifyReleaseArtifact } = await import(
+  const { artifactFilename, selectReleaseArtifact, sha256File, verifyReleaseArtifact, verifyReleaseNotices } = await import(
     path.join(ROOT, "dist/platform/release-artifacts.mjs")
   );
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-release-artifact-"));
@@ -25,9 +25,15 @@ test("release artifact selection is allowlisted and checksum-verified", async ()
     const file = artifactFilename("1.2.3", "darwin", "arm64");
     fs.writeFileSync(path.join(directory, file), "binary bytes");
     const record = { platform: "darwin", arch: "arm64", file, sha256: sha256File(path.join(directory, file)), size: 12, signing: "adhoc" };
-    const manifest = { schemaVersion: 1, version: "1.2.3", sourceCommit: "a".repeat(40), sourceDirty: false, bunVersion: "1.3.14", bytecode: false, artifacts: [record] };
+    const noticesFile = path.join(directory, "THIRD_PARTY_NOTICES.txt");
+    fs.writeFileSync(noticesFile, "runtime notices\n");
+    const notices = { file: "THIRD_PARTY_NOTICES.txt", sha256: sha256File(noticesFile), size: fs.statSync(noticesFile).size, scope: "runtime-closure" };
+    const manifest = { schemaVersion: 1, version: "1.2.3", sourceCommit: "a".repeat(40), sourceDirty: false, bunVersion: "1.3.14", bytecode: false, notices, artifacts: [record] };
     assert.equal(selectReleaseArtifact(manifest, "darwin", "arm64"), record);
     assert.equal(verifyReleaseArtifact(directory, record), path.join(directory, file));
+    assert.equal(verifyReleaseNotices(directory, manifest), noticesFile);
+    fs.writeFileSync(noticesFile, "tampered notices\n");
+    assert.throws(() => verifyReleaseNotices(directory, manifest), /runtime notices (?:size|checksum)/);
     assert.throws(() => selectReleaseArtifact(manifest, "win32", "x64"), /unsupported platform/);
     fs.writeFileSync(path.join(directory, file), "tamper bytes");
     assert.throws(() => verifyReleaseArtifact(directory, record), /checksum mismatch/);

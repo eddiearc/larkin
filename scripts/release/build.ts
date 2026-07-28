@@ -10,6 +10,7 @@ import {
   type ReleaseArtifactRecord,
   type ReleaseManifest,
 } from "../../src/platform/release-artifacts.js";
+import { generateRuntimeNotices } from "../generate-third-party-notices.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
@@ -137,6 +138,14 @@ for (const target of selected) {
   });
 }
 
+const noticesFile = path.join(outDir, "THIRD_PARTY_NOTICES.txt");
+fs.writeFileSync(noticesFile, generateRuntimeNotices());
+const notices = {
+  file: "THIRD_PARTY_NOTICES.txt" as const,
+  sha256: sha256File(noticesFile),
+  size: fs.statSync(noticesFile).size,
+  scope: "runtime-closure" as const,
+};
 const manifest: ReleaseManifest = {
   schemaVersion: 1,
   version,
@@ -144,8 +153,12 @@ const manifest: ReleaseManifest = {
   sourceDirty,
   bunVersion: Bun.version,
   bytecode: false,
+  notices,
   artifacts,
 };
 fs.writeFileSync(path.join(outDir, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-fs.writeFileSync(path.join(outDir, "SHA256SUMS"), `${artifacts.map((artifact) => `${artifact.sha256}  ${artifact.file}`).join("\n")}\n`);
+fs.writeFileSync(path.join(outDir, "SHA256SUMS"), `${[
+  ...artifacts.map((artifact) => `${artifact.sha256}  ${artifact.file}`),
+  `${notices.sha256}  ${notices.file}`,
+].join("\n")}\n`);
 process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);

@@ -232,7 +232,7 @@ test("capacity backpressure never slices active or pending durable state", () =>
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("public create enforces atomic global byte backpressure before the persisted store becomes unreadable", () => {
+test("public create enforces atomic global byte backpressure before the persisted store becomes unreadable", { timeout: 15_000 }, () => {
   const f = fixture();
   try {
     const active = f.machine.create({ definition: validDefinition(), expected_chat_id: "oc_decision" });

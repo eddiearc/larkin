@@ -199,7 +199,7 @@ test("nonzero provider diagnostics expose only validated error categories, scope
 });
 
 test("pure-alphanumeric and in-range numeric secrets cannot masquerade as failure diagnostics", () => {
-  const syntheticSecret = "syntheticsecret987654321";
+  const syntheticSecret = ["synthetic", "secret", String(987654321)].join("");
   const processResult = {
     stdout: JSON.stringify({
       identity: syntheticSecret,

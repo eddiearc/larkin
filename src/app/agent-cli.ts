@@ -16,6 +16,10 @@ import { AGENT_CLI_CAPABILITIES } from "../agent/agent-cli-capabilities.js";
 import { CONFIG_CLI_USAGE, CONFIG_CLI_VALUES } from "../agent/config-cli-contract.js";
 import { internalCommandSpec } from "./internal-command.js";
 import { packageVersion } from "../platform/build-info.js";
+import {
+  feishuImFreshnessAdapter, feishuImTarget, mergeFeishuImCursor, serializeFeishuImTarget,
+  type FeishuImCursor, type FeishuImMessage,
+} from "../feishu/im-freshness-adapter.js";
 
 type Env = Record<string, string | undefined>;
 type JsonObject = Record<string, unknown>;
@@ -465,6 +469,25 @@ export function runAgentCli(
       const rawLimit = options.values.get("--limit");
       const limit = rawLimit === undefined ? undefined : Number(rawLimit);
       const polled = stateStore.pollInbox<InboxEnvelope>({ ...(target ? { target } : {}), ...(limit !== undefined ? { limit } : {}) });
+      const providerMessages = new Map<string, FeishuImMessage[]>();
+      for (const envelope of polled.envelopes) {
+        if (typeof envelope.message_id !== "string" || typeof envelope.create_time !== "string") continue;
+        const localTarget = typeof envelope.target === "string" ? envelope.target
+          : (typeof envelope.chat_id === "string" && envelope.chat_id
+            ? (typeof envelope.thread_id === "string" && envelope.thread_id
+              ? `thread:${envelope.chat_id}:${envelope.thread_id}` : `chat:${envelope.chat_id}`)
+            : null);
+        if (!localTarget) continue;
+        const key = serializeFeishuImTarget(feishuImTarget(localTarget));
+        const rows = providerMessages.get(key) ?? [];
+        rows.push(envelope as FeishuImMessage);
+        providerMessages.set(key, rows);
+      }
+      for (const [key, messages] of providerMessages) {
+        const cursor = feishuImFreshnessAdapter.cursor({ messages });
+        if (cursor) stateStore.mergeFreshnessCursor<FeishuImCursor>(key, cursor, mergeFeishuImCursor,
+          env.LARKIN_RUNTIME_OBSERVATION_GENERATION || "external");
+      }
       const projected = projectInboxEvents(polled.envelopes);
       emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
         seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });

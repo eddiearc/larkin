@@ -18,6 +18,7 @@ export interface AgentStatePaths {
   pendingReact: string;
   runtimeDeliveries: string;
   inboxState: string;
+  freshnessState: string;
   interactions: string;
   conversation: string;
   inbox: string;
@@ -89,6 +90,7 @@ export class TargetRootLayout {
       pendingReact: path.join(root, "feishu-pending-react.json"),
       runtimeDeliveries: path.join(root, "runtime-deliveries.json"),
       inboxState: path.join(root, "inbox-state.json"),
+      freshnessState: path.join(root, "freshness-state.json"),
       interactions: path.join(root, "interactions.json"),
       conversation: path.join(root, "conversation.ndjson"),
       inbox: path.join(root, "feishu-inbox.ndjson"),

@@ -332,6 +332,7 @@ export function createHostShell({
       const inboxEnvelope = projectInboxEnvelope(envelope, {
         chat_id: event.chat_id,
         thread_id: event.thread_id,
+        ...(event.create_time !== undefined ? { create_time: String(event.create_time) } : {}),
         sender_id: event.sender_id,
         content: String(envelope.content ?? event.content ?? ""),
       });

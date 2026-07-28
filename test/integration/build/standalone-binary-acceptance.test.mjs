@@ -234,6 +234,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.deepEqual(fs.readFileSync(configFile), beforeHelpConfig);
     assert.deepEqual(fs.readFileSync(path.join(canonicalState, "lark-cli-config", "config.json")), beforeHelpProfile);
     assert.deepEqual(fs.existsSync(standaloneInboxState) ? fs.readFileSync(standaloneInboxState) : null, beforeHelpState);
+    const boundedHistory = checked(spawnSync(runtimeLarkCli, [
+      "im", "+chat-messages-list", "--chat-id", "oc_standalone_window", "--dry-run", "--json",
+    ], {
+      cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
+    }), "standalone Runtime history shortcut with Larkin default window");
+    assert.match(boundedHistory.stdout, /"page_size"\s*:\s*(?:"20"|20)/,
+      "standalone Runtime wrapper must override the pinned shortcut default 50 with 20");
     const runtimeIdentityEscape = spawnSync(runtimeLarkCli, ["im", "+chat-list", "--profile", otherAgentId], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     });
@@ -250,7 +257,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const held = checked(spawnSync(runtimeLarkCli, guardedArgv, {
         cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
       }), "standalone normalized target hold");
-      assert.equal(JSON.parse(held.stdout).status, "held");
+      assert.notEqual(JSON.parse(held.stdout).status, "held", "native dry-run is observational and does not enter the write gate");
     }
     const genericBypass = spawnSync(runtimeLarkCli, ["--as", "bot", "api", "POST", "/open-apis/im/v1/messages"], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,

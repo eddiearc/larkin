@@ -72,7 +72,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v4");
+  assert.equal(prompt.version, "larkin-standing-v5");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
@@ -86,8 +86,8 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.doesNotMatch(prompt.content, /larkin (?:message|channel|attachment|server|task claim)\b/);
   assert.match(prompt.content, /Only a real Feishu `message_id` beginning with `om_`/);
   assert.match(prompt.content, /`rem_`, `redeliver_`.*synthetic ID must never be replied to/);
-  assert.match(prompt.content, /Once a draft is sending it is too late to abandon/);
-  assert.match(prompt.content, /interrupted process.*same idempotency key/);
+  assert.match(prompt.content, /nonzero `freshness_conflict`.*direct-acks/);
+  assert.doesNotMatch(prompt.content, /larkin-draft|draft-id|send --draft/);
   assert.match(prompt.content, /regular textual message bodies.*`--markdown`/i);
   assert.match(prompt.content, /native `--text`.*logs.*code.*exact whitespace/i);
   assert.doesNotMatch(prompt.content, /rejected|--literal-text/i);

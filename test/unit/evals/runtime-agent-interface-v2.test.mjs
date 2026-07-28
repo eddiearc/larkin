@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
@@ -14,7 +15,7 @@ const DATASET = loadRuntimeAgentInterfaceEval(path.join(ROOT, "evals", "runtime-
 test("fixed runtime Agent interface eval registers dataset, rubric, grader, threshold, Runtime/model/version and six-plus scenarios", () => {
   assert.equal(DATASET.version, 1);
   assert.equal(DATASET.runtime.adapter, "codex");
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v4");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v5");
   assert.equal(DATASET.grader.version, 1);
   assert.equal(DATASET.grader.threshold, 1);
   assert.ok(DATASET.grader.rubric.length >= 5);
@@ -61,4 +62,11 @@ test("grader rejects empty traces even when a scenario expects no provider write
   }
   const empty = Object.fromEntries(DATASET.scenarios.map((scenario) => [scenario.id, []]));
   assert.equal(summarizeRuntimeAgentInterfaceEval(DATASET, empty).passed, false);
+});
+
+test("native eval binds controlled executables by absolute path so login shells cannot escape PATH isolation", () => {
+  const source = fs.readFileSync(path.join(ROOT, "test/live/runtime-agent-interface-v2-agent-eval.test.mjs"), "utf8");
+  assert.match(source, /JSON\.stringify\(path\.join\(binDir, "larkin"\)\)/);
+  assert.match(source, /JSON\.stringify\(path\.join\(binDir, "lark-cli"\)\)/);
+  assert.doesNotMatch(source, /const exactSend = `lark-cli /);
 });

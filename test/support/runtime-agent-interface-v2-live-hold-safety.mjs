@@ -16,6 +16,28 @@ export const HOLD_SENTINEL_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host
 export const HOLD_READY_MAX_AGE_MS = 120_000;
 const SYSTEM_PS = "/bin/ps";
 const SYSTEM_WHICH = "/usr/bin/which";
+const OUTPUT_SHAPE_BYTE_CAP = 4096;
+const OUTPUT_SHAPE_LINE_CAP = 20;
+
+function redactedStreamShape(value) {
+  const output = typeof value === "string" ? value : String(value ?? "");
+  const byteLength = Buffer.byteLength(output);
+  const lineCount = output.length === 0 ? 0 : output.split(/\r?\n/).length;
+  return {
+    present: byteLength > 0,
+    byteLength: Math.min(byteLength, OUTPUT_SHAPE_BYTE_CAP),
+    byteLengthCapped: byteLength > OUTPUT_SHAPE_BYTE_CAP,
+    lineCount: Math.min(lineCount, OUTPUT_SHAPE_LINE_CAP),
+    lineCountCapped: lineCount > OUTPUT_SHAPE_LINE_CAP,
+  };
+}
+
+export function redactedProcessOutputShape(result) {
+  return {
+    stdout: redactedStreamShape(result?.stdout),
+    stderr: redactedStreamShape(result?.stderr),
+  };
+}
 
 function owned(stat) {
   return typeof process.getuid !== "function" || stat.uid === process.getuid();

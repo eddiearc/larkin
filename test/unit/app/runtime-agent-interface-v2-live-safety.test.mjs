@@ -20,6 +20,7 @@ import {
   claimHoldHostRoot,
   cleanupClaimedHoldHostRoot,
   readyProofFor,
+  redactedProcessOutputShape,
   runProviderWithLiveHoldReady,
   validateLiveHoldHostReady,
   writePrivateJson,
@@ -52,6 +53,34 @@ test("live hold-host entry is default-deny and package script does not opt in", 
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   assert.equal(pkg.scripts["test:live:runtime-agent-interface-v2:hold-host"],
     "bun run build && bun run test/live/runtime-agent-interface-v2-hold-host.mjs app/runtime-process.mjs");
+});
+
+test("provider JSON parse diagnostics expose only bounded output shape", () => {
+  const sensitiveId = "om_fixtureSensitiveMessageId";
+  const sensitiveText = "fixture-sensitive-content";
+  const result = redactedProcessOutputShape({
+    stdout: `${sensitiveId} ${sensitiveText}\n${"x".repeat(5000)}`,
+    stderr: Array.from({ length: 30 }, (_, index) => `private-${index}`).join("\n"),
+  });
+  assert.deepEqual(result, {
+    stdout: {
+      present: true,
+      byteLength: 4096,
+      byteLengthCapped: true,
+      lineCount: 2,
+      lineCountCapped: false,
+    },
+    stderr: {
+      present: true,
+      byteLength: 319,
+      byteLengthCapped: false,
+      lineCount: 20,
+      lineCountCapped: true,
+    },
+  });
+  const diagnostic = JSON.stringify(result);
+  assert.doesNotMatch(diagnostic, new RegExp(sensitiveId));
+  assert.doesNotMatch(diagnostic, new RegExp(sensitiveText));
 });
 
 test("hold RuntimeHost never starts a Runtime and always defers delivery", async () => {
@@ -245,7 +274,7 @@ test("history capability succeeds before any drain or external send in the write
   const preflight = source.indexOf("\n  history();");
   const ready = source.indexOf("validateLiveHoldHostReady(configDir, agentId)");
   const drain = source.indexOf("Runtime target pre-drain");
-  const send = source.indexOf('"im", "+messages-send"');
+  const send = source.indexOf("messageSendArgs(", source.indexOf("messageSendArgs(") + 1);
   assert.ok(preflight >= 0, "history capability preflight must exist");
   assert.ok(ready > preflight, "live process/root/channel proof must follow external read capability");
   assert.ok(ready < drain, "live process/root/channel proof must precede target drain");
@@ -254,4 +283,12 @@ test("history capability succeeds before any drain or external send in the write
   for (const stage of ["controlled user send", "stale Runtime Bot send", "current Runtime Bot send"]) {
     assert.match(source, new RegExp(`provider\\("${stage}"`), `${stage} must revalidate immediately around its provider call`);
   }
+  assert.match(source, /function messageSendArgs\(\.\.\.args\) \{\s*return \["im", "\+messages-send", \.\.\.args, "--json"\];/,
+    "every provider message send must request the native CLI JSON output contract");
+  assert.equal(source.match(/messageSendArgs\(/g)?.length, 4,
+    "the shared JSON-send builder must serve exactly the three provider sends");
+  assert.equal(source.match(/"\+messages-send"/g)?.length, 1,
+    "provider sends must not bypass the shared JSON-send builder");
+  assert.match(source, /redacted output shape=.*redactedProcessOutputShape\(completed\)/,
+    "JSON parse failures must report only bounded redacted process-output shape");
 });

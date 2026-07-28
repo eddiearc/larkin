@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import {
+  redactedProcessOutputShape,
   runProviderWithLiveHoldReady,
   validateLiveHoldHostReady,
 } from "../support/runtime-agent-interface-v2-live-hold-safety.mjs";
@@ -28,12 +29,19 @@ function checked(result, label) {
 }
 
 function parseJson(result, label) {
-  try { return JSON.parse(checked(result, label).stdout); }
-  catch { throw new Error(`${label}: response was not JSON`); }
+  const completed = checked(result, label);
+  try { return JSON.parse(completed.stdout); }
+  catch {
+    throw new Error(`${label}: response was not JSON; redacted output shape=${JSON.stringify(redactedProcessOutputShape(completed))}`);
+  }
 }
 
 function externalUser(args, timeout) {
   return run(NATIVE_CLI, args, process.env, timeout);
+}
+
+function messageSendArgs(...args) {
+  return ["im", "+messages-send", ...args, "--json"];
 }
 
 function requireExpectedUser() {
@@ -115,10 +123,10 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   const emptyCheck = parseJson(run(larkin, ["inbox", "check", "--target", target], runtimeEnv), "Runtime empty target check");
   assert.equal(emptyCheck.pending_total, 0);
 
-  const update = parseJson(provider("controlled user send", () => externalUser([
-    "im", "+messages-send", "--chat-id", chatId, "--text", updateMarker, "--as", "user",
+  const update = parseJson(provider("controlled user send", () => externalUser(messageSendArgs(
+    "--chat-id", chatId, "--text", updateMarker, "--as", "user",
     "--idempotency-key", `larkin-live-update-${nonce}`,
-  ], 60_000)), "default user controlled update send");
+  ), 60_000)), "default user controlled update send");
   const updateMessageId = update.data?.message_id || update.data?.message?.message_id || update.message_id;
   assert.match(updateMessageId || "", /^om_[A-Za-z0-9]+$/, "controlled update must return its exact message ID");
 
@@ -129,9 +137,9 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
     "controlled Runtime callback ingestion",
   );
 
-  const held = parseJson(provider("stale Runtime Bot send", () => run(larkCli, [
-    "im", "+messages-send", "--chat-id", chatId, "--text", staleMarker,
-  ], runtimeEnv, 60_000)), "Runtime stale Bot send");
+  const held = parseJson(provider("stale Runtime Bot send", () => run(larkCli, messageSendArgs(
+    "--chat-id", chatId, "--text", staleMarker,
+  ), runtimeEnv, 60_000)), "Runtime stale Bot send");
   assert.equal(held.status, "held");
   assert.equal(held.target, target);
   assert.match(held.draft_id || "", /^draft_/);
@@ -146,9 +154,9 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   assert.equal(polled.at_most_once, true);
   assert.ok(polled.events.some((event) => String(event.content || "").trim() === updateMarker));
 
-  checked(provider("current Runtime Bot send", () => run(larkCli, [
-    "im", "+messages-send", "--chat-id", chatId, "--text", currentMarker,
-  ], runtimeEnv, 60_000)), "Runtime current Bot send");
+  checked(provider("current Runtime Bot send", () => run(larkCli, messageSendArgs(
+    "--chat-id", chatId, "--text", currentMarker,
+  ), runtimeEnv, 60_000)), "Runtime current Bot send");
   const finalHistory = await waitFor(history, (payload) => markerCount(payload, currentMarker) === 1, "current Bot marker delivery");
   assert.equal(markerCount(finalHistory, staleMarker), 0);
   assert.equal(markerCount(finalHistory, currentMarker), 1);

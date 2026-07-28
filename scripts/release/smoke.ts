@@ -8,6 +8,7 @@ import { once } from "node:events";
 import {
   selectReleaseArtifact,
   verifyReleaseArtifact,
+  verifyReleaseNotices,
   type ReleaseManifest,
 } from "../../src/platform/release-artifacts.js";
 
@@ -23,6 +24,7 @@ if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.artifacts)) throw ne
 const platform = os.platform();
 const arch = os.arch();
 const record = selectReleaseArtifact(manifest, platform, arch);
+verifyReleaseNotices(releaseDir, manifest);
 const artifact = verifyReleaseArtifact(releaseDir, record);
 
 async function freePort(): Promise<number> {

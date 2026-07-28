@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   selectReleaseArtifact,
   verifyReleaseArtifact,
+  verifyReleaseNotices,
   type ReleaseManifest,
 } from "../../src/platform/release-artifacts.js";
 
@@ -43,6 +44,7 @@ if (!releaseDirInput) throw new Error("--release-dir is required");
 const releaseDir = path.resolve(releaseDirInput);
 const manifestFile = path.join(releaseDir, "release-manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as ReleaseManifest;
+verifyReleaseNotices(releaseDir, manifest);
 if (manifest.sourceDirty && !has("--allow-dirty")) throw new Error("refusing an artifact built from a dirty source tree");
 const platform = value("--platform", os.platform());
 const arch = value("--arch", os.arch());

@@ -27,6 +27,12 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Set up pinned Go for embedded license closure
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.23.12
+          cache: false
+
       - name: Verify tagged commit belongs to main
         run: |
           git show-ref --verify --quiet refs/remotes/origin/main || {
@@ -120,6 +126,12 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Set up pinned Go for embedded license closure
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.23.12
+          cache: false
+
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
 
@@ -137,7 +149,7 @@ jobs:
           bun scripts/release/build.ts --target "${{ matrix.target }}" --out-dir artifacts/release
 
       - name: Scan source history and built artifact
-        run: bun run scripts/check-publication.mjs --trusted --denylist "$RUNNER_TEMP/larkin-publication-denylist.txt" artifacts/release/larkin-v*
+        run: bun run scripts/check-publication.mjs --trusted --denylist "$RUNNER_TEMP/larkin-publication-denylist.txt" --allow-embedded-lark-cli node_modules/@larksuite/cli/bin/lark-cli artifacts/release/larkin-v* artifacts/release/THIRD_PARTY_NOTICES.txt
 
       - name: Smoke current platform artifact
         run: bun run release:smoke -- --release-dir artifacts/release
@@ -170,6 +182,15 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Set up pinned Go for embedded license closure
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.23.12
+          cache: false
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
       - name: Download platform artifacts from draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -186,7 +207,7 @@ jobs:
       - name: Verify release notices
         run: |
           cmp LICENSE artifacts/release/LICENSE
-          cmp THIRD_PARTY_NOTICES.md artifacts/release/THIRD_PARTY_NOTICES.md
+          bun run scripts/generate-third-party-notices.mjs --check --output artifacts/release/THIRD_PARTY_NOTICES.txt
 
       - name: Finalize GitHub release
         env:
@@ -195,7 +216,7 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" \
             artifacts/release/SHA256SUMS artifacts/release/release-manifest.json \
-            artifacts/release/LICENSE artifacts/release/THIRD_PARTY_NOTICES.md \
+            artifacts/release/LICENSE artifacts/release/THIRD_PARTY_NOTICES.txt \
             --repo "$GITHUB_REPOSITORY" --clobber
           for manifest in artifacts/platform/release-manifest-*.json; do
             gh release delete-asset "$RELEASE_TAG" "$(basename "$manifest")" \

@@ -124,6 +124,16 @@ test.skipIf(!enabled)("native standalone release embeds Dashboard assets, instal
     assert.notEqual(rejected.status, 0);
     assert.match(rejected.stderr, /checksum mismatch/);
     assert.equal(fs.existsSync(path.join(rejectedDir, "larkin")), false);
+    const badNoticesRelease = path.join(root, "bad-notices-release");
+    fs.cpSync(releaseDirA, badNoticesRelease, { recursive: true });
+    fs.appendFileSync(path.join(badNoticesRelease, "THIRD_PARTY_NOTICES.txt"), "tampered\n");
+    const rejectedNoticesDir = path.join(root, "rejected-notices");
+    const rejectedNotices = spawnSync(process.execPath, [
+      "scripts/release/install.ts", "--release-dir", badNoticesRelease, "--install-dir", rejectedNoticesDir, "--allow-dirty",
+    ], { cwd: ROOT, encoding: "utf8" });
+    assert.notEqual(rejectedNotices.status, 0);
+    assert.match(rejectedNotices.stderr, /runtime notices (?:size|checksum)/);
+    assert.equal(fs.existsSync(path.join(rejectedNoticesDir, "larkin")), false);
     assert.equal(fs.readdirSync(releaseDirA).some((name) => /\.(?:js|mjs|cjs|ts|map)$/.test(name)), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

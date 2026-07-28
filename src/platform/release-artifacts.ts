@@ -28,7 +28,15 @@ export interface ReleaseManifest {
   sourceDirty: boolean;
   bunVersion: string;
   bytecode: false;
+  notices: ReleaseNoticeRecord;
   artifacts: ReleaseArtifactRecord[];
+}
+
+export interface ReleaseNoticeRecord {
+  file: "THIRD_PARTY_NOTICES.txt";
+  sha256: string;
+  size: number;
+  scope: "runtime-closure";
 }
 
 export function artifactFilename(version: string, platform: ReleasePlatform, arch: ReleaseArch): string {
@@ -68,5 +76,21 @@ export function verifyReleaseArtifact(directory: string, record: ReleaseArtifact
   }
   const actual = sha256File(file);
   if (actual !== record.sha256) throw new Error(`checksum mismatch for ${record.file}`);
+  return file;
+}
+
+export function verifyReleaseNotices(directory: string, manifest: ReleaseManifest): string {
+  const record = manifest.notices;
+  if (!record || record.file !== "THIRD_PARTY_NOTICES.txt" || record.scope !== "runtime-closure" || !/^[a-f0-9]{64}$/.test(record.sha256)) {
+    throw new Error("invalid runtime notices manifest entry");
+  }
+  const root = path.resolve(directory);
+  const file = path.resolve(root, record.file);
+  if (path.dirname(file) !== root) throw new Error("runtime notices path escaped release directory");
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || !Number.isSafeInteger(record.size) || record.size <= 0 || stat.size !== record.size) {
+    throw new Error("invalid runtime notices size");
+  }
+  if (sha256File(file) !== record.sha256) throw new Error("runtime notices checksum mismatch");
   return file;
 }

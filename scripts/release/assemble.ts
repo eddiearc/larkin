@@ -6,9 +6,11 @@ import {
   RELEASE_TARGETS,
   sha256File,
   verifyReleaseArtifact,
+  verifyReleaseNotices,
   type ReleaseArtifactRecord,
   type ReleaseManifest,
 } from "../../src/platform/release-artifacts.js";
+import { generateRuntimeNotices } from "../generate-third-party-notices.mjs";
 
 function argument(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
@@ -74,16 +76,31 @@ export function assembleRelease(inputDirectory: string, outputDirectory: string)
     return selected.record;
   });
 
-  const combined: ReleaseManifest = { ...first, artifacts };
+  const repositoryRoot = path.resolve(import.meta.dirname, "..", "..");
+  fs.copyFileSync(path.join(repositoryRoot, "LICENSE"), path.join(outputDirectory, "LICENSE"));
+  const noticesFile = path.join(outputDirectory, "THIRD_PARTY_NOTICES.txt");
+  fs.writeFileSync(noticesFile, generateRuntimeNotices());
+  const notices = {
+    file: "THIRD_PARTY_NOTICES.txt" as const,
+    sha256: sha256File(noticesFile),
+    size: fs.statSync(noticesFile).size,
+    scope: "runtime-closure" as const,
+  };
+  for (const candidate of manifests) {
+    if (JSON.stringify(candidate.manifest.notices) !== JSON.stringify(notices)) {
+      throw new Error(`platform manifest runtime notices do not match release output: ${candidate.directory}`);
+    }
+  }
+  const combined: ReleaseManifest = { ...first, notices, artifacts };
   fs.writeFileSync(path.join(outputDirectory, "release-manifest.json"), `${JSON.stringify(combined, null, 2)}\n`);
+  verifyReleaseNotices(outputDirectory, combined);
   fs.writeFileSync(
     path.join(outputDirectory, "SHA256SUMS"),
-    `${artifacts.map((artifact) => `${artifact.sha256}  ${artifact.file}`).join("\n")}\n`,
+    `${[
+      ...artifacts.map((artifact) => `${artifact.sha256}  ${artifact.file}`),
+      `${notices.sha256}  ${notices.file}`,
+    ].join("\n")}\n`,
   );
-  const repositoryRoot = path.resolve(import.meta.dirname, "..", "..");
-  for (const notice of ["LICENSE", "THIRD_PARTY_NOTICES.md"]) {
-    fs.copyFileSync(path.join(repositoryRoot, notice), path.join(outputDirectory, notice));
-  }
   return combined;
 }
 

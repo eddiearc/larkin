@@ -1,11 +1,13 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { LARK_CLI_NATIVE_SHA256, LARK_CLI_VERSION, larkCliTarget } from "./release/lark-cli-provenance.mjs";
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const REQUIRED = ["README.md", "AGENTS.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "THIRD_PARTY_NOTICES.md"];
-const ALLOWED_MARKDOWN = new Set(["README.md", "AGENTS.md", "SECURITY.md", "CONTRIBUTING.md", "THIRD_PARTY_NOTICES.md"]);
+const REQUIRED = ["README.md", "AGENTS.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md"];
+const ALLOWED_MARKDOWN = new Set(["README.md", "AGENTS.md", "SECURITY.md", "CONTRIBUTING.md"]);
 const isAscii = (value) => /^[\x00-\x7f]*$/.test(value);
 
 function parseArguments(argv) {
@@ -13,6 +15,7 @@ function parseArguments(argv) {
   let treeOnly = false;
   let trusted = false;
   let denylistPath = process.env.LARKIN_PUBLICATION_DENYLIST_FILE || "";
+  let embeddedLarkCliPath = "";
   const artifacts = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -20,35 +23,41 @@ function parseArguments(argv) {
     else if (value === "--trusted") trusted = true;
     else if (value === "--root") root = path.resolve(argv[++index] ?? "");
     else if (value === "--denylist") denylistPath = path.resolve(argv[++index] ?? "");
+    else if (value === "--allow-embedded-lark-cli") embeddedLarkCliPath = path.resolve(argv[++index] ?? "");
     else artifacts.push(path.resolve(value));
   }
   if (trusted && !denylistPath) throw new Error("trusted publication scan requires --denylist or LARKIN_PUBLICATION_DENYLIST_FILE");
-  return { root, treeOnly, trusted, denylistPath, artifacts };
+  if (embeddedLarkCliPath && !trusted) throw new Error("embedded lark-cli provenance requires --trusted");
+  return { root, treeOnly, trusted, denylistPath, embeddedLarkCliPath, artifacts };
 }
 
 function loadDenylist(file) {
   if (!file) return [];
   const lines = fs.readFileSync(file, "utf8").split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"));
+    .map((value, index) => ({ value: value.trim(), line: index + 1 }))
+    .filter(({ value }) => value && !value.startsWith("#"));
   if (lines.length === 0) throw new Error("private publication denylist is empty");
   const entries = new Map();
-  for (const line of lines) {
-    const token = /^token:/i.test(line);
-    const term = token ? line.slice("token:".length).trim() : line;
+  for (const { value, line } of lines) {
+    const token = /^token:/i.test(value);
+    const term = token ? value.slice("token:".length).trim() : value;
     if (!term) throw new Error("private publication denylist contains an empty token entry");
     const normalizedTerm = isAscii(term) ? term.toLocaleLowerCase("en-US") : term;
-    entries.set(`${token}:${normalizedTerm}`, { term: normalizedTerm, token, ascii: isAscii(normalizedTerm) });
+    const add = (variant, variantToken) => {
+      const key = `${variantToken}:${variant}`;
+      if (!entries.has(key)) entries.set(key, { term: variant, token: variantToken, ascii: isAscii(variant), line });
+    };
+    add(normalizedTerm, token);
     if (token) continue;
     const parts = normalizedTerm.split(/[\s._/-]+/u).filter(Boolean);
     if (parts.length > 1) {
       for (const separator of ["", "-", ".", "_", " ", "/"]) {
         const variant = parts.join(separator);
-        entries.set(`false:${variant}`, { term: variant, token: false, ascii: isAscii(variant) });
+        add(variant, false);
       }
     }
   }
-  return [...entries.values()].sort((left, right) => right.term.length - left.term.length);
+  return [...entries.values()].sort((left, right) => right.term.length - left.term.length || left.line - right.line);
 }
 
 function git(root, args, encoding = null) {
@@ -58,19 +67,6 @@ function git(root, args, encoding = null) {
 }
 
 const ALPHANUMERIC = /[\p{L}\p{N}]/u;
-
-function matchesText(text, entry) {
-  if (!entry.token) return text.includes(entry.term);
-  let offset = text.indexOf(entry.term);
-  while (offset >= 0) {
-    const before = offset === 0 ? "" : [...text.slice(0, offset)].at(-1);
-    const afterOffset = offset + entry.term.length;
-    const after = afterOffset >= text.length ? "" : [...text.slice(afterOffset)][0];
-    if ((!before || !ALPHANUMERIC.test(before)) && (!after || !ALPHANUMERIC.test(after))) return true;
-    offset = text.indexOf(entry.term, offset + 1);
-  }
-  return false;
-}
 
 function utf8Before(bytes, offset) {
   if (offset === 0) return "";
@@ -111,17 +107,19 @@ function utf16After(bytes, offset, endian) {
   return String.fromCharCode(first);
 }
 
-function encodedMatch(bytes, haystack, pattern, entry, encoding) {
+function encodedMatch(bytes, haystack, pattern, entry, encoding, ignoredRanges) {
   let offset = haystack.indexOf(pattern);
   while (offset >= 0) {
-    if (!entry.token) return true;
     const end = offset + pattern.length;
-    const before = encoding === "utf8" ? utf8Before(bytes, offset) : utf16Before(bytes, offset, encoding);
-    const after = encoding === "utf8" ? utf8After(bytes, end) : utf16After(bytes, end, encoding);
-    if ((!before || !ALPHANUMERIC.test(before)) && (!after || !ALPHANUMERIC.test(after))) return true;
+    const boundaryMatch = !entry.token || (() => {
+      const before = encoding === "utf8" ? utf8Before(bytes, offset) : utf16Before(bytes, offset, encoding);
+      const after = encoding === "utf8" ? utf8After(bytes, end) : utf16After(bytes, end, encoding);
+      return (!before || !ALPHANUMERIC.test(before)) && (!after || !ALPHANUMERIC.test(after));
+    })();
+    if (boundaryMatch && !ignoredRanges.some((range) => offset >= range.start && end <= range.end)) return { start: offset, end };
     offset = haystack.indexOf(pattern, offset + 1);
   }
-  return false;
+  return null;
 }
 
 function utf16be(value) {
@@ -130,34 +128,16 @@ function utf16be(value) {
   return encoded;
 }
 
-function decodeBomUtf16(bytes) {
-  if (bytes.length < 2) return null;
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) return bytes.subarray(2).toString("utf16le");
-  if (bytes[0] !== 0xfe || bytes[1] !== 0xff) return null;
-  const body = Buffer.from(bytes.subarray(2, bytes.length - ((bytes.length - 2) % 2)));
-  for (let index = 0; index < body.length; index += 2) [body[index], body[index + 1]] = [body[index + 1], body[index]];
-  return body.toString("utf16le");
-}
-
-function scanPrivateTerms(failures, label, bytes, deny) {
+function scanPrivateTerms(failures, label, bytes, deny, source = "larkin", ignoredRanges = []) {
   if (deny.length === 0) return;
 
   // Fold only single-byte ASCII. This keeps byte offsets stable and lets native
   // Buffer searches replace four whole-artifact UTF-16 decodes.
   const folded = Buffer.from(bytes.toString("latin1").toLowerCase(), "latin1");
-  for (const entry of deny) {
+  for (const [entryIndex, entry] of deny.entries()) {
     const haystack = entry.ascii ? folded : bytes;
-    if (encodedMatch(bytes, haystack, Buffer.from(entry.term, "utf8"), entry, "utf8")) {
-      failures.push(`${label}: blocked by private publication denylist`);
-      return;
-    }
-  }
-
-  const bomText = decodeBomUtf16(bytes);
-  if (bomText !== null) {
-    const foldedText = bomText.toLocaleLowerCase("en-US");
-    if (deny.some((entry) => matchesText(entry.ascii ? foldedText : bomText, entry))) {
-      failures.push(`${label}: blocked by private publication denylist`);
+    if (encodedMatch(bytes, haystack, Buffer.from(entry.term, "utf8"), entry, "utf8", ignoredRanges)) {
+      failures.push(`${label}: blocked by private publication denylist (source=${source}; line=${entry.line}; encoding=utf8)`);
       return;
     }
   }
@@ -166,15 +146,62 @@ function scanPrivateTerms(failures, label, bytes, deny) {
     // Two-codepoint non-ASCII byte sequences collide frequently with opaque
     // native Unicode/locale tables. They remain covered as UTF-8 and as BOM-
     // marked UTF-16 text; BOM-less UTF-16 matching starts at three codepoints.
-    if (!entry.ascii && [...entry.term].length < 3) continue;
     const haystack = entry.ascii ? folded : bytes;
     for (const [encoding, pattern] of [["le", Buffer.from(entry.term, "utf16le")], ["be", utf16be(entry.term)]]) {
-      if (encodedMatch(bytes, haystack, pattern, entry, encoding)) {
-        failures.push(`${label}: blocked by private publication denylist`);
+      if (!entry.ascii && [...entry.term].length < 3) {
+        const bom = encoding === "le" ? bytes[0] === 0xff && bytes[1] === 0xfe : bytes[0] === 0xfe && bytes[1] === 0xff;
+        if (!bom) continue;
+      }
+      if (encodedMatch(bytes, haystack, pattern, entry, encoding, ignoredRanges)) {
+        failures.push(`${label}: blocked by private publication denylist (source=${source}; line=${entry.line}; encoding=utf16-${encoding})`);
         return;
       }
     }
   }
+}
+
+function verifiedEmbeddedLarkCli(root, file) {
+  if (!file) return null;
+  const packageRoot = path.join(root, "node_modules", "@larksuite", "cli");
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+  if (manifest.name !== "@larksuite/cli" || manifest.version !== LARK_CLI_VERSION) {
+    throw new Error(`embedded lark-cli provenance requires @larksuite/cli ${LARK_CLI_VERSION}`);
+  }
+  const lock = fs.readFileSync(path.join(root, "bun.lock"), "utf8");
+  if (!/"@larksuite\/cli": \["@larksuite\/cli@1\.0\.78",[^\n]+"sha512-[A-Za-z0-9+/=]+"\]/.test(lock)) {
+    throw new Error("embedded lark-cli provenance is not pinned by bun.lock integrity");
+  }
+  const checksums = fs.readFileSync(path.join(packageRoot, "checksums.txt"), "utf8");
+  const { key, archive } = larkCliTarget(process.platform, process.arch);
+  if (!new RegExp(`^[a-f0-9]{64}  ${archive.replaceAll(".", "\\.")}$`, "m").test(checksums)) {
+    throw new Error("embedded lark-cli archive checksum provenance is unavailable");
+  }
+  const expected = path.join(packageRoot, "bin", process.platform === "win32" ? "lark-cli.exe" : "lark-cli");
+  if (path.resolve(file) !== path.resolve(expected) || !fs.statSync(file).isFile()) {
+    throw new Error("embedded lark-cli path is outside the pinned package");
+  }
+  const bytes = fs.readFileSync(file);
+  const expectedHash = LARK_CLI_NATIVE_SHA256[key];
+  const actualHash = crypto.createHash("sha256").update(bytes).digest("hex");
+  if (!expectedHash || actualHash !== expectedHash) throw new Error("embedded lark-cli binary does not match the pinned platform hash");
+  return bytes;
+}
+
+function scanArtifact(failures, artifact, bytes, deny, embedded) {
+  const label = `artifact ${artifact}`;
+  if (!embedded || !/^larkin-v/.test(path.basename(artifact))) return scanPrivateTerms(failures, label, bytes, deny, "artifact");
+  const offsets = [];
+  let offset = bytes.indexOf(embedded);
+  while (offset >= 0) {
+    offsets.push(offset);
+    offset = bytes.indexOf(embedded, offset + embedded.length);
+  }
+  if (offsets.length !== 1) {
+    failures.push(`${label}: expected exactly one byte-identical pinned @larksuite/cli component, found ${offsets.length}`);
+    return;
+  }
+  const start = offsets[0];
+  scanPrivateTerms(failures, label, bytes, deny, "artifact-larkin", [{ start, end: start + embedded.length }]);
 }
 
 function scanProsePointers(failures, label, bytes) {
@@ -235,6 +262,7 @@ function scanReachableHistory(root, failures, deny) {
 
 const options = parseArguments(process.argv.slice(2));
 const deny = loadDenylist(options.denylistPath);
+const embeddedLarkCli = verifiedEmbeddedLarkCli(options.root, options.embeddedLarkCliPath);
 const failures = [];
 const tracked = scanIndex(options.root, failures, deny);
 for (const required of REQUIRED) {
@@ -251,12 +279,9 @@ if (packageJson.license !== "Apache-2.0") failures.push("package.json: license m
 if (packageJson.private !== true) failures.push("package.json: private must prevent accidental registry publication");
 const license = tracked.includes("LICENSE") ? indexBlob(options.root, "LICENSE").toString("utf8") : "";
 if (!license.includes("Apache License") || !license.includes("Version 2.0, January 2004")) failures.push("LICENSE: canonical Apache-2.0 text is required");
-const notices = tracked.includes("THIRD_PARTY_NOTICES.md") ? indexBlob(options.root, "THIRD_PARTY_NOTICES.md").toString("utf8") : "";
-if (!notices.includes("Generated by `bun run licenses:generate`")) failures.push("THIRD_PARTY_NOTICES.md: generated inventory marker missing");
-
 let history = { refs: 0, objects: 0 };
 if (!options.treeOnly) history = scanReachableHistory(options.root, failures, deny);
-for (const artifact of options.artifacts) scanPrivateTerms(failures, `artifact ${artifact}`, fs.readFileSync(artifact), deny);
+for (const artifact of options.artifacts) scanArtifact(failures, artifact, fs.readFileSync(artifact), deny, embeddedLarkCli);
 
 if (failures.length > 0) {
   console.error([...new Set(failures)].join("\n"));

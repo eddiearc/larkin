@@ -85,10 +85,19 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   const staleMarker = `[larkin-runtime-interface-v2:${nonce}:stale-must-not-send]`;
   const currentMarker = `[larkin-runtime-interface-v2:${nonce}:current]`;
   const target = `chat:${chatId}`;
-  const history = () => parseJson(externalUser([
-    "im", "+chat-messages-list", "--chat-id", chatId, "--page-size", "50", "--as", "user", "--json",
-  ], 60_000), "default user read-only message history");
+  const history = () => {
+    const payload = parseJson(externalUser([
+      "im", "+chat-messages-list", "--chat-id", chatId, "--page-size", "50", "--as", "user", "--json",
+    ], 60_000), "default user read-only message history");
+    assert.equal(payload.ok, true, "default user message-history capability must succeed");
+    assert.equal(payload.identity, "user", "message-history capability must use the authorized user");
+    return payload;
+  };
   const markerCount = (payload, marker) => JSON.stringify(payload).split(marker).length - 1;
+
+  // Fail before poll/drain or either external send when message-history scopes
+  // are unavailable. This keeps an authorization failure at zero writes.
+  history();
 
   await waitFor(
     () => parseJson(run(larkin, ["inbox", "poll", "--target", target], runtimeEnv), "Runtime target pre-drain"),

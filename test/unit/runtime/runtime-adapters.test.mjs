@@ -66,28 +66,28 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
   assert.equal(prompt.hash.length, 64);
   assert.match(prompt.version, /^larkin-standing-/);
   const update = builder.buildRuntimeInput("inbox_update", "input-1", { count: 3, deliveryId: "delivery-1" });
-  assert.match(update.text, /3 pending wake messages/);
+  assert.match(update.text, /3 pending messages/);
   assert.equal(update.deliveryId, "delivery-1");
 });
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v3");
+  assert.equal(prompt.version, "larkin-standing-v4");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
   assert.match(prompt.content, /Only a successful interaction resolve/);
-  assert.match(prompt.content, /larkin im <lark-cli im arguments>/);
+  assert.match(prompt.content, /package-local `lark-cli` directly/);
   assert.match(prompt.content, /larkin profile show/);
   for (const command of [
     "im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +messages-mget",
-    "im +chat-list", "im +chat-search", "im chats get", "im +chat-create", "im +chat-update",
-    "im chat.members get", "im chat.members create", "im chat.members delete",
-    "im reactions create", "im reactions delete", "im +messages-resources-download",
+    "im +chat-list", "im +chat-search", "im chats get", "im +messages-resources-download",
   ]) assert.match(prompt.content, new RegExp(command.replace(/[+.]/g, "\\$&")), command);
   assert.doesNotMatch(prompt.content, /larkin (?:message|channel|attachment|server|task claim)\b/);
   assert.match(prompt.content, /Only a real Feishu `message_id` beginning with `om_`/);
   assert.match(prompt.content, /`rem_`, `redeliver_`.*synthetic ID must never be replied to/);
+  assert.match(prompt.content, /Once a draft is sending it is too late to abandon/);
+  assert.match(prompt.content, /interrupted process.*same idempotency key/);
   assert.match(prompt.content, /regular textual message bodies.*`--markdown`/i);
   assert.match(prompt.content, /native `--text`.*logs.*code.*exact whitespace/i);
   assert.doesNotMatch(prompt.content, /rejected|--literal-text/i);
@@ -132,19 +132,22 @@ test("Codex, Claude and Pi receive the markdown-default standing contract", asyn
   assertContract(piPrompt);
 });
 
-test("context prompt uses the exact injected Agent CLI executable for every command", () => {
+test("context prompt keeps Larkin-local and native lark-cli executable surfaces separate", () => {
   const executable = "'/opt/bun with space/$()/`bin`/bun' '/app/larkin agent'\"'\"'cli.mjs'";
   const prompt = new ContextPromptBuilder().buildStandingPrompt({
     agent: { id: "cli_test" }, runtime: "codex",
     cli: { executable, commands: [
       { command: "inbox check", purpose: "Drain." },
-      { command: "im <lark-cli im arguments>", purpose: "Locked IM." },
+      { command: "profile show", purpose: "Identity." },
     ] },
   }).content;
-  for (const suffix of ["inbox check", "im +messages-reply", "im +chat-list", "im chat.members get", "im +messages-resources-download"]) {
+  for (const suffix of ["inbox check", "profile show"]) {
     assert.ok(prompt.includes(`${executable} ${suffix}`), suffix);
   }
-  assert.doesNotMatch(prompt, /`larkin im/);
+  for (const suffix of ["im +messages-reply", "im +chat-list", "im +messages-resources-download"]) {
+    assert.ok(prompt.includes(`lark-cli ${suffix}`), suffix);
+  }
+  assert.doesNotMatch(prompt, /\/installed\/agent-cli.* im /);
   assert.match(prompt, /Only a real Feishu `message_id` beginning with `om_`/);
 });
 

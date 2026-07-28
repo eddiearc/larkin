@@ -6,12 +6,11 @@ import { INTERNAL_AGENT_CLI, internalCommandShell } from "../app/internal-comman
 export const AGENT_CLI_CAPABILITIES = Object.freeze({
   version: 1,
   commands: Object.freeze({
-    inbox: Object.freeze(["check"]),
+    inbox: Object.freeze(["check", "poll"]),
     reminder: Object.freeze(["schedule", "list", "snooze", "update", "cancel", "log"]),
     interaction: Object.freeze(["callback-status", "callback-probe", "create", "get", "resolve"]),
     profile: Object.freeze(["show"]),
     config: CONFIG_CLI_OPERATIONS,
-    im: Object.freeze(["passthrough"]),
   }),
 });
 
@@ -20,7 +19,7 @@ function posixQuote(value: string): string {
 }
 
 export function resolveAgentCliExecutable(
-  cliPath = process.env.LARKIN_COMPUTER_CLI_PATH,
+  cliPath?: string,
   runtimeExecutable = process.execPath,
 ): string {
   if (cliPath === INTERNAL_AGENT_CLI) return internalCommandShell("agent-cli");
@@ -30,13 +29,13 @@ export function resolveAgentCliExecutable(
 export function agentCliPromptCapabilities(executable = "larkin"): AgentCliCapabilities {
   const commands = Object.entries(AGENT_CLI_CAPABILITIES.commands).flatMap(([group, operations]) =>
     operations.map((operation) => ({
-      command: group === "im" ? "im <lark-cli im arguments>" : `${group} ${operation}`,
-      purpose: group === "inbox" ? "Drain the canonical Inbox once." :
+      command: `${group} ${operation}`,
+      purpose: group === "inbox" ? (operation === "check" ? "Read pending target summaries without consuming messages." : "Poll full messages and direct-ack the returned batch.") :
         group === "reminder" ? "Manage this Agent's durable reminders." :
           group === "interaction" ? "Create, inspect, or resolve a durable interactive card run." :
           group === "profile" ? "Show this Agent's locked identity." :
-            group === "config" ? "Read or update safe Larkin configuration, including explicit global/cross-Agent targets and runtime apply; credentials and Feishu identity stay locked." :
-              "Use the locked bot identity for Feishu IM operations.",
+            group === "config" ? "Read or update safe Larkin configuration; credentials and Feishu identity stay locked." :
+              "Use this Larkin-owned command.",
     })),
   );
   return { executable, commands: commands as AgentCliCapabilities["commands"] };

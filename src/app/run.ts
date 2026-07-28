@@ -21,7 +21,7 @@ import {
   removeControlAuthority,
   requestDashboardRecovery,
 } from "./local-control.js";
-import { INTERNAL_AGENT_CLI, internalCommandSpec, processCommandToken } from "./internal-command.js";
+import { internalCommandSpec, processCommandToken } from "./internal-command.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -178,7 +178,6 @@ export async function main(): Promise<void> {
     ...process.env,
     LARKIN_HOME: configDir,
     LARKIN_CONFIG_DIR: configDir,
-    LARKIN_COMPUTER_CLI_PATH: INTERNAL_AGENT_CLI,
     LARKIN_AGENT_TRANSPORT_MODULE: path.join(HERE, "..", "agent", "agent-transport.cjs"),
     LARKIN_SERVER_ID: String(serverId),
     LARKIN_AGENTS_CONFIG: JSON.stringify(agents),

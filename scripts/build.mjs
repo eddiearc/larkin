@@ -260,7 +260,7 @@ try {
   for (const [name, data] of outputs) {
     const destination = path.join(outputStage, ...name.split("/"));
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, data, { mode: name === "app/cli.mjs" ? 0o755 : 0o644 });
+    fs.writeFileSync(destination, data, { mode: ["app/cli.mjs", "app/lark-cli.mjs"].includes(name) ? 0o755 : 0o644 });
   }
   if (!buildDashboardWeb(path.join(outputStage, "dashboard", "web"))) throw new CompilationFailed();
 

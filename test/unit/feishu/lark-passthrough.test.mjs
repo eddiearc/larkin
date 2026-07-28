@@ -99,7 +99,6 @@ test("native text remains untouched outside the identity-locked runtime message 
 test("agent runtime passthrough rejects every explicit --agent selector", () => {
   for (const runtimeEnv of [
     { LARKIN_AGENT_ID: "cli_larkA1" },
-    { LARKIN_RUNTIME_AGENT_ID: "cli_larkA1" },
   ]) for (const explicitAgent of ["cli_larkA1", "cli_larkB2"]) {
     const decision = assessPassthrough(
       ["docs", "+fetch", "--token", "t", "--agent", explicitAgent],
@@ -108,11 +107,6 @@ test("agent runtime passthrough rejects every explicit --agent selector", () => 
     assert.equal(decision.ok, false, `agent runtime must reject --agent ${explicitAgent}`);
     assert.match(decision.reason, /身份边界|当前 Agent|--agent/);
   }
-  const conflict = assessPassthrough(["im", "+chat-list"], {
-    LARKIN_AGENT_ID: "cli_larkA1", LARKIN_RUNTIME_AGENT_ID: "cli_larkB2",
-  });
-  assert.equal(conflict.ok, false);
-  assert.match(conflict.reason, /身份边界|冲突/);
 });
 
 test("terminal passthrough rejects missing or repeated --agent selectors", () => {
@@ -206,7 +200,7 @@ echo '{"ok":true,"data":{"mock":true}}'
 test("larkin <group> forwards to lark-cli with locked profile and config dir", () => {
   const { temp, second, marker, run } = passthroughWorkspace();
   try {
-    const result = run(["im", "+chat-list", "--json"], { LARKIN_AGENT_ID: second });
+    const result = run(["im", "+chat-list", "--json", "--agent", second]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /"mock":true/, "mock lark-cli output must reach the caller");
     const lines = fs.readFileSync(marker, "utf8").trim().split("\n");
@@ -233,7 +227,7 @@ test("terminal larkin <group> honours --agent selector and rejects identity esca
     fs.rmSync(marker, { force: true });
     const rejected = run(["im", "send", "--chat-id", "oc_x", "--as", "user"], { LARKIN_AGENT_ID: first });
     assert.equal(rejected.status, 2);
-    assert.match(rejected.stderr, /身份边界/);
+    assert.match(rejected.stderr, /原生 `lark-cli im`/);
     assert.equal(fs.existsSync(marker), false, "rejected calls must never reach lark-cli");
 
     for (const managementArgs of [
@@ -249,8 +243,8 @@ test("terminal larkin <group> honours --agent selector and rejects identity esca
     }
 
     const unknown = run(["im", "+chat-list"], { LARKIN_AGENT_ID: "cli_missing9" });
-    assert.equal(unknown.status, 1);
-    assert.match(unknown.stderr, /不存在|未配置/);
+    assert.equal(unknown.status, 2);
+    assert.match(unknown.stderr, /原生 `lark-cli im`/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -263,8 +257,23 @@ test("agent runtime larkin <group> rejects --agent before spawning lark-cli", ()
       fs.rmSync(marker, { force: true });
       const result = run(["docs", "+fetch", "--token", "t", "--agent", explicitAgent], { LARKIN_AGENT_ID: first });
       assert.equal(result.status, 2, result.stderr || result.stdout);
-      assert.match(result.stderr, /身份边界|当前 Agent|--agent/);
+      assert.match(result.stderr, /身份边界|当前 Agent|--agent|不支持的 Agent 命令/);
       assert.equal(fs.existsSync(marker), false, "rejected agent-context calls must never reach lark-cli");
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("Agent Runtime rejects the ambient larkin passthrough and migrates IM to package-local lark-cli", () => {
+  const { first, temp, marker, run } = passthroughWorkspace();
+  try {
+    for (const args of [["im", "+chat-list"], ["docs", "+fetch", "--token", "t"]]) {
+      fs.rmSync(marker, { force: true });
+      const result = run(args, { LARKIN_AGENT_ID: first });
+      assert.equal(result.status, 2, result.stderr || result.stdout);
+      assert.match(result.stderr, args[0] === "im" ? /原生 `lark-cli im`/ : /不支持|不可用/);
+      assert.equal(fs.existsSync(marker), false, "Runtime must never reach an ambient lark-cli through larkin");
     }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
@@ -299,7 +308,24 @@ test("larkin own commands and help keep precedence over the passthrough", () => 
   }
 });
 
-test("external Agent CLI exposes the current identity-locked im surface only", () => {
+test("Runtime-bound installed larkin routes local Agent commands to agent-cli", () => {
+  const { first, marker, temp, run } = passthroughWorkspace();
+  try {
+    const check = run(["inbox", "check"], { LARKIN_AGENT_ID: first });
+    assert.equal(check.status, 0, check.stderr || check.stdout);
+    assert.deepEqual(JSON.parse(check.stdout), { version: 2, targets: [], pending_total: 0, has_more: false });
+    assert.equal(fs.existsSync(marker), false, "Runtime-local Inbox commands must never reach lark-cli");
+
+    const configHelp = run(["config", "--help"], { LARKIN_AGENT_ID: first });
+    assert.equal(configHelp.status, 0, configHelp.stderr || configHelp.stdout);
+    assert.ok(JSON.parse(configHelp.stdout).usage.some((line) => line.includes("larkin config apply")));
+    assert.equal(fs.existsSync(marker), false, "Runtime-local config help must stay on agent-cli");
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("external Agent CLI exposes only Larkin-owned commands and migrates IM to native lark-cli", () => {
   const AGENT_CLI = path.join(ROOT, "dist", "app", "agent-cli.mjs");
   const { temp, first, marker, run: _run } = passthroughWorkspace();
   try {
@@ -320,28 +346,10 @@ test("external Agent CLI exposes the current identity-locked im surface only", (
         ...extraEnv,
       },
     });
-    // lark-cli 命令组 → 直通（身份锁定生效）
-    const forwarded = run(["im", "+chat-list", "--json"]);
-    assert.equal(forwarded.status, 0, forwarded.stderr);
-    const lines = fs.readFileSync(marker, "utf8").trim().split("\n");
-    assert.deepEqual(lines.slice(1, 3), ["ARG=--profile", `ARG=${first}`], "agent-cli must route groups through the identity-locked passthrough");
-
-    for (const [flag, body] of [["--text", "plain"], ["--markdown", "**bold**"]]) {
-      fs.rmSync(marker, { force: true });
-      const sent = run(["im", "+messages-reply", "--message-id", "om_contract", flag, body]);
-      assert.equal(sent.status, 0, sent.stderr || sent.stdout);
-      const sentLines = fs.readFileSync(marker, "utf8").trim().split("\n");
-      assert.deepEqual(sentLines.slice(-4), ["ARG=--message-id", "ARG=om_contract", `ARG=${flag}`, `ARG=${body}`]);
-    }
-
-    // 真实 agent-cli wrapper 也必须在 lark-cli spawn 前拒绝同 ID 与跨 ID 的显式选择
-    for (const explicitAgent of [first, "cli_larkB2"]) {
-      fs.rmSync(marker, { force: true });
-      const rejectedAgent = run(["im", "+chat-list", "--agent", explicitAgent]);
-      assert.equal(rejectedAgent.status, 2, rejectedAgent.stderr || rejectedAgent.stdout);
-      assert.match(rejectedAgent.stderr, /身份边界|当前 Agent|--agent/);
-      assert.equal(fs.existsSync(marker), false, "agent-cli --agent rejection must happen before lark-cli spawn");
-    }
+    const migrated = run(["im", "+chat-list", "--json"]);
+    assert.equal(migrated.status, 2, migrated.stderr);
+    assert.match(migrated.stderr, /原生 `lark-cli im`/);
+    assert.equal(fs.existsSync(marker), false, "legacy larkin im must not spawn lark-cli");
 
     for (const removedCommand of ["init", "bot:connect"]) {
       fs.rmSync(marker, { force: true });
@@ -370,8 +378,8 @@ test("external Agent CLI exposes the current identity-locked im surface only", (
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
     const helpPayload = JSON.parse(help.stdout);
-    assert.deepEqual(helpPayload.capabilities.commands.inbox, ["check"]);
-    assert.deepEqual(helpPayload.capabilities.commands.im, ["passthrough"]);
+    assert.deepEqual(helpPayload.capabilities.commands.inbox, ["check", "poll"]);
+    assert.equal("im" in helpPayload.capabilities.commands, false);
     assert.doesNotMatch(help.stdout, /im\/docs\/wiki\/drive|docx/);
     assert.equal(fs.existsSync(marker), false, "help must not touch lark-cli");
   } finally {
@@ -379,24 +387,24 @@ test("external Agent CLI exposes the current identity-locked im surface only", (
   }
 });
 
-test("platform rules teach the passthrough, long-running task updates, and the irreversible-op convention", async () => {
+test("platform rules teach native lark-cli, long-running task updates, and the irreversible-op convention", async () => {
   const { PLATFORM_RULES } = await import(
     pathToFileURL(path.join(ROOT, "dist", "platform", "workspace-service.mjs")).href
   );
-  assert.match(PLATFORM_RULES, /standing instructions.*CLI 能力/, "platform rules must defer to the capability manifest");
+  assert.match(PLATFORM_RULES, /standing instructions.*Larkin 本地能力/, "platform rules must defer to the capability manifest");
   assert.match(PLATFORM_RULES, /inbox check/, "platform rules must teach the external Inbox command");
-  assert.match(PLATFORM_RULES, /身份锁定的 im 直通/, "platform rules must teach the locked IM passthrough");
+  assert.match(PLATFORM_RULES, /package-local lark-cli/, "platform rules must teach native lark-cli");
   assert.doesNotMatch(PLATFORM_RULES, /larkin message|larkin task claim|larkin docs/, "platform rules must not teach removed commands");
   assert.match(PLATFORM_RULES, /--as user/, "platform rules must state the identity boundary");
   assert.match(PLATFORM_RULES, /commentary.*final_answer.*(?:不可见|不等于飞书出站)/, "runtime-native output must not be presented as user-visible IM");
-  assert.match(PLATFORM_RULES, /只有[^\n]*成功调用[^\n]*身份锁定[^\n]*im[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/, "only a successful locked IM send or reply is user-visible");
+  assert.match(PLATFORM_RULES, /只有[^\n]*成功调用[^\n]*lark-cli[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/, "only a successful native send or reply is user-visible");
   assert.match(PLATFORM_RULES, /多个外部步骤[^\n]*(?:首个|第一个)[^\n]*(?:外部|耗时)步骤前[^\n]*(?:简短确认|首响)/, "multi-step external work must acknowledge before its first external or slow step");
   assert.match(PLATFORM_RULES, /短任务[^\n]*(?:直接处理|无需)[^\n]*(?:收到|确认|首响)/, "short work must not gain a mechanical acknowledgement");
   assert.match(PLATFORM_RULES, /用户[^\n]*步骤顺序[^\n]*(?:严格|必须)[^\n]*顺序[^\n]*不得[^\n]*(?:fallback|重排|重复)/, "explicit user ordering must forbid premature fallback, repetition, and reordering");
   assert.match(PLATFORM_RULES, /进度[^\n]*用户[^\n]*大阶段[^\n]*(?:而非|不按)[^\n]*(?:工具|小步骤)[^\n]*(?:仅在|只在)[^\n]*阶段变化[^\n]*明显延迟[^\n]*需要用户动作[^\n]*用户可感知阻塞[^\n]*同一阶段[^\n]*同一阻塞[^\n]*(?:不重复|只发送一次)/, "phase-level progress must stay bounded and user-meaningful");
-  assert.match(PLATFORM_RULES, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止发送[^\n]*(?:im|IM)[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先[^\n]*(?:im|IM)[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/, "dependent work must be observed one call at a time before one binary retry-or-fallback decision");
+  assert.match(PLATFORM_RULES, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止重复发送[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先用 lark-cli[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/, "dependent work must be observed one call at a time before one binary retry-or-fallback decision");
   assert.match(PLATFORM_RULES, /不得[^\n]*(?:每次工具调用|逐次工具调用)[^\n]*(?:刷屏|发送)|(?:而非|不按)[^\n]*(?:工具|小步骤)/, "progress must not spam on every tool call");
   assert.match(PLATFORM_RULES, /不得泄露[^\n]*thinking[^\n]*凭证[^\n]*原始工具输出[^\n]*内部路径/, "progress must protect sensitive runtime details");
-  assert.match(PLATFORM_RULES, /(?:完成|无法继续|需要用户动作)[^\n]*im[^\n]*(?:最终结论|明确请求)/, "terminal outcomes must be sent through IM");
+  assert.match(PLATFORM_RULES, /(?:完成|无法继续|需要用户动作)[^\n]*lark-cli[^\n]*(?:最终结论|明确请求)/, "terminal outcomes must be sent through native lark-cli");
   assert.match(PLATFORM_RULES, /不可逆|撤回|删除/, "platform rules must carry the irreversible-op convention");
 });

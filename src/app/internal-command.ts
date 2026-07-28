@@ -10,6 +10,7 @@ export const INTERNAL_MODES = [
   "runtime-process",
   "dashboard",
   "agent-cli",
+  "lark-cli",
   "runtime-model-directory",
   "bot-register",
   "setup-bind",

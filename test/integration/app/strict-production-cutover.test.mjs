@@ -543,7 +543,7 @@ require("node:module").syncBuiltinESMExports();
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-for (const mode of ["sync-fail", "verify-fail"]) {
+for (const mode of ["sync-fail", "strict-mode-fail"]) {
   test(`run fails closed when derived canonical profile ${mode} and never spawns daemon`, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-run-profile-${mode}-`));
     try {
@@ -553,7 +553,7 @@ for (const mode of ["sync-fail", "verify-fail"]) {
       const preload = path.join(temp, "profile.cjs");
       const spawnMarker = path.join(temp, "spawned");
       const callMarker = path.join(temp, "calls.json");
-      fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),original=cp.spawnSync; cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");throw new Error("daemon spawn reached")}; cp.spawnSync=(command,args,options={})=>{if(command!=="lark-cli")return original(command,args,options); fs.appendFileSync(process.env.CALL_MARKER,JSON.stringify({command,args,secretViaStdin:options.input==="secret-value"})+"\\n"); if(args[0]==="config") return {status:${mode === "sync-fail" ? 1 : 0},stdout:"",stderr:"secret-value"}; if(args.includes("+chat-list")) return {status:0,stdout:${JSON.stringify(mode === "verify-fail" ? JSON.stringify({ok:false,identity:"bot",error:"secret-value"}) : JSON.stringify({ok:true,identity:"bot"}))},stderr:""}; return {status:0,stdout:"",stderr:""};}; require("node:module").syncBuiltinESMExports();`);
+      fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),path=require("node:path"),original=cp.spawnSync; cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");throw new Error("daemon spawn reached")}; cp.spawnSync=(command,args,options={})=>{const pinned=command===process.execPath&&String(args?.[0]||"").includes("@larksuite/cli/scripts/run.js");if(!pinned)return original(command,args,options);const cli=args.slice(1),file=path.join(options.env.LARKSUITE_CLI_CONFIG_DIR,"config.json");fs.appendFileSync(process.env.CALL_MARKER,JSON.stringify({command:"package-local",args:cli,secretViaStdin:options.input==="secret-value"})+"\\n");if(cli[0]==="config"&&cli[1]==="init"){if(${JSON.stringify(mode)}==="sync-fail")return {status:1,stdout:"",stderr:"secret-value"};const id=cli[cli.indexOf("--app-id")+1],name=cli[cli.indexOf("--name")+1];fs.writeFileSync(file,JSON.stringify({apps:[{appId:id,name,appSecret:options.input,brand:"feishu",defaultAs:"auto",strictMode:"off",users:[]}]}),{mode:0o600});return {status:0,stdout:"",stderr:""};}const value=JSON.parse(fs.readFileSync(file,"utf8"));if(cli.includes("default-as"))value.apps[0].defaultAs="bot";if(cli.includes("strict-mode")){if(${JSON.stringify(mode)}==="strict-mode-fail")return {status:1,stdout:"",stderr:"secret-value"};value.apps[0].strictMode="bot";}fs.writeFileSync(file,JSON.stringify(value),{mode:0o600});return {status:0,stdout:"",stderr:""};};require("node:module").syncBuiltinESMExports();`);
       const result = spawnSync(process.execPath, [path.join(ROOT, "dist/app/run.mjs")], {
         cwd: ROOT, encoding: "utf8", env: { ...process.env, HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: root, SPAWN_MARKER: spawnMarker, CALL_MARKER: callMarker, BUN_OPTIONS: `--preload=${preload}` },
       });
@@ -561,7 +561,7 @@ for (const mode of ["sync-fail", "verify-fail"]) {
       assert.equal(fs.existsSync(spawnMarker), false);
       assert.equal(fs.existsSync(callMarker), true, result.stderr || result.stdout);
       const calls = fs.readFileSync(callMarker, "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(calls.find((call) => call.command === "lark-cli" && call.args[0] === "config")?.secretViaStdin, true, JSON.stringify({ calls, output: result.stderr + result.stdout }));
+      assert.equal(calls.find((call) => call.command === "package-local" && call.args[0] === "config")?.secretViaStdin, true, JSON.stringify({ calls, output: result.stderr + result.stdout }));
       assert.doesNotMatch(result.stderr + result.stdout, /secret-value/);
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });

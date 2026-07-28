@@ -17,6 +17,10 @@ const statusFile = path.join(temp, "owner.json");
 const commandToken = processState.currentProcessMetadata(path.basename(process.argv[1])).commandToken;
 const actual = processState.inspectProcess(process.pid);
 assert.equal(actual.ok, true, actual.reason);
+assert.equal(processState.pidAlive(123, () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }), true,
+  "EPERM must remain possibly alive");
+assert.equal(processState.pidAlive(123, () => { throw Object.assign(new Error("missing"), { code: "ESRCH" }); }), false,
+  "only ESRCH proves the process is dead");
 
 try {
   fs.writeFileSync(statusFile, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), processStartToken: actual.startToken, commandToken }));

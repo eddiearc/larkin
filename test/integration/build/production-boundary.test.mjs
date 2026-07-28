@@ -107,7 +107,7 @@ test("transport derives identity and state only from strict hydrated v3 selectio
     fs.writeFileSync(canonicalInbox, "");
     const legacyInbox = path.join(temp, "legacy-inbox.ndjson");
     fs.writeFileSync(legacyInbox, JSON.stringify({ message_id: "legacy" }) + "\n");
-    const script = `require("node:child_process").spawnSync=()=>({status:1,stdout:"",stderr:"mocked"}); const {transport}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-transport.cjs"))}); (async()=>{const s=await transport.request({method:"GET",path:"/server"}); const p=await transport.request({method:"GET",path:"/profile"}); process.stdout.write(JSON.stringify({runtimeContext:s.data.runtimeContext,profile:p.data}));})().catch(e=>{console.error(e);process.exit(1)});`;
+    const script = `const cp=require("node:child_process"),original=cp.spawnSync;cp.spawnSync=function(command){return command==="lark-cli"?{status:1,stdout:"",stderr:"mocked"}:original.apply(this,arguments)}; const {transport}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-transport.cjs"))}); (async()=>{const s=await transport.request({method:"GET",path:"/server"}); const p=await transport.request({method:"GET",path:"/profile"}); process.stdout.write(JSON.stringify({runtimeContext:s.data.runtimeContext,profile:p.data}));})().catch(e=>{console.error(e);process.exit(1)});`;
     const result = spawnSync(process.execPath, ["--eval", script], { cwd: ROOT, encoding: "utf8", env: {
       ...process.env, HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: root,
       LARKIN_HOME: path.join(temp, "legacy-home"), LARKIN_FEISHU_INBOX: legacyInbox, LARKIN_FEISHU_MAP: path.join(temp, "legacy-map"),
@@ -131,7 +131,7 @@ test("transport derives identity and state only from strict hydrated v3 selectio
     const otherInbox = path.join(root, "state", "agents", other, "feishu-inbox.ndjson");
     fs.mkdirSync(path.dirname(otherInbox), { recursive: true });
     fs.writeFileSync(otherInbox, JSON.stringify({ message_id: "other-event", seq: 1, sender_name: "user", sender_type: "human", channel_type: "dm", channel_name: "user", content: "hello", timestamp: "2026-07-15T00:00:00.000Z", thread_id: null }) + "\n");
-    const otherScript = `require("node:child_process").spawnSync=()=>({status:1,stdout:"",stderr:"mocked"}); const {transport}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-transport.cjs"))}); (async()=>{const p=await transport.request({method:"GET",path:"/profile"}); const e=await transport.request({method:"GET",path:"/events"}); process.stdout.write(JSON.stringify({profile:p.data,events:e.data.events}));})().catch(e=>{console.error(e);process.exit(1)});`;
+    const otherScript = `const cp=require("node:child_process"),original=cp.spawnSync;cp.spawnSync=function(command){return command==="lark-cli"?{status:1,stdout:"",stderr:"mocked"}:original.apply(this,arguments)}; const {transport}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-transport.cjs"))}); (async()=>{const p=await transport.request({method:"GET",path:"/profile"}); const e=await transport.request({method:"GET",path:"/events"}); process.stdout.write(JSON.stringify({profile:p.data,events:e.data.events}));})().catch(e=>{console.error(e);process.exit(1)});`;
     const selectedOther = spawnSync(process.execPath, ["--eval", otherScript], { cwd: ROOT, encoding: "utf8", env: {
       ...process.env, HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: other,
       LARKIN_FEISHU_INBOX: legacyInbox, LARKIN_RUNTIME: "legacy", LARKIN_MODEL: "legacy",

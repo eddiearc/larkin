@@ -8,13 +8,16 @@
   "type": "module",
   "description": "把 Codex、Claude Code 和 Pi Agent Runtime 接到飞书的本地 Runtime Host",
   "bin": {
-    "larkin": "dist/app/cli.mjs"
+    "larkin": "dist/app/cli.mjs",
+    "larkin-lark-cli": "dist/app/lark-cli.mjs"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eddiearc/larkin.git"
   },
-  "trustedDependencies": [],
+  "trustedDependencies": [
+    "@larksuite/cli"
+  ],
   "scripts": {
     "clean": "bun run scripts/clean.mjs",
     "typecheck": "bun run scripts/typecheck.mjs",
@@ -51,9 +54,15 @@
     "test:live:lark-passthrough": "bun test --max-concurrency 1 test/live/lark-passthrough-live.test.mjs",
     "test:live:card-interaction": "bun test --max-concurrency 1 test/live/card-interaction-live.test.mjs",
     "test:live:card-interaction-evidence": "bun run test/live/card-interaction-evidence-driver.mjs",
-    "test:eval:long-running-im-progress": "bun run build && bun test --max-concurrency 1 test/live/long-running-im-progress-live.test.mjs"
+    "test:live:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-live.test.mjs",
+    "test:live:runtime-agent-interface-v2:read-only": "LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE=1 bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-live.test.mjs",
+    "test:live:runtime-agent-interface-v2:hold-host": "bun run build && bun run test/live/runtime-agent-interface-v2-hold-host.mjs app/runtime-process.mjs",
+    "test:eval:long-running-im-progress": "bun run build && bun test --max-concurrency 1 test/live/long-running-im-progress-live.test.mjs",
+    "test:eval:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/unit/evals/runtime-agent-interface-v2.test.mjs",
+    "test:eval:runtime-agent-interface-v2:native": "bun run build && LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_EVAL=1 bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-agent-eval.test.mjs"
   },
   "dependencies": {
+    "@larksuite/cli": "1.0.78",
     "@larksuite/channel": "^0.4.0",
     "@radix-ui/react-dialog": "^1.1.21",
     "lucide-react": "^1.26.0",

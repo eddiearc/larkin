@@ -9,6 +9,11 @@ const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
 test("release platform CI strictly builds and smokes every supported runner architecture", () => {
   const workflow = read(".github/workflows/release-platform-smoke.yml");
   const smoke = read("scripts/release/smoke.ts");
+  assert.equal(
+    read(".gitleaksignore"),
+    "1e12236e5462a361cf45e1b1b218aae035ed7451:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:138\n",
+    "the synthetic-secret exception must remain one exact historical fingerprint",
+  );
   for (const [runner, target] of [
     ["ubuntu-24.04", "linux-x64"],
     ["ubuntu-24.04-arm", "linux-arm64"],
@@ -20,7 +25,8 @@ test("release platform CI strictly builds and smokes every supported runner arch
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /permissions:\n\s+contents: read/);
+  assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/);
+  assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies, ["@larksuite/cli"]);
   assert.match(workflow, /bun-version: 1\.3\.14/);
   assert.match(workflow, /bun install --frozen-lockfile/);
   assert.match(workflow, /bun run licenses:check/);
@@ -36,6 +42,7 @@ test("release platform CI strictly builds and smokes every supported runner arch
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Build current platform release"));
   assert.match(workflow, /if: matrix\.full_test\n\s+run: bun run test/);
   assert.match(workflow, /bun scripts\/release\/build\.ts --target "\$\{\{ matrix\.target \}\}" --out-dir artifacts\/release/);
+  assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /bun run release:smoke -- --release-dir artifacts\/release/);
   assert.match(workflow, /bun run scripts\/check-publication\.mjs --tree-only artifacts\/release\/larkin-v\*/);

@@ -40,17 +40,16 @@ function fixture() {
 }
 
 test("Agent CLI manifest is the single machine-readable public command inventory", () => {
-  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.inbox, ["check"]);
+  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.inbox, ["check", "poll"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.reminder, ["schedule", "list", "snooze", "update", "cancel", "log"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.interaction, ["callback-status", "callback-probe", "create", "get", "resolve"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.profile, ["show"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "apply"]);
-  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.im, ["passthrough"]);
   const f = fixture();
   try {
     const help = JSON.parse(f.run(["--help"]).stdout);
-    assert.equal(help.usage, "larkin <inbox|reminder|interaction|profile|config|im> ...");
-    assert.deepEqual(Object.keys(help.capabilities.commands), ["inbox", "reminder", "interaction", "profile", "config", "im"]);
+    assert.equal(help.usage, "larkin <inbox|reminder|interaction|profile|config> ...");
+    assert.deepEqual(Object.keys(help.capabilities.commands), ["inbox", "reminder", "interaction", "profile", "config"]);
     assert.equal("removed" in help.capabilities, false, "help must not advertise removed command names");
     assert.equal("removed" in cliModule.AGENT_CLI_CAPABILITIES, false, "public manifest must contain only usable commands");
     for (const operation of cliModule.AGENT_CLI_CAPABILITIES.commands.config) {
@@ -284,7 +283,7 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("inbox check drains one successful batch and preserves malformed input", () => {
+test("inbox check is repeatable and content-light while poll direct-acks a bounded target batch", () => {
   const f = fixture();
   try {
     f.store.writeJson("runtimeDeliveries", {
@@ -295,23 +294,46 @@ test("inbox check drains one successful batch and preserves malformed input", ()
         { deliveryId: "d2", messageId: "om_other", status: "pending", input: {}, updatedAt: "2026-07-19T00:00:00.000Z" },
       ],
     });
-    f.store.appendNdjson("inbox", { message_id: "om_1", chat_id: "oc_1", thread_id: "omt_1", sender_id: "ou_1", content: "hello", seq: 4 });
+    f.store.appendNdjson("inbox", { message_id: "om_1", chat_id: "oc_1", sender_id: "ou_1", content: "secret body", seq: 4 });
+    f.store.appendNdjson("inbox", { message_id: "om_2", chat_id: "oc_1", sender_id: "ou_1", content: "second body", seq: 5 });
+    f.store.appendNdjson("inbox", { message_id: "om_other", chat_id: "oc_2", sender_id: "ou_2", content: "other body", seq: 6 });
+    const beforeInbox = fs.readFileSync(f.store.paths.inbox);
+    const beforeDeliveries = fs.readFileSync(f.store.paths.runtimeDeliveries);
     const first = f.run(["inbox", "check"]);
+    const second = f.run(["inbox", "check"]);
     assert.equal(first.code, 0, first.stderr);
-    assert.deepEqual(JSON.parse(first.stdout).events[0], {
-      message_id: "om_1", chat_id: "oc_1", thread_id: "omt_1", sender_id: "ou_1", content: "hello", seq: 4,
-    });
+    assert.deepEqual(JSON.parse(first.stdout), JSON.parse(second.stdout));
+    assert.equal(JSON.stringify(JSON.parse(first.stdout)).includes("secret body"), false);
+    assert.deepEqual(JSON.parse(first.stdout).targets.map(({ target, pending_count }) => ({ target, pending_count })), [
+      { target: "chat:oc_1", pending_count: 2 },
+      { target: "chat:oc_2", pending_count: 1 },
+    ]);
+    assert.deepEqual(fs.readFileSync(f.store.paths.inbox), beforeInbox, "check must not mutate Inbox bytes");
+    assert.deepEqual(fs.readFileSync(f.store.paths.runtimeDeliveries), beforeDeliveries, "check must not consume Runtime delivery state");
+
+    const firstPoll = f.run(["inbox", "poll", "--target", "chat:oc_1", "--limit", "1"]);
+    assert.equal(firstPoll.code, 0, firstPoll.stderr);
+    const polled = JSON.parse(firstPoll.stdout);
+    assert.equal(polled.delivery, "direct_ack");
+    assert.equal(polled.at_most_once, true);
+    assert.equal(polled.events.length, 1);
+    assert.equal(polled.events[0].content, "secret body");
+    assert.equal(polled.seen_through_seq, 1);
+    assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_2", "om_other"]);
     const deliveries = f.store.readJson("runtimeDeliveries", null);
     assert.equal(deliveries.owner, "preserved");
     assert.deepEqual({ ...deliveries.records[0], updatedAt: "<changed>" }, {
       deliveryId: "d1", messageId: "om_1", status: "consumed", input: { text: "wake" }, updatedAt: "<changed>", extra: 7,
     });
     assert.equal(deliveries.records[1].status, "pending");
-    assert.deepEqual(JSON.parse(f.run(["inbox", "check"]).stdout).events, []);
+    assert.equal(JSON.parse(f.run(["inbox", "check"]).stdout).targets.find((row) => row.target === "chat:oc_1").pending_count, 1);
+    assert.equal(JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout).events[0].message_id, "om_2");
+    assert.deepEqual(JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout).events, []);
+    assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_other"], "unrelated target must remain pending");
 
     fs.writeFileSync(f.store.paths.inbox, '{"message_id":"om_bad"}\nnot-json\n');
     const deliveryBytes = fs.readFileSync(f.store.paths.runtimeDeliveries, "utf8");
-    const malformed = f.run(["inbox", "check"]);
+    const malformed = f.run(["inbox", "poll"]);
     assert.equal(malformed.code, 2);
     assert.match(malformed.stderr, /invalid NDJSON/);
     assert.equal(fs.readFileSync(f.store.paths.inbox, "utf8"), '{"message_id":"om_bad"}\nnot-json\n');
@@ -327,35 +349,41 @@ test("current Agent-facing docs and prompts do not teach removed Agent commands"
   }
 });
 
-test("Inbox drain serializes a cross-process append into the next batch", async () => {
+test("an artificially old but live Inbox lock cannot be reclaimed by a cross-process append", async () => {
   const f = fixture();
   const marker = path.join(f.root, "append-started");
+  const appended = path.join(f.root, "append-complete");
   const moduleFile = path.join(ROOT, "dist/agent/agent-state-store.cjs");
   let child;
   try {
     f.store.appendNdjson("inbox", { message_id: "om_old" });
-    const drained = f.store.drainInbox({
+    const drained = f.store.pollInbox({
       afterRead() {
+        const old = new Date(Date.now() - 60_000);
+        fs.utimesSync(`${f.store.paths.inbox}.lock`, old, old);
         child = spawn(process.execPath, ["-e", `
 const fs = require("node:fs");
 const { createAgentStateStore } = require(process.argv[1]);
 fs.writeFileSync(process.argv[4], "started");
 createAgentStateStore(process.argv[2], process.argv[3]).appendNdjson("inbox", { message_id: "om_new" });
-`, moduleFile, f.root, f.agentId, marker], { stdio: "ignore" });
+fs.writeFileSync(process.argv[5], "complete");
+`, moduleFile, f.root, f.agentId, marker, appended], { stdio: "ignore" });
         const deadline = Date.now() + 2_000;
         while (!fs.existsSync(marker) && Date.now() < deadline) {
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
         }
         assert.equal(fs.existsSync(marker), true, "child must attempt append while drain owns the lock");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+        assert.equal(fs.existsSync(appended), false, "live owner must win even when lock mtime exceeds the former stale threshold");
       },
     });
-    assert.deepEqual(drained, [{ message_id: "om_old" }]);
+    assert.deepEqual(drained.envelopes.map((row) => row.message_id), ["om_old"]);
     const exit = await new Promise((resolve, reject) => {
       child.once("error", reject);
       child.once("exit", (code, signal) => resolve({ code, signal }));
     });
     assert.deepEqual(exit, { code: 0, signal: null });
-    assert.deepEqual(f.store.readNdjson("inbox"), [{ message_id: "om_new" }]);
+    assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_new"]);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     fs.rmSync(f.root, { recursive: true, force: true });
@@ -450,7 +478,7 @@ test("interaction commands create, inspect, and resolve through the durable stat
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("profile show is local and im passthrough is locked to the injected bot identity", () => {
+test("profile show is local and legacy larkin im migrates to native lark-cli", () => {
   const f = fixture();
   try {
     f.store.writeJson("botIdentity", { open_id: "ou_bot", name: "Larkin Bot", avatar_url: "https://example.test/avatar.png" });
@@ -468,19 +496,13 @@ test("profile show is local and im passthrough is locked to the injected bot ide
       return { status: 0, signal: null, output: [], pid: 1, stdout: '{"ok":true}\n', stderr: "", error: undefined };
     };
     const im = f.run(["im", "+chat-list", "--json"], { spawn });
-    assert.equal(im.code, 0, im.stderr);
-    assert.deepEqual(call.args, ["--profile", f.agentId, "im", "+chat-list", "--json"]);
-    assert.equal(call.options.env.LARKSUITE_CLI_CONFIG_DIR, path.join(f.root, "lark-cli-config"));
-
-    call = undefined;
-    const escaped = f.run(["im", "+chat-list", "--profile", "other"], { spawn });
-    assert.equal(escaped.code, 2);
-    assert.match(escaped.stderr, /身份边界/);
-    assert.equal(call, undefined, "identity rejection must happen before spawn");
+    assert.equal(im.code, 2);
+    assert.match(im.stderr, /lark-cli im/);
+    assert.equal(call, undefined, "migration must happen before any spawn");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("Agent CLI preserves native text and markdown message argv", () => {
+test("Agent CLI does not retain a second IM argv surface", () => {
   const f = fixture();
   try {
     const calls = [];
@@ -489,13 +511,10 @@ test("Agent CLI preserves native text and markdown message argv", () => {
       return { status: 0, signal: null, output: [], pid: 1, stdout: '{"ok":true}\n', stderr: "", error: undefined };
     };
 
-    const plain = f.run(["im", "+messages-reply", "--message-id", "om_x", "--text", "**raw**"], { spawn });
-    assert.equal(plain.code, 0, plain.stderr);
-    assert.deepEqual(calls.at(-1).args, ["--profile", f.agentId, "im", "+messages-reply", "--message-id", "om_x", "--text", "**raw**"]);
-
-    const markdown = f.run(["im", "+messages-send", "--chat-id", "oc_x", "--markdown", "**bold**"], { spawn });
-    assert.equal(markdown.code, 0, markdown.stderr);
-    assert.deepEqual(calls.at(-1).args, ["--profile", f.agentId, "im", "+messages-send", "--chat-id", "oc_x", "--markdown", "**bold**"]);
+    const migrated = f.run(["im", "+messages-reply", "--message-id", "om_x", "--text", "**raw**"], { spawn });
+    assert.equal(migrated.code, 2);
+    assert.match(migrated.stderr, /原生 `lark-cli im`/);
+    assert.deepEqual(calls, []);
 
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });

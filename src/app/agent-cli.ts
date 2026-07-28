@@ -1,13 +1,12 @@
 #!/usr/bin/env bun
 
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
 import * as larkinConfig from "../platform/config.js";
-import { projectInboxEvents, type InboxEnvelope } from "../agent/inbox-projection.js";
-import { assessPassthrough } from "../feishu/lark-passthrough.js";
+import { projectInboxCheck, projectInboxEvents, type InboxEnvelope } from "../agent/inbox-projection.js";
 import { createReminderRoutes } from "../agent/reminder-routes.js";
 import { InteractionStateMachine } from "../agent/interaction-state-machine.js";
 import { issueCallbackProbe, readCallbackCapability } from "../platform/callback-capability.js";
@@ -126,15 +125,16 @@ function query(requestPath: string, name: string): string | null {
 
 function migrationError(group: string, subcommand?: string): string | null {
   if (group === "message") {
-    return "message 已移除：读取收件箱请用 `larkin inbox check`；发送、回复和查询消息请用 `larkin im +messages-send`、`+messages-reply`、`+chat-messages-list` 或 `+messages-mget`。";
+    return "message 已移除：只读查看收件箱用 `larkin inbox check`，领取完整消息用 `larkin inbox poll`；飞书发送、回复和查询请直接使用 `lark-cli im +messages-send`、`+messages-reply`、`+chat-messages-list` 或 `+messages-mget`。";
   }
   if (group === "channel") {
-    return "channel 已移除：群聊操作请使用 `larkin im +chat-list`、`+chat-search`、`chats get`、`+chat-create`、`+chat-update` 或 `chat.members get/create/delete`。";
+    return "channel 已移除：群聊操作请直接使用 `lark-cli im +chat-list`、`+chat-search`、`chats get`、`+chat-create`、`+chat-update` 或 `chat.members get/create/delete`。";
   }
   if (group === "attachment") {
-    return "attachment 已移除：发送附件请使用 `larkin im +messages-send --file/--image/--video/--audio`；下载请使用 `larkin im +messages-resources-download`。";
+    return "attachment 已移除：发送附件请使用 `lark-cli im +messages-send --file/--image/--video/--audio`；下载请使用 `lark-cli im +messages-resources-download`。";
   }
-  if (group === "server") return "server 已移除；飞书群与消息信息请通过 `larkin im ...` 查询。";
+  if (group === "server") return "server 已移除；飞书群与消息信息请通过 `lark-cli im ...` 查询。";
+  if (group === "im") return "`larkin im` 已迁移为原生 `lark-cli im`；Runtime 会自动绑定当前 Bot identity，请按 `lark-cli im --help` 使用。";
   if (group === "profile" && subcommand !== "show") {
     return "profile 只保留只读的 `larkin profile show`；身份和凭证由 `larkin setup` 管理，不支持 update。";
   }
@@ -143,7 +143,7 @@ function migrationError(group: string, subcommand?: string): string | null {
 
 function help(): JsonObject {
   return {
-    usage: "larkin <inbox|reminder|interaction|profile|config|im> ...",
+    usage: "larkin <inbox|reminder|interaction|profile|config> ...",
     capabilities: AGENT_CLI_CAPABILITIES,
   };
 }
@@ -449,17 +449,25 @@ export function runAgentCli(
     const { config, agent } = requireAgent(env);
     const stateStore = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
     if (group === "inbox") {
-      if (subcommand !== "check" || rest.some((argument) => argument !== "--json")) {
-        throw new Error("inbox 只支持 `larkin inbox check`");
+      if (!["check", "poll"].includes(subcommand || "")) {
+        throw new Error("inbox 只支持 `larkin inbox check` 与 `larkin inbox poll`");
       }
-      const envelopes = stateStore.drainInbox<InboxEnvelope>();
-      const projected = projectInboxEvents(envelopes);
-      const messageIds = new Set(envelopes.map((envelope) => envelope.message_id).filter((id): id is string => typeof id === "string"));
-      const deliveryState = stateStore.readJson<{ records?: Array<{ deliveryId?: unknown; messageId?: unknown; status?: unknown }> }>("runtimeDeliveries", {});
-      const consumedDeliveryIds = (deliveryState.records || []).flatMap((record) =>
-        record.status === "consumed" && typeof record.deliveryId === "string" && typeof record.messageId === "string" && messageIds.has(record.messageId)
-          ? [record.deliveryId] : []);
-      emitJson(io, { ...projected, consumed_delivery_ids: consumedDeliveryIds });
+      const options = parseOptions(rest, new Set(["--json"]));
+      if (options.positionals.length || [...options.values.keys()].some((flag) => !["--target", "--limit"].includes(flag))) {
+        throw new Error(`inbox ${subcommand} 只接受 --target、${subcommand === "poll" ? "--limit、" : ""}--json`);
+      }
+      const target = options.values.get("--target");
+      if (subcommand === "check") {
+        if (options.values.has("--limit")) throw new Error("inbox check 不接受 --limit");
+        emitJson(io, projectInboxCheck(stateStore.readNdjson<InboxEnvelope>("inbox"), target));
+        return 0;
+      }
+      const rawLimit = options.values.get("--limit");
+      const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+      const polled = stateStore.pollInbox<InboxEnvelope>({ ...(target ? { target } : {}), ...(limit !== undefined ? { limit } : {}) });
+      const projected = projectInboxEvents(polled.envelopes);
+      emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
+        seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });
       return 0;
     }
     if (group === "reminder") {
@@ -499,19 +507,6 @@ export function runAgentCli(
       });
       emitJson(io, result);
       return 0;
-    }
-    if (group === "im") {
-      const decision = assessPassthrough([group, ...(subcommand ? [subcommand] : []), ...rest], env);
-      if (!decision.ok) throw new Error(decision.reason);
-      const result = (dependencies.spawn ?? spawnSync)(
-        "lark-cli",
-        ["--profile", agent.feishuProfile, ...decision.argv!],
-        { encoding: "utf8", env: { ...env, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir } },
-      ) as SpawnSyncReturns<string>;
-      if (result.stdout) io.stdout(result.stdout);
-      if (result.stderr) io.stderr(result.stderr);
-      if (result.error) throw new Error(`lark-cli 启动失败：${result.error.message}`);
-      return result.status ?? 1;
     }
     throw new Error(`不支持的 Agent 命令：${group}。可用能力见 larkin help`);
   } catch (error) {

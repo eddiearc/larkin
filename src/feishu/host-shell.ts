@@ -16,8 +16,7 @@ import {
   shouldPreventiveReconnect,
 } from "./host-business-state.js";
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
-import { resolveAgentCliExecutable } from "../agent/agent-cli-capabilities.js";
-import { projectInboxEnvelope } from "../agent/inbox-projection.js";
+import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
@@ -295,7 +294,7 @@ export function createHostShell({
     (agent, chatId, senderId) => senderIdentity.noteUnknownSender(agent, chatId, senderId),
     undefined,
     undefined,
-    resolveAgentCliExecutable(env.LARKIN_COMPUTER_CLI_PATH),
+    "larkin",
   );
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
@@ -315,18 +314,20 @@ export function createHostShell({
   for (const agent of agents) prepareAgentState(agent);
   const reminder = new HostReminderOrchestrator({ agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log });
   const seenEventIds = new Set<string>();
+  const inFlightEventIds = new Set<string>();
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
     const wake = options?.wake !== false;
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
-    if (event.event_id && seenEventIds.has(eventKey)) return;
-    if (event.event_id) seenEventIds.add(eventKey);
+    if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
+    if (event.event_id) inFlightEventIds.add(eventKey);
     try {
       const [names, signature] = await Promise.all([
         senderIdentity.ensureChatNames(agent, event.chat_id, 3_000),
         event._sender_is_bot ? Promise.resolve(null) : senderIdentity.ensureSenderSignature(agent, event.sender_id, 3_000),
       ]);
       const envelope = envelopeProjector.projectInbound(agent, event, { anchorReply: wake, names, signature }) as unknown as Record<string, unknown>;
+      envelope.target = targetKeyOfInboxEnvelope({ ...envelope, chat_id: event.chat_id, thread_id: event.thread_id });
       if (wake) envelope.wake = true;
       const inboxEnvelope = projectInboxEnvelope(envelope, {
         chat_id: event.chat_id,
@@ -336,6 +337,9 @@ export function createHostShell({
       });
       try { stateStore(agent).appendNdjson("inbox", inboxEnvelope); }
       catch (error) { throw new Error(`inbox 写失败: ${errorMessage(error)}`); }
+      // An event becomes permanently seen only after its canonical Inbox append
+      // is durable. Failures remain eligible for same-process redelivery.
+      if (event.event_id) seenEventIds.add(eventKey);
       hostState.appendConversation(agent, {
         direction: "in", from: envelope.sender_name, senderType: envelope.sender_type,
         target: targetFor(event).target, wake, text: event.content, messageId: envelope.message_id,
@@ -356,6 +360,8 @@ export function createHostShell({
     } catch (error) {
       log(`onFeishuMessage 异常 agent=${agent.name}: ${error instanceof Error ? error.stack || error.message : String(error)}`);
       hostState.recordStatusError(agent, `onFeishuMessage: ${errorMessage(error)}`);
+    } finally {
+      if (event.event_id) inFlightEventIds.delete(eventKey);
     }
   };
   const interactionChannels = new Map<string, LarkChannel>();

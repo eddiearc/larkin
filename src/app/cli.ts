@@ -38,6 +38,11 @@ const routes: Record<string, Route> = {
   chats: ["agent-config", "chats"],
   config: ["agent-config", "config"],
 };
+const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
+  && process.env.LARKIN_AGENT_ID.trim().length > 0;
+const runtimeAgentCommand = runtimeAgentAuthority
+  && ["inbox", "reminder", "interaction", "profile", "config"].includes(command);
+if (runtimeAgentCommand) routes[command] = ["agent-cli", command];
 
 // Help stays in the outer CLI so it never loads configuration, inspects a process,
 // or starts a foreground service merely to print usage.
@@ -84,21 +89,22 @@ if (command === "help" && rest[0] && commandHelp[rest[0]]) {
   process.exit(0);
 }
 
-if (routes[command] && rest.some((argument) => argument === "--help" || argument === "-h")) {
+if (!runtimeAgentCommand && routes[command] && rest.some((argument) => argument === "--help" || argument === "-h")) {
   console.log(commandHelp[command]);
   process.exit(0);
 }
 
-if (command === "config" && ["runtime", "model", "effort"].includes(rest[0] || "")) {
+if (!runtimeAgentCommand && command === "config" && ["runtime", "model", "effort"].includes(rest[0] || "")) {
   routes.config = ["agent-config", rest[0]];
   rest = rest.slice(1);
 }
 
-// Unregistered non-flag commands are lark-cli command groups (larkin im ... == lark-cli im ...):
-// forwarded verbatim with the Agent's own bot identity locked in by the passthrough entry.
+// At a user terminal, unregistered non-flag commands keep the legacy lark-cli passthrough.
+// Inside an Agent Runtime, every `larkin` command stays on the Larkin-owned surface;
+// Feishu commands use the separate package-local `lark-cli` shim.
 const wantsHelp = command === "help" || command === "--help" || command === "-h" || command.startsWith("-");
 if (!routes[command] && !wantsHelp) {
-  routes[command] = ["lark", command];
+  routes[command] = runtimeAgentAuthority ? ["agent-cli", command] : ["lark", command];
 }
 
 if (!routes[command]) {

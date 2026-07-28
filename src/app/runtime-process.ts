@@ -8,16 +8,16 @@ import { createRuntimeHost, type RuntimeHost } from "../runtime/runtime-host.js"
 import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../platform/config.js";
 import { createAgentControlServer } from "./local-control.js";
-import { hydrateRuntimeAgent, syncAgentProfile } from "./runtime-agent-config.js";
+import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
 
 type HostShellOptions = Parameters<typeof createHostShell>[0];
 
-export function loadAndSyncRuntimeAgent(env: NodeJS.ProcessEnv, agentId: string) {
+export function loadAndSyncRuntimeAgent(env: NodeJS.ProcessEnv, agentId: string, dependencies: RuntimeAgentConfigDependencies = {}) {
   const loaded = loadConfig(env);
   const stored = loaded.config.agents[agentId];
   if (!stored) throw new Error(`Agent ${agentId} 不存在于 canonical config`);
   const agent = hydrateRuntimeAgent(loaded.configDir, stored);
-  syncAgentProfile(agent, { ...env, LARKIN_CONFIG_DIR: loaded.configDir });
+  syncAgentProfile(agent, { ...env, LARKIN_CONFIG_DIR: loaded.configDir }, dependencies);
   return agent;
 }
 
@@ -51,7 +51,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
   const adapters = new Map<string, ReturnType<typeof createNativeRuntimeAdapter>>();
   const runtimeHost = overrides.runtimeHost ?? createRuntimeHost({
     promptBuilder: new ContextPromptBuilder(),
-    agentCliPath: env.LARKIN_COMPUTER_CLI_PATH,
     stateStoreFor(agentId) {
       if (!env.LARKIN_HOME) throw new Error("LARKIN_HOME is required for Runtime delivery state");
       return createAgentStateStore(env.LARKIN_HOME, agentId);

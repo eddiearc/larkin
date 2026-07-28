@@ -124,11 +124,8 @@ export function resolveLarkConfigDir(env: Env = process.env, configDir = resolve
 
 export function resolveRuntimeAuthority(env: Env = process.env): string | null {
   const primary = env.LARKIN_AGENT_ID || null;
-  const durableMarker = env.LARKIN_RUNTIME_AGENT_ID || null;
-  if (primary && durableMarker && primary !== durableMarker) throw new Error("Runtime Agent 身份标记冲突，拒绝选择 authority");
-  const agentId = primary || durableMarker;
-  if (agentId && !APP_ID.test(agentId)) throw new Error("Runtime Agent 身份标记格式无效");
-  return agentId;
+  if (primary && !APP_ID.test(primary)) throw new Error("Runtime Agent 身份标记格式无效");
+  return primary;
 }
 
 function assertAllowedFields(object: Obj, allowed: Set<string>, label: string): void {
@@ -207,7 +204,7 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
     name: key, agentId: key, feishuAppId: key, feishuProfile: key,
     runtime: agent.runtime, model: agent.model,
     workspaceDir: layout.workspaceDir(key), stateDir: layout.agentStateDir(key),
-    larkConfigDir: resolveLarkConfigDir({}, layout.root),
+    larkConfigDir: path.join(layout.agentStateDir(key), "lark-cli-config"),
     ...(agent.effort ? { effort: agent.effort } : {}),
     ...(agent.mentionPolicy ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(agent.chatMentionPolicies ? { chatMentionPolicies: { ...agent.chatMentionPolicies } } : {}),

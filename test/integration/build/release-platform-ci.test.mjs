@@ -6,23 +6,15 @@ import { test } from "bun:test";
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
 
-test("release platform CI strictly builds and smokes every supported runner architecture", () => {
+test("PR and main CI validate source without building release artifacts", () => {
   const workflow = read(".github/workflows/release-platform-smoke.yml");
-  const smoke = read("scripts/release/smoke.ts");
   assert.equal(fs.existsSync(path.join(ROOT, ".gitleaksignore")), false, "synthetic secrets must be constructed at runtime without fingerprint exceptions");
   assert.equal(fs.existsSync(path.join(ROOT, "THIRD_PARTY_NOTICES.md")), false, "complete lock-graph notices must not be tracked at the repository root");
-  for (const [runner, target] of [
-    ["ubuntu-24.04", "linux-x64"],
-    ["ubuntu-24.04-arm", "linux-arm64"],
-    ["macos-15", "darwin-arm64"],
-    ["macos-15-intel", "darwin-x64"],
-  ]) {
-    assert.match(workflow, new RegExp(`runner: ${runner.replaceAll(".", "\\.")}\\n\\s+target: ${target}`));
-  }
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/);
+  assert.equal(workflow.match(/runs-on: ubuntu-24\.04/g)?.length, 1);
   assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies, ["@larksuite/cli"]);
   assert.match(workflow, /bun-version: 1\.3\.14/);
   assert.match(workflow, /actions\/setup-go@v6[\s\S]{0,100}go-version: 1\.23\.12/);
@@ -36,29 +28,15 @@ test("release platform CI strictly builds and smokes every supported runner arch
   assert.match(workflow, /--trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt"/);
   assert.match(workflow, /gitleaks\/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3/);
   assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}\n\s+GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false/);
-  assert.match(workflow, /GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false\n\n\s+- name: Remove Gitleaks SARIF output\n\s+if: matrix\.full_test\n\s+run: rm -f -- results\.sarif/);
+  assert.match(workflow, /GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false\n\n\s+- name: Remove Gitleaks SARIF output\n\s+run: rm -f -- results\.sarif/);
   assert.equal(workflow.match(/rm -f -- results\.sarif/g)?.length, 1, "only the generated Gitleaks SARIF path may be removed");
   assert.ok(workflow.indexOf("gitleaks/gitleaks-action@") < workflow.indexOf("run: rm -f -- results.sarif"));
-  assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Build current platform release"));
-  assert.match(workflow, /if: matrix\.full_test\n\s+run: bun run test/);
-  assert.match(workflow, /bun scripts\/release\/build\.ts --target "\$\{\{ matrix\.target \}\}" --out-dir artifacts\/release/);
+  assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Run full test suite"));
+  assert.match(workflow, /run: bun run test/);
   assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);
   assert.match(workflow, /persist-credentials: false/);
-  assert.match(workflow, /bun run release:smoke -- --release-dir artifacts\/release/);
-  assert.match(workflow, /bun run scripts\/check-publication\.mjs --tree-only artifacts\/release\/larkin-v\*/);
-  assert.match(workflow, /--allow-embedded-lark-cli node_modules\/@larksuite\/cli\/bin\/lark-cli artifacts\/release\/larkin-v\*/);
-  assert.match(workflow, /artifacts\/release\/larkin-v\* artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);
+  assert.doesNotMatch(workflow, /scripts\/release\/build\.ts|release:smoke|artifacts\/release|matrix\./);
   assert.doesNotMatch(workflow, /continue-on-error|actions\/(?:upload|download)-artifact|\b(?:node|npm|pnpm)\b/);
-
-  assert.match(smoke, /selectReleaseArtifact\(manifest, platform, arch\)/);
-  assert.match(smoke, /verifyReleaseArtifact\(releaseDir, record\)/);
-  assert.match(smoke, /verifyReleaseNotices\(releaseDir, manifest\)/);
-  assert.match(smoke, /PATH: restrictedBin/);
-  assert.match(smoke, /\["--version"\]/);
-  assert.match(smoke, /\["--help"\]/);
-  assert.match(smoke, /\["__internal", "dashboard"/);
-  assert.match(smoke, /response\.status === 200/);
-  assert.match(smoke, /fs\.rmSync\(temporaryRoot, \{ recursive: true, force: true \}\)/);
 });
 
 test("tag publication validates an explicit version and publishes one combined release", () => {

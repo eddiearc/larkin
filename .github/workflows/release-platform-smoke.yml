@@ -1,4 +1,4 @@
-name: Release platform smoke
+name: Source checks
 
 on:
   pull_request:
@@ -12,25 +12,8 @@ permissions:
   pull-requests: read
 
 jobs:
-  release-smoke:
-    name: ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: linux-x64
-            full_test: true
-          - runner: ubuntu-24.04-arm
-            target: linux-arm64
-            full_test: false
-          - runner: macos-15
-            target: darwin-arm64
-            full_test: false
-          - runner: macos-15-intel
-            target: darwin-x64
-            full_test: false
-    runs-on: ${{ matrix.runner }}
+  source-checks:
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -54,11 +37,10 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Verify complete dependency notices
-        if: matrix.full_test
         run: bun run licenses:check
 
       - name: Verify generic public source tree for fork pull requests
-        if: matrix.full_test && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         run: bun run publication:check:tree
 
       - name: Prepare private publication denylist for trusted runs
@@ -71,36 +53,17 @@ jobs:
           printf '%s\n' "$PRIVATE_DENYLIST" > "$RUNNER_TEMP/larkin-publication-denylist.txt"
 
       - name: Verify trusted public source tree
-        if: matrix.full_test && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: bun run scripts/check-publication.mjs --tree-only --trusted --denylist "$RUNNER_TEMP/larkin-publication-denylist.txt"
 
       - name: Scan source for credential leaks
-        if: matrix.full_test
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
 
       - name: Remove Gitleaks SARIF output
-        if: matrix.full_test
         run: rm -f -- results.sarif
 
       - name: Run full test suite
-        if: matrix.full_test
         run: bun run test
-
-      - name: Build current platform release
-        run: |
-          bun run build
-          bun scripts/release/build.ts --target "${{ matrix.target }}" --out-dir artifacts/release
-
-      - name: Scan built artifact for fork pull requests
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-        run: bun run scripts/check-publication.mjs --tree-only artifacts/release/larkin-v* artifacts/release/THIRD_PARTY_NOTICES.txt
-
-      - name: Scan built artifact for trusted runs
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        run: bun run scripts/check-publication.mjs --tree-only --trusted --denylist "$RUNNER_TEMP/larkin-publication-denylist.txt" --allow-embedded-lark-cli node_modules/@larksuite/cli/bin/lark-cli artifacts/release/larkin-v* artifacts/release/THIRD_PARTY_NOTICES.txt
-
-      - name: Smoke current platform artifact
-        run: bun run release:smoke -- --release-dir artifacts/release

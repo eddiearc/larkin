@@ -11,6 +11,7 @@ const RUN = process.env.LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE === "1";
 const WRITE = RUN && process.env.LARKIN_LIVE_ALLOW_WRITE === "1";
 const NATIVE_CLI = process.env.LARKIN_LIVE_NATIVE_LARK_CLI || "lark-cli";
 const EXPECTED_USER_NAME = process.env.LARKIN_LIVE_EXPECTED_USER_NAME || "";
+const EXPECTED_USER_OPEN_ID = process.env.LARKIN_LIVE_EXPECTED_USER_OPEN_ID || "";
 
 function run(command, args, env = process.env, timeout = 30_000) {
   return spawnSync(command, args, { cwd: ROOT, env, encoding: "utf8", timeout });
@@ -33,10 +34,11 @@ function externalUser(args, timeout) {
 
 function requireExpectedUser() {
   assert.ok(EXPECTED_USER_NAME.trim(), "LARKIN_LIVE_EXPECTED_USER_NAME must identify the authorized default user");
+  assert.match(EXPECTED_USER_OPEN_ID, /^ou_[A-Za-z0-9]+$/, "LARKIN_LIVE_EXPECTED_USER_OPEN_ID must identify the exact authorized default user");
   const status = parseJson(externalUser(["auth", "status", "--json"], 30_000), "default user auth status");
-  assert.equal(status.identity, "user");
   assert.equal(status.identities?.user?.status, "ready");
   assert.equal(status.identities?.user?.userName, EXPECTED_USER_NAME);
+  assert.equal(status.identities?.user?.openId, EXPECTED_USER_OPEN_ID);
 }
 
 async function waitFor(read, predicate, label, timeoutMs = 45_000) {
@@ -88,15 +90,26 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   ], 60_000), "default user read-only message history");
   const markerCount = (payload, marker) => JSON.stringify(payload).split(marker).length - 1;
 
-  checked(externalUser([
+  await waitFor(
+    () => parseJson(run(larkin, ["inbox", "poll", "--target", target], runtimeEnv), "Runtime target pre-drain"),
+    (payload) => Array.isArray(payload.events) && payload.events.length === 0,
+    "empty dedicated target before controlled update",
+  );
+  const emptyCheck = parseJson(run(larkin, ["inbox", "check", "--target", target], runtimeEnv), "Runtime empty target check");
+  assert.equal(emptyCheck.pending_total, 0);
+
+  const update = parseJson(externalUser([
     "im", "+messages-send", "--chat-id", chatId, "--text", updateMarker, "--as", "user",
     "--idempotency-key", `larkin-live-update-${nonce}`,
   ], 60_000), "default user controlled update send");
+  const updateMessageId = update.data?.message_id || update.data?.message?.message_id || update.message_id;
+  assert.match(updateMessageId || "", /^om_[A-Za-z0-9]+$/, "controlled update must return its exact message ID");
 
   await waitFor(
     () => parseJson(run(larkin, ["inbox", "check", "--target", target], runtimeEnv), "Runtime inbox check"),
-    (payload) => payload.targets?.some((row) => row.target === target && row.pending_count > 0),
-    "Runtime callback ingestion",
+    (payload) => payload.targets?.some((row) => row.target === target && row.pending_count > 0
+      && row.first_message_id === updateMessageId),
+    "controlled Runtime callback ingestion",
   );
 
   const held = parseJson(run(larkCli, [

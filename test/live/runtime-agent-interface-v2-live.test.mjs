@@ -44,7 +44,7 @@ function requireWriteEnvironment() {
   assert.match(configDir || "", /^\//, "LARKIN_LIVE_CONFIG_DIR must be an absolute path");
   assert.match(agentId || "", /^cli_[A-Za-z0-9]+$/, "LARKIN_LIVE_AGENT_ID must be an exact Agent App ID");
   assert.match(chatId || "", /^oc_[A-Za-z0-9]+$/, "LARKIN_LIVE_CHAT_ID must be an exact dedicated chat ID");
-  const markerMatch = /^\[larkin-runtime-interface-v2:([0-9a-f-]{36}):manual-update\]$/.exec(manualMarker);
+  const markerMatch = /^\[larkin-runtime-interface-v2:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):manual-update\]$/.exec(manualMarker);
   assert.ok(markerMatch, "LARKIN_LIVE_MANUAL_TRIGGER_MARKER must be the exact generated manual marker");
   const runtimeBin = path.join(configDir, "state", "agents", agentId, "runtime-bin");
   const larkin = path.join(runtimeBin, "larkin");
@@ -79,10 +79,14 @@ test.skipIf(!WRITE)("manually triggered dedicated Feishu chat holds a stale Bot 
   assert.match(held.draft_id || "", /^draft_/);
   assert.equal(markerCount(history(), staleMarker), 0, "held content must not reach Feishu");
 
-  const polled = parseJson(run(larkin, ["inbox", "poll", "--target", target], runtimeEnv), "Runtime target poll");
+  const polled = await waitFor(
+    () => parseJson(run(larkin, ["inbox", "poll", "--target", target], runtimeEnv), "Runtime target poll"),
+    (payload) => payload.events?.some((event) => String(event.content || "").trim() === manualMarker),
+    "exact manual marker poll",
+  );
   assert.equal(polled.delivery, "direct_ack");
   assert.equal(polled.at_most_once, true);
-  assert.ok(polled.events.some((event) => String(event.content || "").includes(manualMarker)));
+  assert.ok(polled.events.some((event) => String(event.content || "").trim() === manualMarker));
 
   checked(run(larkCli, [
     "im", "+messages-send", "--chat-id", chatId, "--text", currentMarker,

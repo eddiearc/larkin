@@ -37,6 +37,7 @@ test("release platform CI strictly builds and smokes every supported runner arch
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Build current platform release"));
   assert.match(workflow, /if: matrix\.full_test\n\s+run: bun run test/);
   assert.match(workflow, /bun scripts\/release\/build\.ts --target "\$\{\{ matrix\.target \}\}" --out-dir artifacts\/release/);
+  assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /bun run release:smoke -- --release-dir artifacts\/release/);
   assert.match(workflow, /bun run scripts\/check-publication\.mjs --tree-only artifacts\/release\/larkin-v\*/);

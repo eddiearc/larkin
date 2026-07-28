@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import {
+  redactedProcessFailureDiagnostic,
   redactedProcessOutputShape,
   runProviderWithLiveHoldReady,
   validateLiveHoldHostReady,
@@ -23,8 +24,10 @@ function run(command, args, env = process.env, timeout = 30_000) {
 }
 
 function checked(result, label) {
-  assert.equal(result.error, undefined, `${label}: process could not start`);
-  assert.equal(result.status, 0, `${label}: exit ${result.status}`);
+  if (result.error !== undefined) throw new Error(`${label}: process could not start`);
+  if (result.status !== 0) {
+    throw new Error(`${label}: exit ${result.status}; redacted failure=${JSON.stringify(redactedProcessFailureDiagnostic(result))}`);
+  }
   return result;
 }
 

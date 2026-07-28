@@ -18,6 +18,10 @@ const SYSTEM_PS = "/bin/ps";
 const SYSTEM_WHICH = "/usr/bin/which";
 const OUTPUT_SHAPE_BYTE_CAP = 4096;
 const OUTPUT_SHAPE_LINE_CAP = 20;
+const FAILURE_CATEGORY = /^[a-z][a-z0-9_]{0,63}$/i;
+const IDENTIFIER_LIKE_CATEGORY = /^(?:om|ou|oc|cli|draft|req|request|log|trace)_[a-z0-9]+$/i;
+const SCOPE_NAME = /^[a-z][a-z0-9_.]*(?::[a-z][a-z0-9_.]*)+$/i;
+const MISSING_SCOPE_CAP = 20;
 
 function redactedStreamShape(value) {
   const output = typeof value === "string" ? value : String(value ?? "");
@@ -37,6 +41,63 @@ export function redactedProcessOutputShape(result) {
     stdout: redactedStreamShape(result?.stdout),
     stderr: redactedStreamShape(result?.stderr),
   };
+}
+
+function parseJsonObject(value) {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+function safeCategory(value) {
+  return typeof value === "string" && FAILURE_CATEGORY.test(value) && !IDENTIFIER_LIKE_CATEGORY.test(value)
+    ? value : undefined;
+}
+
+function safeCode(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function safeScopes(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((scope) =>
+    typeof scope === "string" && scope.length <= 160 && SCOPE_NAME.test(scope)))]
+    .slice(0, MISSING_SCOPE_CAP);
+}
+
+export function redactedProcessFailureDiagnostic(result) {
+  const payloads = [result?.stdout, result?.stderr].map(parseJsonObject).filter((value) => value !== null);
+  if (payloads.length === 0) return { outputShape: redactedProcessOutputShape(result) };
+
+  const diagnostic = {};
+  for (const payload of payloads) {
+    const sourceError = payload.error && typeof payload.error === "object" && !Array.isArray(payload.error)
+      ? payload.error : {};
+    const error = {};
+    const type = safeCategory(sourceError.type);
+    const subtype = safeCategory(sourceError.subtype);
+    const code = safeCode(sourceError.code);
+    if (type !== undefined) error.type = type;
+    if (subtype !== undefined) error.subtype = subtype;
+    if (code !== undefined) error.code = code;
+    if (Object.keys(error).length > 0) {
+      diagnostic.error ||= {};
+      for (const [key, value] of Object.entries(error)) {
+        if (diagnostic.error[key] === undefined) diagnostic.error[key] = value;
+      }
+    }
+
+    const scopes = safeScopes(sourceError.missing_scopes ?? payload.missing_scopes);
+    if (scopes.length > 0) diagnostic.missing_scopes = [
+      ...new Set([...(diagnostic.missing_scopes || []), ...scopes]),
+    ].slice(0, MISSING_SCOPE_CAP);
+    if ((payload.identity === "user" || payload.identity === "bot") && diagnostic.identity === undefined) {
+      diagnostic.identity = payload.identity;
+    }
+  }
+  return diagnostic;
 }
 
 function owned(stat) {

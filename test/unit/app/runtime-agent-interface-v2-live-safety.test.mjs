@@ -20,6 +20,7 @@ import {
   claimHoldHostRoot,
   cleanupClaimedHoldHostRoot,
   readyProofFor,
+  redactedProcessFailureDiagnostic,
   redactedProcessOutputShape,
   runProviderWithLiveHoldReady,
   validateLiveHoldHostReady,
@@ -81,6 +82,73 @@ test("provider JSON parse diagnostics expose only bounded output shape", () => {
   const diagnostic = JSON.stringify(result);
   assert.doesNotMatch(diagnostic, new RegExp(sensitiveId));
   assert.doesNotMatch(diagnostic, new RegExp(sensitiveText));
+});
+
+test("nonzero provider diagnostics expose only validated error categories, scopes, and identity", () => {
+  const sensitiveId = "om_fixtureSensitiveMessageId";
+  const sensitiveOpenId = "ou_fixtureSensitiveUserId";
+  const sensitiveText = "fixture-sensitive-message-content";
+  const result = redactedProcessFailureDiagnostic({
+    stdout: JSON.stringify({
+      ok: false,
+      identity: "user",
+      request_id: sensitiveId,
+      args: ["--text", sensitiveText, "--open-id", sensitiveOpenId],
+      content: sensitiveText,
+      error: {
+        type: "api_error",
+        subtype: "app_scope_not_applied",
+        code: 99991672,
+        message: `${sensitiveText}: ${sensitiveId}`,
+        hint: `contact ${sensitiveOpenId}`,
+        log_id: sensitiveId,
+        missing_scopes: [
+          "im:message",
+          "im:chat.members:write_only",
+          sensitiveId,
+          "../private",
+          `im:${sensitiveText}`,
+          123,
+        ],
+      },
+    }),
+    stderr: JSON.stringify({
+      identity: sensitiveOpenId,
+      error: { type: sensitiveId, subtype: sensitiveText, code: sensitiveId },
+      message: sensitiveText,
+    }),
+  });
+  assert.deepEqual(result, {
+    error: { type: "api_error", subtype: "app_scope_not_applied", code: 99991672 },
+    missing_scopes: ["im:message", "im:chat.members:write_only"],
+    identity: "user",
+  });
+  const diagnostic = JSON.stringify(result);
+  for (const sensitive of [sensitiveId, sensitiveOpenId, sensitiveText]) {
+    assert.equal(diagnostic.includes(sensitive), false, `diagnostic must redact ${sensitive}`);
+  }
+  for (const forbiddenKey of ["args", "content", "message", "hint", "log_id", "request_id"]) {
+    assert.equal(Object.hasOwn(result, forbiddenKey), false, `diagnostic must omit ${forbiddenKey}`);
+    assert.equal(Object.hasOwn(result.error, forbiddenKey), false, `diagnostic error must omit ${forbiddenKey}`);
+  }
+});
+
+test("non-JSON provider failures retain only bounded output shape", () => {
+  const sensitiveId = "om_fixtureOpaqueFailureId";
+  const sensitiveText = "fixture-opaque-sensitive-content";
+  const result = redactedProcessFailureDiagnostic({
+    stdout: `${sensitiveId} ${sensitiveText}\n${"x".repeat(5000)}`,
+    stderr: `${sensitiveText}\n${sensitiveId}`,
+  });
+  assert.deepEqual(result, {
+    outputShape: {
+      stdout: { present: true, byteLength: 4096, byteLengthCapped: true, lineCount: 2, lineCountCapped: false },
+      stderr: { present: true, byteLength: 58, byteLengthCapped: false, lineCount: 2, lineCountCapped: false },
+    },
+  });
+  const diagnostic = JSON.stringify(result);
+  assert.equal(diagnostic.includes(sensitiveId), false);
+  assert.equal(diagnostic.includes(sensitiveText), false);
 });
 
 test("hold RuntimeHost never starts a Runtime and always defers delivery", async () => {
@@ -291,4 +359,6 @@ test("history capability succeeds before any drain or external send in the write
     "provider sends must not bypass the shared JSON-send builder");
   assert.match(source, /redacted output shape=.*redactedProcessOutputShape\(completed\)/,
     "JSON parse failures must report only bounded redacted process-output shape");
+  assert.match(source, /redacted failure=.*redactedProcessFailureDiagnostic\(result\)/,
+    "nonzero provider failures must use the strict JSON allowlist or bounded output shape");
 });

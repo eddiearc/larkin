@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { validateLiveHoldHostReady } from "../support/runtime-agent-interface-v2-live-hold-safety.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RUN = process.env.LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE === "1";
@@ -98,6 +99,7 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   // Fail before poll/drain or either external send when message-history scopes
   // are unavailable. This keeps an authorization failure at zero writes.
   history();
+  validateLiveHoldHostReady(configDir, agentId);
 
   await waitFor(
     () => parseJson(run(larkin, ["inbox", "poll", "--target", target], runtimeEnv), "Runtime target pre-drain"),

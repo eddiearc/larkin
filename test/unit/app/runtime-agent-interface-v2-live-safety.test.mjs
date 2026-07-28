@@ -1,15 +1,45 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { test } from "bun:test";
+import { spawn, spawnSync } from "node:child_process";
+import { onTestFinished, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
-import { createDeferredRuntimeHost } from "../../live/runtime-agent-interface-v2-hold-host.mjs";
+import {
+  acquireGlobalLaunchLock,
+  createDeferredRuntimeHost,
+  finalizeHoldHostResources,
+  materializeBotOnlyProfile,
+} from "../../live/runtime-agent-interface-v2-hold-host.mjs";
+import {
+  HOLD_DRIVER_BASENAME,
+  HOLD_HOST_COMMAND_TOKEN,
+  HOLD_READY_MAX_AGE_MS,
+  HOLD_TEMP_ROOT_PREFIX,
+  claimHoldHostRoot,
+  cleanupClaimedHoldHostRoot,
+  readyProofFor,
+  validateLiveHoldHostReady,
+  writePrivateJson,
+} from "../../support/runtime-agent-interface-v2-live-hold-safety.mjs";
+import { inspectProcess } from "../../../dist/platform/process-state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const DRIVER = path.join(ROOT, "test", "live", "runtime-agent-interface-v2-hold-host.mjs");
 const HARNESS = path.join(ROOT, "test", "live", "runtime-agent-interface-v2-live.test.mjs");
+
+function freshHoldRoot(prefix = HOLD_TEMP_ROOT_PREFIX) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.chmodSync(directory, 0o700);
+  return directory;
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
 
 test("live hold-host entry is default-deny and package script does not opt in", () => {
   const env = { ...process.env };
@@ -35,28 +65,163 @@ test("hold RuntimeHost never starts a Runtime and always defers delivery", async
   }
 });
 
+test("hold root claim rejects unsafe path/mode and cleanup requires the sentinel before removing credentials", () => {
+  const wrongName = freshHoldRoot("larkin-wrong-live-root-");
+  assert.throws(() => claimHoldHostRoot(wrongName), /system-temp child/);
+  fs.rmdirSync(wrongName);
+
+  const wrongMode = freshHoldRoot();
+  fs.chmodSync(wrongMode, 0o755);
+  assert.throws(() => claimHoldHostRoot(wrongMode), /owned 0700/);
+  fs.chmodSync(wrongMode, 0o700);
+  fs.rmdirSync(wrongMode);
+
+  const target = freshHoldRoot();
+  const claim = claimHoldHostRoot(target, { nonce: "fixture-root-nonce", ownerPid: process.pid });
+  const privateDir = path.join(claim.targetRoot, "bots");
+  fs.mkdirSync(privateDir, { mode: 0o700 });
+  fs.writeFileSync(path.join(privateDir, "credential.json"), "fixture", { mode: 0o600 });
+  fs.chmodSync(claim.sentinelFile, 0o644);
+  assert.throws(() => cleanupClaimedHoldHostRoot(claim), /0600/);
+  assert.equal(fs.existsSync(claim.targetRoot), true, "failed ownership proof must preserve the root");
+  fs.chmodSync(claim.sentinelFile, 0o600);
+  cleanupClaimedHoldHostRoot(claim);
+  assert.equal(fs.existsSync(target), false, "validated cleanup must remove the whole credential-bearing root");
+});
+
+test("source launch lock rejects a competing hold-host owner", () => {
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-live-source-lock-"));
+  fs.chmodSync(sourceRoot, 0o700);
+  const commandToken = path.basename(process.execPath);
+  const first = acquireGlobalLaunchLock(sourceRoot, commandToken);
+  try {
+    assert.throws(() => acquireGlobalLaunchLock(sourceRoot, commandToken), /lock.*(?:占用|occupied)/i);
+  } finally {
+    first.release();
+    fs.rmdirSync(sourceRoot);
+  }
+});
+
+test("abnormal finalization cleans the claimed credential root and releases the global lock before failing", async () => {
+  const target = freshHoldRoot();
+  const claim = claimHoldHostRoot(target);
+  fs.mkdirSync(path.join(claim.targetRoot, "bots"), { mode: 0o700 });
+  fs.writeFileSync(path.join(claim.targetRoot, "bots", "credential.json"), "fixture", { mode: 0o600 });
+  const order = [];
+  const host = { async shutdown() { order.push("shutdown"); throw new Error("fixture shutdown failure"); } };
+  const launchLock = { release() { order.push("release"); } };
+  await assert.rejects(
+    finalizeHoldHostResources({ host, claim, launchLock, failure: new Error("fixture primary failure") }),
+    /fixture primary failure.*Host shutdown failed/,
+  );
+  assert.deepEqual(order, ["shutdown", "release"]);
+  assert.equal(fs.existsSync(target), false, "abnormal finalization must still remove the credential-bearing root");
+});
+
+test("direct Bot-only profile materialization keeps the secret local and never creates a keychain reference", () => {
+  const target = freshHoldRoot();
+  const claim = claimHoldHostRoot(target);
+  const stateDir = path.join(claim.targetRoot, "state", "agents", "cli_fixtureA");
+  const larkConfigDir = path.join(stateDir, "lark-cli-config");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  try {
+    materializeBotOnlyProfile({
+      stateDir,
+      larkConfigDir,
+      feishuAppId: "cli_fixtureA",
+      feishuAppSecret: "fixture-secret",
+      feishuDomain: "https://open.feishu.cn",
+    });
+    const profile = JSON.parse(fs.readFileSync(path.join(larkConfigDir, "config.json"), "utf8"));
+    assert.deepEqual(profile.apps, [{
+      appId: "cli_fixtureA", name: "cli_fixtureA", appSecret: "fixture-secret", brand: "feishu",
+      defaultAs: "bot", strictMode: "bot", users: [],
+    }]);
+    assert.equal(typeof profile.apps[0].appSecret, "string");
+    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), true);
+  } finally {
+    cleanupClaimedHoldHostRoot(claim);
+  }
+});
+
+test("ready proof binds a fresh channel to the live exact process, root inode, config, and daemon status", async () => {
+  const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)", HOLD_DRIVER_BASENAME, HOLD_HOST_COMMAND_TOKEN], {
+    stdio: "ignore",
+  });
+  onTestFinished(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const inspected = inspectProcess(child.pid);
+  assert.equal(inspected.ok, true, inspected.reason);
+  const target = freshHoldRoot();
+  const claim = claimHoldHostRoot(target, { nonce: "ready-fixture-nonce", ownerPid: child.pid });
+  const agentId = "cli_fixtureA";
+  const connectedAt = new Date().toISOString();
+  try {
+    writePrivateJson(path.join(claim.targetRoot, "config.json"), {
+      version: 4, serverId: "fixture", mentionPolicy: "require", activeAgent: agentId,
+      agents: { [agentId]: { runtime: "codex", model: "fixture" } },
+    });
+    writePrivateJson(path.join(claim.targetRoot, "daemon-status.json"), {
+      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId],
+    });
+    writeJson(path.join(claim.targetRoot, "state", "agents", agentId, "status.json"), {
+      connectedVia: "channel", connectedAt, reconnectingAt: null,
+    });
+    const identity = { pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN };
+    writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt }));
+    const validated = validateLiveHoldHostReady(claim.targetRoot, agentId);
+    assert.equal(validated.inspected.startToken, inspected.startToken);
+    assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId, {
+      nowMs: Date.parse(connectedAt) + HOLD_READY_MAX_AGE_MS + 1,
+    }), /stale/);
+    fs.chmodSync(claim.readyFile, 0o644);
+    assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /0600/);
+    fs.chmodSync(claim.readyFile, 0o600);
+
+    const wrong = JSON.parse(fs.readFileSync(claim.readyFile, "utf8"));
+    wrong.processStartToken = "wrong-start-token";
+    fs.writeFileSync(claim.readyFile, `${JSON.stringify(wrong)}\n`);
+    assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /process identity/);
+    fs.writeFileSync(claim.readyFile, `${JSON.stringify(readyProofFor(claim, { agentId, identity, connectedAt }))}\n`);
+
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", resolve));
+    assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /process identity/);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    cleanupClaimedHoldHostRoot(claim);
+  }
+});
+
 test("driver proves the audited sole-Host boundary without managing launchd", () => {
   const source = fs.readFileSync(DRIVER, "utf8");
   assert.match(source, /com\.eddiearc\.larkin/);
   assert.match(source, /\/opt\/homebrew\/bin\/larkin/);
-  assert.match(source, /\["print", `gui\/\$\{process\.getuid\(\)\}\/\$\{LAUNCHD_LABEL\}`\]/);
+  assert.match(source, /spawnSync\(LAUNCHCTL, \["print"/);
   assert.doesNotMatch(source, /\[\s*["'](?:bootout|bootstrap|kickstart|kill)["']/);
   assert.match(source, /isolatedAgentIds\.length !== 1/);
-  assert.match(source, /HOLD_HOST_COMMAND_TOKEN = "app\/runtime-process\.mjs"/);
-  assert.match(source, /currentProcessMetadata\(path\.basename\(fileURLToPath\(import\.meta\.url\)\)\)/);
+  assert.match(source, /currentProcessMetadata\(HOLD_DRIVER_BASENAME\)/);
   assert.match(source, /currentProcessMetadata\(HOLD_HOST_COMMAND_TOKEN\)/);
-  assert.match(source, /path\.dirname\(readyFile\) !== targetRoot/);
+  assert.match(source, /acquireGlobalLaunchLock\(sourceRoot\)/);
+  assert.match(source, /cleanupClaimedHoldHostRoot\(claim\)/);
   assert.match(source, /runtimeHost: createDeferredRuntimeHost\(\)/);
   assert.match(source, /execFileImpl: refuseAncillaryLarkCli/,
     "processing-eye reactions and other host-shell lark-cli calls must stay blocked");
+  assert.doesNotMatch(source, /syncAgentProfile|\[\s*"config"\s*,\s*"init"|keychain-downgrade/i,
+    "live driver must not execute lark-cli configuration or keychain commands");
+  assert.match(source, /writes the supported plaintext Bot-only profile/);
+  for (const absolute of ["/usr/bin/plutil", "/bin/launchctl", "/bin/ps"]) assert.match(source, new RegExp(absolute));
 });
 
 test("history capability succeeds before any drain or external send in the write harness", () => {
   const source = fs.readFileSync(HARNESS, "utf8");
   const preflight = source.indexOf("\n  history();");
+  const ready = source.indexOf("validateLiveHoldHostReady(configDir, agentId)");
   const drain = source.indexOf("Runtime target pre-drain");
   const send = source.indexOf('"im", "+messages-send"');
   assert.ok(preflight >= 0, "history capability preflight must exist");
+  assert.ok(ready > preflight, "live process/root/channel proof must follow external read capability");
+  assert.ok(ready < drain, "live process/root/channel proof must precede target drain");
   assert.ok(preflight < drain, "history capability must precede target drain");
   assert.ok(preflight < send, "history capability must precede external send");
 });

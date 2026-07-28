@@ -6,17 +6,26 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { hydrateRuntimeAgent, syncAgentProfile } from "../../dist/app/runtime-agent-config.mjs";
+import { hydrateRuntimeAgent, installRuntimeCommandShims } from "../../dist/app/runtime-agent-config.mjs";
 import { createHostShell } from "../../dist/feishu/host-shell.mjs";
 import { loadConfig, toStored } from "../../dist/platform/config.mjs";
-import { currentProcessMetadata, readProcessState } from "../../dist/platform/process-state.mjs";
+import { acquireProcessLock, currentProcessMetadata, readProcessState } from "../../dist/platform/process-state.mjs";
 import { loadValidatedBotCredential } from "../../dist/setup/run-credential-preflight.mjs";
+import {
+  HOLD_DRIVER_BASENAME,
+  HOLD_HOST_COMMAND_TOKEN,
+  assertProductionInspectUsesTrustedPs,
+  claimHoldHostRoot,
+  cleanupClaimedHoldHostRoot,
+  readyProofFor,
+  writePrivateJson,
+} from "../support/runtime-agent-interface-v2-live-hold-safety.mjs";
 
-export const HOLD_HOST_COMMAND_TOKEN = "app/runtime-process.mjs";
 const LAUNCHD_LABEL = "com.eddiearc.larkin";
 const LAUNCHD_PROGRAM_ARGUMENTS = ["/opt/homebrew/bin/larkin", "start"];
-const TEMP_ROOT_PREFIX = "larkin-runtime-interface-v2-hold-";
-const READY_BASENAME = "runtime-interface-v2-hold-host-ready.json";
+const PLUTIL = "/usr/bin/plutil";
+const LAUNCHCTL = "/bin/launchctl";
+const PS = "/bin/ps";
 
 function required(env, name) {
   const value = env[name];
@@ -32,16 +41,6 @@ function assertOwnedDirectory(directory, label, exactMode = 0o700) {
     throw new Error(`${label} must be an owned non-symlink directory with mode ${exactMode.toString(8)}`);
   }
   return fs.realpathSync(directory);
-}
-
-function writePrivateJson(file, value) {
-  const fd = fs.openSync(file, "wx", 0o600);
-  try {
-    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
 }
 
 function assertExplicitGate(env) {
@@ -68,7 +67,7 @@ function assertLaunchdRecoveryAndBootout(home) {
       || stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
     throw new Error("launchd recovery plist is missing or unsafe");
   }
-  const parsed = spawnSync("plutil", ["-convert", "json", "-o", "-", plist], { encoding: "utf8" });
+  const parsed = spawnSync(PLUTIL, ["-convert", "json", "-o", "-", plist], { encoding: "utf8" });
   if (parsed.error || parsed.status !== 0) throw new Error("launchd recovery plist cannot be audited");
   let payload;
   try { payload = JSON.parse(parsed.stdout); }
@@ -78,7 +77,7 @@ function assertLaunchdRecoveryAndBootout(home) {
       || payload.KeepAlive !== true || payload.RunAtLoad !== true) {
     throw new Error("launchd recovery identity does not match the audited Larkin service");
   }
-  const printed = spawnSync("launchctl", ["print", `gui/${process.getuid()}/${LAUNCHD_LABEL}`], {
+  const printed = spawnSync(LAUNCHCTL, ["print", `gui/${process.getuid()}/${LAUNCHD_LABEL}`], {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C", LANG: "C" },
   });
@@ -95,7 +94,7 @@ function assertNoGlobalHost(sourceRoot) {
       throw new Error(`global ${role} is ${record.state}; refuse a second Host connection`);
     }
   }
-  const listed = spawnSync("ps", ["-axo", "pid=,command="], {
+  const listed = spawnSync(PS, ["-axo", "pid=,command="], {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C", LANG: "C" },
   });
@@ -119,17 +118,28 @@ function resolveSafeRoots(env) {
   const sourceRoot = assertOwnedDirectory(sourceInput, "source root");
   const expectedSource = fs.realpathSync(path.join(home, ".larkin"));
   if (sourceRoot !== expectedSource) throw new Error("source root must be the audited global ~/.larkin root");
-  const targetRoot = assertOwnedDirectory(targetInput, "isolated root");
-  const tempRoot = fs.realpathSync(os.tmpdir());
-  if (path.dirname(targetRoot) !== tempRoot || !path.basename(targetRoot).startsWith(TEMP_ROOT_PREFIX)) {
-    throw new Error(`isolated root must be a direct ${TEMP_ROOT_PREFIX}* child of the system temp directory`);
-  }
-  if (targetRoot === sourceRoot || fs.readdirSync(targetRoot).length !== 0) {
-    throw new Error("isolated root must be distinct and empty");
-  }
-  const readyFile = path.join(targetRoot, READY_BASENAME);
-  if (path.dirname(readyFile) !== targetRoot || fs.existsSync(readyFile)) throw new Error("ready path is unsafe");
-  return { home, sourceRoot, targetRoot, readyFile };
+  if (fs.realpathSync(targetInput) === sourceRoot) throw new Error("isolated root must be distinct from source root");
+  return { home, sourceRoot, targetInput };
+}
+
+export function materializeBotOnlyProfile(runtimeAgent) {
+  // @larksuite/cli 1.0.57 config init may persist appSecret through macOS
+  // Keychain. The live driver writes the supported plaintext Bot-only profile
+  // directly into its disposable 0700 root, then removes that whole root.
+  fs.mkdirSync(runtimeAgent.larkConfigDir, { recursive: true, mode: 0o700 });
+  const profileDir = assertOwnedDirectory(runtimeAgent.larkConfigDir, "isolated lark-cli profile");
+  writePrivateJson(path.join(profileDir, "config.json"), {
+    apps: [{
+      appId: runtimeAgent.feishuAppId,
+      name: runtimeAgent.feishuAppId,
+      appSecret: runtimeAgent.feishuAppSecret,
+      brand: runtimeAgent.feishuDomain === "https://open.larksuite.com" ? "lark" : "feishu",
+      defaultAs: "bot",
+      strictMode: "bot",
+      users: [],
+    }],
+  });
+  installRuntimeCommandShims(runtimeAgent);
 }
 
 function stageSingleAgentRoot(sourceRoot, targetRoot, agentId, env) {
@@ -157,8 +167,32 @@ function stageSingleAgentRoot(sourceRoot, targetRoot, agentId, env) {
     throw new Error("isolated config is not an exact single-Agent config");
   }
   const runtimeAgent = hydrateRuntimeAgent(targetRoot, isolated.config.agents[agentId]);
-  syncAgentProfile(runtimeAgent, { ...env, LARKIN_CONFIG_DIR: targetRoot, LARKIN_AGENT_ID: agentId });
+  materializeBotOnlyProfile(runtimeAgent);
   return { isolated, runtimeAgent };
+}
+
+export function acquireGlobalLaunchLock(sourceRoot, commandToken = HOLD_HOST_COMMAND_TOKEN) {
+  return acquireProcessLock(path.join(sourceRoot, "supervisor-launch.lock.json"), commandToken);
+}
+
+export async function finalizeHoldHostResources({ host, claim, launchLock, failure }) {
+  const finalizationErrors = [];
+  if (host) {
+    try { await host.shutdown("hold-host finalization"); }
+    catch (error) { finalizationErrors.push(`Host shutdown failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  if (claim) {
+    try { cleanupClaimedHoldHostRoot(claim); }
+    catch (error) { finalizationErrors.push(`isolated root cleanup failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  if (launchLock) {
+    try { launchLock.release(); }
+    catch (error) { finalizationErrors.push(`global launch lock release failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  if (finalizationErrors.length) {
+    throw new Error([failure instanceof Error ? failure.message : failure, ...finalizationErrors].filter(Boolean).join("; "));
+  }
+  if (failure) throw failure;
 }
 
 export function createDeferredRuntimeHost() {
@@ -210,56 +244,73 @@ async function waitForConnected(statusFile, startedMs, stopped, timeoutMs = 30_0
 
 export async function main(env = process.env) {
   assertExplicitGate(env);
-  currentProcessMetadata(path.basename(fileURLToPath(import.meta.url)));
+  assertProductionInspectUsesTrustedPs(env);
+  currentProcessMetadata(HOLD_DRIVER_BASENAME);
   const identity = currentProcessMetadata(HOLD_HOST_COMMAND_TOKEN);
   const agentId = required(env, "LARKIN_LIVE_AGENT_ID");
   if (!/^cli_[A-Za-z0-9]+$/.test(agentId)) throw new Error("LARKIN_LIVE_AGENT_ID must be an exact Agent App ID");
-  const { home, sourceRoot, targetRoot, readyFile } = resolveSafeRoots(env);
-  assertLaunchdRecoveryAndBootout(home);
-  assertNoGlobalHost(sourceRoot);
-
-  const { isolated, runtimeAgent } = stageSingleAgentRoot(sourceRoot, targetRoot, agentId, env);
-  const hostEnv = {
-    ...env,
-    LARKIN_HOME: targetRoot,
-    LARKIN_CONFIG_DIR: targetRoot,
-    LARKIN_AGENT_ID: agentId,
-    LARKIN_SERVER_ID: isolated.config.serverId,
-    LARKIN_AGENTS_CONFIG: JSON.stringify([runtimeAgent]),
-    LARKSUITE_CLI_CONFIG_DIR: runtimeAgent.larkConfigDir,
-    LARKIN_INBOUND_DROUGHT_SEC: "0",
-  };
-  let resolveStopped;
-  const stopped = new Promise((resolve) => { resolveStopped = resolve; });
-  const host = createHostShell({
-    env: hostEnv,
-    runtimeHost: createDeferredRuntimeHost(),
-    eventSourceStartDelayMs: 0,
-    execFileImpl: refuseAncillaryLarkCli,
-    onOrderedShutdownComplete(exitCode) { resolveStopped(exitCode); },
-  });
-  const startedMs = Date.now();
-  await host.start();
-  let connectedAt;
+  const { home, sourceRoot, targetInput } = resolveSafeRoots(env);
+  let claim;
+  let launchLock;
+  let host;
+  let exitCode = 0;
+  let failure;
+  let requestedSignal = null;
+  const rememberSignal = (signal) => { requestedSignal = requestedSignal || signal; };
+  const onSigint = () => rememberSignal("SIGINT");
+  const onSigterm = () => rememberSignal("SIGTERM");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
   try {
-    connectedAt = await waitForConnected(path.join(runtimeAgent.stateDir, "status.json"), startedMs, stopped);
+    claim = claimHoldHostRoot(targetInput);
+    assertLaunchdRecoveryAndBootout(home);
+    assertNoGlobalHost(sourceRoot);
+    launchLock = acquireGlobalLaunchLock(sourceRoot);
+    // Close the check-to-lock race: once this passes, a concurrent larkin start
+    // cannot acquire the production launch lock until this Host is fully down.
+    assertLaunchdRecoveryAndBootout(home);
+    assertNoGlobalHost(sourceRoot);
+    if (requestedSignal) throw new Error(`hold-host interrupted before channel start (${requestedSignal})`);
+
+    const { isolated, runtimeAgent } = stageSingleAgentRoot(sourceRoot, claim.targetRoot, agentId, env);
+    if (requestedSignal) throw new Error(`hold-host interrupted during isolated staging (${requestedSignal})`);
+    const hostEnv = {
+      ...env,
+      LARKIN_HOME: claim.targetRoot,
+      LARKIN_CONFIG_DIR: claim.targetRoot,
+      LARKIN_AGENT_ID: agentId,
+      LARKIN_SERVER_ID: isolated.config.serverId,
+      LARKIN_AGENTS_CONFIG: JSON.stringify([runtimeAgent]),
+      LARKSUITE_CLI_CONFIG_DIR: runtimeAgent.larkConfigDir,
+      LARKIN_INBOUND_DROUGHT_SEC: "0",
+    };
+    let resolveStopped;
+    const stopped = new Promise((resolve) => { resolveStopped = resolve; });
+    host = createHostShell({
+      env: hostEnv,
+      runtimeHost: createDeferredRuntimeHost(),
+      eventSourceStartDelayMs: 0,
+      execFileImpl: refuseAncillaryLarkCli,
+      onOrderedShutdownComplete(code) { resolveStopped(code); },
+    });
+    if (requestedSignal) throw new Error(`hold-host interrupted before Host start (${requestedSignal})`);
+    const startedMs = Date.now();
+    await host.start();
+    if (requestedSignal) throw new Error(`hold-host interrupted during Host start (${requestedSignal})`);
+    const connectedAt = await waitForConnected(path.join(runtimeAgent.stateDir, "status.json"), startedMs, stopped);
+    writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt }));
+    process.stderr.write(`[live-hold-host] ready; isolated root=${claim.targetRoot}; Runtime delivery=always-deferred\n`);
+    exitCode = await stopped;
+    if (exitCode !== 0) throw new Error(`hold-host stopped with exit=${exitCode}`);
   } catch (error) {
-    await host.shutdown("hold-host readiness failed").catch(() => {});
-    throw error;
+    failure = error;
+  } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    try { await finalizeHoldHostResources({ host, claim, launchLock, failure }); }
+    catch (error) { failure = error; }
   }
-  writePrivateJson(readyFile, {
-    version: 1,
-    ready: true,
-    pid: identity.pid,
-    processStartToken: identity.processStartToken,
-    commandToken: identity.commandToken,
-    connectedAt,
-    agentCount: 1,
-    runtimeDelivery: "always-deferred",
-  });
-  process.stderr.write(`[live-hold-host] ready; isolated root=${targetRoot}; Runtime delivery=always-deferred\n`);
-  const exitCode = await stopped;
-  try { fs.unlinkSync(readyFile); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  if (failure) throw failure;
   process.exitCode = exitCode;
 }
 

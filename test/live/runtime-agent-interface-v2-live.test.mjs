@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import {
+  liveUpdateIdempotencyKey,
   redactedProcessFailureDiagnostic,
   redactedProcessOutputShape,
   runProviderWithLiveHoldReady,
@@ -96,6 +97,7 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   const { configDir, agentId, chatId, larkin, larkCli } = requireWriteEnvironment();
   const runtimeEnv = { ...process.env, LARKIN_CONFIG_DIR: configDir, LARKIN_AGENT_ID: agentId };
   const nonce = crypto.randomUUID();
+  const updateIdempotencyKey = liveUpdateIdempotencyKey(nonce);
   const updateMarker = `[larkin-runtime-interface-v2:${nonce}:update]`;
   const staleMarker = `[larkin-runtime-interface-v2:${nonce}:stale-must-not-send]`;
   const currentMarker = `[larkin-runtime-interface-v2:${nonce}:current]`;
@@ -128,7 +130,7 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
 
   const update = parseJson(provider("controlled user send", () => externalUser(messageSendArgs(
     "--chat-id", chatId, "--text", updateMarker, "--as", "user",
-    "--idempotency-key", `larkin-live-update-${nonce}`,
+    "--idempotency-key", updateIdempotencyKey,
   ), 60_000)), "default user controlled update send");
   const updateMessageId = update.data?.message_id || update.data?.message?.message_id || update.message_id;
   assert.match(updateMessageId || "", /^om_[A-Za-z0-9]+$/, "controlled update must return its exact message ID");

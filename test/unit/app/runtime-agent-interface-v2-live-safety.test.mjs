@@ -19,6 +19,7 @@ import {
   HOLD_TEMP_ROOT_PREFIX,
   claimHoldHostRoot,
   cleanupClaimedHoldHostRoot,
+  liveUpdateIdempotencyKey,
   readyProofFor,
   redactedProcessFailureDiagnostic,
   redactedProcessOutputShape,
@@ -54,6 +55,16 @@ test("live hold-host entry is default-deny and package script does not opt in", 
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   assert.equal(pkg.scripts["test:live:runtime-agent-interface-v2:hold-host"],
     "bun run build && bun run test/live/runtime-agent-interface-v2-hold-host.mjs app/runtime-process.mjs");
+});
+
+test("controlled update idempotency key stays within Feishu's limit and preserves the exact nonce", () => {
+  const nonce = "123e4567-e89b-12d3-a456-426614174000";
+  const key = liveUpdateIdempotencyKey(nonce);
+  assert.equal(key, `lk-${nonce}`);
+  assert.equal(key.slice("lk-".length), nonce);
+  assert.equal(Buffer.byteLength(key), 39);
+  assert.ok(Buffer.byteLength(key) <= 50);
+  assert.throws(() => liveUpdateIdempotencyKey("x".repeat(48)), /must not exceed 50 bytes/);
 });
 
 test("provider JSON parse diagnostics expose only bounded output shape", () => {

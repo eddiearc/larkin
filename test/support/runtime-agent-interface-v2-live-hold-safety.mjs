@@ -35,6 +35,16 @@ const SAFE_MISSING_SCOPES = new Set([
   "im:message.send_as_user",
   "im:message",
 ]);
+const IDEMPOTENCY_KEY_MAX_BYTES = 50;
+
+export function liveUpdateIdempotencyKey(nonce) {
+  if (typeof nonce !== "string" || nonce.length === 0) throw new Error("live update nonce must be a non-empty string");
+  const key = `lk-${nonce}`;
+  if (Buffer.byteLength(key) > IDEMPOTENCY_KEY_MAX_BYTES) {
+    throw new Error(`live update idempotency key must not exceed ${IDEMPOTENCY_KEY_MAX_BYTES} bytes`);
+  }
+  return key;
+}
 
 function redactedStreamShape(value) {
   const output = typeof value === "string" ? value : String(value ?? "");

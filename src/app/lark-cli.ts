@@ -50,6 +50,11 @@ const PROTECTED_VALUE_FLAGS = new Set([
 const RAW_IM_WRITE_OPERATIONS = new Set([
   "create", "reply", "patch", "update", "forward", "merge_forward", "delete", "urgent_app", "urgent_phone", "urgent_sms",
 ]);
+const HISTORY_VALUE_FLAGS = new Set([
+  ...POLICY_VALUE_FLAGS,
+  "--start", "--end", "--order", "--sort", "--page-size", "--page-token", "--thread",
+  "--format", "--jq", "-q", "--download-dir",
+]);
 
 type ProtectedOperation = "send" | "reply" | "card-patch" | "card-update" | "raw-create" | "raw-reply"
   | "raw-forward" | "raw-merge_forward" | "raw-delete" | "raw-urgent_app" | "raw-urgent_phone" | "raw-urgent_sms"
@@ -365,15 +370,34 @@ function freshnessGeneration(env: Env): string {
 }
 
 function rawFlagValue(argv: readonly string[], flag: string): string | null {
-  const direct = argv.indexOf(flag);
-  if (direct >= 0) return argv[direct + 1] ?? null;
-  const inline = argv.find((argument) => argument.startsWith(`${flag}=`));
+  const nativeArgv = nativeArgvBeforeBoundary(argv);
+  const direct = nativeArgv.indexOf(flag);
+  if (direct >= 0) return nativeArgv[direct + 1] ?? null;
+  const inline = nativeArgv.find((argument) => argument.startsWith(`${flag}=`));
   return inline ? inline.slice(flag.length + 1) : null;
 }
 
+function historyShortcut(argv: readonly string[]): "+chat-messages-list" | "+threads-messages-list" | null {
+  const positional: string[] = [];
+  const nativeArgv = nativeArgvBeforeBoundary(argv);
+  for (let index = 0; index < nativeArgv.length; index += 1) {
+    const argument = nativeArgv[index];
+    const inlineFlag = [...HISTORY_VALUE_FLAGS].find((flag) => argument.startsWith(`${flag}=`));
+    if (inlineFlag) continue;
+    if (HISTORY_VALUE_FLAGS.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("-")) continue;
+    positional.push(argument);
+  }
+  if (positional.length !== 2 || positional[0] !== "im") return null;
+  return positional[1] === "+chat-messages-list" || positional[1] === "+threads-messages-list"
+    ? positional[1] : null;
+}
+
 function boundedHistoryArgv(argv: readonly string[]): string[] {
-  if (!exactPath(argv, ["im", "+chat-messages-list"])
-      && !exactPath(argv, ["im", "+threads-messages-list"])) return [...argv];
+  if (!historyShortcut(argv)) return [...argv];
   const boundary = argv.indexOf("--");
   const commandArgv = boundary < 0 ? argv : argv.slice(0, boundary);
   if (commandArgv.includes("--page-size")
@@ -388,7 +412,7 @@ function conditionalHeadReadTarget(argv: readonly string[]): FreshnessTarget | n
       || argv.some((argument) => argument.startsWith(`${flag}=`)))) return null;
   const format = rawFlagValue(argv, "--format");
   if (format && format !== "json") return null;
-  if (exactPath(argv, ["im", "+chat-messages-list"])) {
+  if (historyShortcut(argv) === "+chat-messages-list") {
     const chatId = rawFlagValue(argv, "--chat-id");
     const order = rawFlagValue(argv, "--order") ?? "desc";
     return chatId && order === "desc" ? feishuImTarget(`chat:${chatId}`) : null;
@@ -397,7 +421,7 @@ function conditionalHeadReadTarget(argv: readonly string[]): FreshnessTarget | n
 }
 
 function eligibleThreadHeadRead(argv: readonly string[]): string | null {
-  if (!exactPath(argv, ["im", "+threads-messages-list"])) return null;
+  if (historyShortcut(argv) !== "+threads-messages-list") return null;
   if (["--page-token", "--jq", "-q"].some((flag) => argv.includes(flag)
       || argv.some((argument) => argument.startsWith(`${flag}=`)))) return null;
   const format = rawFlagValue(argv, "--format");

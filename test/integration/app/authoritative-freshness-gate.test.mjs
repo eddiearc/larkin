@@ -425,6 +425,24 @@ test("formatted public chat/thread shortcuts preserve stdout and advance only af
   }
 });
 
+test("normalized and prefixed history shortcuts use the same default 20 window", () => {
+  const f = fixture();
+  try {
+    for (const argv of [
+      ["--json", "im", "+chat-messages-list", "--chat-id", "oc_prefixed", "--order", "desc"],
+      ["im", "--json", "+threads-messages-list", "--thread", "omt_prefixed", "--order", "desc"],
+    ]) {
+      const command = argv.includes("+chat-messages-list") ? "+chat-messages-list" : "+threads-messages-list";
+      const result = f.lark(argv, {
+        LARKIN_TEST_PROVIDER_STDOUT: JSON.stringify({ ok: true, identity: "bot", data: { messages: [] } }),
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const shortcut = f.calls().findLast((call) => call.argv.includes(command));
+      assert.equal(shortcut.argv[shortcut.argv.indexOf("--page-size") + 1], "20");
+    }
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("a raw reconciliation race or ID mismatch never acknowledges an undisplayed head", () => {
   const f = fixture();
   try {

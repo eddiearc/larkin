@@ -132,6 +132,17 @@ test("Runtime-bound history shortcuts default to 20 while preserving explicit pa
     const bounded = f.calls.slice(boundaryBefore).find((call) => call.args[2] === "+chat-messages-list").args.slice(1);
     const boundary = bounded.indexOf("--");
     assert.deepEqual(bounded.slice(boundary - 2), ["--page-size", "20", "--", "--page-size", "99"]);
+
+    for (const argv of [
+      ["--json", "im", "+chat-messages-list", "--chat-id", "oc_prefixed", "--order", "desc"],
+      ["im", "--json", "+threads-messages-list", "--thread", "omt_middle", "--order", "desc"],
+    ]) {
+      const before = f.calls.length;
+      f.run(argv);
+      const shortcut = f.calls.slice(before).find((call) => call.args.includes(argv.includes("+chat-messages-list")
+        ? "+chat-messages-list" : "+threads-messages-list")).args.slice(1);
+      assert.equal(shortcut[shortcut.indexOf("--page-size") + 1], "20");
+    }
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

@@ -104,6 +104,7 @@ test("nonzero provider diagnostics expose only validated error categories, scope
         log_id: sensitiveId,
         missing_scopes: [
           "im:message",
+          "im:message.send_as_user",
           "im:chat.members:write_only",
           sensitiveId,
           "../private",
@@ -120,7 +121,7 @@ test("nonzero provider diagnostics expose only validated error categories, scope
   });
   assert.deepEqual(result, {
     error: { type: "api_error", subtype: "app_scope_not_applied", code: 99991672 },
-    missing_scopes: ["im:message", "im:chat.members:write_only"],
+    missing_scopes: ["im:message", "im:message.send_as_user"],
     identity: "user",
   });
   const diagnostic = JSON.stringify(result);
@@ -131,6 +132,25 @@ test("nonzero provider diagnostics expose only validated error categories, scope
     assert.equal(Object.hasOwn(result, forbiddenKey), false, `diagnostic must omit ${forbiddenKey}`);
     assert.equal(Object.hasOwn(result.error, forbiddenKey), false, `diagnostic error must omit ${forbiddenKey}`);
   }
+});
+
+test("pure-alphanumeric synthetic secrets cannot masquerade as failure categories or scopes", () => {
+  const syntheticSecret = "syntheticsecret987654321";
+  const processResult = {
+    stdout: JSON.stringify({
+      identity: syntheticSecret,
+      error: {
+        type: syntheticSecret,
+        subtype: syntheticSecret,
+        code: 1_000_000_000,
+        missing_scopes: [`im:${syntheticSecret}`],
+      },
+    }),
+    stderr: "",
+  };
+  const result = redactedProcessFailureDiagnostic(processResult);
+  assert.deepEqual(result, { outputShape: redactedProcessOutputShape(processResult) });
+  assert.equal(JSON.stringify(result).includes(syntheticSecret), false);
 });
 
 test("non-JSON provider failures retain only bounded output shape", () => {

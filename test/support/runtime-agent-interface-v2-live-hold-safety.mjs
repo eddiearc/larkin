@@ -18,10 +18,23 @@ const SYSTEM_PS = "/bin/ps";
 const SYSTEM_WHICH = "/usr/bin/which";
 const OUTPUT_SHAPE_BYTE_CAP = 4096;
 const OUTPUT_SHAPE_LINE_CAP = 20;
-const FAILURE_CATEGORY = /^[a-z][a-z0-9_]{0,63}$/i;
-const IDENTIFIER_LIKE_CATEGORY = /^(?:om|ou|oc|cli|draft|req|request|log|trace)_[a-z0-9]+$/i;
-const SCOPE_NAME = /^[a-z][a-z0-9_.]*(?::[a-z][a-z0-9_.]*)+$/i;
-const MISSING_SCOPE_CAP = 20;
+const SAFE_ERROR_TYPES = new Set([
+  "api", "api_error", "auth", "auth_error", "authentication", "authorization", "authorization_error",
+  "provider", "provider_error", "validation", "validation_error",
+]);
+const SAFE_ERROR_SUBTYPES = new Set([
+  "api", "api_error", "app_scope_not_applied", "auth", "auth_error", "authentication", "authorization",
+  "authorization_error", "missing_scope", "provider", "provider_error", "validation", "validation_error",
+]);
+const SAFE_MISSING_SCOPES = new Set([
+  "im:message:readonly",
+  "im:chat:readonly",
+  "im:chat",
+  "im:chat.group_info:readonly",
+  "im:chat.members:read",
+  "im:message.send_as_user",
+  "im:message",
+]);
 
 function redactedStreamShape(value) {
   const output = typeof value === "string" ? value : String(value ?? "");
@@ -51,20 +64,18 @@ function parseJsonObject(value) {
   } catch { return null; }
 }
 
-function safeCategory(value) {
-  return typeof value === "string" && FAILURE_CATEGORY.test(value) && !IDENTIFIER_LIKE_CATEGORY.test(value)
-    ? value : undefined;
+function safeCategory(value, allowed) {
+  return typeof value === "string" && allowed.has(value) ? value : undefined;
 }
 
 function safeCode(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 999_999_999
+    ? value : undefined;
 }
 
 function safeScopes(value) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter((scope) =>
-    typeof scope === "string" && scope.length <= 160 && SCOPE_NAME.test(scope)))]
-    .slice(0, MISSING_SCOPE_CAP);
+  return [...new Set(value.filter((scope) => typeof scope === "string" && SAFE_MISSING_SCOPES.has(scope)))];
 }
 
 export function redactedProcessFailureDiagnostic(result) {
@@ -76,8 +87,8 @@ export function redactedProcessFailureDiagnostic(result) {
     const sourceError = payload.error && typeof payload.error === "object" && !Array.isArray(payload.error)
       ? payload.error : {};
     const error = {};
-    const type = safeCategory(sourceError.type);
-    const subtype = safeCategory(sourceError.subtype);
+    const type = safeCategory(sourceError.type, SAFE_ERROR_TYPES);
+    const subtype = safeCategory(sourceError.subtype, SAFE_ERROR_SUBTYPES);
     const code = safeCode(sourceError.code);
     if (type !== undefined) error.type = type;
     if (subtype !== undefined) error.subtype = subtype;
@@ -92,12 +103,14 @@ export function redactedProcessFailureDiagnostic(result) {
     const scopes = safeScopes(sourceError.missing_scopes ?? payload.missing_scopes);
     if (scopes.length > 0) diagnostic.missing_scopes = [
       ...new Set([...(diagnostic.missing_scopes || []), ...scopes]),
-    ].slice(0, MISSING_SCOPE_CAP);
+    ];
     if ((payload.identity === "user" || payload.identity === "bot") && diagnostic.identity === undefined) {
       diagnostic.identity = payload.identity;
     }
   }
-  return diagnostic;
+  return Object.keys(diagnostic).length > 0
+    ? diagnostic
+    : { outputShape: redactedProcessOutputShape(result) };
 }
 
 function owned(stat) {

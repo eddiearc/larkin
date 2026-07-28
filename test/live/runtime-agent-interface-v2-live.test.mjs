@@ -9,7 +9,6 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RUN = process.env.LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE === "1";
 const WRITE = RUN && process.env.LARKIN_LIVE_ALLOW_WRITE === "1";
-const IDAN_PROFILE = process.env.LARKIN_LIVE_IDAN_PROFILE || "";
 const NATIVE_CLI = process.env.LARKIN_LIVE_NATIVE_LARK_CLI || "lark-cli";
 
 function run(command, args, env = process.env, timeout = 30_000) {
@@ -28,8 +27,7 @@ function parseJson(result, label) {
 }
 
 function idan(args, timeout) {
-  assert.match(IDAN_PROFILE, /^cli_[A-Za-z0-9]+$/, "LARKIN_LIVE_IDAN_PROFILE must resolve the authorized idan user profile");
-  return run(NATIVE_CLI, ["--profile", IDAN_PROFILE, ...args], process.env, timeout);
+  return run(NATIVE_CLI, args, process.env, timeout);
 }
 
 async function waitFor(read, predicate, label, timeoutMs = 45_000) {

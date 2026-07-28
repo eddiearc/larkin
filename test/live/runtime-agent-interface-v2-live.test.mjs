@@ -5,7 +5,10 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { validateLiveHoldHostReady } from "../support/runtime-agent-interface-v2-live-hold-safety.mjs";
+import {
+  runProviderWithLiveHoldReady,
+  validateLiveHoldHostReady,
+} from "../support/runtime-agent-interface-v2-live-hold-safety.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RUN = process.env.LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE === "1";
@@ -95,6 +98,9 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
     return payload;
   };
   const markerCount = (payload, marker) => JSON.stringify(payload).split(marker).length - 1;
+  const provider = (stage, operation) => runProviderWithLiveHoldReady(
+    configDir, agentId, operation, { stage },
+  );
 
   // Fail before poll/drain or either external send when message-history scopes
   // are unavailable. This keeps an authorization failure at zero writes.
@@ -109,10 +115,10 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   const emptyCheck = parseJson(run(larkin, ["inbox", "check", "--target", target], runtimeEnv), "Runtime empty target check");
   assert.equal(emptyCheck.pending_total, 0);
 
-  const update = parseJson(externalUser([
+  const update = parseJson(provider("controlled user send", () => externalUser([
     "im", "+messages-send", "--chat-id", chatId, "--text", updateMarker, "--as", "user",
     "--idempotency-key", `larkin-live-update-${nonce}`,
-  ], 60_000), "default user controlled update send");
+  ], 60_000)), "default user controlled update send");
   const updateMessageId = update.data?.message_id || update.data?.message?.message_id || update.message_id;
   assert.match(updateMessageId || "", /^om_[A-Za-z0-9]+$/, "controlled update must return its exact message ID");
 
@@ -123,9 +129,9 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
     "controlled Runtime callback ingestion",
   );
 
-  const held = parseJson(run(larkCli, [
+  const held = parseJson(provider("stale Runtime Bot send", () => run(larkCli, [
     "im", "+messages-send", "--chat-id", chatId, "--text", staleMarker,
-  ], runtimeEnv, 60_000), "Runtime stale Bot send");
+  ], runtimeEnv, 60_000)), "Runtime stale Bot send");
   assert.equal(held.status, "held");
   assert.equal(held.target, target);
   assert.match(held.draft_id || "", /^draft_/);
@@ -140,9 +146,9 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   assert.equal(polled.at_most_once, true);
   assert.ok(polled.events.some((event) => String(event.content || "").trim() === updateMarker));
 
-  checked(run(larkCli, [
+  checked(provider("current Runtime Bot send", () => run(larkCli, [
     "im", "+messages-send", "--chat-id", chatId, "--text", currentMarker,
-  ], runtimeEnv, 60_000), "Runtime current Bot send");
+  ], runtimeEnv, 60_000)), "Runtime current Bot send");
   const finalHistory = await waitFor(history, (payload) => markerCount(payload, currentMarker) === 1, "current Bot marker delivery");
   assert.equal(markerCount(finalHistory, staleMarker), 0);
   assert.equal(markerCount(finalHistory, currentMarker), 1);

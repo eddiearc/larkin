@@ -20,6 +20,7 @@ import {
   claimHoldHostRoot,
   cleanupClaimedHoldHostRoot,
   readyProofFor,
+  runProviderWithLiveHoldReady,
   validateLiveHoldHostReady,
   writePrivateJson,
 } from "../../support/runtime-agent-interface-v2-live-hold-safety.mjs";
@@ -178,6 +179,23 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /0600/);
     fs.chmodSync(claim.readyFile, 0o600);
 
+    writeJson(path.join(claim.targetRoot, "state", "agents", agentId, "status.json"), {
+      connectedVia: "channel",
+      connectedAt,
+      reconnectingAt: null,
+      recentErrors: [
+        { at: connectedAt, text: "larkApi POST reactions: hold-host blocked" },
+        { at: connectedAt, text: "channel ws 连接错误" },
+      ],
+    });
+    assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /websocket error/);
+    writeJson(path.join(claim.targetRoot, "state", "agents", agentId, "status.json"), {
+      connectedVia: "channel", connectedAt, reconnectingAt: null,
+      recentErrors: [{ at: connectedAt, text: "larkApi POST reactions: hold-host blocked" }],
+    });
+    assert.doesNotThrow(() => validateLiveHoldHostReady(claim.targetRoot, agentId),
+      "expected blocked processing-eye errors must not look like a channel failure");
+
     const wrong = JSON.parse(fs.readFileSync(claim.readyFile, "utf8"));
     wrong.processStartToken = "wrong-start-token";
     fs.writeFileSync(claim.readyFile, `${JSON.stringify(wrong)}\n`);
@@ -186,7 +204,16 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
 
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("exit", resolve));
-    assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /process identity/);
+    let providerCalls = 0;
+    for (const stage of ["controlled user send", "stale Runtime Bot send", "current Runtime Bot send"]) {
+      assert.throws(() => runProviderWithLiveHoldReady(
+        claim.targetRoot,
+        agentId,
+        () => { providerCalls += 1; },
+        { stage },
+      ), new RegExp(`${stage} blocked.*process identity`));
+      assert.equal(providerCalls, 0, `${stage}: dead proof must block the provider runner`);
+    }
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     cleanupClaimedHoldHostRoot(claim);
@@ -224,4 +251,7 @@ test("history capability succeeds before any drain or external send in the write
   assert.ok(ready < drain, "live process/root/channel proof must precede target drain");
   assert.ok(preflight < drain, "history capability must precede target drain");
   assert.ok(preflight < send, "history capability must precede external send");
+  for (const stage of ["controlled user send", "stale Runtime Bot send", "current Runtime Bot send"]) {
+    assert.match(source, new RegExp(`provider\\("${stage}"`), `${stage} must revalidate immediately around its provider call`);
+  }
 });

@@ -194,5 +194,21 @@ export function validateLiveHoldHostReady(configDir, agentId, { nowMs = Date.now
   if (status.connectedVia !== "channel" || statusConnected < readyConnected || status.reconnectingAt) {
     throw new Error("hold-host channel is not currently connected and fresh");
   }
+  const channelFailed = (Array.isArray(status.recentErrors) ? status.recentErrors : []).some((entry) =>
+    entry?.text === "channel ws 连接错误" && Date.parse(String(entry.at || "")) >= statusConnected);
+  if (channelFailed) throw new Error("hold-host channel reported a websocket error after connecting");
   return { ready, status, inspected };
+}
+
+export function runProviderWithLiveHoldReady(
+  configDir,
+  agentId,
+  providerRunner,
+  { stage = "provider command", validate = validateLiveHoldHostReady } = {},
+) {
+  try { validate(configDir, agentId); }
+  catch (error) {
+    throw new Error(`${stage} blocked because live hold-host proof failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return providerRunner();
 }

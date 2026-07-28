@@ -72,7 +72,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v5");
+  assert.equal(prompt.version, "larkin-standing-v6");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
@@ -95,6 +95,17 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   assert.match(prompt.content, /put real newline characters directly in the argument/);
   assert.ok(prompt.content.includes("Do not use the two literal characters `\\n` inside ordinary quotes"));
+  assert.match(prompt.content, /authoritative self identity.*cli_test/i);
+  assert.match(prompt.content, /do not call.*profile show.*learn.*identity/i);
+  assert.match(prompt.content, /exclusively (?:assigns|addresses).*another named Agent.*stay silent/i);
+  assert.match(prompt.content, /thread:<chat_id>:<thread_id>/);
+  assert.match(prompt.content, /\+threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json/);
+  assert.match(prompt.content, /response messages.*data\.messages/i);
+  assert.match(prompt.content, /never.*chat-wide fallback/i);
+  assert.match(prompt.content, /never.*`2>&1`.*JSON/i);
+  assert.match(prompt.content, /fail visibly.*remembered.*hard-coded text/i);
+  assert.match(prompt.content, /exact text.*one literal `--text` argument/i);
+  assert.match(prompt.content, /never.*command substitution.*`eval`.*unquoted variable/i);
 });
 
 test("Codex, Claude and Pi receive the markdown-default standing contract", async () => {

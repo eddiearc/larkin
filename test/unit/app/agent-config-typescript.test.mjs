@@ -3,12 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const ENTRY = path.join(ROOT, "dist", "app", "agent-config.mjs");
 const PUBLIC_ENTRY = path.join(ROOT, "dist", "app", "cli.mjs");
+const { inspectProcess } = await import(pathToFileURL(path.join(ROOT, "dist", "platform", "process-state.mjs")).href);
 
 test("Pi default model label is concise and does not claim an official default", () => {
   const source = fs.readFileSync(path.join(ROOT, "src", "app", "agent-config.ts"), "utf8");
@@ -129,6 +130,43 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
     assert.match(agents.stdout, /cli_configB2/);
     assert.match(agents.stdout, /入站=本次运行尚未收到消息验证/);
 
+    const agentsJson = run("agents", "--json");
+    assert.equal(agentsJson.status, 0, agentsJson.stderr);
+    assert.deepEqual(JSON.parse(agentsJson.stdout), {
+      version: 1,
+      daemon: { owned: false, pid: null, started_at: null },
+      agents: [
+        {
+          agent_id: first,
+          name: first,
+          runtime: "codex",
+          model: "gpt-5.3-codex",
+          ready: false,
+          readiness: {
+            daemon_owned: false,
+            runtime_ready: false,
+            channel_connected: false,
+            channel_not_reconnecting: true,
+          },
+          channel: { connected_at: null, connected_via: null, inbound_verified_at: null },
+        },
+        {
+          agent_id: second,
+          name: second,
+          runtime: "claude",
+          model: "claude-sonnet-4-5",
+          ready: false,
+          readiness: {
+            daemon_owned: false,
+            runtime_ready: false,
+            channel_connected: false,
+            channel_not_reconnecting: true,
+          },
+          channel: { connected_at: null, connected_via: null, inbound_verified_at: null },
+        },
+      ],
+    });
+
     const ambiguous = run("chats", "free", "oc_contract");
     assert.equal(ambiguous.status, 1);
     assert.match(ambiguous.stderr, /修改必须用 --agent/);
@@ -166,6 +204,76 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
     assert.match(invalidRuntime.stderr, /不是合法 runtime/);
     assert.equal(fs.readFileSync(configFile, "utf8"), beforeInvalid, "invalid catalog choice must fail before write");
   } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("compiled agents --json becomes ready only for the current daemon Runtime and channel", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-agent-ready-cli-"));
+  const agentId = "cli_readyJsonA1";
+  const daemonEntry = path.join(temp, "app", "runtime-process.mjs");
+  fs.mkdirSync(path.dirname(daemonEntry), { recursive: true });
+  fs.writeFileSync(daemonEntry, "setInterval(() => {}, 1000);\n");
+  const child = spawn(process.execPath, [daemonEntry], { stdio: "ignore" });
+  try {
+    let inspected;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      inspected = inspectProcess(child.pid);
+      if (inspected?.ok) break;
+      await Bun.sleep(20);
+    }
+    assert.equal(inspected?.ok, true, inspected?.reason);
+    const startedAt = "2026-07-29T01:00:00.000Z";
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-ready-json", mentionPolicy: "require", activeAgent: agentId,
+      agents: { [agentId]: { runtime: "pi", model: "default" } },
+    })}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(temp, "daemon-status.json"), `${JSON.stringify({
+      pid: child.pid,
+      processStartToken: inspected.startToken,
+      commandToken: "app/runtime-process.mjs",
+      startedAt,
+      agents: [agentId],
+    })}\n`, { mode: 0o600 });
+    const stateDir = path.join(temp, "state", "agents", agentId);
+    fs.mkdirSync(stateDir, { recursive: true });
+    const writeStatus = (value) => fs.writeFileSync(path.join(stateDir, "status.json"), `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    writeStatus({
+      connectedAt: "2026-07-29T01:00:01.000Z",
+      connectedVia: "channel",
+      inboundVerifiedAt: "2026-07-29T01:00:02.000Z",
+      reconnectingAt: null,
+      runtimeReadiness: { state: "ready" },
+    });
+    const run = () => spawnSync(process.execPath, [ENTRY, "agents", "--json"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
+    });
+    const ready = run();
+    assert.equal(ready.status, 0, ready.stderr);
+    const readyPayload = JSON.parse(ready.stdout);
+    assert.equal(readyPayload.daemon.owned, true);
+    assert.equal(readyPayload.daemon.pid, child.pid);
+    assert.equal(readyPayload.agents[0].ready, true);
+
+    writeStatus({
+      connectedAt: "2026-07-29T01:00:01.000Z",
+      connectedVia: "channel",
+      reconnectingAt: "2026-07-29T01:00:03.000Z",
+      reconnectedAt: "2026-07-29T01:00:02.000Z",
+      runtimeReadiness: { state: "ready" },
+    });
+    const reconnecting = JSON.parse(run().stdout).agents[0];
+    assert.equal(reconnecting.ready, false);
+    assert.equal(reconnecting.readiness.channel_not_reconnecting, false);
+
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-ready-json", mentionPolicy: "require", activeAgent: null, agents: {},
+    })}\n`, { mode: 0o600 });
+    const empty = JSON.parse(run().stdout);
+    assert.deepEqual(empty.daemon, { owned: true, pid: child.pid, started_at: startedAt });
+    assert.deepEqual(empty.agents, []);
+  } finally {
+    child.kill("SIGTERM");
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });

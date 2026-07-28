@@ -489,7 +489,7 @@ test("an incomplete successful write is confirmed by one bounded post-write prob
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("post-write probe failure or a concurrent message reports unconfirmed and preserves old seen", () => {
+test("post-write probe failure or a concurrent message reports committed once and preserves old seen", () => {
   for (const variant of ["failure", "concurrent"]) {
     const f = fixture();
     try {
@@ -509,9 +509,22 @@ test("post-write probe failure or a concurrent message reports unconfirmed and p
       const result = f.lark(["im", "+messages-send", "--chat-id", "oc_post_guard", "--text", "write-happened"], {
         LARKIN_TEST_PROVIDER_HISTORY_SEQUENCE: JSON.stringify([null, f.history([old]), second]),
         LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: { message_id: ownId } }),
+        LARKIN_TEST_PROVIDER_STDERR: "retry the ordinary command\n",
       });
-      assert.equal(result.status, 3, `${variant}: ${result.stderr}`);
-      assert.equal(JSON.parse(result.stderr.split("\n").filter(Boolean).at(-1)).error.subtype, "freshness_unavailable");
+      assert.equal(result.status, 0, `${variant}: ${result.stderr}`);
+      assert.equal(result.stderr, "", `${variant}: committed success must not include a contradictory retry error`);
+      const committed = JSON.parse(result.stdout);
+      assert.deepEqual({
+        ok: committed.ok,
+        committed: committed.committed,
+        verified: committed.verified,
+        cursor_advanced: committed.cursor_advanced,
+      }, { ok: true, committed: true, verified: false, cursor_advanced: false });
+      assert.equal(committed.data.message_id, ownId, `${variant}: provider response data must remain available`);
+      assert.equal(committed.verification.subtype, "post_write_unverified");
+      assert.equal(committed.provider_stderr_present, true);
+      assert.doesNotMatch(JSON.stringify(committed), /retry/i);
+      assert.equal(result.stdout.trim().split("\n").length, 1, `${variant}: exactly one structured document`);
       const state = JSON.parse(fs.readFileSync(path.join(f.stateDir, "freshness-state.json"), "utf8"));
       assert.deepEqual(state.cursors[targetKey], before,
         `${variant}: an unconfirmed post-probe must preserve the exact old cursor and not merge current`);

@@ -60,6 +60,7 @@
     "test:eval:long-running-im-progress": "bun run build && bun test --max-concurrency 1 test/live/long-running-im-progress-live.test.mjs",
     "test:eval:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/unit/evals/runtime-agent-interface-v2.test.mjs",
     "test:eval:authoritative-freshness-gate": "bun test --max-concurrency 1 test/unit/evals/authoritative-freshness-gate.test.mjs",
+    "test:eval:agent-experience-v6": "bun test --max-concurrency 1 test/unit/evals/agent-experience-v6.test.mjs",
     "test:eval:authoritative-freshness-gate:native": "bun run build && LARKIN_RUN_AUTHORITATIVE_FRESHNESS_EVAL=1 bun test --max-concurrency 1 test/live/authoritative-freshness-gate-agent-eval.test.mjs",
     "test:live:authoritative-freshness-gate": "bun test --max-concurrency 1 test/live/authoritative-freshness-gate-live.test.mjs",
     "test:eval:runtime-agent-interface-v2:native": "bun run build && LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_EVAL=1 bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-agent-eval.test.mjs"

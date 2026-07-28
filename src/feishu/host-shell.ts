@@ -827,7 +827,14 @@ export function createHostShell({
     if (!agent) return;
     if (message.type === "agent-status") {
       log("agent:status", message.agentId, message.status);
-      if (message.readiness) hostState.updateStatus(agent, { runtimeReadiness: message.readiness });
+      if (message.status === "error" || message.status === "inactive") hostState.updateStatus(agent, {
+        runtimeReadiness: message.readiness?.state && message.readiness.state !== "ready" ? message.readiness : {
+          runtime: agent.runtime,
+          state: message.status === "error" ? "incompatible" : "missing",
+          reason: message.status === "error" ? message.error || "Runtime entered an error state" : "Runtime is inactive",
+        },
+      });
+      else if (message.readiness) hostState.updateStatus(agent, { runtimeReadiness: message.readiness });
       else if (message.status === "active") hostState.updateStatus(agent, { runtimeReadiness: {
         runtime: agent.runtime, state: "ready",
       } });

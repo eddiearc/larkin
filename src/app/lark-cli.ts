@@ -533,6 +533,36 @@ function emitNativeResult(result: SpawnSyncReturns<string>, io: LarkCliIo): numb
   return result.status ?? 1;
 }
 
+function emitCommittedUnverified(
+  result: SpawnSyncReturns<string>,
+  io: LarkCliIo,
+  input: { target: string; reason: string; current?: FeishuImCursor; messages?: FeishuImMessage[] },
+): number {
+  let providerResponse: unknown;
+  try { providerResponse = JSON.parse(result.stdout || ""); }
+  catch { providerResponse = { raw_stdout: result.stdout || "" }; }
+  const providerDocument = providerResponse && typeof providerResponse === "object" && !Array.isArray(providerResponse)
+    ? providerResponse as Record<string, unknown>
+    : { provider_response: providerResponse };
+  io.stdout(`${JSON.stringify({
+    ...providerDocument,
+    ok: true,
+    committed: true,
+    verified: false,
+    cursor_advanced: false,
+    target: input.target,
+    verification: {
+      status: "unverified",
+      subtype: "post_write_unverified",
+      message: input.reason,
+      ...(input.current ? { current_cursor: input.current } : {}),
+      ...(input.messages ? { unseen_messages: input.messages } : {}),
+    },
+    ...(result.stderr ? { provider_stderr_present: true } : {}),
+  })}\n`);
+  return 0;
+}
+
 export function runLarkCli(
   argv: readonly string[], env: Env = process.env, dependencies: LarkCliLauncherDependencies = {},
 ): number {
@@ -589,26 +619,21 @@ export function runLarkCli(
           && unseenAfterWrite.some((message) => message.message_id === responseMessage.message_id)
           && unseenAfterWrite.every((message) => message.message_id === responseMessage.message_id);
         if (!confirmedOwnWrite) {
-          if (write.stdout) io.stdout(write.stdout);
-          if (write.stderr) io.stderr(write.stderr);
-          emitFreshnessError(io, {
-            subtype: "freshness_unavailable", target: targetKey, current: postCursor ?? undefined,
+          return emitCommittedUnverified(write, io, {
+            target: targetKey,
+            ...(postCursor ? { current: postCursor } : {}),
             messages: unseenAfterWrite,
             reason: responseMessage
               ? "provider write succeeded but bounded post-write probe found an additional concurrent update; cursor was not advanced"
               : "provider write succeeded without a message id/revision and bounded post-write probe could not identify the write; cursor was not advanced",
           });
-          return 3;
         }
         store.mergeFreshnessCursor(targetKey, postCursor, mergeFeishuImCursor, generation);
-      } catch (error) {
-        if (write.stdout) io.stdout(write.stdout);
-        if (write.stderr) io.stderr(write.stderr);
-        emitFreshnessError(io, {
-          subtype: "freshness_unavailable", target: targetKey,
-          reason: `provider write succeeded but bounded post-write confirmation failed; cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`,
+      } catch {
+        return emitCommittedUnverified(write, io, {
+          target: targetKey,
+          reason: "provider write succeeded but bounded post-write confirmation was unavailable; cursor was not advanced",
         });
-        return 3;
       }
     }
     return emitNativeResult(write, io);

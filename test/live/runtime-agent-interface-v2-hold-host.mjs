@@ -215,6 +215,12 @@ export function createDeferredRuntimeHost() {
   });
 }
 
+export function normalizeHoldHostExitCode(exitCode, requestedSignal, ready) {
+  if (ready && ((requestedSignal === "SIGTERM" && exitCode === 143)
+      || (requestedSignal === "SIGINT" && exitCode === 130))) return 0;
+  return exitCode;
+}
+
 function refuseAncillaryLarkCli(_command, _args, _options, callback) {
   const error = Object.assign(new Error("hold-host blocks ancillary lark-cli calls"), { code: "LARKIN_HOLD_HOST" });
   queueMicrotask(() => callback(error, "", "hold-host blocked"));
@@ -256,6 +262,7 @@ export async function main(env = process.env) {
   let exitCode = 0;
   let failure;
   let requestedSignal = null;
+  let ready = false;
   const rememberSignal = (signal) => { requestedSignal = requestedSignal || signal; };
   const onSigint = () => rememberSignal("SIGINT");
   const onSigterm = () => rememberSignal("SIGTERM");
@@ -299,8 +306,9 @@ export async function main(env = process.env) {
     if (requestedSignal) throw new Error(`hold-host interrupted during Host start (${requestedSignal})`);
     const connectedAt = await waitForConnected(path.join(runtimeAgent.stateDir, "status.json"), startedMs, stopped);
     writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt }));
+    ready = true;
     process.stderr.write(`[live-hold-host] ready; isolated root=${claim.targetRoot}; Runtime delivery=always-deferred\n`);
-    exitCode = await stopped;
+    exitCode = normalizeHoldHostExitCode(await stopped, requestedSignal, ready);
     if (exitCode !== 0) throw new Error(`hold-host stopped with exit=${exitCode}`);
   } catch (error) {
     failure = error;
@@ -311,12 +319,19 @@ export async function main(env = process.env) {
     catch (error) { failure = error; }
   }
   if (failure) throw failure;
-  process.exitCode = exitCode;
+  return exitCode;
+}
+
+export async function runHoldHostEntrypoint(runMain = main) {
+  try {
+    const exitCode = await runMain();
+    process.exit(exitCode);
+  } catch (error) {
+    process.stderr.write(`[live-hold-host] refused: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {
-  main().catch((error) => {
-    process.stderr.write(`[live-hold-host] refused: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
+  void runHoldHostEntrypoint();
 }

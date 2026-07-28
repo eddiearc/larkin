@@ -4,13 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { onTestFinished, test } from "bun:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   acquireGlobalLaunchLock,
   createDeferredRuntimeHost,
   finalizeHoldHostResources,
   materializeBotOnlyProfile,
+  normalizeHoldHostExitCode,
 } from "../../live/runtime-agent-interface-v2-hold-host.mjs";
 import {
   HOLD_DRIVER_BASENAME,
@@ -55,6 +56,58 @@ test("live hold-host entry is default-deny and package script does not opt in", 
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   assert.equal(pkg.scripts["test:live:runtime-agent-interface-v2:hold-host"],
     "bun run build && bun run test/live/runtime-agent-interface-v2-hold-host.mjs app/runtime-process.mjs");
+});
+
+test("ready hold-host treats its matching operator signal as a clean prompt process exit", { timeout: 5_000 }, async () => {
+  assert.equal(normalizeHoldHostExitCode(143, "SIGTERM", true), 0);
+  assert.equal(normalizeHoldHostExitCode(130, "SIGINT", true), 0);
+  assert.equal(normalizeHoldHostExitCode(143, "SIGINT", true), 143);
+  assert.equal(normalizeHoldHostExitCode(143, "SIGTERM", false), 143);
+
+  const fixture = `
+    import { normalizeHoldHostExitCode, runHoldHostEntrypoint } from ${JSON.stringify(pathToFileURL(DRIVER).href)};
+    await runHoldHostEntrypoint(async () => {
+      const requestedSignal = await new Promise((resolve) => {
+        process.once("SIGTERM", () => resolve("SIGTERM"));
+        process.stdout.write("fixture-ready\\n");
+      });
+      setInterval(() => {}, 60_000);
+      return normalizeHoldHostExitCode(143, requestedSignal, true);
+    });
+  `;
+  const child = spawn(process.execPath, ["--eval", fixture], {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  onTestFinished(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const within = async (promise, timeoutMs, label) => {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
+  await within(new Promise((resolve, reject) => {
+    const inspect = () => { if (stdout.includes("fixture-ready")) resolve(); };
+    child.stdout.on("data", inspect);
+    child.once("exit", (code, signal) => reject(new Error(`fixture exited before ready: ${code}/${signal}; ${stderr}`)));
+    inspect();
+  }), 2_000, "fixture ready");
+  const started = Date.now();
+  assert.equal(child.kill("SIGTERM"), true);
+  const outcome = await within(new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  }), 2_000, "fixture clean exit");
+  assert.deepEqual(outcome, { code: 0, signal: null }, stderr);
+  assert.ok(Date.now() - started < 2_000, "explicit top-level exit must not wait for lingering timers/listeners");
 });
 
 test("controlled update idempotency key stays within Feishu's limit and preserves the exact nonce", () => {

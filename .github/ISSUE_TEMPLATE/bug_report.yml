@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a reproducible problem in Larkin
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Search existing issues first.
+        Do not include credentials, private messages, user data, or exploit details. Report vulnerabilities through the private security link in the issue chooser.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its user impact.
+      placeholder: A concise description of the problem and when it occurs.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the problem.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Setup or onboarding
+        - Runtime host or sessions
+        - Feishu messaging or cards
+        - Dashboard
+        - CLI or configuration
+        - Packaging or release
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Larkin version or commit
+      placeholder: v0.2.32 or caaf292
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, architecture, agent runtime, and Bun version when relevant.
+      placeholder: macOS 15 arm64, Codex, Bun 1.3.14
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include only the smallest useful logs or screenshots after removing secrets and private data.
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed credentials, private messages, user data, and other sensitive information.
+          required: true
+        - label: This is not a vulnerability or other security-sensitive disclosure.
+          required: true

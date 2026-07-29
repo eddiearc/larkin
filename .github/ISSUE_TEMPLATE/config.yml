@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/eddiearc/larkin/security/advisories/new
+    about: Privately report vulnerabilities or security-sensitive details.
+  - name: Contribution guide
+    url: https://github.com/eddiearc/larkin/blob/main/CONTRIBUTING.md
+    about: Read the issue-first policy and development workflow before contributing.

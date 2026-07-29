@@ -1,0 +1,81 @@
+{
+  "dataset": "public-contribution-governance",
+  "version": 1,
+  "subject": {
+    "kind": "repository-policy",
+    "policy_version": "larkin-public-contribution-v1"
+  },
+  "grader": {
+    "name": "public-contribution-governance-artifact-grader",
+    "version": 1,
+    "threshold": 1.0,
+    "rubric": [
+      "small low-risk changes can use a direct pull request without a ceremonial issue",
+      "non-trivial behavior and feature work waits for issue alignment",
+      "permission, persistence, dependency, and release changes are issue-first",
+      "security-sensitive reports are routed to private vulnerability reporting",
+      "pull requests link an issue or explain the small-change exemption and record validation",
+      "contributions preserve publication, secret, generated-output, and release-tag boundaries"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "small-doc-fix-direct-pr",
+      "prompt": "Fix a typo in the README without changing behavior.",
+      "expected_route": "direct-pr",
+      "assertions": [
+        { "file": "CONTRIBUTING.md", "pattern": "may open a pull request directly[\\s\\S]*typo and documentation fixes" },
+        { "file": ".github/pull_request_template.md", "pattern": "Small-change exemption" }
+      ]
+    },
+    {
+      "id": "feature-issue-first",
+      "prompt": "Add a new user-visible Runtime capability.",
+      "expected_route": "issue-first",
+      "assertions": [
+        { "file": "CONTRIBUTING.md", "pattern": "Open an issue and wait for maintainer alignment[\\s\\S]*new features[\\s\\S]*user-visible behavior changes" },
+        { "file": ".github/ISSUE_TEMPLATE/feature_request.yml", "pattern": "wait for maintainer alignment before implementing" }
+      ]
+    },
+    {
+      "id": "boundary-change-issue-first",
+      "prompt": "Change dependencies, permissions, persistence, or release behavior.",
+      "expected_route": "issue-first",
+      "assertions": [
+        { "file": "CONTRIBUTING.md", "pattern": "dependency changes, permission or persistence changes, release\\s+changes" },
+        { "file": ".github/ISSUE_TEMPLATE/feature_request.yml", "pattern": "configuration, permissions, persistence, or release behavior" }
+      ]
+    },
+    {
+      "id": "vulnerability-private",
+      "prompt": "Report a vulnerability with exploit details.",
+      "expected_route": "private-security",
+      "assertions": [
+        { "file": "SECURITY.md", "pattern": "private vulnerability reporting" },
+        { "file": ".github/ISSUE_TEMPLATE/config.yml", "pattern": "security/advisories/new" },
+        { "file": ".github/ISSUE_TEMPLATE/bug_report.yml", "pattern": "This is not a vulnerability" }
+      ]
+    },
+    {
+      "id": "reviewable-pr-evidence",
+      "prompt": "Submit an aligned implementation for review.",
+      "expected_route": "pull-request",
+      "assertions": [
+        { "file": ".github/pull_request_template.md", "pattern": "Closes #" },
+        { "file": ".github/pull_request_template.md", "pattern": "bun run test" },
+        { "file": ".github/pull_request_template.md", "pattern": "publication:check:tree" },
+        { "file": "CONTRIBUTING.md", "pattern": "commands and actual results used for validation" }
+      ]
+    },
+    {
+      "id": "publication-and-release-safety",
+      "prompt": "Prepare an ordinary contribution without publishing a release.",
+      "expected_route": "pull-request",
+      "assertions": [
+        { "file": ".github/pull_request_template.md", "pattern": "no credentials[\\s\\S]*generated `dist/`[\\s\\S]*release artifacts" },
+        { "file": ".github/pull_request_template.md", "pattern": "did not create, move, or replace a release tag" },
+        { "file": "CONTRIBUTING.md", "pattern": "dependency[\\s\\S]*caches[\\s\\S]*release artifacts" }
+      ]
+    }
+  ]
+}

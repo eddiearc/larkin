@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose a user-facing capability or substantial change
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Non-trivial changes are issue-first. Please align the problem and intended direction with maintainers before implementation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What user problem should Larkin solve, and who experiences it?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and success without prescribing unnecessary implementation details.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Share a possible approach, public interface, or workflow if you have one.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What existing workflow or narrower solution did you consider?
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and compatibility
+      description: Note affected runtimes, platforms, configuration, permissions, persistence, or release behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation ideas
+      description: Which user-visible scenarios would demonstrate that the change works?
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to contribute an implementation after alignment?
+      options:
+        - "Yes"
+        - "No"
+        - Maybe
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find an equivalent proposal.
+          required: true
+        - label: I will wait for maintainer alignment before implementing this non-trivial change.
+          required: true
+        - label: This request contains no credentials, private user data, or vulnerability details.
+          required: true

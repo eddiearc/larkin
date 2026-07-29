@@ -413,6 +413,26 @@ test("tree scan rejects internal documentation paths and non-allowlisted Markdow
   }
 });
 
+test("tree scan allows only the approved GitHub pull request Markdown template", () => {
+  const root = fixture();
+  try {
+    const approved = ".github/pull_request_template.md";
+    const rejected = ".github/README.md";
+    for (const [relative, contents] of [[approved, "## Summary\n"], [rejected, "# Internal\n"]]) {
+      const absolute = path.join(root, relative);
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, contents);
+      git(root, "add", relative);
+    }
+    const result = runCheck(root, "--tree-only");
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.doesNotMatch(result.stderr, /pull_request_template\.md/);
+    assert.match(result.stderr, /\.github\/README\.md: Markdown file is outside the publication allowlist/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("default scan covers reachable history, commit messages, paths, and refs", () => {
   const root = fixture();
   try {

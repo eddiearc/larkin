@@ -85,6 +85,7 @@ for (const [runtime, intermediates] of [
     const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
     const timers = [], calls = [];
     const eye = new ProcessingEyeOrchestrator({
+      cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
       execFile(_command, args, _options, callback) {
         calls.push(args);
         callback(null, JSON.stringify(args.includes("POST") ? { data: { reaction_id: `react-${runtime}` } } : { ok: true }), "");
@@ -120,7 +121,8 @@ test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary r
   const adapter = { id: "codex", capabilities: { standingPrompt: "append", sessionResume: true, busyInput: "direct", cancel: true }, async createSession(input) {
     assert.match(input.standingPrompt.content, /inbox check/);
     assert.match(input.standingPrompt.content, /larkin inbox poll/);
-    assert.match(input.standingPrompt.content, /lark-cli im \+messages-send/);
+    assert.match(input.standingPrompt.content, /larkin im \+messages-send/);
+    assert.doesNotMatch(input.standingPrompt.content, /(?:^|\s)lark-cli im /m);
     assert.equal(input.resumeSessionId, "old-session");
     return session;
   } };

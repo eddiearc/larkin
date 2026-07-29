@@ -150,6 +150,9 @@ const scenarios = JSON.parse(process.env.HOST_WAKE_SCENARIOS);
 module.exports.execFileImpl = function(_command, _args, _options, callback) {
   callback(null, JSON.stringify({ ok: true, data: { users: [], bots: [] } }), "");
 };
+module.exports.managedCliForAgent = function() {
+  return { command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} };
+};
 module.exports.channelPackage = {
     createLarkChannel() {
       return {
@@ -197,6 +200,7 @@ const timer = setInterval(() => {
       feishuProfile: agentId,
       workspaceDir,
       stateDir,
+      larkConfigDir: path.join(stateDir, "lark-cli-config"),
       noMentionChats: ["oc_human_whitelist", "oc_bot_whitelist"],
       feishuAppSecret: "fixture-secret",
       feishuDomain: "https://open.feishu.cn",

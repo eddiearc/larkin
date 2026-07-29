@@ -367,7 +367,7 @@ export class HostEnvelopeProjector {
   }
 
   private larkCommand(suffix: string): string {
-    return `lark-cli ${suffix}`;
+    return `${this.agentCliExecutable} ${suffix}`;
   }
 
   private nextSequence(agentId: string): number {

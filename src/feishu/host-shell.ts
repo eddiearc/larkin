@@ -26,6 +26,7 @@ import { providerAuthenticationFailureReadiness, RuntimePrerequisiteError } from
 import { verifyCallbackProbe } from "../platform/callback-capability.js";
 import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
+import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
 interface ConfiguredAgent {
   agentId: string;
@@ -170,6 +171,7 @@ export function createHostShell({
   eventSourceStartDelayMs = 2_000,
   channelDisconnectTimeoutMs = 2_000,
   execFileImpl = execFile,
+  managedCliForAgent = (agent: ConfiguredAgent) => managedOfficialLarkCli(agent, env),
   reconcileAgentWorkspaceImpl = reconcileAgentWorkspace,
   logImpl = (...parts: unknown[]): void => { process.stderr.write(`[host] ${parts.join(" ")}\n`); },
   onOrderedShutdownComplete,
@@ -180,6 +182,7 @@ export function createHostShell({
   eventSourceStartDelayMs?: number;
   channelDisconnectTimeoutMs?: number;
   execFileImpl?: typeof execFile;
+  managedCliForAgent?: (agent: ConfiguredAgent) => ReturnType<typeof managedOfficialLarkCli>;
   reconcileAgentWorkspaceImpl?: typeof reconcileAgentWorkspace;
   logImpl?: (...parts: unknown[]) => void;
   onOrderedShutdownComplete?: (exitCode: number) => void;
@@ -242,14 +245,19 @@ export function createHostShell({
     recordStatusError: (agent, text) => hostState.recordStatusError(agent, text),
     readPending: (agent) => stateStore(agent as ConfiguredAgent).readJson<{ items?: Array<{ msgId: string; reactionId: string }> }>("pendingReact", {}).items || [],
     writePending: (agent, items) => stateStore(agent as ConfiguredAgent).writeJson("pendingReact", { items }),
+    cliForAgent: (agent) => {
+      const managed = managedCliForAgent(agent as ConfiguredAgent);
+      return { command: managed.command.command, argsPrefix: managed.command.argsPrefix, env: managed.env };
+    },
   });
   const larkApi = (agent: ConfiguredAgent, method: string, apiPath: string, data: unknown): Promise<Record<string, unknown> | null> =>
     new Promise((resolve) => processingEyes.larkApi(agent, method, apiPath, data, (_error, result) => resolve(result)));
   const fetchMemberPayload = (agent: ConfiguredAgent, args: string[]): Promise<unknown> => new Promise((resolve) => {
-    execFileImpl("lark-cli", ["--profile", agent.feishuProfile, "im", ...args, "--json"], {
+    const managed = managedCliForAgent(agent);
+    execFileImpl(managed.command.command, [...managed.command.argsPrefix, "im", ...args, "--json"], {
       encoding: "utf8",
       timeout: 10_000,
-      env: { ...env, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir },
+      env: managed.env,
     }, (error, stdout) => {
       if (error) log(`成员表子查询失败 agent=${agent.name}: ${errorMessage(error).slice(0, 100)}`);
       try { resolve(JSON.parse(String(stdout))); }

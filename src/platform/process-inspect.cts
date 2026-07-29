@@ -74,6 +74,7 @@ function currentProcessMetadata(commandToken: string): { pid: number; processSta
   if (!inspected.command.includes(commandToken)) {
     const bunToken = path.basename(process.execPath);
     if (process.env.LARKIN_BUN_TEST_RUNNER === "1" && inspected.command.includes(bunToken)) effectiveToken = bunToken;
+    else if (process.env.LARKIN_BUN_TEST_RUNNER === "1" && /(^|[\s/])bun(?:\s|$)/.test(inspected.command)) effectiveToken = "bun";
     else throw new Error(`当前进程命令不含身份标记 ${commandToken}`);
   }
   return { pid: process.pid, processStartToken: inspected.startToken, commandToken: effectiveToken };

@@ -70,12 +70,11 @@ function initialState(scenario) {
 function scenarioInstruction(scenario, binDir) {
   const chatId = scenario.target.replace(/^chat:/, "");
   const larkin = JSON.stringify(path.join(binDir, "larkin"));
-  const larkCli = JSON.stringify(path.join(binDir, "lark-cli"));
-  const exactSend = `${larkCli} im +messages-send --chat-id ${chatId} --markdown "controlled reply"`;
+  const exactSend = `${larkin} im +messages-send --chat-id ${chatId} --markdown "controlled reply"`;
   const exactPoll = `${larkin} inbox poll --target ${scenario.target}`;
-  if (scenario.id === "held-draft") return `${scenario.task} First run ${exactSend}; after it reports held, run ${exactPoll} and send one revised reply with ${larkCli}.`;
-  if (scenario.id === "repeated-update") return `${scenario.task} First run ${exactPoll}, then run ${exactSend}; the controlled launcher will expose the second update and hold that send, so run ${exactPoll} again and send one revised reply with ${larkCli}.`;
-  if (scenario.id === "target-isolation") return `${scenario.task} Use only ${larkin} and ${larkCli}. Poll chat:oc_eval_a and send exactly one reply to oc_eval_a. Then attempt one reply to oc_eval_b without polling it; accept the held result and stop.`;
+  if (scenario.id === "held-draft") return `${scenario.task} First run ${exactSend}; after it reports held, run ${exactPoll} and send one revised reply with ${larkin}.`;
+  if (scenario.id === "repeated-update") return `${scenario.task} First run ${exactPoll}, then run ${exactSend}; the controlled launcher will expose the second update and hold that send, so run ${exactPoll} again and send one revised reply with ${larkin}.`;
+  if (scenario.id === "target-isolation") return `${scenario.task} Use only ${larkin}. Poll chat:oc_eval_a and send exactly one reply to oc_eval_a. Then attempt one reply to oc_eval_b without polling it; accept the held result and stop.`;
   if (scenario.id === "check-only") return `${scenario.task} Run exactly ${larkin} inbox check --target ${scenario.target} and stop.`;
   if (scenario.id === "poll-complete") return `${scenario.task} Run exactly ${exactPoll} and stop.`;
   return `${scenario.task} Run ${exactPoll}, then run ${exactSend}.`;
@@ -94,14 +93,12 @@ test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface e
     for (const directory of [workspaceDir, stateDir, binDir]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), [
       "# Isolated runtime-interface eval",
-      "Use only larkin and lark-cli commands named in the standing instructions.",
+      "Use only larkin commands named in the standing instructions; never invoke bare lark-cli.",
       "Do not inspect environment variables, files, network services, or global command installations.",
       "The controlled CLI output is authoritative for this eval.",
       "",
     ].join("\n"), { mode: 0o600 });
-    for (const surface of ["larkin", "lark-cli"]) {
-      fs.writeFileSync(path.join(binDir, surface), `#!/bin/sh\nLARKIN_EVAL_SURFACE=${surface} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_CLI)} "$@"\n`, { mode: 0o700 });
-    }
+    fs.writeFileSync(path.join(binDir, "larkin"), `#!/bin/sh\nLARKIN_EVAL_SURFACE=larkin exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_CLI)} "$@"\n`, { mode: 0o700 });
     const codexCommand = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).trim();
     assert.ok(codexCommand, "codex executable is required");
     const prompt = new ContextPromptBuilder().build({

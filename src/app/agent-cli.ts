@@ -129,16 +129,16 @@ function query(requestPath: string, name: string): string | null {
 
 function migrationError(group: string, subcommand?: string): string | null {
   if (group === "message") {
-    return "message 已移除：只读查看收件箱用 `larkin inbox check`，领取完整消息用 `larkin inbox poll`；飞书发送、回复和查询请直接使用 `lark-cli im +messages-send`、`+messages-reply`、`+chat-messages-list` 或 `+messages-mget`。";
+    return "message 已移除：只读查看收件箱用 `larkin inbox check`，领取完整消息用 `larkin inbox poll`；飞书发送、回复和查询请使用 `larkin im +messages-send`、`+messages-reply`、`+chat-messages-list` 或 `+messages-mget`。";
   }
   if (group === "channel") {
-    return "channel 已移除：群聊操作请直接使用 `lark-cli im +chat-list`、`+chat-search`、`chats get`、`+chat-create`、`+chat-update` 或 `chat.members get/create/delete`。";
+    return "channel 已移除：群聊操作请使用 `larkin im +chat-list`、`+chat-search`、`chats get`、`+chat-create`、`+chat-update` 或 `chat.members get/create/delete`。";
   }
   if (group === "attachment") {
-    return "attachment 已移除：发送附件请使用 `lark-cli im +messages-send --file/--image/--video/--audio`；下载请使用 `lark-cli im +messages-resources-download`。";
+    return "attachment 已移除：发送附件请使用 `larkin im +messages-send --file/--image/--video/--audio`；下载请使用 `larkin im +messages-resources-download`。";
   }
-  if (group === "server") return "server 已移除；飞书群与消息信息请通过 `lark-cli im ...` 查询。";
-  if (group === "im") return "`larkin im` 已迁移为原生 `lark-cli im`；Runtime 会自动绑定当前 Bot identity，请按 `lark-cli im --help` 使用。";
+  if (group === "server") return "server 已移除；飞书群与消息信息请通过 `larkin im ...` 查询。";
+  if (group === "im") return "请通过 `larkin im ...` 使用飞书命令；Runtime 会自动绑定当前 Bot identity，并在写入前执行 freshness gate。可运行 `larkin im --help` 查看帮助。";
   if (group === "profile" && subcommand !== "show") {
     return "profile 只保留只读的 `larkin profile show`；身份和凭证由 `larkin setup` 管理，不支持 update。";
   }

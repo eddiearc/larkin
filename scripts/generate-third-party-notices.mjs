@@ -1,9 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { LARK_CLI_NATIVE_SHA256, LARK_CLI_VERSION, larkCliTarget } from "./release/lark-cli-provenance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputIndex = process.argv.indexOf("--output");
@@ -57,50 +55,6 @@ function lockedIntegrities() {
   return entries;
 }
 
-function goCommand(args) {
-  const result = spawnSync("go", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
-  if (result.status !== 0) throw new Error(result.stderr || `go ${args.join(" ")} failed`);
-  return result.stdout;
-}
-
-function embeddedGoModules() {
-  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, "scripts", "release", "lark-cli-go-modules.json"), "utf8"));
-  if (lock.schemaVersion !== 1 || lock.larkCliVersion !== LARK_CLI_VERSION || !Array.isArray(lock.modules) || !lock.targetExclusions) {
-    throw new Error("invalid embedded lark-cli Go module lock");
-  }
-  const binary = path.join(ROOT, "node_modules", "@larksuite", "cli", "bin", process.platform === "win32" ? "lark-cli.exe" : "lark-cli");
-  const { key } = larkCliTarget(process.platform, process.arch);
-  const actualBinaryHash = sha256(fs.readFileSync(binary));
-  if (actualBinaryHash !== LARK_CLI_NATIVE_SHA256[key]) throw new Error("embedded lark-cli binary hash changed before Go module inspection");
-  const actual = goCommand(["version", "-m", binary]).split(/\r?\n/).map((line) => line.trim().split(/\s+/))
-    .filter(([kind]) => kind === "dep").map(([, module, version, sum]) => ({ module, version, sum }))
-    .sort((left, right) => left.module.localeCompare(right.module));
-  const targetKeys = Object.keys(lock.targetExclusions).sort();
-  if (JSON.stringify(targetKeys) !== JSON.stringify(Object.keys(LARK_CLI_NATIVE_SHA256).sort())) {
-    throw new Error("embedded lark-cli Go module lock does not cover every release target");
-  }
-  const exclusions = lock.targetExclusions[key];
-  if (!Array.isArray(exclusions) || exclusions.some((module) => !lock.modules.some((entry) => entry.module === module))) {
-    throw new Error(`invalid embedded Go module exclusions for ${key}`);
-  }
-  const expected = lock.modules.filter((entry) => !exclusions.includes(entry.module))
-    .sort((left, right) => left.module.localeCompare(right.module));
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("embedded lark-cli Go module set does not exactly match the fixed release closure");
-
-  return [...lock.modules].sort((left, right) => left.module.localeCompare(right.module)).map((entry) => {
-    const downloaded = JSON.parse(goCommand(["mod", "download", "-json", `${entry.module}@${entry.version}`]));
-    if (downloaded.Path !== entry.module || downloaded.Version !== entry.version || downloaded.Sum !== entry.sum || !downloaded.Dir) {
-      throw new Error(`Go module provenance mismatch for ${entry.module}@${entry.version}`);
-    }
-    const files = fs.readdirSync(downloaded.Dir, { withFileTypes: true })
-      .filter((candidate) => candidate.isFile() && licenseName.test(candidate.name))
-      .map((candidate) => ({ name: candidate.name, bytes: fs.readFileSync(path.join(downloaded.Dir, candidate.name)) }))
-      .sort((left, right) => left.name.localeCompare(right.name));
-    if (files.length === 0) throw new Error(`Go module has no root license or notice text: ${entry.module}@${entry.version}`);
-    return { ...entry, files };
-  });
-}
-
 function runtimePackages() {
   const rootManifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   const queue = Object.keys(rootManifest.dependencies ?? {}).map((name) => ({ name, fromRoot: ROOT, direct: true }));
@@ -124,9 +78,6 @@ function runtimePackages() {
     }
     packages.push({ name: manifest.name, version: manifest.version, license, files, direct: candidate.direct, integrity });
 
-    // The CLI package contributes its separately downloaded, checksum-verified
-    // native executable. Its JavaScript installer dependency is not distributed.
-    if (manifest.name === "@larksuite/cli") continue;
     const children = {
       ...(manifest.dependencies ?? {}),
       ...(manifest.optionalDependencies ?? {}),
@@ -156,7 +107,6 @@ const escapeCell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\
 
 export function generateRuntimeNotices() {
   const packages = runtimePackages();
-  const goModules = embeddedGoModules();
   const texts = new Map();
   const lines = [
     "Third-party notices", "", "Generated at release time from Larkin's installed runtime dependency closure.",
@@ -176,32 +126,6 @@ export function generateRuntimeNotices() {
     if (!fileRefs) throw new Error(`${pkg.name}@${pkg.version} has no resolved license text`);
     lines.push(`| ${escapeCell(pkg.name)} | ${escapeCell(pkg.version)} | ${pkg.direct ? "runtime direct" : "runtime transitive"} | ${escapeCell(expression(pkg.license))} | ${fileRefs} | ${pkg.integrity} |`);
   }
-  lines.push("", "Embedded lark-cli Go module license closure", "",
-    `The ${goModules.length}-module release-family union below is fixed from go version -m metadata for all four pinned native binaries.`,
-    "Each platform's exact module subset is bound by lark-cli-go-modules.json; the generator rejects any difference in the current binary.",
-    "Each module source is fetched by fixed module@version and accepted only when its Go module sum matches the fixed metadata.", "",
-    "| Go module | Version | Module sum | License/notice texts (SHA-256) |",
-    "| --- | --- | --- | --- |");
-  for (const module of goModules) {
-    const fileRefs = module.files.map(({ name, bytes }) => {
-      const normalized = bytes.toString("utf8").replace(/\r\n?/g, "\n").split("\n")
-        .map((line) => line.replace(/[ \t]+$/, "")).join("\n").replace(/\s*$/, "\n");
-      const hash = sha256(Buffer.from(normalized));
-      if (!texts.has(hash)) texts.set(hash, normalized);
-      return `${name} (${hash})`;
-    }).join("; ");
-    lines.push(`| ${escapeCell(module.module)} | ${module.version} | ${module.sum} | ${fileRefs} |`);
-  }
-  const cliPackage = packages.find((pkg) => pkg.name === "@larksuite/cli" && pkg.version === LARK_CLI_VERSION);
-  if (!cliPackage) throw new Error(`embedded @larksuite/cli ${LARK_CLI_VERSION} is missing from the runtime closure`);
-  const checksumsFile = path.join(ROOT, "node_modules", "@larksuite", "cli", "checksums.txt");
-  const archiveChecksums = fs.readFileSync(checksumsFile, "utf8").split(/\r?\n/)
-    .filter((line) => /lark-cli-1\.0\.78-(?:darwin|linux)-(?:amd64|arm64)\.tar\.gz$/.test(line));
-  if (archiveChecksums.length !== 4) throw new Error("embedded lark-cli four-platform archive provenance is incomplete");
-  lines.push("", "Embedded native component provenance", "", `@larksuite/cli ${LARK_CLI_VERSION} is distributed as a byte-identical native component.`,
-    "Its package integrity is pinned by bun.lock; its upstream archive checksums and extracted native hashes are:", "",
-    ...archiveChecksums.map((line) => `archive ${line}`),
-    ...Object.entries(LARK_CLI_NATIVE_SHA256).sort(([left], [right]) => left.localeCompare(right)).map(([target, hash]) => `native ${hash}  ${target}`));
   const qr = packages.find((pkg) => pkg.name === "qrcode-terminal");
   if (!qr || !qr.files.some(({ bytes }) => /QRCode for JavaScript/.test(bytes.toString("utf8")) && /MIT license/i.test(bytes.toString("utf8")))) {
     throw new Error("qrcode-terminal bundled MIT attribution is missing from the runtime closure");

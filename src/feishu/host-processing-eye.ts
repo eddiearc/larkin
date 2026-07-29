@@ -1,5 +1,6 @@
 import { execFile as nodeExecFile } from "node:child_process";
 import type { HostAgent } from "./host-business-state.js";
+import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
 interface EyeAgent extends HostAgent { feishuProfile?: string | null }
 interface Reaction { msgId: string; reactionId: string }
@@ -21,6 +22,8 @@ export interface ProcessingEyeOptions {
   writePending?: (agent: EyeAgent, items: readonly Reaction[]) => void;
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
+  envForAgent?: (agent: EyeAgent) => NodeJS.ProcessEnv;
+  cliForAgent?: (agent: EyeAgent) => { command: string; argsPrefix: string[]; env: NodeJS.ProcessEnv };
 }
 
 function errorMessage(error: unknown): string {
@@ -45,9 +48,14 @@ export class ProcessingEyeOrchestrator {
   }
 
   larkApi(agent: EyeAgent, method: string, apiPath: string, data: unknown, callback?: ApiCallback): void {
-    const args = ["--profile", String(agent.feishuProfile || ""), "api", method, apiPath];
+    const args = ["api", method, apiPath];
     if (data) args.push("--data", JSON.stringify(data));
-    this.execFile("lark-cli", args, { encoding: "utf8", timeout: 10_000 }, (error, stdout, stderr) => {
+    const selected = this.options.cliForAgent?.(agent) ?? (() => {
+      const managed = managedOfficialLarkCli(agent, this.options.envForAgent?.(agent) ?? process.env);
+      return { command: managed.command.command, argsPrefix: managed.command.argsPrefix, env: managed.env };
+    })();
+    this.execFile(selected.command, [...selected.argsPrefix, ...args], { encoding: "utf8", timeout: 10_000,
+      env: selected.env }, (error, stdout, stderr) => {
       let result: ApiResult | null = null;
       try { result = JSON.parse(String(stdout)) as ApiResult; } catch { /* non-JSON */ }
       if (error && !result) {

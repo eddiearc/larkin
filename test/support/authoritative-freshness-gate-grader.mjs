@@ -10,7 +10,7 @@ export function loadAuthoritativeFreshnessEval(file) {
   if (!Array.isArray(value.grader.rubric) || value.grader.rubric.length < 5) throw new Error("grader rubric is incomplete");
   const modelScenario = value.scenarios?.find((scenario) => scenario.id === "model-conflict-redecision");
   if (typeof modelScenario?.prompt !== "string" || !modelScenario.prompt.trim()) throw new Error("native model scenario prompt is required");
-  if (!modelScenario.prompt.includes("{lark_cli}")) throw new Error("native model scenario must bind the controlled lark_cli executable");
+  if (!modelScenario.prompt.includes("{larkin}")) throw new Error("native model scenario must bind the controlled larkin executable");
   return value;
 }
 
@@ -40,6 +40,7 @@ export function gradeNativeCommandAudit(audit, controlledExecutable) {
     if (event.item_type !== "commandExecution") failures.push(`audit item ${index} was an extra non-command tool action`);
     const command = typeof event.command === "string" ? event.command : "";
     if (command.split(controlledExecutable).length - 1 !== 1) failures.push(`command ${index} did not bind exactly one controlled executable`);
+    if (/(^|[\s"'])lark-cli(?:[\s"']|$)/.test(command)) failures.push(`command ${index} bypassed larkin with bare lark-cli`);
     if (!command.includes(" im +messages-send --chat-id oc_eval_freshness --text ")) failures.push(`command ${index} was not the allowed ordinary send`);
     if (/[;<>\n]|&&|\|\||\$\(/.test(command)) failures.push(`command ${index} contained extra shell operations`);
     if (/larkin-draft|freshness-state|cursor|\b(?:cat|sed|awk|grep|rg|jq|python|node)\b/i.test(command)) {

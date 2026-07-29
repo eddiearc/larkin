@@ -16,9 +16,7 @@ const value = (flag) => {
 const output = (body) => process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
 
 if (argv.includes("--help") || argv.includes("-h")) {
-  output(surface === "larkin"
-    ? { usage: ["larkin inbox check [--target <target>]", "larkin inbox poll [--target <target>]"] }
-    : { usage: ["lark-cli im +messages-send --chat-id <chat-id> --markdown <message>", "lark-cli larkin-draft send --draft-id <id>"] });
+  output({ usage: ["larkin inbox check [--target <target>]", "larkin inbox poll [--target <target>]", "larkin im +messages-send --chat-id <chat-id> --markdown <message>"] });
   process.exit(0);
 }
 
@@ -54,11 +52,11 @@ if (surface === "larkin" && argv[0] === "inbox" && argv[1] === "poll") {
   process.exit(0);
 }
 
-if (surface === "lark-cli" && argv[0] === "im" && argv[1] === "+messages-send") {
+if (surface === "larkin" && argv[0] === "im" && argv[1] === "+messages-send") {
   const chatId = value("--chat-id");
   const target = chatId ? `chat:${chatId}` : null;
   if (!target || !state.targets[target]) {
-    process.stderr.write("eval lark-cli: send requires an exact known --chat-id\n");
+    process.stderr.write("eval larkin: send requires an exact known --chat-id\n");
     process.exit(2);
   }
   const row = targetState(target);
@@ -76,11 +74,11 @@ if (surface === "lark-cli" && argv[0] === "im" && argv[1] === "+messages-send") 
   process.exit(0);
 }
 
-if (surface === "lark-cli" && argv[0] === "larkin-draft" && argv[1] === "send") {
+if (surface === "larkin" && argv[0] === "larkin-draft" && argv[1] === "send") {
   const draftId = value("--draft-id");
   const draft = state.drafts[draftId];
   if (!draft) {
-    process.stderr.write("eval lark-cli: held draft not found\n");
+    process.stderr.write("eval larkin: held draft not found\n");
     process.exit(2);
   }
   const row = targetState(draft.target);
@@ -96,7 +94,7 @@ if (surface === "lark-cli" && argv[0] === "larkin-draft" && argv[1] === "send") 
   process.exit(0);
 }
 
-if (surface === "lark-cli" && argv[0] === "larkin-draft" && argv[1] === "abandon") {
+if (surface === "larkin" && argv[0] === "larkin-draft" && argv[1] === "abandon") {
   const draftId = value("--draft-id");
   delete state.drafts[draftId];
   writeState(state);

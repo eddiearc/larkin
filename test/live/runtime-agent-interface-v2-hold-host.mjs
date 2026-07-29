@@ -123,7 +123,7 @@ function resolveSafeRoots(env) {
 }
 
 export function materializeBotOnlyProfile(runtimeAgent) {
-  // @larksuite/cli 1.0.78 config init may persist appSecret through macOS
+  // @larksuite/cli 1.0.79 config bind may persist resolved app secrets through macOS
   // Keychain. The live driver writes the supported plaintext Bot-only profile
   // directly into its disposable 0700 root, then removes that whole root.
   fs.mkdirSync(runtimeAgent.larkConfigDir, { recursive: true, mode: 0o700 });

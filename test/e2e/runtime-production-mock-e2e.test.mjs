@@ -11,6 +11,8 @@ import { createHostShell, memberNamesFromPayloads } from "../../dist/feishu/host
 import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 import { InteractionStateMachine } from "../../dist/agent/interaction-state-machine.mjs";
 
+const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
+
 function callbackValue(card, index = 0) {
   const button = card.body.elements.filter((item) => item.tag === "button")[index];
   return button.behaviors.find((behavior) => behavior.type === "callback").value;
@@ -26,7 +28,7 @@ class FakeNativeSession {
   async cancel() {} async close() {}
 }
 
-test("member parser accepts the real lark-cli 1.0.78 get/bots shapes", () => {
+test("member parser accepts the real lark-cli 1.0.79 get/bots shapes", () => {
   assert.deepEqual(memberNamesFromPayloads([
     { ok: true, data: { items: [{ member_id: "ou_user", name: "User" }] } },
     { ok: true, data: { items: [{ bot_id: "cli_bot", bot_name: "Bot" }] } },
@@ -41,7 +43,12 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
   const store = createAgentStateStore(root, agentId);
   const session = new FakeNativeSession("codex");
   const adapter = { id: "codex", capabilities: { busyInput: "direct" }, async createSession() { return session; } };
-  const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  const runtimeHost = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+    assertOfficialCliReady: () => {},
+  });
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
     version: 3, serverId: "server-interaction", activeAgent: agentId,
@@ -86,6 +93,7 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0",
     },
     runtimeHost,
+    managedCliForAgent: testManagedCli,
     eventSourceStartDelayMs: 0,
     channelPackage: { createLarkChannel() { return channel; } },
   });
@@ -144,7 +152,12 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const store = createAgentStateStore(root, agentId);
     const session = new FakeNativeSession(runtime);
     const adapter = { id: runtime, capabilities: { busyInput: runtime === "claude" ? "gated" : "direct" }, async createSession() { return session; } };
-    const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+    const runtimeHost = createRuntimeHost({
+      adapterFor: () => adapter,
+      promptBuilder: new ContextPromptBuilder(),
+      stateStoreFor: () => store,
+      assertOfficialCliReady: () => {},
+    });
     const runtimeEvents = [];
     const memberCalls = [];
     runtimeHost.subscribe((event) => runtimeEvents.push(event));
@@ -159,6 +172,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const hostShell = createHostShell({
       env,
       runtimeHost,
+      managedCliForAgent: testManagedCli,
       execFileImpl(command, args, _options, callback) {
         memberCalls.push([command, ...args]);
         const data = args.includes("bots")
@@ -185,7 +199,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       assert.equal(canonical[0].chat_id, `oc_${runtime}`);
       assert.equal(canonical[0].thread_id, null);
       assert.equal(canonical[0].content, "first");
-      assert.deepEqual(memberCalls.slice(0, 2).map((call) => call.slice(3, 7)), [
+      assert.deepEqual(memberCalls.slice(0, 2).map((call) => call.slice(1, 5)), [
         ["im", "chat.members", "get", "--chat-id"],
         ["im", "chat.members", "bots", "--chat-id"],
       ]);
@@ -196,10 +210,10 @@ for (const runtime of ["codex", "claude", "pi"]) {
       let guardedStdout = "", guardedStderr = "";
       const guardedDependencies = {
         stateStore: store,
-        upstreamScript: "/fixture/@larksuite/cli/scripts/run.js",
+        nativeCommand: { command: "/fixture/@larksuite/cli/scripts/run.js", argsPrefix: [], version: "1.0.79" },
         spawn(command, args, options) {
-          if (["+chat-messages-list", "+threads-messages-list"].includes(args[2])
-              || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages")) {
+          if (["+chat-messages-list", "+threads-messages-list"].includes(args[1])
+              || (args[0] === "api" && args[1] === "GET" && args[2] === "/open-apis/im/v1/messages")) {
             return { status: 0, stdout: JSON.stringify({ ok: true, identity: "bot", data: { messages: [
               { message_id: `om_${runtime}_1`, chat_id: `oc_${runtime}`, create_time: "1784160000000", content: "first" },
               { message_id: `om_${runtime}_2`, chat_id: `oc_${runtime}`, create_time: "1784160001000", content: "second" },
@@ -247,8 +261,9 @@ for (const runtime of ["codex", "claude", "pi"]) {
       assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
       assert.equal(sent.length, 1, "the provider is called once after the target is current");
       assert.deepEqual(sent[0].args.slice(0, 6), [
-        "/fixture/@larksuite/cli/scripts/run.js", "im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text",
+        "im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text", "fresh response",
       ]);
+      assert.equal(sent[0].command, "/fixture/@larksuite/cli/scripts/run.js");
       assert.ok(sent[0].args.includes("--as") && sent[0].args.includes("bot"));
       assert.ok(sent[0].args.includes("--idempotency-key"));
       await new Promise((resolve) => setTimeout(resolve, 300));

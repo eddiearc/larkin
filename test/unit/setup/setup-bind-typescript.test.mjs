@@ -52,17 +52,16 @@ test("setup-bind is strict TypeScript compiled to its direct runtime entry", () 
   assert.doesNotMatch(entry, /packages\/larkin-shell|fork\/feishu/);
 });
 
-test("failed bot verification preserves config bytes and creates no attachment", () => {
+test("explicit App-ID setup-bind no longer depends on a legacy profile verification", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-rollback-"));
   try {
     const configFile = path.join(root, "config.json");
     const before = `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`;
     fs.writeFileSync(configFile, before, { mode: 0o600 });
     const result = runBind(root, { FAIL_BOT_VERIFY: "1" });
-    assert.notEqual(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout + result.stderr, /bot 校验失败|未修改 Agent 配置/);
-    assert.equal(fs.readFileSync(configFile, "utf8"), before);
-    assert.equal(fs.existsSync(path.join(root, "computer")), false);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.notEqual(fs.readFileSync(configFile, "utf8"), before);
+    assert.equal(fs.existsSync(path.join(root, "computer")), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

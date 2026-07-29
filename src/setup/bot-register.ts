@@ -3,12 +3,14 @@
 
 import { spawnSync as systemSpawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerApp as channelRegisterApp } from "@larksuite/channel";
 import { internalCommandSpec } from "../app/internal-command.js";
 import * as larkinConfig from "../platform/config.js";
+import { hydrateRuntimeAgent, syncAgentProfile } from "../app/runtime-agent-config.js";
+import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
+import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -37,33 +39,18 @@ const testFixture = process.env.LARKIN_TEST_BOT_REGISTER_MODULE
     registerApp?: RegisterApp;
     qrcode?: { generate(text: string, options: { small: boolean }, callback: (code: string) => void): void };
     spawnSync?: typeof systemSpawnSync;
+    syncAgentProfile?: typeof syncAgentProfile;
+    resolveOfficialLarkCli?: typeof resolveOfficialLarkCli;
+    wait?: (milliseconds: number) => Promise<void>;
   }
   : null;
 const registerApp: RegisterApp = testFixture?.registerApp ?? channelRegisterApp as unknown as RegisterApp;
 const qrcode = testFixture?.qrcode ?? qrcodePackage;
 const spawnSync = testFixture?.spawnSync ?? systemSpawnSync;
+const synchronizeAgentProfile = testFixture?.syncAgentProfile ?? syncAgentProfile;
+const resolveOfficialCli = testFixture?.resolveOfficialLarkCli ?? resolveOfficialLarkCli;
+const wait = testFixture?.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
 const CFG_DIR = larkinConfig.resolveConfigDir(process.env);
-let temporaryLarkConfigDir: string | null = null;
-
-process.on("exit", () => {
-  if (!temporaryLarkConfigDir) return;
-  try { fs.rmSync(temporaryLarkConfigDir, { recursive: true, force: true }); } catch { /* best effort */ }
-});
-
-function createTemporaryLarkProfileDir(): void {
-  temporaryLarkConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-profile-"));
-  fs.chmodSync(temporaryLarkConfigDir, 0o700);
-}
-
-const larkEnv = (): NodeJS.ProcessEnv => {
-  const env = { ...process.env };
-  for (const key of ["HERMES_HOME", "OPENCLAW_HOME", "OPENCLAW_CLI"]) delete env[key];
-  for (const key of Object.keys(env)) {
-    if (key === "LARK_CHANNEL" || key.startsWith("LARK_CHANNEL_")) delete env[key];
-  }
-  if (temporaryLarkConfigDir) env.LARKSUITE_CLI_CONFIG_DIR = temporaryLarkConfigDir;
-  return env;
-};
 const argv = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
   const index = argv.indexOf(name);
@@ -77,60 +64,11 @@ const die = (message: string): never => {
 };
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
-// A freshly created Feishu App can remain invisible to credential validation for
-// more than a few seconds. Keep setup bounded, but cover a realistic propagation
-// window so users do not have to restart the browser flow manually.
-const PROFILE_SYNC_BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000] as const;
+const BOT_VERIFY_BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000] as const;
 
-interface ProfileSyncFailure {
-  kind: "invalid_client" | "temporary_network" | "agent_context" | "unknown";
-  retryable: boolean;
-  label: string;
-}
-
-function parseJsonEnvelope(value: unknown): { subtype?: unknown; code?: unknown } | null {
-  if (typeof value !== "string" || !value.trim()) return null;
-  try {
-    const parsed = JSON.parse(value) as { error?: { subtype?: unknown; code?: unknown } };
-    return parsed?.error || null;
-  } catch { return null; }
-}
-
-function classifyProfileSyncFailure(result: { status: number | null; stdout?: unknown; stderr?: unknown }): ProfileSyncFailure {
-  const envelopes = [parseJsonEnvelope(result.stderr), parseJsonEnvelope(result.stdout)].filter(Boolean) as Array<{ subtype?: unknown; code?: unknown }>;
-  const subtype = envelopes.map((item) => item.subtype).find((value) => typeof value === "string");
-  const code = envelopes.map((item) => item.code).find((value) => typeof value === "number");
-  const text = `${typeof result.stderr === "string" ? result.stderr : ""}\n${typeof result.stdout === "string" ? result.stdout : ""}`;
-  if (subtype === "invalid_client" || code === 20048 || /\binvalid_client\b|specified app does not exist/i.test(text)) {
-    return { kind: "invalid_client", retryable: true, label: "invalid_client（飞书可能仍在同步新应用）" };
-  }
-  if (/EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|temporary network|too many requests|\b(?:429|502|503|504)\b/i.test(text)) {
-    return { kind: "temporary_network", retryable: true, label: "temporary_network（临时网络或网关错误）" };
-  }
-  if (subtype === "not_configured" && /Agent context|HERMES_HOME|OPENCLAW_HOME|config init is refused/i.test(text)) {
-    return { kind: "agent_context", retryable: false, label: "agent_context（临时 profile 仍被识别为 Agent 环境）" };
-  }
-  return { kind: "unknown", retryable: false, label: `unknown（lark-cli exit=${result.status ?? "signal"}）` };
-}
-
-const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-async function syncTemporaryProfile(id: string, secret: string, tenant: string): Promise<{ attempts: number; failure: ProfileSyncFailure | null }> {
-  const attempts = PROFILE_SYNC_BACKOFF_MS.length + 1;
-  for (let index = 0; index < attempts; index += 1) {
-    const sync = spawnSync("lark-cli", ["config", "init", "--app-id", id, "--app-secret-stdin", "--brand", tenant, "--name", id], {
-      input: secret,
-      encoding: "utf8",
-      env: larkEnv(),
-    });
-    if (sync.status === 0) return { attempts: index + 1, failure: null };
-    const failure = classifyProfileSyncFailure(sync);
-    if (!failure.retryable || index === attempts - 1) return { attempts: index + 1, failure };
-    const delay = PROFILE_SYNC_BACKOFF_MS[index];
-    say(`! 临时 profile 尚未就绪（${failure.label}），${delay}ms 后重试 ${index + 2}/${attempts}`);
-    await wait(delay);
-  }
-  return { attempts, failure: { kind: "unknown", retryable: false, label: "unknown（未执行 profile 验证）" } };
+function botVerificationRetryable(result: { status: number | null; stdout?: unknown; stderr?: unknown }): boolean {
+  const text = `${typeof result.stdout === "string" ? result.stdout : ""}\n${typeof result.stderr === "string" ? result.stderr : ""}`;
+  return /\binvalid_client\b|specified app does not exist|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|temporary network|too many requests|\b(?:429|502|503|504)\b/i.test(text);
 }
 
 function ensureSecureBotsDir(): string {
@@ -219,7 +157,6 @@ if (typeof rawSecret !== "string" || rawSecret.length === 0) die("授权完成�
 const id = rawId as string;
 const secret = rawSecret as string;
 const botsDir = ensureSecureBotsDir();
-createTemporaryLarkProfileDir();
 say(`[setup 3/5] 正在按 App ID ${id} 刷新凭证并配置 Agent`);
 
 const tenant = userInfo?.tenant_brand === "lark" ? "lark" : "feishu";
@@ -228,18 +165,6 @@ const prior: StoredCredential = (() => {
   try { return JSON.parse(fs.readFileSync(botFile, "utf8")) as StoredCredential; }
   catch { return {}; }
 })();
-
-const sync = await syncTemporaryProfile(id, secret, tenant);
-if (sync.failure) die(`临时 lark-cli 验证 profile 创建失败（${sync.failure.label}，已尝试 ${sync.attempts} 次）；未写入本地 bot 凭证或 Agent binding，请重试 setup`);
-say(`✓ 临时 lark-cli profile ${id} 已创建`);
-
-const verify = spawnSync("lark-cli", ["--profile", id, "im", "+chat-list", "--as", "bot"], { encoding: "utf8", env: larkEnv() });
-let verified: { ok?: unknown; identity?: unknown } | undefined;
-try { verified = JSON.parse(verify.stdout || "") as { ok?: unknown; identity?: unknown }; } catch { /* fail closed below */ }
-if (verify.status !== 0 || verified?.ok !== true || verified.identity !== "bot") {
-  die(`临时 lark-cli profile ${id} 的 bot 凭证校验失败；未写入本地 bot 凭证或 Agent binding，请重试 setup`);
-}
-say("✓ 凭证校验通过（identity=bot）");
 
 const stagedBotFile = path.join(botsDir, `.${id}.${process.pid}.tmp`);
 try {
@@ -264,11 +189,36 @@ const targetAgent = flag("--agent") || id;
 const bindArgs = ["--profile", id, "--yes", "--agent", targetAgent];
 const runtime = flag("--runtime");
 if (runtime) bindArgs.push("--runtime", runtime);
-const bindSpec = internalCommandSpec("setup-bind", bindArgs, larkEnv());
-const bind = spawnSync(bindSpec.command, bindSpec.args, { env: larkEnv(), stdio: "inherit" });
+const bindSpec = internalCommandSpec("setup-bind", bindArgs, process.env);
+const bind = spawnSync(bindSpec.command, bindSpec.args, { env: process.env, stdio: "inherit" });
 if (bind.status !== 0) {
   die("新 bot 凭证已发布但 Agent 绑定失败；权威凭证状态已保留，请重跑 larkin setup 并在网页中重新选择机器人");
 }
+try {
+  const loaded = larkinConfig.loadConfig(process.env);
+  const stored = loaded.config.agents[targetAgent];
+  if (!stored) throw new Error(`Agent ${targetAgent} 不存在于 canonical config`);
+  const agent = hydrateRuntimeAgent(loaded.configDir, stored);
+  synchronizeAgentProfile(agent, { ...process.env, LARKIN_CONFIG_DIR: loaded.configDir }, { forceRebind: true });
+  const cliEnv = managedLarkCliEnv(agent, process.env);
+  const official = resolveOfficialCli({ env: cliEnv });
+  let verified = false;
+  for (let index = 0; index <= BOT_VERIFY_BACKOFF_MS.length; index += 1) {
+    const result = spawnSync(official.command, [...official.argsPrefix, "im", "+chat-list", "--as", "bot"], { encoding: "utf8", env: cliEnv });
+    let envelope: { ok?: unknown; identity?: unknown } | undefined;
+    try { envelope = JSON.parse(result.stdout || "") as { ok?: unknown; identity?: unknown }; } catch { /* fail closed below */ }
+    if (result.status === 0 && envelope?.ok === true && envelope.identity === "bot") { verified = true; break; }
+    if (!botVerificationRetryable(result) || index === BOT_VERIFY_BACKOFF_MS.length) break;
+    const delay = BOT_VERIFY_BACKOFF_MS[index];
+    say(`! 新应用 Bot identity 尚未就绪，${delay}ms 后重试 ${index + 2}/${BOT_VERIFY_BACKOFF_MS.length + 1}`);
+    await wait(delay);
+  }
+  if (!verified) throw new Error("Bot identity verification failed");
+} catch (error) {
+  void error;
+  die("Agent lark-channel binding/凭证校验失败；权威 bot 凭证已保留，请重跑 larkin setup");
+}
+say("✓ 官方 lark-channel workspace 已绑定（identity=bot-only），Bot 凭证校验通过");
 say(`\n[setup 4/5] ✓ Agent ${id} 已配置`);
 if (resultFile) {
   try { fs.writeFileSync(resultFile, `${JSON.stringify({ agentId: id })}\n`, { mode: 0o600, flag: "wx" }); }

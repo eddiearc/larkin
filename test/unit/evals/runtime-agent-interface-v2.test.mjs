@@ -67,6 +67,6 @@ test("grader rejects empty traces even when a scenario expects no provider write
 test("native eval binds controlled executables by absolute path so login shells cannot escape PATH isolation", () => {
   const source = fs.readFileSync(path.join(ROOT, "test/live/runtime-agent-interface-v2-agent-eval.test.mjs"), "utf8");
   assert.match(source, /JSON\.stringify\(path\.join\(binDir, "larkin"\)\)/);
-  assert.match(source, /JSON\.stringify\(path\.join\(binDir, "lark-cli"\)\)/);
+  assert.doesNotMatch(source, /JSON\.stringify\(path\.join\(binDir, "lark-cli"\)\)/);
   assert.doesNotMatch(source, /const exactSend = `lark-cli /);
 });

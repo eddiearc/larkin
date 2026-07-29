@@ -15,7 +15,19 @@ function checked(result, label) {
 }
 
 function writeLarkCli(binDir) {
-  fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/bin/sh
+  const packageDir = path.join(path.dirname(binDir), "official", "node_modules", "@larksuite", "cli");
+  const launcher = path.join(packageDir, "scripts", "run.sh");
+  fs.mkdirSync(path.dirname(launcher), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+  }), { mode: 0o600 });
+  fs.writeFileSync(launcher, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '1.0.79\n'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "bind" ]; then
+  ${JSON.stringify(process.execPath)} --eval 'const fs=require("node:fs"),path=require("node:path"),source=JSON.parse(fs.readFileSync(process.env.LARK_CHANNEL_CONFIG,"utf8")),id=source.accounts.app.id,dir=path.join(process.env.LARKSUITE_CLI_CONFIG_DIR,"lark-channel");fs.mkdirSync(dir,{recursive:true,mode:0o700});fs.writeFileSync(path.join(dir,"config.json"),JSON.stringify({apps:[{appId:id,appSecret:{source:"keychain",id:"appsecret:"+id},defaultAs:"bot",strictMode:"bot",users:[]}]}),{mode:0o600})'
+  exit $?
+fi
 count=0
 if [ -f "$SETUP_LARK_CALLS" ]; then count=$(grep -c '+chat-list' "$SETUP_LARK_CALLS"); fi
 printf '%s\n' "$*" >> "$SETUP_LARK_CALLS"
@@ -31,6 +43,7 @@ else
   printf '%s\n' '{"ok":true}'
 fi
 `, { mode: 0o755 });
+  fs.symlinkSync(launcher, path.join(binDir, "lark-cli"));
 }
 
 function writeRegisterFixture(temp) {
@@ -68,7 +81,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   return executable;
 }
 
-test.skipIf(!enabled)("compiled setup-bind executes its internal stage and propagates binding failures", { timeout: 180_000 }, () => {
+test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent config and propagate lark-channel verification failures", { timeout: 180_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-standalone-setup-"));
   const releaseDir = path.join(temp, "release");
   const configDir = path.join(temp, "config");
@@ -95,8 +108,11 @@ test.skipIf(!enabled)("compiled setup-bind executes its internal stage and propa
     };
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
     writeLarkCli(binDir);
+    const fixtureHome = path.join(temp, "home");
+    fs.mkdirSync(fixtureHome, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(fixtureHome, ".bash_profile"), `export PATH=${JSON.stringify(binDir)}:/usr/bin:/bin\n`, { mode: 0o600 });
     const baseEnv = {
-      HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: configDir,
+      HOME: fixtureHome, SHELL: "/bin/bash", LARKIN_CONFIG_DIR: configDir,
       PATH: `${binDir}${path.delimiter}/usr/bin:/bin`, SETUP_APP_ID: secondAgent,
       SETUP_LARK_CALLS: path.join(temp, "lark-calls"),
     };
@@ -110,14 +126,6 @@ test.skipIf(!enabled)("compiled setup-bind executes its internal stage and propa
     assert.equal(configured.agents[secondAgent].runtime, "codex");
     assert.equal(configured.activeAgent, firstAgent, "adding an Agent must preserve the existing active selection");
     assert.match(added.stderr + added.stdout, /已写配置/);
-
-    fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
-    const failed = spawnSync(artifact, ["__internal", "setup-bind", "--profile", secondAgent, "--agent", secondAgent, "--runtime", "codex", "--yes"], {
-      cwd: temp, env: { ...baseEnv, SETUP_FAIL_BIND_VERIFY: "1" }, encoding: "utf8", timeout: 30_000,
-    });
-    assert.notEqual(failed.status, 0, failed.stderr + failed.stdout);
-    assert.doesNotMatch(failed.stderr + failed.stdout, /已写配置/);
-    assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), initial);
 
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
     fs.rmSync(baseEnv.SETUP_LARK_CALLS, { force: true });
@@ -138,11 +146,17 @@ test.skipIf(!enabled)("compiled setup-bind executes its internal stage and propa
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
     fs.rmSync(baseEnv.SETUP_LARK_CALLS, { force: true });
     const publicFailed = spawnSync(artifact, ["setup", "--runtime", "codex", "--no-start"], {
-      cwd: temp, env: { ...publicEnv, SETUP_FAIL_BIND_VERIFY: "second" }, encoding: "utf8", timeout: 30_000,
+      cwd: temp, env: { ...publicEnv, SETUP_FAIL_BIND_VERIFY: "1" }, encoding: "utf8", timeout: 30_000,
     });
     assert.notEqual(publicFailed.status, 0, publicFailed.stderr + publicFailed.stdout);
     assert.doesNotMatch(publicFailed.stderr + publicFailed.stdout, new RegExp(`Agent ${secondAgent} 已配置`));
-    assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), initial);
+    const recoverable = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    assert.deepEqual(Object.keys(recoverable.agents), [firstAgent, secondAgent]);
+    assert.equal(recoverable.activeAgent, firstAgent);
+    assert.equal(fs.existsSync(path.join(configDir, "bots", `${secondAgent}.json`)), true,
+      "verification failure must preserve the authoritative credential for recovery");
+    assert.equal(fs.existsSync(path.join(configDir, "state", "agents", secondAgent, "lark-cli-config", "lark-channel", "config.json")), true,
+      "verification failure must preserve the successful official workspace binding");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

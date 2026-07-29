@@ -28,14 +28,14 @@
       "expected": {
         "max_tool_calls": 1,
         "provider_writes": 0,
-        "required_command": "lark-cli im +threads-messages-list --thread omt_eval_thread --order desc --page-size 10 --no-reactions --json",
+        "required_command": "larkin im +threads-messages-list --thread omt_eval_thread --order desc --page-size 10 --no-reactions --json",
         "response_path": "data.messages",
         "forbidden_command_fragments": ["+chat-messages-list", "2>&1"]
       },
       "trace": [
         {
           "action": "tool",
-          "command": "lark-cli im +threads-messages-list --thread omt_eval_thread --order desc --page-size 10 --no-reactions --json",
+          "command": "larkin im +threads-messages-list --thread omt_eval_thread --order desc --page-size 10 --no-reactions --json",
           "exit_code": 0,
           "stdout_documents": 1,
           "stderr": "",
@@ -56,7 +56,7 @@
       "trace": [
         {
           "action": "tool",
-          "command": "lark-cli im +threads-messages-list --thread omt_eval_failed --order desc --page-size 10 --no-reactions --json",
+          "command": "larkin im +threads-messages-list --thread omt_eval_failed --order desc --page-size 10 --no-reactions --json",
           "exit_code": 2,
           "stdout_documents": 0,
           "stderr": "scoped read unavailable"
@@ -76,7 +76,7 @@
       "trace": [
         {
           "action": "provider_write",
-          "command": "lark-cli im +messages-send --chat-id oc_eval_exact --text '原文：“修复 A/B”；不要改成 ASCII 引号。' --json",
+          "command": "larkin im +messages-send --chat-id oc_eval_exact --text '原文：“修复 A/B”；不要改成 ASCII 引号。' --json",
           "transported_text": "原文：“修复 A/B”；不要改成 ASCII 引号。",
           "shell_interpolation": false,
           "exit_code": 0
@@ -114,7 +114,7 @@
       "trace": [
         {
           "action": "provider_write",
-          "command": "lark-cli im +messages-reply --message-id om_eval_anchor --text 'done' --json",
+          "command": "larkin im +messages-reply --message-id om_eval_anchor --text 'done' --json",
           "exit_code": 0,
           "stdout_documents": 1,
           "stderr": "",

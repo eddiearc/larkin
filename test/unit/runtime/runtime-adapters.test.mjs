@@ -77,7 +77,8 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
   assert.match(prompt.content, /Only a successful interaction resolve/);
-  assert.match(prompt.content, /package-local `lark-cli` directly/);
+  assert.match(prompt.content, /Use only the Larkin-owned `larkin` command/);
+  assert.match(prompt.content, /never invoke bare `lark-cli`/);
   assert.match(prompt.content, /larkin profile show/);
   for (const command of [
     "im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +messages-mget",
@@ -143,7 +144,7 @@ test("Codex, Claude and Pi receive the markdown-default standing contract", asyn
   assertContract(piPrompt);
 });
 
-test("context prompt keeps Larkin-local and native lark-cli executable surfaces separate", () => {
+test("context prompt uses the single Larkin-owned executable surface", () => {
   const executable = "'/opt/bun with space/$()/`bin`/bun' '/app/larkin agent'\"'\"'cli.mjs'";
   const prompt = new ContextPromptBuilder().buildStandingPrompt({
     agent: { id: "cli_test" }, runtime: "codex",
@@ -156,8 +157,9 @@ test("context prompt keeps Larkin-local and native lark-cli executable surfaces 
     assert.ok(prompt.includes(`${executable} ${suffix}`), suffix);
   }
   for (const suffix of ["im +messages-reply", "im +chat-list", "im +messages-resources-download"]) {
-    assert.ok(prompt.includes(`lark-cli ${suffix}`), suffix);
+    assert.ok(prompt.includes(`${executable} ${suffix}`), suffix);
   }
+  assert.match(prompt, /never invoke bare `lark-cli`/);
   assert.doesNotMatch(prompt, /\/installed\/agent-cli.* im /);
   assert.match(prompt, /Only a real Feishu `message_id` beginning with `om_`/);
 });

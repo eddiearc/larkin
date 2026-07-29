@@ -181,7 +181,6 @@ export async function main(): Promise<void> {
     LARKIN_AGENT_TRANSPORT_MODULE: path.join(HERE, "..", "agent", "agent-transport.cjs"),
     LARKIN_SERVER_ID: String(serverId),
     LARKIN_AGENTS_CONFIG: JSON.stringify(agents),
-    LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir,
     LARKIN_CONTROL_AUTHORIZATION: controlToken,
   };
   if (argv.includes("--dry-run")) runtimeEnv.LARKIN_FEISHU_DRYRUN = "1";

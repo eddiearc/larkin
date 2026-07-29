@@ -15,10 +15,9 @@ test("PR and main CI validate source without building release artifacts", () => 
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/);
   assert.equal(workflow.match(/runs-on: ubuntu-24\.04/g)?.length, 1);
-  assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies, ["@larksuite/cli"]);
+  assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies ?? [], []);
   assert.match(workflow, /bun-version: 1\.3\.14/);
-  assert.match(workflow, /actions\/setup-go@v6[\s\S]{0,100}go-version: 1\.23\.12/);
-  assert.equal(workflow.match(/cache: false/g)?.length, 1, "setup-go must not require an absent go.sum cache key");
+  assert.doesNotMatch(workflow, /actions\/setup-go|go-version:/);
   assert.match(workflow, /bun install --frozen-lockfile/);
   assert.match(workflow, /bun run licenses:check/);
   assert.match(workflow, /bun run publication:check:tree/);
@@ -33,6 +32,8 @@ test("PR and main CI validate source without building release artifacts", () => 
   assert.ok(workflow.indexOf("gitleaks/gitleaks-action@") < workflow.indexOf("run: rm -f -- results.sarif"));
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Run full test suite"));
   assert.match(workflow, /run: bun run test/);
+  assert.match(workflow, /LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND: "1"/);
+  assert.match(workflow, /bun test --max-concurrency 1 test\/integration\/app\/official-lark-channel-bind-live\.test\.mjs/);
   assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);
   assert.match(workflow, /persist-credentials: false/);
   assert.doesNotMatch(workflow, /scripts\/release\/build\.ts|release:smoke|artifacts\/release|matrix\./);
@@ -50,9 +51,7 @@ test("tag publication validates an explicit version and publishes one combined r
   assert.match(workflow, /bun run release:check-version "\$\{GITHUB_REF_NAME\}"/);
   assert.match(workflow, /bun run test/);
   assert.match(workflow, /bun run licenses:check/);
-  assert.equal(workflow.match(/actions\/setup-go@v6/g)?.length, 3);
-  assert.equal(workflow.match(/go-version: 1\.23\.12/g)?.length, 3);
-  assert.equal(workflow.match(/cache: false/g)?.length, 3, "every setup-go step must disable go.sum-based caching");
+  assert.doesNotMatch(workflow, /actions\/setup-go|go-version:/);
   assert.match(workflow, /secrets\.LARKIN_PUBLICATION_DENYLIST/);
   assert.match(workflow, /--trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt"/);
   assert.match(workflow, /gitleaks\/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3/);
@@ -61,7 +60,7 @@ test("tag publication validates an explicit version and publishes one combined r
   assert.equal(workflow.match(/rm -f -- results\.sarif/g)?.length, 1, "only the generated Gitleaks SARIF path may be removed");
   assert.ok(workflow.indexOf("gitleaks/gitleaks-action@") < workflow.indexOf("run: rm -f -- results.sarif"));
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Build current platform release"));
-  assert.match(workflow, /bun run scripts\/check-publication\.mjs --trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt" --allow-embedded-lark-cli node_modules\/@larksuite\/cli\/bin\/lark-cli artifacts\/release\/larkin-v\*/);
+  assert.match(workflow, /bun run scripts\/check-publication\.mjs --trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt" artifacts\/release\/larkin-v\*/);
   assert.match(workflow, /artifacts\/release\/larkin-v\* artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);
   for (const target of ["linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"]) {
     assert.match(workflow, new RegExp(`target: ${target}`));

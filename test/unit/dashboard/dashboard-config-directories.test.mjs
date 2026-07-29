@@ -10,6 +10,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const APP = "cli_dashboardDirectoryA1";
 const CONTROLLER = pathToFileURL(path.join(ROOT, "dist/dashboard/dashboard-config-controller.mjs")).href;
 const CONFIG = pathToFileURL(path.join(ROOT, "dist/platform/config.mjs")).href;
+const testManagedCli = (agent, env) => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" },
+  env: { ...env, LARK_CHANNEL: "1", LARK_CHANNEL_CONFIG: path.join(agent.stateDir, "lark-channel-source", "config.json"),
+    LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir } });
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-dashboard-directory-"));
@@ -98,12 +101,25 @@ test("dashboard config lists only explicit chat policies, resolves a missing loc
   assert.deepEqual(after.body.agents[0].knownChats, [], "inherit removes the persisted override and therefore the Dashboard row");
 });
 
+test("dashboard chat lookup reuses the managed Agent environment that scrubs foreign CLI homes", async () => {
+  const workspace = await import(pathToFileURL(path.join(ROOT, "dist/app/agent-lark-cli-workspace.mjs")).href);
+  const agent = { agentId: APP, stateDir: "/safe/state", larkConfigDir: "/safe/lark-cli" };
+  const env = workspace.managedLarkCliEnv(agent, { OPENCLAW_HOME: "/foreign/openclaw", HERMES_HOME: "/foreign/hermes" });
+  assert.equal(Object.hasOwn(env, "OPENCLAW_HOME"), false);
+  assert.equal(Object.hasOwn(env, "HERMES_HOME"), false);
+  assert.equal(env.LARK_CHANNEL_CONFIG, "/safe/state/lark-channel-source/config.json");
+  const source = fs.readFileSync(path.join(ROOT, "src/dashboard/dashboard-config-controller.ts"), "utf8");
+  assert.match(source, /managedOfficialLarkCli/);
+  assert.doesNotMatch(source, /env:\s*\{\s*\.\.\.process\.env,\s*LARK_CHANNEL/);
+});
+
 test("chat directory resolver uses list then get fallback with five-minute TTL and concurrent request dedupe", async () => {
   const module = await import(`${CONTROLLER}?chat-cache=${Date.now()}`);
   assert.equal(typeof module.createChatDirectoryResolver, "function", "dashboard controller must export the injectable chat directory resolver factory");
   let now = 1_000;
   const calls = [];
   const resolver = module.createChatDirectoryResolver({
+    managedCli: testManagedCli,
     now: () => now,
     ttlMs: 5 * 60_000,
     async runLarkJson(call) {
@@ -119,10 +135,12 @@ test("chat directory resolver uses list then get fallback with five-minute TTL a
   assert.deepEqual(first, { oc_listed: "列表群名", oc_fallback: "单群 回退名" });
   assert.deepEqual(concurrent, first);
   assert.equal(calls.length, 2, "one list and one missing-id get serve concurrent callers");
-  assert.deepEqual(calls[0].args, ["--profile", APP, "im", "+chat-list", "--as", "bot", "--page-size", "100", "--json"]);
-  assert.deepEqual(calls[1].args, ["--profile", APP, "im", "chats", "get", "--chat-id", "oc_fallback", "--as", "bot", "--json"]);
+  assert.deepEqual(calls[0].args, ["im", "+chat-list", "--as", "bot", "--page-size", "100", "--json"]);
+  assert.deepEqual(calls[1].args, ["im", "chats", "get", "--chat-id", "oc_fallback", "--as", "bot", "--json"]);
   for (const call of calls) {
     assert.equal(call.env.LARKSUITE_CLI_CONFIG_DIR, input.configDir, "resolver pins the canonical profile config directory");
+    assert.equal(call.env.LARK_CHANNEL, "1");
+    assert.equal(call.env.LARK_CHANNEL_CONFIG, "/canonical/lark-channel-source/config.json");
     assert.equal(call.timeout, 15_000);
     assert.ok(call.maxBuffer >= 256 * 1024 && call.maxBuffer <= 4 * 1024 * 1024, "resolver bounds lark-cli output");
   }
@@ -145,6 +163,7 @@ test("chat directory clears rejected in-flight work, retries, and bounds stale f
   let mode = "success";
   let calls = 0;
   const resolver = module.createChatDirectoryResolver({
+    managedCli: testManagedCli,
     now: () => now,
     ttlMs: 5 * 60_000,
     maxStaleMs: 60_000,
@@ -175,6 +194,7 @@ test("chat directory clears rejected in-flight work, retries, and bounds stale f
 test("chat directory preserves successful names when another explicit group is deleted or inaccessible", async () => {
   const module = await import(`${CONTROLLER}?chat-partial=${Date.now()}`);
   const resolver = module.createChatDirectoryResolver({
+    managedCli: testManagedCli,
     async runLarkJson(call) {
       if (call.args.includes("+chat-list")) return { data: { chats: [{ chat_id: "oc_valid", name: "有效群" }] } };
       if (call.args.includes("oc_deleted")) throw new Error("not found");
@@ -194,6 +214,7 @@ test("chat directory treats exit-zero ok:false envelopes as failures and preserv
   let now = 5_000;
   let failedEnvelope = false;
   const resolver = module.createChatDirectoryResolver({
+    managedCli: testManagedCli,
     now: () => now,
     async runLarkJson(call) {
       if (failedEnvelope) return { ok: false, error: { message: "not authorized" } };
@@ -214,6 +235,7 @@ test("chat directory treats exit-zero ok:false envelopes as failures and preserv
 test("chat directory falls back to isolated per-group reads when chat-list is unavailable", async () => {
   const module = await import(`${CONTROLLER}?chat-list-fallback=${Date.now()}`);
   const resolver = module.createChatDirectoryResolver({
+    managedCli: testManagedCli,
     async runLarkJson(call) {
       if (call.args.includes("+chat-list")) throw new Error("list unavailable");
       if (call.args.includes("oc_one")) return { data: { name: "单群回退" } };
@@ -232,6 +254,7 @@ test("chat directory bounds expired or superseded cache keys instead of retainin
   const module = await import(`${CONTROLLER}?chat-bound=${Date.now()}`);
   let calls = 0;
   const resolver = module.createChatDirectoryResolver({
+    managedCli: testManagedCli,
     ttlMs: 60 * 60_000,
     async runLarkJson(call) {
       calls += 1;

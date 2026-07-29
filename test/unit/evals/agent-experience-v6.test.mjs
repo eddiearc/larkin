@@ -33,7 +33,7 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
 test("grader rejects chat-wide fallback, stderr merging, false success, text mutation, excluded replies, and duplicate retry", () => {
   const byId = Object.fromEntries(DATASET.scenarios.map((scenario) => [scenario.id, scenario]));
   const badThread = gradeAgentExperienceV6Trace(byId["target-scoped-thread-read"], [{
-    action: "tool", command: "lark-cli im +chat-messages-list --chat-id oc_eval_thread 2>&1", exit_code: 0,
+    action: "tool", command: "larkin im +chat-messages-list --chat-id oc_eval_thread 2>&1", exit_code: 0,
   }]);
   assert.deepEqual(new Set(badThread.failures.map((item) => item.rule)), new Set([
     "canonical_command", "forbidden_command", "stable_response_path",
@@ -41,7 +41,7 @@ test("grader rejects chat-wide fallback, stderr merging, false success, text mut
 
   const falseSuccess = gradeAgentExperienceV6Trace(byId["failed-thread-read-no-false-success"], [
     byId["failed-thread-read-no-false-success"].trace[0],
-    { action: "provider_write", command: "lark-cli im +messages-send", transported_text: "remembered" },
+    { action: "provider_write", command: "larkin im +messages-send", transported_text: "remembered" },
   ]);
   assert.equal(falseSuccess.failures.some((item) => ["bounded_calls", "provider_write_count", "visible_failure", "no_memory_fallback"].includes(item.rule)), true);
 
@@ -52,7 +52,7 @@ test("grader rejects chat-wide fallback, stderr merging, false success, text mut
     new Set(["exact_text", "shell_interpolation"]));
 
   assert.equal(gradeAgentExperienceV6Trace(byId["exclusive-other-agent-silence"], [{
-    action: "provider_write", command: "lark-cli im +messages-send", exit_code: 0,
+    action: "provider_write", command: "larkin im +messages-send", exit_code: 0,
   }]).failures.some((item) => item.rule === "exclusive_silence"), true);
 
   const duplicated = [...byId["committed-unverified-no-retry"].trace, ...byId["committed-unverified-no-retry"].trace];

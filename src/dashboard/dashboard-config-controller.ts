@@ -7,9 +7,10 @@ import { requestAgentUpsert } from "../app/local-control.js";
 import { discoverClaudeModelCatalog, type DiscoverClaudeCatalogOptions } from "../runtime/claude-model-catalog.js";
 import { discoverCodexModelCatalog, type DiscoverCodexCatalogOptions } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtime/pi-model-catalog.js";
+import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
 type Env = Record<string, string | undefined>;
-type LarkJsonCall = { args: string[]; env: Env; maxBuffer: number; timeout: number };
+type LarkJsonCall = { command: string; args: string[]; env: Env; maxBuffer: number; timeout: number };
 type ChatDirectoryInput = { agentId: string; chatIds: string[]; configDir: string; profile: string };
 type ClaudeModelDirectoryInput = { agentId: string; cwd: string; env: Env };
 type CodexModelDirectoryInput = { agentId: string; cwd: string; env: Env };
@@ -83,7 +84,7 @@ function assertLarkSuccess(value: unknown): void {
 
 async function runLarkJson(call: LarkJsonCall): Promise<unknown> {
   return await new Promise((resolve, reject) => {
-    execFile("lark-cli", call.args, { env: call.env, maxBuffer: call.maxBuffer, timeout: call.timeout }, (error, stdout) => {
+    execFile(call.command, call.args, { env: call.env, maxBuffer: call.maxBuffer, timeout: call.timeout }, (error, stdout) => {
       if (error) return reject(new Error("directory unavailable"));
       try { resolve(JSON.parse(stdout)); } catch { reject(new Error("directory unavailable")); }
     });
@@ -92,6 +93,7 @@ async function runLarkJson(call: LarkJsonCall): Promise<unknown> {
 
 export function createChatDirectoryResolver(options: {
   maxStaleMs?: number;
+  managedCli?: typeof managedOfficialLarkCli;
   now?: () => number;
   runLarkJson?: (call: LarkJsonCall) => Promise<unknown>;
   ttlMs?: number;
@@ -100,6 +102,7 @@ export function createChatDirectoryResolver(options: {
   const ttlMs = options.ttlMs ?? 5 * 60_000;
   const maxStaleMs = options.maxStaleMs ?? 60_000;
   const execute = options.runLarkJson ?? runLarkJson;
+  const resolveManagedCli = options.managedCli ?? managedOfficialLarkCli;
   const cache = new Map<string, { expiresAt: number; staleUntil: number; value: Record<string, string> }>();
   const inFlight = new Map<string, Promise<Record<string, string>>>();
   return {
@@ -113,8 +116,11 @@ export function createChatDirectoryResolver(options: {
       let pending = inFlight.get(key);
       if (!pending) {
         pending = (async () => {
+          const managed = resolveManagedCli({ agentId: input.agentId, feishuAppId: input.agentId,
+            stateDir: path.dirname(input.configDir), larkConfigDir: input.configDir }, process.env);
           const common = {
-            env: { ...process.env, LARKSUITE_CLI_CONFIG_DIR: input.configDir },
+            command: managed.command.command,
+            env: managed.env,
             maxBuffer: 1024 * 1024,
             timeout: 15_000,
           };
@@ -122,7 +128,7 @@ export function createChatDirectoryResolver(options: {
           const requested = new Set(chatIds);
           let listSucceeded = false;
           try {
-            const listed = await execute({ ...common, args: ["--profile", input.profile, "im", "+chat-list", "--as", "bot", "--page-size", "100", "--json"] });
+            const listed = await execute({ ...common, args: [...managed.command.argsPrefix, "im", "+chat-list", "--as", "bot", "--page-size", "100", "--json"] });
             assertLarkSuccess(listed);
             listSucceeded = true;
             for (const chat of chatList(listed)) if (requested.has(chat.chatId)) names[chat.chatId] = chat.name;
@@ -131,7 +137,7 @@ export function createChatDirectoryResolver(options: {
           for (const chatId of chatIds) {
             if (names[chatId]) continue;
             try {
-              const detail = await execute({ ...common, args: ["--profile", input.profile, "im", "chats", "get", "--chat-id", chatId, "--as", "bot", "--json"] });
+              const detail = await execute({ ...common, args: [...managed.command.argsPrefix, "im", "chats", "get", "--chat-id", chatId, "--as", "bot", "--json"] });
               assertLarkSuccess(detail);
               detailSucceeded = true;
               const name = chatName(detail);

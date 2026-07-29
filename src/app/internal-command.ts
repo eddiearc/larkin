@@ -15,6 +15,7 @@ export const INTERNAL_MODES = [
   "bot-register",
   "setup-bind",
   "grant-scopes",
+  "lark-channel-secret",
 ] as const;
 
 export type InternalMode = typeof INTERNAL_MODES[number];

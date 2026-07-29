@@ -23,12 +23,12 @@ test("authoritative freshness eval is versioned, reproducible, and covers the cr
   assert.equal(dataset.grader.threshold, 1);
   assert.equal(dataset.grader.rubric.length, 5);
   const modelScenario = dataset.scenarios.find((scenario) => scenario.id === "model-conflict-redecision");
-  assert.equal(modelScenario.prompt.includes("{lark_cli}"), true);
+  assert.equal(modelScenario.prompt.includes("{larkin}"), true);
   const nativeHarness = fs.readFileSync(path.join(ROOT, "test/live/authoritative-freshness-gate-agent-eval.test.mjs"), "utf8");
-  assert.match(nativeHarness, /replaceAll\("\{lark_cli\}", JSON\.stringify\(path\.join\(binDir, "lark-cli"\)\)\)/);
+  assert.match(nativeHarness, /replaceAll\("\{larkin\}", JSON\.stringify\(path\.join\(binDir, "larkin"\)\)\)/);
   assert.deepEqual(gradeConflictRedecision(modelScenario.trace), { passed: true, failures: [] });
   assert.equal(gradeConflictRedecision(modelScenario.trace.slice(0, 1)).passed, false);
-  const controlled = "/tmp/controlled/bin/lark-cli";
+  const controlled = "/tmp/controlled/bin/larkin";
   const audit = [
     { item_type: "commandExecution", command: `/bin/zsh -lc "\\"${controlled}\\" im +messages-send --chat-id oc_eval_freshness --text 'stale red status'"`, exit_code: 3 },
     { item_type: "commandExecution", command: `/bin/zsh -lc "\\"${controlled}\\" im +messages-send --chat-id oc_eval_freshness --text 'green revised status'"`, exit_code: 0 },

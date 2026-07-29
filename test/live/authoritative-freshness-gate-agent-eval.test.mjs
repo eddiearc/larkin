@@ -47,12 +47,12 @@ test.skipIf(!RUN)("native Runtime/model redecides after nonzero conflict without
     fs.writeFileSync(traceFile, "", { mode: 0o600 });
     fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), [
       "# Controlled authoritative freshness eval",
-      "Use only lark-cli commands explicitly requested by the task.",
+      "Use only larkin commands explicitly requested by the task; never invoke bare lark-cli.",
       "Do not inspect or edit files, environment, cursor state, or use larkin-draft.",
       "A nonzero JSON conflict is authoritative context, not a shell failure to bypass.", "",
     ].join("\n"), { mode: 0o600 });
-    for (const surface of ["larkin", "lark-cli"]) fs.writeFileSync(path.join(binDir, surface),
-      `#!/bin/sh\nLARKIN_EVAL_SURFACE=${surface} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE)} "$@"\n`, { mode: 0o700 });
+    fs.writeFileSync(path.join(binDir, "larkin"),
+      `#!/bin/sh\nLARKIN_EVAL_SURFACE=larkin exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE)} "$@"\n`, { mode: 0o700 });
     const codexCommand = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).trim();
     assert.ok(codexCommand);
     const captureSpawn = (command, args, options) => {
@@ -102,7 +102,7 @@ test.skipIf(!RUN)("native Runtime/model redecides after nonzero conflict without
     const after = events.items.length;
     const accepted = await promptWhenReady(session, {
       inputId: "authoritative-conflict-redecision", kind: "initial", attempt: 0,
-      text: SCENARIO.prompt.replaceAll("{lark_cli}", JSON.stringify(path.join(binDir, "lark-cli"))),
+      text: SCENARIO.prompt.replaceAll("{larkin}", JSON.stringify(path.join(binDir, "larkin"))),
     });
     assert.equal(accepted.status, "accepted");
     await waitForTurnEnd(events, after);
@@ -110,7 +110,7 @@ test.skipIf(!RUN)("native Runtime/model redecides after nonzero conflict without
     assert.equal(runtimeError, undefined, runtimeError?.message);
     const trace = fs.readFileSync(traceFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
     const traceGrade = gradeConflictRedecision(trace);
-    const auditGrade = gradeNativeCommandAudit(commandAudit, path.join(binDir, "lark-cli"));
+    const auditGrade = gradeNativeCommandAudit(commandAudit, path.join(binDir, "larkin"));
     const grade = { passed: traceGrade.passed && auditGrade.passed,
       failures: [...traceGrade.failures, ...auditGrade.failures] };
     process.stderr.write(`# authoritative-freshness native eval: ${JSON.stringify({

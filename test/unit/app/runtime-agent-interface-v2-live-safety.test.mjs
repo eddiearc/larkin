@@ -6,6 +6,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { onTestFinished, test } from "bun:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+process.env.LARKIN_BUN_TEST_RUNNER = "1";
+
 import {
   acquireGlobalLaunchLock,
   createDeferredRuntimeHost,
@@ -320,7 +322,8 @@ test("direct Bot-only profile materialization keeps the secret local and never c
       defaultAs: "bot", strictMode: "bot", users: [],
     }]);
     assert.equal(typeof profile.apps[0].appSecret, "string");
-    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), true);
+    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "larkin")), true);
+    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), false);
   } finally {
     cleanupClaimedHoldHostRoot(claim);
   }
@@ -419,6 +422,16 @@ test("driver proves the audited sole-Host boundary without managing launchd", ()
     "live driver must not execute lark-cli configuration or keychain commands");
   assert.match(source, /writes the supported plaintext Bot-only profile/);
   for (const absolute of ["/usr/bin/plutil", "/bin/launchctl", "/bin/ps"]) assert.match(source, new RegExp(absolute));
+});
+
+test("real Codex routing is cross-platform, keychain-safe, and computes its canonical lark workspace before assertions", () => {
+  const source = fs.readFileSync(path.join(ROOT, "test/live/agent-cli-routing-codex-live.test.mjs"), "utf8");
+  const binder = fs.readFileSync(path.join(ROOT, "test/support/keychain-safe-lark-channel-binder.mjs"), "utf8");
+  assert.doesNotMatch(source, /process\.platform\s*!==\s*["']darwin["']/);
+  assert.match(source, /argsPrefix: \[KEYCHAIN_SAFE_BINDER\]/);
+  assert.doesNotMatch(binder, /node:child_process|\bsecurity\b|keychain-downgrade/);
+  assert.match(source, /const larkConfigDir = path\.join\(configDir, "state", "agents", agentId, "lark-cli-config"\)/);
+  assert.ok(source.indexOf("const larkConfigDir =") < source.indexOf("call.config_dir === larkConfigDir"));
 });
 
 test("history capability succeeds before any drain or external send in the write harness", () => {

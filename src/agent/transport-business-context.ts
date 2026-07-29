@@ -16,6 +16,7 @@ import { signatureDescription } from "../feishu/message-policy.js";
 import { createOutboundTransport, type ReplyContext, type StagedAttachment } from "../feishu/outbound-transport.js";
 import { createReminderRoutes } from "./reminder-routes.js";
 import { isImageMime, looksLikeMarkdown, resolveMappedChatId, safeConversationExcerpt } from "./transport-shell.js";
+import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
 type Env = Record<string, string | undefined>;
 type JsonObject = Record<string, unknown>;
@@ -102,18 +103,21 @@ export function createTransportBusinessContext(env: Env = process.env) {
   };
   const resolveChatId = (target: unknown): string => resolveMappedChatId(loadMap(), target);
 
-  const larkArgs = (...rest: string[]): string[] => ["--profile", selectedAgent.feishuProfile, ...rest];
+  const larkArgs = (...rest: string[]): string[] => rest;
   const larkCli = (args: string[], cwd?: string): CommandResult => {
+    const managed = managedOfficialLarkCli(selectedAgent, process.env);
     const options: SpawnSyncOptionsWithStringEncoding = {
       encoding: "utf8",
-      env: { ...process.env, LARKSUITE_CLI_CONFIG_DIR: selectedAgent.larkConfigDir },
+      env: managed.env,
       ...(cwd ? { cwd } : {}),
     };
-    const result = spawnSync("lark-cli", larkArgs(...args), options);
+    const result = spawnSync(managed.command.command, [...managed.command.argsPrefix, ...larkArgs(...args)], options);
     return { code: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
   };
   const larkJsonOut = (args: string[]): LarkResult | null => {
-    const result = larkCli(args);
+    let result: CommandResult;
+    try { result = larkCli(args); }
+    catch { return null; }
     const clean = (value: string): string => value.split("\n").filter((line) => !/^\[page|fetching/.test(line.trim())).join("\n");
     for (const value of [result.stdout, result.stderr]) {
       try {

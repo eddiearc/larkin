@@ -192,7 +192,8 @@ test("the public CLI router is authored in TypeScript as the direct package bin"
   const source = fs.readFileSync(SOURCE_CLI, "utf8");
   assert.match(source, /const routes:/);
   assert.match(source, /child\.kill\(signal\)/);
-  assert.match(source, /process\.exit\(signal === "SIGINT" \? 130/);
+  assert.match(source, /process\.kill\(process\.pid, signal\)/);
+  assert.match(source, /signal === "SIGINT" \? 130[\s\S]*signal === "SIGTERM" \? 143/);
 });
 
 test("a clean shell build emits loadable artifacts from repository TypeScript sources", async () => {

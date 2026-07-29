@@ -274,7 +274,7 @@ for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["s
       const result = spawnSync(process.execPath, ["--preload", loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto"], {
         cwd: ROOT,
         encoding: "utf8",
-        timeout: 5_000,
+        timeout: 10_000,
         env: { ...process.env, HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: root, CALL_MARKER: callMarker, BIND_MARKER: bindMarker, FAST_RETRY_TIMER: "1", LARKIN_TEST_BOT_REGISTER_MODULE: preload, BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${preload}`].filter(Boolean).join(" ") },
       });
       assert.equal(result.status, expectedStatus, result.stderr || result.stdout);

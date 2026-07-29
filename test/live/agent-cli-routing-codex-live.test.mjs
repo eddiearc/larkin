@@ -9,10 +9,11 @@ import { ensureOfficialLarkCliForSetup } from "../../dist/app/official-lark-cli.
 import { loadAndSyncRuntimeAgent } from "../../dist/app/runtime-process.mjs";
 import { createNativeRuntimeAdapter } from "../../dist/runtime/runtime-adapters.mjs";
 
-const RUN = process.env.LARKIN_RUN_AGENT_CLI_ROUTING_CODEX_LIVE === "1" && process.platform !== "darwin";
+const RUN = process.env.LARKIN_RUN_AGENT_CLI_ROUTING_CODEX_LIVE === "1";
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const PROVIDER = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider.mjs");
 const PRELOAD = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider-preload.cjs");
+const KEYCHAIN_SAFE_BINDER = path.join(ROOT, "test/support/keychain-safe-lark-channel-binder.mjs");
 
 function waitForTurnEnd(events, after, timeoutMs = 180_000) {
   return new Promise((resolve, reject) => {
@@ -75,7 +76,12 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
     fs.writeFileSync(path.join(botsDir, `${agentId}.json`), JSON.stringify({
       appId: agentId, appSecret: "fixture-secret", tenant: "feishu",
     }), { mode: 0o600 });
-    loadAndSyncRuntimeAgent({ ...installEnv, LARKIN_CONFIG_DIR: configDir }, agentId);
+    // Real official config bind is covered on hosted Linux. This Real Codex
+    // workflow seeds the same validated workspace shape without accessing the
+    // macOS Keychain, then exercises the production routing/AOP process.
+    loadAndSyncRuntimeAgent({ ...installEnv, LARKIN_CONFIG_DIR: configDir }, agentId, {
+      resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [KEYCHAIN_SAFE_BINDER], version: "1.0.79" }),
+    });
     fs.writeFileSync(callsFile, "", { mode: 0o600 });
     fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), [
       "# Controlled real Codex routing workflow",

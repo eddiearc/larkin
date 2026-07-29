@@ -424,9 +424,12 @@ test("driver proves the audited sole-Host boundary without managing launchd", ()
   for (const absolute of ["/usr/bin/plutil", "/bin/launchctl", "/bin/ps"]) assert.match(source, new RegExp(absolute));
 });
 
-test("real Codex routing stays Darwin-disabled and computes its canonical lark workspace before assertions", () => {
+test("real Codex routing is cross-platform, keychain-safe, and computes its canonical lark workspace before assertions", () => {
   const source = fs.readFileSync(path.join(ROOT, "test/live/agent-cli-routing-codex-live.test.mjs"), "utf8");
-  assert.match(source, /process\.platform !== "darwin"/);
+  const binder = fs.readFileSync(path.join(ROOT, "test/support/keychain-safe-lark-channel-binder.mjs"), "utf8");
+  assert.doesNotMatch(source, /process\.platform\s*!==\s*["']darwin["']/);
+  assert.match(source, /argsPrefix: \[KEYCHAIN_SAFE_BINDER\]/);
+  assert.doesNotMatch(binder, /node:child_process|\bsecurity\b|keychain-downgrade/);
   assert.match(source, /const larkConfigDir = path\.join\(configDir, "state", "agents", agentId, "lark-cli-config"\)/);
   assert.ok(source.indexOf("const larkConfigDir =") < source.indexOf("call.config_dir === larkConfigDir"));
 });

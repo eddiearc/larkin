@@ -51,10 +51,10 @@ const commandHelp: Record<string, string> = {
 Start one foreground supervisor for the daemon and local dashboard, or reuse it.`,
   setup: `Usage: larkin setup [--runtime <runtime>] [--no-start]
 Run the interactive setup to create or connect a bot and configure its Agent.`,
-  status: `Usage: larkin status
-Show Agent configuration, bot identity, credentials, and connection status.`,
-  agents: `Usage: larkin agents
-List every configured Agent and its current local status.`,
+  status: `Usage: larkin status [--json]
+Show Agent configuration, bot identity, credentials, and connection status. Use --json for readiness automation.`,
+  agents: `Usage: larkin agents [--json]
+List every configured Agent and its current local status. Use --json for daemon/Runtime/channel readiness.`,
   model: `Usage: larkin model [<model>] [--agent <App ID>]
 Show or change an Agent model.`,
   runtime: `Usage: larkin runtime [<runtime>] [--agent <App ID>] [--model <model>]

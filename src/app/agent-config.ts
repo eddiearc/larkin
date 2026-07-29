@@ -7,6 +7,7 @@ import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type PiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { callbackCapability } from "../platform/callback-capability.js";
+import { projectAgentReadiness, type AgentReadinessStatus } from "./agent-readiness.js";
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 
@@ -63,12 +64,8 @@ interface ConfigModule {
   safeConfigView(config: HydratedConfig, onlyAgentId?: string, chatId?: string, applyState?: Record<string, unknown>): Record<string, unknown>;
 }
 
-interface StatusRecord {
-  connectedAt?: string;
-  connectedVia?: string;
+interface StatusRecord extends AgentReadinessStatus {
   inboundVerifiedAt?: string;
-  reconnectingAt?: string | null;
-  reconnectedAt?: string | null;
   droughtReconnectAt?: string | null;
   droughtReconnectAbandonedAt?: string | null;
   recentErrors?: Array<{ message?: string; error?: string; [key: string]: unknown }>;
@@ -96,7 +93,7 @@ const allowedValueFlags: Record<string, ReadonlySet<string>> = {
   effort: new Set(["--agent"]), chats: new Set(["--agent"]), config: new Set(["--agent", "--chat"]),
 };
 const allowedBooleanFlags: Record<string, ReadonlySet<string>> = {
-  agents: new Set(), model: new Set(), runtime: new Set(), effort: new Set(), chats: new Set(), config: new Set(["--json"]),
+  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), chats: new Set(), config: new Set(["--json"]),
 };
 const parsedValues = new Map<string, string>();
 const parsedBooleans = new Set<string>();
@@ -135,8 +132,8 @@ function assertOnlyFlags(valueFlags: readonly string[], booleanFlags: readonly s
 }
 
 if (kind === "agents") {
-  assertOnlyFlags([]);
-  if (positionals.length) die("用法: larkin agents");
+  assertOnlyFlags([], ["--json"]);
+  if (positionals.length) die("用法: larkin agents [--json]");
 } else if (kind === "model") {
   assertOnlyFlags(["--agent"]);
   if (positionals.length > 1) die("用法: larkin model [<model>] [--agent <App ID>]");
@@ -183,11 +180,37 @@ if (!fs.existsSync(file)) die("未找到 Larkin 配置，请运行 larkin setup"
 
 if (kind === "agents") {
   const list = Object.values(config.agents || {});
+  const daemon = readProcessState(config.larkinHome).daemon;
+  const daemonView = {
+    owned: daemon.state === "owned",
+    pid: daemon.state === "owned" && Number.isSafeInteger(Number(daemon.pid)) ? Number(daemon.pid) : null,
+    started_at: daemon.state === "owned" && typeof daemon.startedAt === "string" ? daemon.startedAt : null,
+  };
   if (!list.length) {
-    say("还没有配置任何 agent，先跑 larkin setup");
+    if (flagJson) say(JSON.stringify({ version: 1, daemon: daemonView, agents: [] }, null, 2));
+    else say("还没有配置任何 agent，先跑 larkin setup");
     process.exit(0);
   }
-  const daemon = readProcessState(config.larkinHome).daemon;
+  if (flagJson) {
+    const agents = list.map((agent) => {
+      let status: StatusRecord | null = null;
+      try { status = JSON.parse(fs.readFileSync(path.join(agent.stateDir, "status.json"), "utf8")) as StatusRecord; } catch { /* absent */ }
+      const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
+      return {
+        agent_id: agent.agentId,
+        name: agent.name,
+        runtime: agent.runtime,
+        model: effectiveModel,
+        ...projectAgentReadiness({ agentId: agent.agentId, daemon, status }),
+      };
+    });
+    say(JSON.stringify({
+      version: 1,
+      daemon: daemonView,
+      agents,
+    }, null, 2));
+    process.exit(0);
+  }
   say(`共 ${list.length} 个 agent（daemon=${daemon.running ? `运行中 pid=${daemon.pid} agents=${(daemon.agents || []).join(",")}` : "未运行"}）:\n`);
   for (const agent of list) {
     let bot: { name?: string; open_id?: string } | null = null;

@@ -1,7 +1,7 @@
 {
   "dataset": "authoritative-freshness-gate",
   "version": 1,
-  "standing_prompt_version": "larkin-standing-v5",
+  "standing_prompt_version": "larkin-standing-v6",
   "runtime": { "adapter": "codex", "selection": "runtime-default" },
   "grader": {
     "name": "authoritative-freshness-trace-grader",

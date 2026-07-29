@@ -252,13 +252,19 @@ test("production HostShell clears eyes on inactive/error and ignores heartbeat a
     host.start();
     await new Promise((resolve) => setImmediate(resolve));
 
+    listener({ type: "agent-status", agentId, status: "active" });
+    assert.equal(JSON.parse(fs.readFileSync(path.join(agent.stateDir, "status.json"), "utf8")).runtimeReadiness.state, "ready");
+
     await ingest("inactive");
-    listener({ type: "agent-status", agentId, status: "inactive" });
+    listener({ type: "agent-status", agentId, status: "inactive", readiness: { runtime: "pi", state: "ready" } });
     assert.equal(deletes().length, 1);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(agent.stateDir, "status.json"), "utf8")).runtimeReadiness.state, "missing");
 
     await ingest("error");
-    listener({ type: "agent-status", agentId, status: "error", error: "runtime failed" });
+    listener({ type: "agent-status", agentId, status: "active" });
+    listener({ type: "agent-status", agentId, status: "error", error: "runtime failed", readiness: { runtime: "pi", state: "ready" } });
     assert.equal(deletes().length, 2);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(agent.stateDir, "status.json"), "utf8")).runtimeReadiness.state, "incompatible");
 
     await ingest("heartbeat");
     listener({ type: "activity", agentId, activity: "idle", activityKind: "idle", isHeartbeat: true });

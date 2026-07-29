@@ -407,4 +407,8 @@ test("platform rules teach native lark-cli, long-running task updates, and the i
   assert.match(PLATFORM_RULES, /不得泄露[^\n]*thinking[^\n]*凭证[^\n]*原始工具输出[^\n]*内部路径/, "progress must protect sensitive runtime details");
   assert.match(PLATFORM_RULES, /(?:完成|无法继续|需要用户动作)[^\n]*lark-cli[^\n]*(?:最终结论|明确请求)/, "terminal outcomes must be sent through native lark-cli");
   assert.match(PLATFORM_RULES, /不可逆|撤回|删除/, "platform rules must carry the irreversible-op convention");
+  assert.match(PLATFORM_RULES, /standing instructions.*身份.*权威/, "injected identity must be authoritative");
+  assert.match(PLATFORM_RULES, /仅(?:点名|指派).*其他 Agent.*不得回复/, "exclusive assignment must keep non-target agents silent");
+  assert.match(PLATFORM_RULES, /thread:<chat_id>:<thread_id>.*threads-messages-list.*data\.messages/, "thread reads must use one target-scoped stable recipe");
+  assert.match(PLATFORM_RULES, /2>&1.*(?:禁止|不得).*JSON|JSON.*(?:禁止|不得).*2>&1/, "structured output must keep stderr separate");
 });

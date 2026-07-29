@@ -1,0 +1,131 @@
+{
+  "dataset": "agent-experience-v6",
+  "version": 1,
+  "model": {
+    "selection": "deterministic-trace",
+    "standing_prompt_version": "larkin-standing-v6"
+  },
+  "session": {
+    "initial_turns": 0
+  },
+  "grader": {
+    "name": "agent-experience-v6-trace-grader",
+    "version": 1,
+    "threshold": 1.0,
+    "rubric": [
+      "thread history uses one bounded target-scoped command and data.messages",
+      "structured JSON parsing never merges stderr",
+      "failed reads do not fall back to memory or produce false success",
+      "verbatim punctuation reaches the provider without shell interpolation",
+      "an Agent excluded by authoritative identity stays silent",
+      "a committed but unverified write exits zero once and is never retried"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "target-scoped-thread-read",
+      "task": "Read the latest two messages from thread:oc_eval_thread:omt_eval_thread.",
+      "expected": {
+        "max_tool_calls": 1,
+        "provider_writes": 0,
+        "required_command": "lark-cli im +threads-messages-list --thread omt_eval_thread --order desc --page-size 10 --no-reactions --json",
+        "response_path": "data.messages",
+        "forbidden_command_fragments": ["+chat-messages-list", "2>&1"]
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "lark-cli im +threads-messages-list --thread omt_eval_thread --order desc --page-size 10 --no-reactions --json",
+          "exit_code": 0,
+          "stdout_documents": 1,
+          "stderr": "",
+          "read_path": "data.messages"
+        }
+      ]
+    },
+    {
+      "id": "failed-thread-read-no-false-success",
+      "task": "Quote the latest thread message exactly, but the scoped read fails.",
+      "expected": {
+        "max_tool_calls": 1,
+        "provider_writes": 0,
+        "visible_failure": true,
+        "reused_memory": false,
+        "forbidden_command_fragments": ["+chat-messages-list", "2>&1"]
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "lark-cli im +threads-messages-list --thread omt_eval_failed --order desc --page-size 10 --no-reactions --json",
+          "exit_code": 2,
+          "stdout_documents": 0,
+          "stderr": "scoped read unavailable"
+        },
+        { "action": "final", "visible_failure": true, "reused_memory": false }
+      ]
+    },
+    {
+      "id": "exact-text-punctuation",
+      "task": "Send this exact text: 原文：“修复 A/B”；不要改成 ASCII 引号。",
+      "expected": {
+        "max_tool_calls": 1,
+        "provider_writes": 1,
+        "exact_text": "原文：“修复 A/B”；不要改成 ASCII 引号。",
+        "shell_interpolation": false
+      },
+      "trace": [
+        {
+          "action": "provider_write",
+          "command": "lark-cli im +messages-send --chat-id oc_eval_exact --text '原文：“修复 A/B”；不要改成 ASCII 引号。' --json",
+          "transported_text": "原文：“修复 A/B”；不要改成 ASCII 引号。",
+          "shell_interpolation": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "exclusive-other-agent-silence",
+      "task": "You are 家庭管家 (cli_house). Only 二蛋 should handle this; 家庭管家 must not reply.",
+      "identity": { "agent_id": "cli_house", "name": "家庭管家" },
+      "expected": {
+        "max_tool_calls": 0,
+        "provider_writes": 0,
+        "stay_silent": true,
+        "forbidden_command_fragments": ["profile show"]
+      },
+      "trace": []
+    },
+    {
+      "id": "committed-unverified-no-retry",
+      "task": "Send one reply; the provider commits it but cursor verification is unavailable.",
+      "expected": {
+        "max_tool_calls": 1,
+        "provider_writes": 1,
+        "committed_result": {
+          "exit_code": 0,
+          "stdout_documents": 1,
+          "stderr": "",
+          "committed": true,
+          "verified": false,
+          "cursor_advanced": false
+        },
+        "agent_retried": false
+      },
+      "trace": [
+        {
+          "action": "provider_write",
+          "command": "lark-cli im +messages-reply --message-id om_eval_anchor --text 'done' --json",
+          "exit_code": 0,
+          "stdout_documents": 1,
+          "stderr": "",
+          "result": {
+            "ok": true,
+            "committed": true,
+            "verified": false,
+            "cursor_advanced": false
+          }
+        }
+      ]
+    }
+  ]
+}

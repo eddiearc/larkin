@@ -39,6 +39,16 @@ function fixture(agentId = "cli_authoritativeA1") {
   writePrivate(path.join(stateDir, "lark-cli-config", "config.json"), `${JSON.stringify({
     apps: [{ appId: agentId, name: agentId, appSecret: "fixture-only", brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
   })}\n`);
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(bin, { mode: 0o700 });
+  const globalCli = path.join(bin, "lark-cli");
+  fs.writeFileSync(globalCli, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ name: "lark-cli", version: "fixture", runtimeDelegateProtocol: 1 })}'\n`, { mode: 0o700 });
+  const shell = path.join(root, "login-shell");
+  fs.writeFileSync(shell, "#!/bin/sh\ntest \"$1\" = -lc || exit 91\nexec /bin/sh -c \"$2\"\n", { mode: 0o700 });
+  fs.mkdirSync(path.join(root, "runtime"), { mode: 0o700 });
+  writePrivate(path.join(root, "runtime", "lark-cli.json"), `${JSON.stringify({
+    protocolVersion: 1, version: "fixture", executable: fs.realpathSync(globalCli),
+  })}\n`);
   const history = (messages, extra = {}) => JSON.stringify({ ok: true, identity: "bot", data: { messages, has_more: false, ...extra } });
   const env = {
     ...process.env,
@@ -47,6 +57,9 @@ function fixture(agentId = "cli_authoritativeA1") {
     LARKIN_AGENT_ID: agentId,
     LARKIN_TEST_FRESHNESS_PROVIDER: PROVIDER,
     LARKIN_TEST_PROVIDER_CALLS: callsFile,
+    LARKIN_TEST_GLOBAL_CLI: fs.realpathSync(globalCli),
+    SHELL: shell,
+    PATH: `${bin}:${process.env.PATH || ""}`,
     BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${PRELOAD}`].filter(Boolean).join(" "),
   };
   const lark = (argv, overrides = {}) => {

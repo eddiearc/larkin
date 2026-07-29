@@ -77,7 +77,7 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
   assert.match(prompt.content, /Only a successful interaction resolve/);
-  assert.match(prompt.content, /package-local `lark-cli` directly/);
+  assert.match(prompt.content, /Runtime-bound global `lark-cli` directly/);
   assert.match(prompt.content, /larkin profile show/);
   for (const command of [
     "im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +messages-mget",

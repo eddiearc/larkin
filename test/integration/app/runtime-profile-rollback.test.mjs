@@ -32,7 +32,16 @@ function fixture(label) {
     unrelated: { preserve: true },
   }, null, 2)}\n`);
   fs.writeFileSync(profileFile, before, { mode: 0o600 });
-  return { root, target, profileDir, profileFile, before };
+  const nativeCli = path.join(root, "fixture-global-lark-cli");
+  fs.writeFileSync(nativeCli, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ name: "lark-cli", version: "fixture", runtimeDelegateProtocol: 1 })}'\n`, { mode: 0o700 });
+  const runtimeDir = path.join(root, "runtime");
+  fs.mkdirSync(runtimeDir, { mode: 0o700 });
+  fs.writeFileSync(path.join(runtimeDir, "lark-cli.json"), `${JSON.stringify({
+    protocolVersion: 1, version: "fixture", executable: fs.realpathSync(nativeCli),
+  })}\n`, { mode: 0o600 });
+  const canonicalNative = fs.realpathSync(nativeCli);
+  return { root, target, profileDir, profileFile, before, nativeCli: canonicalNative,
+    globalCli: { spawn: () => ({ status: 0, stdout: `__LARKIN_CLI_PATH__${canonicalNative}\n${JSON.stringify({ name: "lark-cli", version: "fixture", runtimeDelegateProtocol: 1 })}\n`, stderr: "" }) } };
 }
 
 function fakePinnedRunner({ failAt = null, injectToken = false } = {}) {
@@ -66,11 +75,11 @@ function fakePinnedRunner({ failAt = null, injectToken = false } = {}) {
   return { calls, runPinnedCli };
 }
 
-test("profile sync uses the package-local pinned command and publishes one Bot-only Agent config", () => {
+test("profile sync uses the setup-recorded global command and publishes one Bot-only Agent config", () => {
   const f = fixture("exclusive-bot");
   const runner = fakePinnedRunner();
   try {
-    loadAndSyncRuntimeAgent({ ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root, PATH: "/ambient-must-not-run" }, f.target, runner);
+    loadAndSyncRuntimeAgent({ ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root, PATH: "/ambient-must-not-run" }, f.target, { ...runner, globalCli: f.globalCli });
     const published = JSON.parse(fs.readFileSync(f.profileFile, "utf8"));
     assert.equal(published.apps.length, 1);
     assert.deepEqual({ ...published.apps[0], appSecret: "<redacted>" }, {
@@ -82,8 +91,8 @@ test("profile sync uses the package-local pinned command and publishes one Bot-o
       ["--profile", f.target, "config", "strict-mode"],
     ]);
     for (const call of runner.calls) {
-      assert.equal(call.command.command, process.execPath);
-      assert.match(call.command.argsPrefix[0], /node_modules[/\\]@larksuite[/\\]cli[/\\]scripts[/\\]run\.js$/);
+      assert.equal(call.command.command, f.nativeCli);
+      assert.deepEqual(call.command.argsPrefix, []);
     }
     assert.equal(runner.calls[0].secretInput, "new-target-secret");
     assert.deepEqual(fs.readdirSync(f.profileDir).filter((name) => name.includes("profile-stage")), []);
@@ -96,7 +105,7 @@ for (const failure of ["strict-mode", "token-validation"]) {
     const runner = fakePinnedRunner(failure === "strict-mode" ? { failAt: "strict-mode" } : { injectToken: true });
     try {
       let message = "";
-      assert.throws(() => loadAndSyncRuntimeAgent({ ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root }, f.target, runner), (error) => {
+      assert.throws(() => loadAndSyncRuntimeAgent({ ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root }, f.target, { ...runner, globalCli: f.globalCli }), (error) => {
         message = error.message;
         return /原 profile 未变更/.test(error.message);
       });
@@ -107,14 +116,14 @@ for (const failure of ["strict-mode", "token-validation"]) {
   });
 }
 
-test("a post-publish shim failure atomically restores the exact previous config", () => {
+test("a post-publish binding failure atomically restores the exact previous config", () => {
   const f = fixture("publish-rollback");
   const runner = fakePinnedRunner();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-profile-runtime-bin-outside-"));
   try {
-    const runtimeBin = path.join(f.root, "state", "agents", f.target, "runtime-bin");
-    fs.symlinkSync(outside, runtimeBin, "dir");
-    assert.throws(() => loadAndSyncRuntimeAgent({ ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root }, f.target, runner), /目录不安全.*已恢复此前 profile/);
+    const bindingDir = path.join(f.root, "state", "agents", f.target, "runtime-cli-binding");
+    fs.symlinkSync(outside, bindingDir, "dir");
+    assert.throws(() => loadAndSyncRuntimeAgent({ ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root }, f.target, { ...runner, globalCli: f.globalCli }), /Runtime CLI 目录.*已恢复此前 profile/);
     assert.deepEqual(fs.readFileSync(f.profileFile), f.before);
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
@@ -122,7 +131,7 @@ test("a post-publish shim failure atomically restores the exact previous config"
   }
 });
 
-test("invalid prior profile fails before package-local CLI execution", () => {
+test("invalid prior profile fails before recorded global CLI execution", () => {
   const f = fixture("invalid-prior");
   const runner = fakePinnedRunner();
   try {

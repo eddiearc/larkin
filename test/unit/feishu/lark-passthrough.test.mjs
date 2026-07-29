@@ -265,7 +265,7 @@ test("agent runtime larkin <group> rejects --agent before spawning lark-cli", ()
   }
 });
 
-test("Agent Runtime rejects the ambient larkin passthrough and migrates IM to package-local lark-cli", () => {
+test("Agent Runtime rejects the ambient larkin passthrough and migrates IM to Runtime-bound lark-cli", () => {
   const { first, temp, marker, run } = passthroughWorkspace();
   try {
     for (const args of [["im", "+chat-list"], ["docs", "+fetch", "--token", "t"]]) {
@@ -393,7 +393,7 @@ test("platform rules teach native lark-cli, long-running task updates, and the i
   );
   assert.match(PLATFORM_RULES, /standing instructions.*Larkin 本地能力/, "platform rules must defer to the capability manifest");
   assert.match(PLATFORM_RULES, /inbox check/, "platform rules must teach the external Inbox command");
-  assert.match(PLATFORM_RULES, /package-local lark-cli/, "platform rules must teach native lark-cli");
+  assert.match(PLATFORM_RULES, /Runtime-bound global lark-cli/, "platform rules must teach Runtime-bound native lark-cli");
   assert.doesNotMatch(PLATFORM_RULES, /larkin message|larkin task claim|larkin docs/, "platform rules must not teach removed commands");
   assert.match(PLATFORM_RULES, /--as user/, "platform rules must state the identity boundary");
   assert.match(PLATFORM_RULES, /commentary.*final_answer.*(?:不可见|不等于飞书出站)/, "runtime-native output must not be presented as user-visible IM");

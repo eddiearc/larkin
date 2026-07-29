@@ -17,6 +17,7 @@ export interface AgentRuntimeConfig {
   runtime: string; model: string; effort?: string | null; workspaceDir: string;
   stateDir?: string; sessionId?: string | null;
   larkConfigDir?: string;
+  runtimeCliBinding?: { descriptor: string; bindingId: string; nativeCli: string; nativeVersion: string; env: NodeJS.ProcessEnv };
 }
 
 export type DeliveryStatus = "pending" | "submitting" | "accepted" | "consumed" | "error";
@@ -142,6 +143,7 @@ function boundedRecords(agent: ManagedAgent): DeliveryRecord[] {
 export function createRuntimeHost(options: {
   adapterFor(runtime: string): RuntimeAdapter; promptBuilder: ContextPromptBuilder; log?: (...parts: unknown[]) => void;
   stateStoreFor?(agentId: string): DeliveryStateStore;
+  assertRuntimeCliReady?(config: AgentRuntimeConfig): void;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
@@ -453,6 +455,7 @@ export function createRuntimeHost(options: {
     if (agent.disabledReason) throw new Error(agent.disabledReason);
     if (agent.session) return agent.session;
     if (agent.starting) return agent.starting;
+    options.assertRuntimeCliReady?.(agent.config);
     const readiness = agent.adapter.probe ? await agent.adapter.probe({ workspaceDir: agent.config.workspaceDir,
       env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
         LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND } })
@@ -473,8 +476,8 @@ export function createRuntimeHost(options: {
       env: { LARKIN_AGENT_ID: agent.config.agentId,
         LARKIN_RUNTIME_OBSERVATION_GENERATION: `${agent.launchId}:${generation}`,
         LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR, LARKIN_HOME: process.env.LARKIN_HOME,
-        PATH: [agent.config.stateDir ? path.join(agent.config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
-        LARKSUITE_CLI_CONFIG_DIR: agent.config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR },
+        LARKSUITE_CLI_CONFIG_DIR: agent.config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR,
+        ...(agent.config.runtimeCliBinding?.env || {}) },
     }).then((session) => {
       completedSession = session;
       if (agent.stopped || generation !== agent.generation) { void session.close("stale creation"); throw new Error("stale runtime session creation"); }
@@ -505,6 +508,7 @@ export function createRuntimeHost(options: {
   return {
     async probe(config): Promise<RuntimeReadiness> {
       const adapter = options.adapterFor(config.runtime);
+      options.assertRuntimeCliReady?.(config);
       return adapter.probe ? adapter.probe({ workspaceDir: config.workspaceDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
           LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND } })
@@ -517,6 +521,7 @@ export function createRuntimeHost(options: {
         throw new Error(`Agent ${config.agentId} is not idle for runtime staging`);
       }
       const adapter = options.adapterFor(config.runtime);
+      options.assertRuntimeCliReady?.(config);
       const readiness = adapter.probe ? await adapter.probe({ workspaceDir: config.workspaceDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
           LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND } })
@@ -534,8 +539,8 @@ export function createRuntimeHost(options: {
         env: { LARKIN_AGENT_ID: config.agentId,
           LARKIN_RUNTIME_OBSERVATION_GENERATION: `${crypto.randomUUID()}:staged`,
           LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR, LARKIN_HOME: process.env.LARKIN_HOME,
-          PATH: [config.stateDir ? path.join(config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
-          LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR },
+          LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR,
+          ...(config.runtimeCliBinding?.env || {}) },
       });
       let state: "staged" | "committed" | "rolled_back" = "staged";
       const rollback = async (reason: string): Promise<void> => {

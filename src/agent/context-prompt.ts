@@ -65,7 +65,7 @@ export class ContextPromptBuilder {
       "",
       "## Feishu IM command map",
       "",
-      "Use the package-local `lark-cli` directly for Feishu. Its Bot identity and private config are Runtime-bound; use native `lark-cli <command> --help` and never pass profile, config-dir, Agent, or user-identity selectors.",
+      "Use the Runtime-bound global `lark-cli` directly for Feishu. Its Bot identity and private config are Runtime-bound; use native `lark-cli <command> --help` and never pass profile, config-dir, Agent, or user-identity selectors.",
       "Use the exact Inbox target for history reads. For `thread:<chat_id>:<thread_id>`, run `lark-cli im +threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json`. For `chat:<chat_id>`, run `lark-cli im +chat-messages-list --chat-id <chat_id> --order desc --page-size 10 --no-reactions --json`.",
       "Successful history response messages are always at `data.messages`. Never use a chat-wide fallback for a thread target, never merge stderr with `2>&1` before parsing JSON, and never truncate structured output before parsing it.",
       "If the scoped history read fails or its schema is invalid, fail visibly. Do not reuse remembered or hard-coded text to make the task appear successful.",

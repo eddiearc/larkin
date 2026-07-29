@@ -2,7 +2,6 @@
 
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
@@ -176,11 +175,6 @@ function parsePolicyArgv(argv: readonly string[]): PolicyArgv {
   return { commandArgv, flags, help: false, error: null };
 }
 
-function resolveUpstreamScript(): string {
-  const require = createRequire(import.meta.url);
-  return path.join(path.dirname(require.resolve("@larksuite/cli/package.json")), "scripts", "run.js");
-}
-
 function policyFlagValue(argv: readonly string[], flag: string): string | null {
   return parsePolicyArgv(argv).flags.get(flag) ?? null;
 }
@@ -247,9 +241,9 @@ function callNative(
 ): SpawnSyncReturns<string> {
   const native = dependencies.nativeCommand;
   const result = (dependencies.spawn ?? spawnSync)(
-    native?.command ?? process.execPath,
-    [...(native?.argsPrefix ?? [dependencies.upstreamScript ?? resolveUpstreamScript()]), ...argv],
-    { encoding: "utf8", env: { ...process.env, ...env } },
+    native?.command ?? (dependencies.upstreamScript ? process.execPath : "lark-cli"),
+    [...(native?.argsPrefix ?? (dependencies.upstreamScript ? [dependencies.upstreamScript] : [])), ...argv],
+    { encoding: "utf8", env: { ...process.env, ...env }, cwd: process.cwd(), stdio: ["inherit", "pipe", "pipe"] },
   ) as SpawnSyncReturns<string>;
   return result;
 }
@@ -261,7 +255,7 @@ function spawnNative(
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
-    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    io.stderr(`lark-cli: native launcher failed: ${result.error.message}\n`);
     return 1;
   }
   return result.status ?? 1;
@@ -492,7 +486,7 @@ function passthroughWithObservation(
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
-    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    io.stderr(`lark-cli: native launcher failed: ${result.error.message}\n`);
     return 1;
   }
   return result.status ?? 1;
@@ -527,7 +521,7 @@ function emitNativeResult(result: SpawnSyncReturns<string>, io: LarkCliIo): numb
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
-    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    io.stderr(`lark-cli: native launcher failed: ${result.error.message}\n`);
     return 1;
   }
   return result.status ?? 1;

@@ -53,6 +53,37 @@ test("RuntimeHost stages a candidate session without stopping the old healthy Ag
   await host.shutdown("done");
 });
 
+for (const runtime of ["codex", "claude", "pi"]) {
+  test(`RuntimeHost revalidates the Runtime CLI binding before ${runtime} create, recreate, and stage`, async () => {
+    const sessions = [];
+    const readiness = [];
+    const binding = { descriptor: `/tmp/${runtime}-descriptor`, bindingId: `${runtime}-binding`,
+      nativeCli: `/tmp/${runtime}-lark-cli`, nativeVersion: "fixture", env: { LARK_CLI_RUNTIME_PROTOCOL: "1" } };
+    const adapter = { id: runtime, capabilities: {}, async createSession(input) {
+      assert.equal(readiness.length > sessions.length, true, "binding readiness must run before session creation");
+      assert.equal(input.env.LARK_CLI_RUNTIME_PROTOCOL, "1");
+      const session = new FakeSession();
+      session.sessionId = `${runtime}-${sessions.length + 1}`;
+      sessions.push(session);
+      return session;
+    } };
+    const config = { agentId: `cli_${runtime}ReadyA1`, name: runtime, runtime, model: "model", workspaceDir: "/tmp", runtimeCliBinding: binding };
+    const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+      assertRuntimeCliReady(observed) { assert.equal(observed.runtimeCliBinding, binding); readiness.push(runtime); },
+      retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 2 } });
+    await host.start([config]);
+    assert.equal(readiness.length, 1);
+    sessions[0].emit({ type: "closed", code: 1, signal: null });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(sessions.length >= 2, true);
+    assert.equal(readiness.length >= 2, true);
+    const staged = await host.stage({ ...config, model: "next" });
+    assert.equal(readiness.length >= 3, true);
+    await staged.rollback("test complete");
+    await host.shutdown("done");
+  });
+}
+
 test("RuntimeHost isolates a missing runtime and keeps healthy agents active", async () => {
   const healthy = new FakeSession();
   const events = [];

@@ -24,7 +24,7 @@ export const PLATFORM_RULES = `${START}
 - 不设任何冷却或频率闸门；防止机器人循环依靠点名 @ 的显式成本和以下行为约定。
 - 要让另一个机器人执行或回复，必须点名 @它的名字，名字后跟空格或标点，例如「@01dan 请查一下…」。
 - 与机器人往来时，除非确实需要对方继续执行动作，回复里不要再 @它——互相 @ 会形成无休止的循环，靠你的克制终止对话。
-- Runtime standing instructions 会列出当前可用的 Larkin 本地能力；收件箱摘要用 larkin inbox check，完整消息用 larkin inbox poll，提醒/身份/安全配置也用 larkin。飞书消息、群与附件操作直接用 package-local lark-cli，并按原生 --help；Bot identity 和私有配置由 Runtime 绑定，不传 --agent、--as user、--profile 或 --config-dir。缺 scope 时把错误原样告知用户去授权，不要自行绕过。
+- Runtime standing instructions 会列出当前可用的 Larkin 本地能力；收件箱摘要用 larkin inbox check，完整消息用 larkin inbox poll，提醒/身份/安全配置也用 larkin。飞书消息、群与附件操作直接用 Runtime-bound global lark-cli，并按原生 --help；Bot identity 和私有配置由 Runtime 绑定，不传 --agent、--as user、--profile 或 --config-dir。缺 scope 时把错误原样告知用户去授权，不要自行绕过。
 - Runtime standing instructions 注入的名称和 Agent ID 是自我身份的权威来源；不要仅为确认身份调用 profile show。消息仅点名或指派其他 Agent，或明确要求你不要回复时，不得回复或发送确认；Inbox 可见不等于你应当出站。
 - 对 thread:<chat_id>:<thread_id> 只用 lark-cli im +threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json，消息固定读取 data.messages，不得退化为全群历史。解析 JSON 时禁止使用 2>&1 合并 stderr；查询失败要如实说明，不得用记忆或硬编码文本伪造成功。
 - 需要逐字保留的内容用原生 --text 作为一个 literal 参数传递，不得通过命令替换、反引号、eval、echo 或未加引号的变量拼接；无法安全表达时应停止并说明，不能擅自改写标点。

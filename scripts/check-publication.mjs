@@ -1,9 +1,7 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { LARK_CLI_NATIVE_SHA256, LARK_CLI_VERSION, larkCliTarget } from "./release/lark-cli-provenance.mjs";
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED = ["README.md", "AGENTS.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md"];
@@ -15,7 +13,6 @@ function parseArguments(argv) {
   let treeOnly = false;
   let trusted = false;
   let denylistPath = process.env.LARKIN_PUBLICATION_DENYLIST_FILE || "";
-  let embeddedLarkCliPath = "";
   const artifacts = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -23,12 +20,10 @@ function parseArguments(argv) {
     else if (value === "--trusted") trusted = true;
     else if (value === "--root") root = path.resolve(argv[++index] ?? "");
     else if (value === "--denylist") denylistPath = path.resolve(argv[++index] ?? "");
-    else if (value === "--allow-embedded-lark-cli") embeddedLarkCliPath = path.resolve(argv[++index] ?? "");
     else artifacts.push(path.resolve(value));
   }
   if (trusted && !denylistPath) throw new Error("trusted publication scan requires --denylist or LARKIN_PUBLICATION_DENYLIST_FILE");
-  if (embeddedLarkCliPath && !trusted) throw new Error("embedded lark-cli provenance requires --trusted");
-  return { root, treeOnly, trusted, denylistPath, embeddedLarkCliPath, artifacts };
+  return { root, treeOnly, trusted, denylistPath, artifacts };
 }
 
 function loadDenylist(file) {
@@ -160,48 +155,9 @@ function scanPrivateTerms(failures, label, bytes, deny, source = "larkin", ignor
   }
 }
 
-function verifiedEmbeddedLarkCli(root, file) {
-  if (!file) return null;
-  const packageRoot = path.join(root, "node_modules", "@larksuite", "cli");
-  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
-  if (manifest.name !== "@larksuite/cli" || manifest.version !== LARK_CLI_VERSION) {
-    throw new Error(`embedded lark-cli provenance requires @larksuite/cli ${LARK_CLI_VERSION}`);
-  }
-  const lock = fs.readFileSync(path.join(root, "bun.lock"), "utf8");
-  if (!/"@larksuite\/cli": \["@larksuite\/cli@1\.0\.78",[^\n]+"sha512-[A-Za-z0-9+/=]+"\]/.test(lock)) {
-    throw new Error("embedded lark-cli provenance is not pinned by bun.lock integrity");
-  }
-  const checksums = fs.readFileSync(path.join(packageRoot, "checksums.txt"), "utf8");
-  const { key, archive } = larkCliTarget(process.platform, process.arch);
-  if (!new RegExp(`^[a-f0-9]{64}  ${archive.replaceAll(".", "\\.")}$`, "m").test(checksums)) {
-    throw new Error("embedded lark-cli archive checksum provenance is unavailable");
-  }
-  const expected = path.join(packageRoot, "bin", process.platform === "win32" ? "lark-cli.exe" : "lark-cli");
-  if (path.resolve(file) !== path.resolve(expected) || !fs.statSync(file).isFile()) {
-    throw new Error("embedded lark-cli path is outside the pinned package");
-  }
-  const bytes = fs.readFileSync(file);
-  const expectedHash = LARK_CLI_NATIVE_SHA256[key];
-  const actualHash = crypto.createHash("sha256").update(bytes).digest("hex");
-  if (!expectedHash || actualHash !== expectedHash) throw new Error("embedded lark-cli binary does not match the pinned platform hash");
-  return bytes;
-}
-
-function scanArtifact(failures, artifact, bytes, deny, embedded) {
+function scanArtifact(failures, artifact, bytes, deny) {
   const label = `artifact ${artifact}`;
-  if (!embedded || !/^larkin-v/.test(path.basename(artifact))) return scanPrivateTerms(failures, label, bytes, deny, "artifact");
-  const offsets = [];
-  let offset = bytes.indexOf(embedded);
-  while (offset >= 0) {
-    offsets.push(offset);
-    offset = bytes.indexOf(embedded, offset + embedded.length);
-  }
-  if (offsets.length !== 1) {
-    failures.push(`${label}: expected exactly one byte-identical pinned @larksuite/cli component, found ${offsets.length}`);
-    return;
-  }
-  const start = offsets[0];
-  scanPrivateTerms(failures, label, bytes, deny, "artifact-larkin", [{ start, end: start + embedded.length }]);
+  scanPrivateTerms(failures, label, bytes, deny, "artifact");
 }
 
 function scanProsePointers(failures, label, bytes) {
@@ -262,7 +218,6 @@ function scanReachableHistory(root, failures, deny) {
 
 const options = parseArguments(process.argv.slice(2));
 const deny = loadDenylist(options.denylistPath);
-const embeddedLarkCli = verifiedEmbeddedLarkCli(options.root, options.embeddedLarkCliPath);
 const failures = [];
 const tracked = scanIndex(options.root, failures, deny);
 for (const required of REQUIRED) {
@@ -281,7 +236,7 @@ const license = tracked.includes("LICENSE") ? indexBlob(options.root, "LICENSE")
 if (!license.includes("Apache License") || !license.includes("Version 2.0, January 2004")) failures.push("LICENSE: canonical Apache-2.0 text is required");
 let history = { refs: 0, objects: 0 };
 if (!options.treeOnly) history = scanReachableHistory(options.root, failures, deny);
-for (const artifact of options.artifacts) scanArtifact(failures, artifact, fs.readFileSync(artifact), deny, embeddedLarkCli);
+for (const artifact of options.artifacts) scanArtifact(failures, artifact, fs.readFileSync(artifact), deny);
 
 if (failures.length > 0) {
   console.error([...new Set(failures)].join("\n"));

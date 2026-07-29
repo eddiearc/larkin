@@ -79,28 +79,12 @@ fs.mkdirSync(outDir, { recursive: true });
 const artifacts: ReleaseArtifactRecord[] = [];
 
 for (const target of selected) {
-  if (target.platform !== process.platform || target.arch !== process.arch) {
-    throw new Error(`standalone lark-cli embed requires a native ${target.platform}-${target.arch} runner`);
-  }
   const file = artifactFilename(version, target.platform, target.arch);
   const output = path.join(outDir, file);
-  const packageRoot = path.join(ROOT, "node_modules", "@larksuite", "cli");
-  const packageManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version?: string };
-  if (packageManifest.version !== "1.0.78") throw new Error("standalone build requires @larksuite/cli 1.0.78");
-  const nativeLarkCli = path.join(packageRoot, "bin", target.platform === "win32" ? "lark-cli.exe" : "lark-cli");
-  if (!fs.statSync(nativeLarkCli).isFile()) throw new Error(`standalone lark-cli binary missing: ${target.platform}-${target.arch}`);
-  const compileWrapper = path.join(outDir, `.standalone-entry-${target.platform}-${target.arch}-${process.pid}.ts`);
-  fs.writeFileSync(compileWrapper, [
-    `import embeddedLarkCli from ${JSON.stringify(nativeLarkCli)} with { type: "file" };`,
-    "globalThis.__LARKIN_EMBEDDED_LARK_CLI__ = embeddedLarkCli;",
-    `await import(${JSON.stringify(path.join(ROOT, "scripts/release/standalone-entry.ts"))});`,
-    "",
-  ].join("\n"), { mode: 0o600, flag: "wx" });
-  try {
-    const build = Bun.spawnSync([
+  const build = Bun.spawnSync([
       process.execPath,
       "build",
-      compileWrapper,
+      path.join(ROOT, "scripts/release/standalone-entry.ts"),
       "--compile",
       "--minify",
       `--target=${target.bunTarget}`,
@@ -110,11 +94,8 @@ for (const target of selected) {
       `--define=LARKIN_BUILD_VERSION=${JSON.stringify(version)}`,
       `--define=LARKIN_BUILD_FINGERPRINT=${JSON.stringify(fingerprint)}`,
       `--outfile=${output}`,
-    ], { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
-    if (build.exitCode !== 0) throw new Error(`Bun compile failed for ${target.platform}-${target.arch}`);
-  } finally {
-    fs.unlinkSync(compileWrapper);
-  }
+  ], { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
+  if (build.exitCode !== 0) throw new Error(`Bun compile failed for ${target.platform}-${target.arch}`);
   fs.chmodSync(output, 0o755);
   let signing: ReleaseArtifactRecord["signing"] = "unsigned";
   if (target.platform === "darwin" && process.platform === "darwin" && Bun.which("codesign")) {

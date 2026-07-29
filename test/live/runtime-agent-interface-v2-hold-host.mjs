@@ -6,7 +6,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { hydrateRuntimeAgent, installRuntimeCommandShims } from "../../dist/app/runtime-agent-config.mjs";
+import { hydrateRuntimeAgent } from "../../dist/app/runtime-agent-config.mjs";
+import { createRuntimeCliBinding } from "../../dist/app/runtime-cli-binding.mjs";
 import { createHostShell } from "../../dist/feishu/host-shell.mjs";
 import { loadConfig, toStored } from "../../dist/platform/config.mjs";
 import { acquireProcessLock, currentProcessMetadata, readProcessState } from "../../dist/platform/process-state.mjs";
@@ -139,7 +140,6 @@ export function materializeBotOnlyProfile(runtimeAgent) {
       users: [],
     }],
   });
-  installRuntimeCommandShims(runtimeAgent);
 }
 
 function stageSingleAgentRoot(sourceRoot, targetRoot, agentId, env) {
@@ -168,6 +168,12 @@ function stageSingleAgentRoot(sourceRoot, targetRoot, agentId, env) {
   }
   const runtimeAgent = hydrateRuntimeAgent(targetRoot, isolated.config.agents[agentId]);
   materializeBotOnlyProfile(runtimeAgent);
+  const sourceCliRecord = path.join(sourceRoot, "runtime", "lark-cli.json");
+  const targetCliRecord = path.join(targetRoot, "runtime", "lark-cli.json");
+  fs.mkdirSync(path.dirname(targetCliRecord), { recursive: true, mode: 0o700 });
+  fs.copyFileSync(sourceCliRecord, targetCliRecord);
+  fs.chmodSync(targetCliRecord, 0o600);
+  runtimeAgent.runtimeCliBinding = createRuntimeCliBinding(runtimeAgent, { ...env, LARKIN_CONFIG_DIR: targetRoot });
   return { isolated, runtimeAgent };
 }
 

@@ -11,6 +11,7 @@ import { requestAgentUpsert } from "./local-control.js";
 import { openOwnedDashboardWhenReady } from "./setup-dashboard.js";
 import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
 import { internalCommandSpec, processCommandToken, type InternalMode } from "./internal-command.js";
+import { ensureCompatibleGlobalLarkCli } from "./runtime-cli-binding.js";
 
 const CFG_DIR = process.env.LARKIN_CONFIG_DIR || path.join(os.homedir(), ".larkin");
 const argv = process.argv.slice(2);
@@ -79,6 +80,8 @@ export async function main(): Promise<void> {
   say("  • 网页选择同一个机器人 → 热更新该 Agent，不重启其他 Agent");
   say("  • 网页创建新机器人 → 热挂载新 Agent，状态彼此独立\n");
   fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
+  say("[setup] 正在检查全局 lark-cli Runtime delegate capability…");
+  ensureCompatibleGlobalLarkCli(CFG_DIR);
   const resultFile = path.join(CFG_DIR, `.setup-result-${process.pid}.json`);
   const registerArgs = ["--auto", "--result-file", resultFile];
   if (OPT.runtime) registerArgs.push("--runtime", OPT.runtime);

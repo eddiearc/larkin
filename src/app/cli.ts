@@ -101,7 +101,7 @@ if (!runtimeAgentCommand && command === "config" && ["runtime", "model", "effort
 
 // At a user terminal, unregistered non-flag commands keep the legacy lark-cli passthrough.
 // Inside an Agent Runtime, every `larkin` command stays on the Larkin-owned surface;
-// Feishu commands use the separate package-local `lark-cli` shim.
+// Feishu commands use the separate global `lark-cli`, bound by the Runtime delegate protocol.
 const wantsHelp = command === "help" || command === "--help" || command === "-h" || command.startsWith("-");
 if (!routes[command] && !wantsHelp) {
   routes[command] = runtimeAgentAuthority ? ["agent-cli", command] : ["lark", command];

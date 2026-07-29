@@ -29,6 +29,18 @@ function writeCredential(root, value, mode = 0o600) {
   return file;
 }
 
+function writeRuntimeCliRecord(root, temp) {
+  const bin = path.join(temp, "bin");
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  const cli = path.join(bin, "lark-cli");
+  fs.writeFileSync(cli, `#!/usr/bin/env bun\nif(process.argv[2]==="__runtime-delegate-capabilities")process.stdout.write(JSON.stringify({name:"lark-cli",version:"fixture",runtimeDelegateProtocol:1})+"\\n");\n`, { mode: 0o700 });
+  const shell = path.join(temp, "login-shell");
+  fs.writeFileSync(shell, "#!/bin/sh\ntest \"$1\" = -lc || exit 91\nexec /bin/sh -c \"$2\"\n", { mode: 0o700 });
+  fs.mkdirSync(path.join(root, "runtime"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(root, "runtime", "lark-cli.json"), `${JSON.stringify({ protocolVersion: 1, version: "fixture", executable: fs.realpathSync(cli) })}\n`, { mode: 0o600 });
+  return { cli: fs.realpathSync(cli), shell, bin };
+}
+
 function successfulRunPreload(temp) {
   const preload = path.join(temp, "successful-run.cjs");
   fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),original=cp.spawnSync,originalLstat=fs.lstatSync,{EventEmitter}=require("node:events"); fs.lstatSync=function(file,...args){const stat=originalLstat.call(this,file,...args);if(process.env.FAKE_UID_PATH&&String(file)===process.env.FAKE_UID_PATH)return new Proxy(stat,{get(target,prop){if(prop==="uid")return target.uid+1;const value=Reflect.get(target,prop,target);return typeof value==="function"?value.bind(target):value}});return stat};cp.spawnSync=(command,args,options)=>{if(command!=="lark-cli")return original(command,args,options);if(args.includes("+chat-list"))return {status:0,stdout:JSON.stringify({ok:true,identity:"bot"}),stderr:""};return {status:0,stdout:"",stderr:""}};cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");const child=new EventEmitter();child.pid=process.pid+1000;child.kill=()=>true;queueMicrotask(()=>child.emit("exit",0));return child};require("node:module").syncBuiltinESMExports();`);
@@ -553,15 +565,16 @@ for (const mode of ["sync-fail", "strict-mode-fail"]) {
       const preload = path.join(temp, "profile.cjs");
       const spawnMarker = path.join(temp, "spawned");
       const callMarker = path.join(temp, "calls.json");
-      fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),path=require("node:path"),original=cp.spawnSync; cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");throw new Error("daemon spawn reached")}; cp.spawnSync=(command,args,options={})=>{const pinned=command===process.execPath&&String(args?.[0]||"").includes("@larksuite/cli/scripts/run.js");if(!pinned)return original(command,args,options);const cli=args.slice(1),file=path.join(options.env.LARKSUITE_CLI_CONFIG_DIR,"config.json");fs.appendFileSync(process.env.CALL_MARKER,JSON.stringify({command:"package-local",args:cli,secretViaStdin:options.input==="secret-value"})+"\\n");if(cli[0]==="config"&&cli[1]==="init"){if(${JSON.stringify(mode)}==="sync-fail")return {status:1,stdout:"",stderr:"secret-value"};const id=cli[cli.indexOf("--app-id")+1],name=cli[cli.indexOf("--name")+1];fs.writeFileSync(file,JSON.stringify({apps:[{appId:id,name,appSecret:options.input,brand:"feishu",defaultAs:"auto",strictMode:"off",users:[]}]}),{mode:0o600});return {status:0,stdout:"",stderr:""};}const value=JSON.parse(fs.readFileSync(file,"utf8"));if(cli.includes("default-as"))value.apps[0].defaultAs="bot";if(cli.includes("strict-mode")){if(${JSON.stringify(mode)}==="strict-mode-fail")return {status:1,stdout:"",stderr:"secret-value"};value.apps[0].strictMode="bot";}fs.writeFileSync(file,JSON.stringify(value),{mode:0o600});return {status:0,stdout:"",stderr:""};};require("node:module").syncBuiltinESMExports();`);
+      const globalCli = writeRuntimeCliRecord(root, temp);
+      fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),path=require("node:path"),original=cp.spawnSync; cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");throw new Error("daemon spawn reached")}; cp.spawnSync=(command,args,options={})=>{const recorded=process.env.LARKIN_TEST_GLOBAL_CLI&&command===process.env.LARKIN_TEST_GLOBAL_CLI;if(!recorded||(args?.length===1&&args[0]==="__runtime-delegate-capabilities"))return original(command,args,options);const cli=args,file=path.join(options.env.LARKSUITE_CLI_CONFIG_DIR,"config.json");fs.appendFileSync(process.env.CALL_MARKER,JSON.stringify({command:"global",args:cli,secretViaStdin:options.input==="secret-value"})+"\\n");if(cli[0]==="config"&&cli[1]==="init"){if(${JSON.stringify(mode)}==="sync-fail")return {status:1,stdout:"",stderr:"secret-value"};const id=cli[cli.indexOf("--app-id")+1],name=cli[cli.indexOf("--name")+1];fs.writeFileSync(file,JSON.stringify({apps:[{appId:id,name,appSecret:options.input,brand:"feishu",defaultAs:"auto",strictMode:"off",users:[]}]}),{mode:0o600});return {status:0,stdout:"",stderr:""};}const value=JSON.parse(fs.readFileSync(file,"utf8"));if(cli.includes("default-as"))value.apps[0].defaultAs="bot";if(cli.includes("strict-mode")){if(${JSON.stringify(mode)}==="strict-mode-fail")return {status:1,stdout:"",stderr:"secret-value"};value.apps[0].strictMode="bot";}fs.writeFileSync(file,JSON.stringify(value),{mode:0o600});return {status:0,stdout:"",stderr:""};};require("node:module").syncBuiltinESMExports();`);
       const result = spawnSync(process.execPath, [path.join(ROOT, "dist/app/run.mjs")], {
-        cwd: ROOT, encoding: "utf8", env: { ...process.env, HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: root, SPAWN_MARKER: spawnMarker, CALL_MARKER: callMarker, BUN_OPTIONS: `--preload=${preload}` },
+        cwd: ROOT, encoding: "utf8", env: { ...process.env, HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: root, SPAWN_MARKER: spawnMarker, CALL_MARKER: callMarker, LARKIN_TEST_GLOBAL_CLI: globalCli.cli, SHELL: globalCli.shell, PATH: `${globalCli.bin}:${process.env.PATH || ""}`, BUN_OPTIONS: `--preload=${preload}` },
       });
       assert.equal(result.status, 1, result.stderr || result.stdout);
       assert.equal(fs.existsSync(spawnMarker), false);
       assert.equal(fs.existsSync(callMarker), true, result.stderr || result.stdout);
       const calls = fs.readFileSync(callMarker, "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(calls.find((call) => call.command === "package-local" && call.args[0] === "config")?.secretViaStdin, true, JSON.stringify({ calls, output: result.stderr + result.stdout }));
+      assert.equal(calls.find((call) => call.command === "global" && call.args[0] === "config")?.secretViaStdin, true, JSON.stringify({ calls, output: result.stderr + result.stdout }));
       assert.doesNotMatch(result.stderr + result.stdout, /secret-value/);
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });

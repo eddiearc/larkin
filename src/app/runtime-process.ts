@@ -9,6 +9,7 @@ import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../platform/config.js";
 import { createAgentControlServer } from "./local-control.js";
 import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
+import { assertRuntimeCliBindingReady } from "./runtime-cli-binding.js";
 
 type HostShellOptions = Parameters<typeof createHostShell>[0];
 
@@ -64,6 +65,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
         adapters.set(runtime, adapter);
       }
       return adapter;
+    },
+    assertRuntimeCliReady(agent) {
+      assertRuntimeCliBindingReady(agent.runtimeCliBinding, { ...env, LARKIN_CONFIG_DIR: env.LARKIN_CONFIG_DIR });
     },
     log: (...parts) => process.stderr.write(`[runtime] ${parts.join(" ")}\n`),
   });

@@ -9,6 +9,18 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const APP = "cli_a1B2c3";
 
+function writeRuntimeCliRecord(root, temp) {
+  const bin = path.join(temp, "bin");
+  fs.mkdirSync(bin, { mode: 0o700 });
+  const cli = path.join(bin, "lark-cli");
+  fs.writeFileSync(cli, `#!/usr/bin/env bun\nif(process.argv[2]==="__runtime-delegate-capabilities")process.stdout.write(JSON.stringify({name:"lark-cli",version:"fixture",runtimeDelegateProtocol:1})+"\\n");\n`, { mode: 0o700 });
+  const shell = path.join(temp, "login-shell");
+  fs.writeFileSync(shell, "#!/bin/sh\ntest \"$1\" = -lc || exit 91\nexec /bin/sh -c \"$2\"\n", { mode: 0o700 });
+  fs.mkdirSync(path.join(root, "runtime"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(root, "runtime", "lark-cli.json"), `${JSON.stringify({ protocolVersion: 1, version: "fixture", executable: fs.realpathSync(cli) })}\n`, { mode: 0o600 });
+  return { cli: fs.realpathSync(cli), shell, bin };
+}
+
 function strictStoredConfig() {
   return {
     version: 3,
@@ -88,9 +100,9 @@ childProcess.spawn = function capture(command, args, options = {}) {
   return new FakeChild();
 };
 childProcess.spawnSync = function(command, args, options = {}) {
-  const pinned = command === process.execPath && String(args?.[0] || "").includes("@larksuite/cli/scripts/run.js");
-  if (!pinned) return originalSpawnSync.apply(this, arguments);
-  const cli = args.slice(1), file = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "config.json");
+  const recordedGlobal = process.env.LARKIN_TEST_GLOBAL_CLI && command === process.env.LARKIN_TEST_GLOBAL_CLI;
+  if (!recordedGlobal || (args?.length === 1 && args[0] === "__runtime-delegate-capabilities")) return originalSpawnSync.apply(this, arguments);
+  const cli = args, file = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "config.json");
   if (cli[0] === "config" && cli[1] === "init") {
     const appId = cli[cli.indexOf("--app-id") + 1], name = cli[cli.indexOf("--name") + 1];
     fs.writeFileSync(file, JSON.stringify({ apps: [{ appId, name, appSecret: options.input, brand: "feishu", defaultAs: "auto", strictMode: "off", users: [] }] }), { mode: 0o600 });
@@ -121,6 +133,7 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
     fs.writeFileSync(path.join(root, "bots", `${APP}.json`), JSON.stringify({ appId: APP, appSecret: "fixture-secret", tenant: "feishu" }), { mode: 0o600 });
     fs.mkdirSync(path.join(root, "lark-cli-config"), { mode: 0o700 });
     fs.writeFileSync(path.join(root, "lark-cli-config", "user-profile-token"), "must-not-survive");
+    const globalCli = writeRuntimeCliRecord(root, temp);
     const runtimeConfig = {
       version: 3,
       serverId: "server-v3",
@@ -141,6 +154,9 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
         RUN_CAPTURE_FILE: capture,
         RUN_CONFIG_FILE: configFile,
         RUN_RUNTIME_CONFIG: JSON.stringify(runtimeConfig),
+        LARKIN_TEST_GLOBAL_CLI: globalCli.cli,
+        SHELL: globalCli.shell,
+        PATH: `${globalCli.bin}:${process.env.PATH || ""}`,
         BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${preload}`].filter(Boolean).join(" "),
       },
       encoding: "utf8",
@@ -157,12 +173,19 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
     assert.equal(observed.larkProfileEntries.includes("user-profile-token"), true, "target-only profile sync must not rebuild the shared profile directory");
     assert.equal(fs.readdirSync(root).some((entry) => entry.startsWith(".lark-cli-config.quarantine-")), false);
     assert.equal(observed.agents.length, 1);
-    assert.deepEqual(observed.agents[0], {
+    const { runtimeCliBinding, ...observedAgent } = observed.agents[0];
+    assert.deepEqual(observedAgent, {
       ...strictRuntimeAgent(root),
       chatMentionPolicies: { oc_keep: "free" },
       feishuAppSecret: "fixture-secret",
       feishuDomain: "https://open.feishu.cn",
     });
+    const descriptor = path.join(root, "state", "agents", APP, "runtime-cli-binding", "descriptor.json");
+    assert.equal(runtimeCliBinding.descriptor, descriptor);
+    assert.equal(runtimeCliBinding.nativeCli, globalCli.cli);
+    assert.equal(runtimeCliBinding.env.LARK_CLI_RUNTIME_DELEGATE, descriptor);
+    assert.equal(runtimeCliBinding.env.LARK_CLI_RUNTIME_PROTOCOL, "1");
+    assert.equal(typeof runtimeCliBinding.bindingId, "string");
     assert.equal(fs.existsSync(path.join(root, "agents", APP, "AGENTS.md")), false, "launcher must not calibrate workspace");
     assert.equal(fs.existsSync(path.join(root, "agents", APP, "CLAUDE.md")), false, "launcher must not calibrate workspace");
   } finally {

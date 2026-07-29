@@ -34,7 +34,7 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     output.stderr = "";
     const code = launcher.runLarkCli(argv, { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, {
       io: { stdout(text) { output.stdout += text; }, stderr(text) { output.stderr += text; } },
-      spawn, upstreamScript: "/fixed/@larksuite/cli/scripts/run.js", stateStore: store,
+      spawn, nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.78" }, stateStore: store,
     });
     return { code, ...output };
   };
@@ -204,7 +204,7 @@ test("provider failure and ambiguous termination retain a stable idempotency key
     assert.equal(f.run(argv).code, 7);
     keys.push(f.calls.at(-1).args[f.calls.at(-1).args.indexOf("--idempotency-key") + 1]);
     f.setWriteResult({ status: null, signal: "SIGKILL", output: [], pid: 1, stdout: "", stderr: "", error: undefined });
-    assert.equal(f.run(argv).code, 1);
+    assert.equal(f.run(argv).code, 137);
     keys.push(f.calls.at(-1).args[f.calls.at(-1).args.indexOf("--idempotency-key") + 1]);
     assert.equal(keys[0], keys[1]);
     assert.match(keys[0], /^larkin-[0-9a-f]{32}$/);

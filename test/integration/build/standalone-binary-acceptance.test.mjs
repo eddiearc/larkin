@@ -99,13 +99,35 @@ test.skipIf(!ENABLED)("standalone binary preserves CLI, Agent, local-control, Da
     fs.mkdirSync(path.join(configDir, "agents", otherAgentId), { recursive: true });
 
     const larkMarker = path.join(temp, "lark-cli.calls");
-    fs.writeFileSync(path.join(mockBin, "lark-cli"), `#!/bin/sh
+    const officialPackage = path.join(temp, "official", "node_modules", "@larksuite", "cli");
+    const officialLauncher = path.join(officialPackage, "scripts", "run.sh");
+    fs.mkdirSync(path.dirname(officialLauncher), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(officialPackage, "package.json"), JSON.stringify({
+      name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+    }), { mode: 0o600 });
+    fs.writeFileSync(officialLauncher, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'lark-cli version 1.0.78\n'; exit 0; fi
 printf '%s\n' "$*" >> "$STANDALONE_LARK_MARKER"
+if [ "$1" = "config" ] && [ "$2" = "init" ]; then
+  app_id=""; app_name=""; previous=""
+  for argument in "$@"; do
+    if [ "$previous" = "--app-id" ]; then app_id="$argument"; fi
+    if [ "$previous" = "--name" ]; then app_name="$argument"; fi
+    previous="$argument"
+  done
+  app_secret=$(cat)
+  APP_ID="$app_id" APP_NAME="$app_name" APP_SECRET="$app_secret" ${JSON.stringify(process.execPath)} --eval 'const fs=require("node:fs"),path=require("node:path");fs.writeFileSync(path.join(process.env.LARKSUITE_CLI_CONFIG_DIR,"config.json"),JSON.stringify({apps:[{appId:process.env.APP_ID,name:process.env.APP_NAME,appSecret:process.env.APP_SECRET,brand:"feishu",defaultAs:"bot",strictMode:"bot",users:[]}]}),{mode:0o600})'
+  exit $?
+fi
 case "$*" in
+  *--help*) printf '%s\n' 'Usage: lark-cli im +messages-send' ;;
   *+chat-list*) printf '%s\n' '{"ok":true,"identity":"bot","data":{"chats":[]}}' ;;
   *) printf '%s\n' '{"ok":true,"data":{"standalone":true}}' ;;
 esac
 `, { mode: 0o755 });
+    fs.symlinkSync(officialLauncher, path.join(mockBin, "lark-cli"));
+    fs.writeFileSync(path.join(home, ".bash_profile"), `export PATH=${JSON.stringify(mockBin)}:/usr/bin:/bin\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(home, ".zprofile"), `export PATH=${JSON.stringify(mockBin)}:/usr/bin:/bin\n`, { mode: 0o600 });
     const codexSource = path.join(temp, "fake-codex.mjs");
     fs.writeFileSync(codexSource, `import readline from "node:readline";
 const output = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
@@ -128,6 +150,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
     const baseEnv = {
       HOME: home,
+      SHELL: "/bin/zsh",
+      BASH_ENV: path.join(home, ".bash_profile"),
+      ZDOTDIR: home,
       LARKIN_CONFIG_DIR: configDir,
       PATH: `${mockBin}${path.delimiter}/usr/bin:/bin`,
       STANDALONE_LARK_MARKER: larkMarker,
@@ -169,11 +194,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     fs.rmSync(larkMarker, { force: true });
     const identityEscape = runAgentCli(["im", "+chat-list", "--agent", otherAgentId]);
     assert.equal(identityEscape.status, 2);
-    assert.match(identityEscape.stderr, /native lark-cli|迁移/);
+    assert.match(identityEscape.stderr, /larkin im|迁移/);
     assert.equal(fs.existsSync(larkMarker), false, "identity rejection must precede lark-cli spawn");
     const removedIm = runAgentCli(["im", "+chat-list"]);
     assert.equal(removedIm.status, 2);
-    assert.match(removedIm.stderr, /native lark-cli|迁移/);
+    assert.match(removedIm.stderr, /larkin im|迁移/);
     assert.equal(fs.existsSync(larkMarker), false, "removed Agent IM shim must not spawn ambient lark-cli");
     assert.match(checked(runAgentCli(["profile", "show", "--json"]), "local profile show").stdout, new RegExp(appId));
     assert.equal(fs.existsSync(larkMarker), false, "profile show must remain local");
@@ -182,6 +207,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     fs.mkdirSync(botsDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(botsDir, `${appId}.json`), JSON.stringify({ appId, appSecret: "standalone-secret", tenant: "feishu" }), { mode: 0o600 });
     fs.writeFileSync(path.join(botsDir, `${otherAgentId}.json`), JSON.stringify({ appId: otherAgentId, appSecret: "standalone-other-secret", tenant: "feishu" }), { mode: 0o600 });
+    for (const [agentId, secret] of [[appId, "standalone-secret"], [otherAgentId, "standalone-other-secret"]]) {
+      const profileDir = path.join(configDir, "state", "agents", agentId, "lark-cli-config");
+      fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(profileDir, "config.json"), JSON.stringify({ apps: [{
+        appId: agentId, name: agentId, appSecret: secret, brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [],
+      }] }), { mode: 0o600 });
+    }
     const channelModule = path.join(temp, "fake-channel.mjs");
     fs.writeFileSync(channelModule, `export function createLarkChannel(options) {
   return {
@@ -216,9 +248,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       .catch((error) => { throw new Error(`${error.message}\n${output()}`); });
 
     const runtimeBin = path.join(configDir, "state", "agents", appId, "runtime-bin");
-    const runtimeLarkCli = path.join(runtimeBin, "lark-cli");
-    assert.equal(fs.statSync(runtimeLarkCli).mode & 0o077, 0, "standalone Runtime shim must remain private");
-    const nativeVersion = checked(spawnSync(runtimeLarkCli, ["--version"], {
+    const runtimeLarkCliPath = path.join(runtimeBin, "lark-cli");
+    const runtimeLarkCli = path.join(runtimeBin, "larkin");
+    assert.equal(fs.statSync(runtimeLarkCli).mode & 0o077, 0, "standalone Runtime larkin shim must remain private");
+    assert.equal(fs.existsSync(runtimeLarkCliPath), false, "standalone must not create a lark-cli shim");
+    const nativeVersion = checked(spawnSync(officialLauncher, ["--version"], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     }), "standalone Runtime pinned lark-cli version");
     assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.78/);
@@ -239,8 +273,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     ], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     }), "standalone Runtime history shortcut with Larkin default window");
-    assert.match(boundedHistory.stdout, /"page_size"\s*:\s*(?:"20"|20)/,
-      "standalone Runtime wrapper must override the pinned shortcut default 50 with 20");
+    assert.match(fs.readFileSync(larkMarker, "utf8"), /\+chat-messages-list[^\n]*--page-size 20/,
+      "standalone Runtime wrapper must inject the bounded history window before official delegation");
     const runtimeIdentityEscape = spawnSync(runtimeLarkCli, ["im", "+chat-list", "--profile", otherAgentId], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     });
@@ -269,7 +303,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     });
     assert.equal(threadForward.status, 2);
     assert.match(threadForward.stderr, /target freshness/);
-    assert.equal(fs.existsSync(larkMarker), false, "standalone Runtime must not resolve ambient PATH lark-cli");
+    assert.equal(fs.existsSync(larkMarker), true, "standalone Runtime must delegate to the verified host official CLI");
     const nativeProfile = JSON.parse(fs.readFileSync(path.join(configDir, "state", "agents", appId, "lark-cli-config", "config.json"), "utf8"));
     assert.deepEqual(nativeProfile.apps.map((entry) => ({
       appId: entry.appId, name: entry.name, defaultAs: entry.defaultAs, strictMode: entry.strictMode, users: entry.users,

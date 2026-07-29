@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import * as larkinConfig from "../platform/config.js";
 import { acquireProcessLock, readProcessState } from "../platform/process-state.js";
@@ -11,6 +12,9 @@ import { requestAgentUpsert } from "./local-control.js";
 import { openOwnedDashboardWhenReady } from "./setup-dashboard.js";
 import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
 import { internalCommandSpec, processCommandToken, type InternalMode } from "./internal-command.js";
+import {
+  ensureOfficialLarkCliForSetup,
+} from "./official-lark-cli.js";
 
 const CFG_DIR = process.env.LARKIN_CONFIG_DIR || path.join(os.homedir(), ".larkin");
 const argv = process.argv.slice(2);
@@ -75,6 +79,19 @@ export async function main(): Promise<void> {
   const mutationLock = acquireProcessLock(path.join(CFG_DIR, "setup.lock.json"), processCommandToken("setup", "app/setup.mjs"));
   const releaseMutationLock = mutationLock.release;
   process.on("exit", releaseMutationLock);
+  const official = await ensureOfficialLarkCliForSetup({
+    env: process.env,
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    async confirmInstall(command) {
+      say("[setup 0/5] Larkin 需要未修改的官方 lark-cli 作为 Feishu 命令下游。");
+      say(`将执行：${command}`);
+      const input = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = (await input.question("是否安装？[y/N] ")).trim().toLowerCase();
+      input.close();
+      return answer === "y" || answer === "yes";
+    },
+  }).catch((error) => die(error instanceof Error ? error.message : String(error)));
+  say(`[setup 0/5] ✓ 官方 lark-cli ${official.command.version}: ${official.command.command}${official.installed ? "（刚刚安装）" : ""}`);
   say("\nAgent 与飞书机器人按 App ID 一一对应：");
   say("  • 网页选择同一个机器人 → 热更新该 Agent，不重启其他 Agent");
   say("  • 网页创建新机器人 → 热挂载新 Agent，状态彼此独立\n");

@@ -478,7 +478,7 @@ test("interaction commands create, inspect, and resolve through the durable stat
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("profile show is local and legacy larkin im migrates to native lark-cli", () => {
+test("profile show is local and the removed internal IM surface points to larkin", () => {
   const f = fixture();
   try {
     f.store.writeJson("botIdentity", { open_id: "ou_bot", name: "Larkin Bot", avatar_url: "https://example.test/avatar.png" });
@@ -497,7 +497,7 @@ test("profile show is local and legacy larkin im migrates to native lark-cli", (
     };
     const im = f.run(["im", "+chat-list", "--json"], { spawn });
     assert.equal(im.code, 2);
-    assert.match(im.stderr, /lark-cli im/);
+    assert.match(im.stderr, /larkin im/);
     assert.equal(call, undefined, "migration must happen before any spawn");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -513,7 +513,7 @@ test("Agent CLI does not retain a second IM argv surface", () => {
 
     const migrated = f.run(["im", "+messages-reply", "--message-id", "om_x", "--text", "**raw**"], { spawn });
     assert.equal(migrated.code, 2);
-    assert.match(migrated.stderr, /原生 `lark-cli im`/);
+    assert.match(migrated.stderr, /`larkin im/);
     assert.deepEqual(calls, []);
 
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

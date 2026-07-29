@@ -320,7 +320,8 @@ test("direct Bot-only profile materialization keeps the secret local and never c
       defaultAs: "bot", strictMode: "bot", users: [],
     }]);
     assert.equal(typeof profile.apps[0].appSecret, "string");
-    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), true);
+    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "larkin")), true);
+    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), false);
   } finally {
     cleanupClaimedHoldHostRoot(claim);
   }

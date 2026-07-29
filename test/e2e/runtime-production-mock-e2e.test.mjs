@@ -196,10 +196,10 @@ for (const runtime of ["codex", "claude", "pi"]) {
       let guardedStdout = "", guardedStderr = "";
       const guardedDependencies = {
         stateStore: store,
-        upstreamScript: "/fixture/@larksuite/cli/scripts/run.js",
+        nativeCommand: { command: "/fixture/@larksuite/cli/scripts/run.js", argsPrefix: [], version: "1.0.78" },
         spawn(command, args, options) {
-          if (["+chat-messages-list", "+threads-messages-list"].includes(args[2])
-              || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages")) {
+          if (["+chat-messages-list", "+threads-messages-list"].includes(args[1])
+              || (args[0] === "api" && args[1] === "GET" && args[2] === "/open-apis/im/v1/messages")) {
             return { status: 0, stdout: JSON.stringify({ ok: true, identity: "bot", data: { messages: [
               { message_id: `om_${runtime}_1`, chat_id: `oc_${runtime}`, create_time: "1784160000000", content: "first" },
               { message_id: `om_${runtime}_2`, chat_id: `oc_${runtime}`, create_time: "1784160001000", content: "second" },
@@ -247,8 +247,9 @@ for (const runtime of ["codex", "claude", "pi"]) {
       assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
       assert.equal(sent.length, 1, "the provider is called once after the target is current");
       assert.deepEqual(sent[0].args.slice(0, 6), [
-        "/fixture/@larksuite/cli/scripts/run.js", "im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text",
+        "im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text", "fresh response",
       ]);
+      assert.equal(sent[0].command, "/fixture/@larksuite/cli/scripts/run.js");
       assert.ok(sent[0].args.includes("--as") && sent[0].args.includes("bot"));
       assert.ok(sent[0].args.includes("--idempotency-key"));
       await new Promise((resolve) => setTimeout(resolve, 300));

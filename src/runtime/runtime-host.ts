@@ -11,6 +11,7 @@ import {
   RuntimePrerequisiteError,
   type RuntimeReadiness,
 } from "./runtime-readiness.js";
+import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
@@ -142,6 +143,7 @@ function boundedRecords(agent: ManagedAgent): DeliveryRecord[] {
 export function createRuntimeHost(options: {
   adapterFor(runtime: string): RuntimeAdapter; promptBuilder: ContextPromptBuilder; log?: (...parts: unknown[]) => void;
   stateStoreFor?(agentId: string): DeliveryStateStore;
+  assertOfficialCliReady?(config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): void | Promise<void>;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
@@ -154,6 +156,23 @@ export function createRuntimeHost(options: {
     stableWindowMs: options.retryPolicy?.stableWindowMs ?? 30_000,
   };
   const emit = (event: RuntimeHostEvent): void => { for (const listener of listeners) listener(event); };
+  const runtimeEnv = (config: AgentRuntimeConfig, generation?: string): NodeJS.ProcessEnv => ({
+    LARKIN_AGENT_ID: config.agentId,
+    ...(generation ? { LARKIN_RUNTIME_OBSERVATION_GENERATION: generation } : {}),
+    LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
+    LARKIN_HOME: process.env.LARKIN_HOME,
+    ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+    ...(process.env.SHELL ? { SHELL: process.env.SHELL } : {}),
+    ...(process.env.ZDOTDIR ? { ZDOTDIR: process.env.ZDOTDIR } : {}),
+    ...(process.env.BASH_ENV ? { BASH_ENV: process.env.BASH_ENV } : {}),
+    PATH: [config.stateDir ? path.join(config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
+    LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR,
+  });
+  const assertOfficialCliReady = async (config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): Promise<void> => {
+    if (!config.larkConfigDir) return;
+    if (options.assertOfficialCliReady) await options.assertOfficialCliReady(config, env);
+    else resolveOfficialLarkCli({ env });
+  };
 
   const emitConsumed = (agent: ManagedAgent, records: DeliveryRecord[]): void => {
     for (const record of records) emit({ type: "delivery", agentId: agent.config.agentId,
@@ -453,9 +472,11 @@ export function createRuntimeHost(options: {
     if (agent.disabledReason) throw new Error(agent.disabledReason);
     if (agent.session) return agent.session;
     if (agent.starting) return agent.starting;
+    const probeEnv = runtimeEnv(agent.config);
+    await assertOfficialCliReady(agent.config, probeEnv);
     const readiness = agent.adapter.probe ? await agent.adapter.probe({ workspaceDir: agent.config.workspaceDir,
       env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
-        LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND } })
+        LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...probeEnv } })
       : { runtime: agent.adapter.id, state: "ready" as const };
     if (!agent.authFailureActive) agent.readiness = readiness;
     if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
@@ -470,11 +491,7 @@ export function createRuntimeHost(options: {
       agentId: agent.config.agentId, model: agent.config.model, reasoningEffort: agent.config.effort || null,
       workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
       resumeSessionId: agent.config.sessionId || null, standingPrompt,
-      env: { LARKIN_AGENT_ID: agent.config.agentId,
-        LARKIN_RUNTIME_OBSERVATION_GENERATION: `${agent.launchId}:${generation}`,
-        LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR, LARKIN_HOME: process.env.LARKIN_HOME,
-        PATH: [agent.config.stateDir ? path.join(agent.config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
-        LARKSUITE_CLI_CONFIG_DIR: agent.config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR },
+      env: runtimeEnv(agent.config, `${agent.launchId}:${generation}`),
     }).then((session) => {
       completedSession = session;
       if (agent.stopped || generation !== agent.generation) { void session.close("stale creation"); throw new Error("stale runtime session creation"); }
@@ -505,9 +522,11 @@ export function createRuntimeHost(options: {
   return {
     async probe(config): Promise<RuntimeReadiness> {
       const adapter = options.adapterFor(config.runtime);
+      const env = runtimeEnv(config);
+      await assertOfficialCliReady(config, env);
       return adapter.probe ? adapter.probe({ workspaceDir: config.workspaceDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
-          LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND } })
+          LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...env } })
         : { runtime: adapter.id, state: "ready" };
     },
     async stage(config): Promise<StagedRuntimeCandidate> {
@@ -517,9 +536,11 @@ export function createRuntimeHost(options: {
         throw new Error(`Agent ${config.agentId} is not idle for runtime staging`);
       }
       const adapter = options.adapterFor(config.runtime);
+      const stageEnv = runtimeEnv(config, `${crypto.randomUUID()}:staged`);
+      await assertOfficialCliReady(config, stageEnv);
       const readiness = adapter.probe ? await adapter.probe({ workspaceDir: config.workspaceDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
-          LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND } })
+          LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...stageEnv } })
         : { runtime: adapter.id, state: "ready" as const };
       if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
       const standingPrompt = options.promptBuilder.build({
@@ -531,11 +552,7 @@ export function createRuntimeHost(options: {
         agentId: config.agentId, model: config.model, reasoningEffort: config.effort || null,
         workspaceDir: config.workspaceDir, stateDir: config.stateDir,
         resumeSessionId: config.sessionId || null, standingPrompt,
-        env: { LARKIN_AGENT_ID: config.agentId,
-          LARKIN_RUNTIME_OBSERVATION_GENERATION: `${crypto.randomUUID()}:staged`,
-          LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR, LARKIN_HOME: process.env.LARKIN_HOME,
-          PATH: [config.stateDir ? path.join(config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
-          LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR },
+        env: stageEnv,
       });
       let state: "staged" | "committed" | "rolled_back" = "staged";
       const rollback = async (reason: string): Promise<void> => {

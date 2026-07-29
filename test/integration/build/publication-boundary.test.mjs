@@ -61,7 +61,7 @@ test("runtime-only dependency notices are deterministic and exclude development 
     const generate = command(ROOT, process.execPath, [path.join(ROOT, "scripts/generate-third-party-notices.mjs"), "--output", output]);
     assert.equal(generate.status, 0, generate.stderr || generate.stdout);
     const notices = fs.readFileSync(output, "utf8");
-    assert.match(notices, /\| @larksuite\/cli \| 1\.0\.78 \| runtime direct \| MIT \|/);
+    assert.doesNotMatch(notices, /@larksuite\/cli|Embedded lark-cli|Embedded native component/);
     assert.match(notices, /\| qrcode-terminal \| 0\.12\.0 \| runtime direct \| \[\{"type":"Apache 2\.0"\}\] \|/);
     for (const developmentOnly of ["vitest", "typescript", "@testing-library/react", "tailwindcss"]) {
       assert.doesNotMatch(notices, new RegExp(`\\| ${developmentOnly.replace("/", "\\/")} \\|`));
@@ -69,12 +69,6 @@ test("runtime-only dependency notices are deterministic and exclude development 
     assert.doesNotMatch(notices, /\(none bundled\)/);
     assert.match(notices, /agent-base \| 6\.0\.2[\s\S]*AUDITED-agent-base@9\.0\.0-LICENSE/);
     assert.doesNotMatch(notices, /<year>|<copyright holders>/);
-    assert.match(notices, /Embedded native component provenance/);
-    assert.equal(notices.match(/^native [a-f0-9]{64}  (?:darwin|linux)-(?:arm64|x64)$/gm)?.length, 4);
-    assert.match(notices, /Embedded lark-cli Go module license closure/);
-    assert.match(notices, /41-module release-family union/);
-    assert.match(notices, /Each platform's exact module subset is bound/);
-    assert.equal(notices.match(/^\| (?:github\.com|golang\.org|gopkg\.in)\//gm)?.length, 41);
     const result = command(ROOT, process.execPath, [path.join(ROOT, "scripts/generate-third-party-notices.mjs"), "--check", "--output", output]);
     assert.equal(result.status, 0, result.stderr || result.stdout);
   } finally {
@@ -93,12 +87,10 @@ test("trusted scans fail closed without a private denylist", () => {
   }
 });
 
-test("public scanner contains no private marker fingerprints beyond pinned lark-cli platform hashes", () => {
+test("public scanner contains no private marker fingerprints or embedded CLI exceptions", () => {
   const source = fs.readFileSync(CHECK, "utf8");
-  const provenance = fs.readFileSync(path.join(ROOT, "scripts/release/lark-cli-provenance.mjs"), "utf8");
   assert.equal(source.match(/\b[0-9a-f]{64}\b/gi)?.length ?? 0, 0);
-  assert.equal(provenance.match(/\b[0-9a-f]{64}\b/gi)?.length, 4);
-  assert.match(source, /LARK_CLI_NATIVE_SHA256/);
+  assert.doesNotMatch(source, /allow-embedded-lark-cli|LARK_CLI_NATIVE_SHA256/);
   assert.doesNotMatch(source, /extra-deny|markerDigest|const DENY\b/);
 });
 
@@ -149,37 +141,6 @@ test("trusted scan applies the private denylist to generated runtime notices", (
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
-
-test("trusted artifact scan excludes only the byte-identical pinned lark-cli component", () => {
-  const native = path.join(ROOT, "node_modules", "@larksuite", "cli", "bin", "lark-cli");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-embedded-cli-scan-"));
-  const artifact = path.join(root, "larkin-vfixture-test");
-  const denylist = path.join(root, "denylist.txt");
-  const privateValue = ["internal", "error"].join("_");
-  try {
-    fs.writeFileSync(denylist, `${privateValue}\n`, { mode: 0o600 });
-    fs.writeFileSync(artifact, Buffer.concat([Buffer.from("larkin-prefix"), fs.readFileSync(native), Buffer.from("larkin-suffix")]));
-    const allowed = command(ROOT, process.execPath, [CHECK, "--root", ROOT, "--tree-only", "--trusted", "--denylist", denylist, "--allow-embedded-lark-cli", native, artifact]);
-    assert.equal(allowed.status, 0, allowed.stderr || allowed.stdout);
-
-    fs.appendFileSync(artifact, privateValue);
-    const rejected = command(ROOT, process.execPath, [CHECK, "--root", ROOT, "--tree-only", "--trusted", "--denylist", denylist, "--allow-embedded-lark-cli", native, artifact]);
-    assert.equal(rejected.status, 1);
-    assert.match(rejected.stderr, /source=artifact-larkin/);
-    assert.equal(rejected.stderr.includes(privateValue), false);
-
-    const nativeBytes = fs.readFileSync(native);
-    const boundaryValue = `x${String.fromCharCode(nativeBytes.readUInt16LE(0), nativeBytes.readUInt16LE(2))}`;
-    fs.writeFileSync(denylist, `${boundaryValue}\n`, { mode: 0o600 });
-    fs.writeFileSync(artifact, Buffer.concat([Buffer.from("x", "utf16le"), nativeBytes, Buffer.from("suffix")]));
-    const crossing = command(ROOT, process.execPath, [CHECK, "--root", ROOT, "--tree-only", "--trusted", "--denylist", denylist, "--allow-embedded-lark-cli", native, artifact]);
-    assert.equal(crossing.status, 1, "a match crossing into the trusted blob must not be suppressed");
-    assert.match(crossing.stderr, /source=artifact-larkin; line=1; encoding=utf16-le/);
-    assert.equal(crossing.stderr.includes(boundaryValue), false);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-}, 30_000);
 
 test("private token mode respects word boundaries and derived path separators", () => {
   const root = fixture();

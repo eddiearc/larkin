@@ -15,7 +15,7 @@ function checked(command, args, options, label) {
   return result;
 }
 
-test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound larkin and package-local lark-cli bins", { timeout: 180_000 }, async () => {
+test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin and uses a host official CLI", { timeout: 180_000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-git-dependency-"));
   try {
     const sourceRepo = path.join(temp, "source");
@@ -37,12 +37,20 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
       private: true,
       trustedDependencies: ["larkin"],
     }, null, 2));
+    const isolatedHome = path.join(temp, "home");
+    const npmPrefix = path.join(temp, "npm-prefix");
+    fs.mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(npmPrefix, { recursive: true, mode: 0o700 });
     const isolatedEnv = {
       ...process.env,
-      HOME: path.join(temp, "home"),
+      HOME: isolatedHome,
+      SHELL: "/bin/bash",
+      npm_config_prefix: npmPrefix,
       BUN_INSTALL_CACHE_DIR: path.join(temp, "bun-cache"),
-      PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ""}`,
+      PATH: `${path.join(npmPrefix, "bin")}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ""}`,
     };
+    fs.writeFileSync(path.join(isolatedHome, ".bash_profile"), `export PATH=${JSON.stringify(path.join(npmPrefix, "bin"))}:${JSON.stringify(path.dirname(process.execPath))}:/usr/local/bin:/usr/bin:/bin\n`, { mode: 0o600 });
+    checked("npm", ["install", "--global", "@larksuite/cli@1.0.78"], { env: isolatedEnv, timeout: 120_000 }, "install host official CLI into isolated prefix");
     checked(process.execPath, ["install", "--frozen-lockfile", "--ignore-scripts"], {
       cwd: sourceRepo,
       env: isolatedEnv,
@@ -61,10 +69,8 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
 
     const installed = path.join(consumer, "node_modules", "larkin");
     const cli = path.join(installed, "dist", "app", "cli.mjs");
-    const larkCliLauncher = path.join(installed, "dist", "app", "lark-cli.mjs");
     const transport = path.join(installed, "dist", "agent", "agent-transport.cjs");
     assert.equal(fs.existsSync(cli), true, "prepare must generate dist/app/cli.mjs");
-    assert.equal(fs.statSync(larkCliLauncher).mode & 0o111, 0o111, "package-local lark-cli launcher must be executable");
     assert.equal(fs.existsSync(transport), true, "prepare must generate the CJS transport");
     assert.equal(fs.existsSync(path.join(installed, "test")), false, "installed Git dependency must exclude repository tests");
     const bin = process.platform === "win32"
@@ -75,8 +81,8 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
     const larkBin = process.platform === "win32"
       ? path.join(consumer, "node_modules", ".bin", "larkin-lark-cli.cmd")
       : path.join(consumer, "node_modules", ".bin", "larkin-lark-cli");
-    assert.equal(fs.existsSync(larkBin), true, "installed package must expose its collision-free fixed lark-cli launcher");
-    assert.equal(JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).dependencies["@larksuite/cli"], "1.0.78");
+    assert.equal(fs.existsSync(larkBin), false, "installed package must not expose a second lark-cli launcher");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).dependencies["@larksuite/cli"], undefined);
     const importConfigDir = path.join(temp, "import-config");
     fs.mkdirSync(importConfigDir, { recursive: true });
     fs.writeFileSync(path.join(importConfigDir, "config.json"), `${JSON.stringify({
@@ -106,9 +112,10 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
     })), [{ appId: "cli_test", name: "cli_test", defaultAs: "bot", strictMode: "bot", users: [] }]);
     const runtimeBin = path.join(inboxDir, "runtime-bin");
     const runtimeLarkin = path.join(runtimeBin, "larkin");
-    const runtimeLarkCli = path.join(runtimeBin, "lark-cli");
+    const runtimeLarkCliPath = path.join(runtimeBin, "lark-cli");
+    const runtimeLarkCli = runtimeLarkin;
     assert.equal(fs.statSync(runtimeLarkin).mode & 0o077, 0);
-    assert.equal(fs.statSync(runtimeLarkCli).mode & 0o077, 0);
+    assert.equal(fs.existsSync(runtimeLarkCliPath), false);
     const inboxFile = path.join(inboxDir, "feishu-inbox.ndjson");
     fs.writeFileSync(inboxFile, `${JSON.stringify({
       envelope_version: 2, target: "chat:oc_installed", target_seq: 1,
@@ -137,8 +144,8 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
       cwd: consumer, env: runtimeEnv, timeout: 120_000,
     }, "run installed package-local native lark-cli help");
     assert.match(nativeHelp.stdout, /lark-cli|Usage|USAGE/i);
-    const runtimeAgentConfig = await import(pathToFileURL(path.join(installed, "dist", "app", "runtime-agent-config.mjs")).href);
-    const pinnedNative = runtimeAgentConfig.resolvePinnedLarkCliCommand(inboxDir);
+    const officialCli = await import(pathToFileURL(path.join(installed, "dist", "app", "official-lark-cli.mjs")).href);
+    const pinnedNative = officialCli.resolveOfficialLarkCli({ env: runtimeEnv });
     assert.match([pinnedNative.command, ...pinnedNative.argsPrefix].join(" "), /@larksuite[/\\]cli|lark-cli/);
     const evaluatorHelpArgv = ["im", "+messages-send", "--as", "user", "--chat-id", "a", "--chat-id=b", "--help"];
     const beforeHelpConfig = fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json"));
@@ -189,8 +196,7 @@ test.skipIf(!enabled)("Bun source dependency workflow exposes Runtime-bound lark
       message_id: "om_installed_unseen", chat_id: "oc_installed", content: "new installed context",
     })}\n`);
     for (const guardedArgv of [
-      ["--chat-id", "oc_installed", "im", "+messages-send", "--text", "stale prefix", "--dry-run"],
-      ["im", "--chat-id", "oc_installed", "+messages-send", "--text", "stale middle", "--dry-run"],
+      ["im", "+messages-send", "--chat-id", "oc_installed", "--text", "observational dry run", "--dry-run"],
     ]) {
       const held = spawnSync(runtimeLarkCli, guardedArgv, {
         cwd: consumer, env: runtimeEnv, encoding: "utf8", timeout: 15_000,

@@ -88,9 +88,12 @@ childProcess.spawn = function capture(command, args, options = {}) {
   return new FakeChild();
 };
 childProcess.spawnSync = function(command, args, options = {}) {
-  const pinned = command === process.execPath && String(args?.[0] || "").includes("@larksuite/cli/scripts/run.js");
+  if (args?.[0] === "-lc" && String(args?.[1]).includes("command -v lark-cli")) return { status: 0, stdout: process.env.OFFICIAL_CLI + "\\n", stderr: "" };
+  const pinned = require("node:path").resolve(String(command)) === require("node:path").resolve(process.env.OFFICIAL_CLI);
   if (!pinned) return originalSpawnSync.apply(this, arguments);
-  const cli = args.slice(1), file = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "config.json");
+  const cli = args;
+  if (cli[0] === "--version") return { status: 0, stdout: "1.0.78\\n", stderr: "" };
+  const file = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "config.json");
   if (cli[0] === "config" && cli[1] === "init") {
     const appId = cli[cli.indexOf("--app-id") + 1], name = cli[cli.indexOf("--name") + 1];
     fs.writeFileSync(file, JSON.stringify({ apps: [{ appId, name, appSecret: options.input, brand: "feishu", defaultAs: "auto", strictMode: "off", users: [] }] }), { mode: 0o600 });
@@ -132,11 +135,22 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
     };
     const capture = path.join(temp, "capture.json");
     const preload = writeRunSpawnPreload(temp);
+    const packageDir = path.join(temp, "official", "node_modules", "@larksuite", "cli");
+    const official = path.join(packageDir, "scripts", "run.sh");
+    const fixtureBin = path.join(temp, "bin");
+    fs.mkdirSync(path.dirname(official), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(fixtureBin, { mode: 0o700 });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" } }), { mode: 0o600 });
+    fs.writeFileSync(official, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    fs.symlinkSync(official, path.join(fixtureBin, "lark-cli"));
     const result = spawnSync(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agent", APP, "--dry-run"], {
       cwd: ROOT,
       env: {
         ...process.env,
         HOME: path.join(temp, "isolated-home"),
+        SHELL: "/bin/sh",
+        PATH: `${fixtureBin}:${process.env.PATH || "/usr/bin:/bin"}`,
+        OFFICIAL_CLI: path.join(fixtureBin, "lark-cli"),
         LARKIN_CONFIG_DIR: root,
         RUN_CAPTURE_FILE: capture,
         RUN_CONFIG_FILE: configFile,

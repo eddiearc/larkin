@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HydratedAgent } from "../platform/config.js";
@@ -12,6 +11,7 @@ import {
   validCredentialRecord,
   type BotCredentialRecord,
 } from "../setup/run-credential-preflight.js";
+import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 
 export interface RuntimeAgentConfig extends HydratedAgent {
   feishuAppSecret: string;
@@ -25,22 +25,10 @@ interface ProfileSnapshot {
   mode: number;
 }
 
-export interface PinnedLarkCliCommand {
-  command: string;
-  argsPrefix: string[];
-}
-
 export interface RuntimeAgentConfigDependencies {
-  runPinnedCli?(command: PinnedLarkCliCommand, args: readonly string[], options: Parameters<typeof spawnSync>[2]): ReturnType<typeof spawnSync>;
+  resolveOfficialCli?(env: NodeJS.ProcessEnv): OfficialLarkCliCommand;
+  runOfficialCli?(command: OfficialLarkCliCommand, args: readonly string[], options: Parameters<typeof spawnSync>[2]): ReturnType<typeof spawnSync>;
 }
-
-declare global {
-  // Set only by the generated standalone compile wrapper to a Bun embedded-file path.
-  // Regular source/install builds resolve the exact package dependency instead.
-  var __LARKIN_EMBEDDED_LARK_CLI__: string | undefined;
-}
-
-const PINNED_LARK_CLI_VERSION = "1.0.78";
 
 function assertSecureProfileDirectory(directory: string): void {
   const stat = fs.lstatSync(directory);
@@ -194,59 +182,18 @@ function assertSecureRuntimeCommandDirectory(commandDir: string): void {
   fs.chmodSync(commandDir, 0o700);
 }
 
-function materializeEmbeddedLarkCli(stateDir: string): string {
-  const embedded = globalThis.__LARKIN_EMBEDDED_LARK_CLI__;
-  if (!embedded) throw new Error("standalone artifact 缺少内嵌的固定 lark-cli");
-  const commandDir = path.join(path.resolve(stateDir), "runtime-bin");
-  assertSecureRuntimeCommandDirectory(commandDir);
-  const executable = path.join(commandDir, `lark-cli-native-${PINNED_LARK_CLI_VERSION}`);
-  const bytes = fs.readFileSync(embedded);
-  const expectedHash = crypto.createHash("sha256").update(bytes).digest("hex");
-  try {
-    const stat = fs.lstatSync(executable);
-    if (!stat.isFile() || stat.isSymbolicLink()
-        || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
-      throw new Error("standalone lark-cli materialization 路径不安全");
-    }
-    const actualHash = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
-    if (actualHash === expectedHash) {
-      fs.chmodSync(executable, 0o700);
-      return executable;
-    }
-    throw new Error("standalone lark-cli materialization 内容校验失败");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const temporary = path.join(commandDir, `.lark-cli-native.${process.pid}.${crypto.randomUUID()}.tmp`);
-  fs.writeFileSync(temporary, bytes, { mode: 0o700, flag: "wx" });
-  fs.renameSync(temporary, executable);
-  fs.chmodSync(executable, 0o700);
-  return executable;
-}
-
-export function resolvePinnedLarkCliCommand(stateDir: string): PinnedLarkCliCommand {
-  if (process.env.LARKIN_STANDALONE === "1") {
-    return { command: materializeEmbeddedLarkCli(stateDir), argsPrefix: [] };
-  }
-  const require = createRequire(import.meta.url);
-  const packageFile = require.resolve("@larksuite/cli/package.json");
-  const manifest = JSON.parse(fs.readFileSync(packageFile, "utf8")) as { version?: string };
-  if (manifest.version !== PINNED_LARK_CLI_VERSION) throw new Error("package-local lark-cli 版本与 Runtime contract 不一致");
-  return { command: process.execPath, argsPrefix: [path.join(path.dirname(packageFile), "scripts", "run.js")] };
-}
-
-function runPinnedLarkCli(
-  command: PinnedLarkCliCommand,
+function runOfficialLarkCli(
+  command: OfficialLarkCliCommand,
   args: readonly string[],
   options: Parameters<typeof spawnSync>[2],
   dependencies: RuntimeAgentConfigDependencies,
 ): ReturnType<typeof spawnSync> {
-  return dependencies.runPinnedCli
-    ? dependencies.runPinnedCli(command, args, options)
+  return dependencies.runOfficialCli
+    ? dependencies.runOfficialCli(command, args, options)
     : spawnSync(command.command, [...command.argsPrefix, ...args], options);
 }
 
-function pinnedFailure(label: string, result: ReturnType<typeof spawnSync>, secret: string): Error {
+function officialFailure(label: string, result: ReturnType<typeof spawnSync>, secret: string): Error {
   const stderr = String(result.stderr || "").replaceAll(secret, "<redacted>").trim().slice(0, 400);
   const detail = [result.error?.message, stderr].filter(Boolean).join(": ");
   return new Error(`${label} failed (exit=${result.status ?? "none"})${detail ? `: ${detail}` : ""}`);
@@ -258,10 +205,7 @@ export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stat
   assertSecureRuntimeCommandDirectory(commandDir);
   const standalone = process.env.LARKIN_STANDALONE === "1";
   const binaryEntry = fileURLToPath(new URL("./binary-entry.mjs", import.meta.url));
-  for (const [name, argumentsPrefix] of [
-    ["larkin", standalone ? [] : [binaryEntry]],
-    ["lark-cli", standalone ? ["__internal", "lark-cli"] : [binaryEntry, "__internal", "lark-cli"]],
-  ] as const) {
+  for (const [name, argumentsPrefix] of [["larkin", standalone ? [] : [binaryEntry]]] as const) {
     const file = path.join(commandDir, name);
     const temporary = path.join(commandDir, `.${name}.${process.pid}.${crypto.randomUUID()}.tmp`);
     const command = [process.execPath, ...argumentsPrefix].map(shellQuote).join(" ");
@@ -291,13 +235,13 @@ export function syncAgentProfile(
   try {
     // Existing bytes are parsed before any command and remain the exact rollback source.
     const before = captureProfileSnapshot(configFile);
-    const pinned = resolvePinnedLarkCliCommand(agent.stateDir);
     fs.mkdirSync(stagingDir, { mode: 0o700 });
     const profileEnv = { ...env, LARKSUITE_CLI_CONFIG_DIR: stagingDir };
     let stage: "sync" | "default-as" | "strict-mode" | "validate" | "publish" | "shims" = "sync";
     let published = false;
     try {
-      const sync = runPinnedLarkCli(pinned, ["config", "init", "--app-id", agent.feishuAppId, "--app-secret-stdin", "--brand", tenant, "--name", agent.feishuAppId], {
+      const official = dependencies.resolveOfficialCli?.(profileEnv) ?? resolveOfficialLarkCli({ env: profileEnv });
+      const sync = runOfficialLarkCli(official, ["config", "init", "--app-id", agent.feishuAppId, "--app-secret-stdin", "--brand", tenant, "--name", agent.feishuAppId], {
         input: agent.feishuAppSecret, encoding: "utf8", env: profileEnv,
       }, dependencies);
       if (sync.status !== 0 || sync.error) {
@@ -306,19 +250,19 @@ export function syncAgentProfile(
         // authority; accept the local write only when its bytes are exact.
         const local = captureProfileSnapshot(path.join(stagingDir, "config.json"));
         if (!hasExactStagedCredential(local, agent)) {
-          throw pinnedFailure(`Agent ${agent.agentId} profile sync`, sync, agent.feishuAppSecret);
+          throw officialFailure(`Agent ${agent.agentId} profile sync`, sync, agent.feishuAppSecret);
         }
       }
       stage = "default-as";
-      const defaultAs = runPinnedLarkCli(pinned, ["--profile", agent.feishuAppId, "config", "default-as", "bot"], {
+      const defaultAs = runOfficialLarkCli(official, ["--profile", agent.feishuAppId, "config", "default-as", "bot"], {
         encoding: "utf8", env: profileEnv,
       }, dependencies);
-      if (defaultAs.status !== 0 || defaultAs.error) throw pinnedFailure(`Agent ${agent.agentId} profile default-as`, defaultAs, agent.feishuAppSecret);
+      if (defaultAs.status !== 0 || defaultAs.error) throw officialFailure(`Agent ${agent.agentId} profile default-as`, defaultAs, agent.feishuAppSecret);
       stage = "strict-mode";
-      const strictMode = runPinnedLarkCli(pinned, ["--profile", agent.feishuAppId, "config", "strict-mode", "bot"], {
+      const strictMode = runOfficialLarkCli(official, ["--profile", agent.feishuAppId, "config", "strict-mode", "bot"], {
         encoding: "utf8", env: profileEnv,
       }, dependencies);
-      if (strictMode.status !== 0 || strictMode.error) throw pinnedFailure(`Agent ${agent.agentId} profile strict-mode`, strictMode, agent.feishuAppSecret);
+      if (strictMode.status !== 0 || strictMode.error) throw officialFailure(`Agent ${agent.agentId} profile strict-mode`, strictMode, agent.feishuAppSecret);
       stage = "validate";
       const staged = captureProfileSnapshot(path.join(stagingDir, "config.json"));
       if (!staged) throw new Error(`Agent ${agent.agentId} profile config missing`);

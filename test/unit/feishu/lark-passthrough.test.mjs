@@ -175,14 +175,25 @@ function passthroughWorkspace() {
   const bin = path.join(temp, "bin");
   fs.mkdirSync(bin);
   const marker = path.join(temp, "lark-cli-calls.txt");
-  fs.writeFileSync(path.join(bin, "lark-cli"), `#!/bin/sh
+  const officialPackage = path.join(temp, "official", "node_modules", "@larksuite", "cli");
+  fs.mkdirSync(path.join(officialPackage, "scripts"), { recursive: true });
+  fs.writeFileSync(path.join(officialPackage, "package.json"), JSON.stringify({
+    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+  }));
+  const official = path.join(officialPackage, "scripts", "run.sh");
+  fs.writeFileSync(official, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '1.0.78\n'; exit 0; fi
 {
   printf 'CONFIGDIR=%s\\n' "$LARKSUITE_CLI_CONFIG_DIR"
   for arg in "$@"; do printf 'ARG=%s\\n' "$arg"; done
 } > "$LARK_MOCK_MARKER"
 echo '{"ok":true,"data":{"mock":true}}'
 `);
-  fs.chmodSync(path.join(bin, "lark-cli"), 0o755);
+  fs.chmodSync(official, 0o755);
+  fs.symlinkSync(official, path.join(bin, "lark-cli"));
+  const shellHome = path.join(temp, "home");
+  fs.mkdirSync(shellHome);
+  fs.writeFileSync(path.join(shellHome, ".bash_profile"), `export PATH=${JSON.stringify(bin)}:$PATH\n`);
   const run = (args, extraEnv = {}) => spawnSync(process.execPath, [CLI, ...args], {
     cwd: ROOT,
     encoding: "utf8",
@@ -190,6 +201,8 @@ echo '{"ok":true,"data":{"mock":true}}'
       ...process.env,
       LARKIN_CONFIG_DIR: temp,
       LARK_MOCK_MARKER: marker,
+      HOME: shellHome,
+      SHELL: "/bin/bash",
       PATH: `${bin}:${process.env.PATH}`,
       ...extraEnv,
     },
@@ -227,8 +240,13 @@ test("terminal larkin <group> honours --agent selector and rejects identity esca
     fs.rmSync(marker, { force: true });
     const rejected = run(["im", "send", "--chat-id", "oc_x", "--as", "user"], { LARKIN_AGENT_ID: first });
     assert.equal(rejected.status, 2);
-    assert.match(rejected.stderr, /原生 `lark-cli im`/);
+    assert.match(rejected.stderr, /身份边界/);
     assert.equal(fs.existsSync(marker), false, "rejected calls must never reach lark-cli");
+
+    const prefixedRejected = run(["--as", "user", "im", "+chat-list"], { LARKIN_AGENT_ID: first });
+    assert.equal(prefixedRejected.status, 2);
+    assert.match(prefixedRejected.stderr, /身份边界/);
+    assert.equal(fs.existsSync(marker), false, "leading identity flags must enter policy classification before spawn");
 
     for (const managementArgs of [
       ["auth", "login"],
@@ -244,7 +262,7 @@ test("terminal larkin <group> honours --agent selector and rejects identity esca
 
     const unknown = run(["im", "+chat-list"], { LARKIN_AGENT_ID: "cli_missing9" });
     assert.equal(unknown.status, 2);
-    assert.match(unknown.stderr, /原生 `lark-cli im`/);
+    assert.match(unknown.stderr, /Agent|不存在|配置/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -265,15 +283,14 @@ test("agent runtime larkin <group> rejects --agent before spawning lark-cli", ()
   }
 });
 
-test("Agent Runtime rejects the ambient larkin passthrough and migrates IM to package-local lark-cli", () => {
+test("Agent Runtime routes Feishu groups through the Larkin-owned AOP to the official CLI", () => {
   const { first, temp, marker, run } = passthroughWorkspace();
   try {
     for (const args of [["im", "+chat-list"], ["docs", "+fetch", "--token", "t"]]) {
       fs.rmSync(marker, { force: true });
       const result = run(args, { LARKIN_AGENT_ID: first });
-      assert.equal(result.status, 2, result.stderr || result.stdout);
-      assert.match(result.stderr, args[0] === "im" ? /原生 `lark-cli im`/ : /不支持|不可用/);
-      assert.equal(fs.existsSync(marker), false, "Runtime must never reach an ambient lark-cli through larkin");
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(fs.existsSync(marker), true, "Runtime must reach the verified official CLI through larkin");
     }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
@@ -348,7 +365,7 @@ test("external Agent CLI exposes only Larkin-owned commands and migrates IM to n
     });
     const migrated = run(["im", "+chat-list", "--json"]);
     assert.equal(migrated.status, 2, migrated.stderr);
-    assert.match(migrated.stderr, /原生 `lark-cli im`/);
+    assert.match(migrated.stderr, /`larkin im/);
     assert.equal(fs.existsSync(marker), false, "legacy larkin im must not spawn lark-cli");
 
     for (const removedCommand of ["init", "bot:connect"]) {
@@ -387,25 +404,25 @@ test("external Agent CLI exposes only Larkin-owned commands and migrates IM to n
   }
 });
 
-test("platform rules teach native lark-cli, long-running task updates, and the irreversible-op convention", async () => {
+test("platform rules teach the sole larkin surface, long-running task updates, and the irreversible-op convention", async () => {
   const { PLATFORM_RULES } = await import(
     pathToFileURL(path.join(ROOT, "dist", "platform", "workspace-service.mjs")).href
   );
   assert.match(PLATFORM_RULES, /standing instructions.*Larkin 本地能力/, "platform rules must defer to the capability manifest");
   assert.match(PLATFORM_RULES, /inbox check/, "platform rules must teach the external Inbox command");
-  assert.match(PLATFORM_RULES, /package-local lark-cli/, "platform rules must teach native lark-cli");
+  assert.match(PLATFORM_RULES, /只用 larkin.*不要调用裸 lark-cli/, "platform rules must teach the Larkin-owned surface");
   assert.doesNotMatch(PLATFORM_RULES, /larkin message|larkin task claim|larkin docs/, "platform rules must not teach removed commands");
   assert.match(PLATFORM_RULES, /--as user/, "platform rules must state the identity boundary");
   assert.match(PLATFORM_RULES, /commentary.*final_answer.*(?:不可见|不等于飞书出站)/, "runtime-native output must not be presented as user-visible IM");
-  assert.match(PLATFORM_RULES, /只有[^\n]*成功调用[^\n]*lark-cli[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/, "only a successful native send or reply is user-visible");
+  assert.match(PLATFORM_RULES, /只有[^\n]*成功调用[^\n]*larkin[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/, "only a successful routed send or reply is user-visible");
   assert.match(PLATFORM_RULES, /多个外部步骤[^\n]*(?:首个|第一个)[^\n]*(?:外部|耗时)步骤前[^\n]*(?:简短确认|首响)/, "multi-step external work must acknowledge before its first external or slow step");
   assert.match(PLATFORM_RULES, /短任务[^\n]*(?:直接处理|无需)[^\n]*(?:收到|确认|首响)/, "short work must not gain a mechanical acknowledgement");
   assert.match(PLATFORM_RULES, /用户[^\n]*步骤顺序[^\n]*(?:严格|必须)[^\n]*顺序[^\n]*不得[^\n]*(?:fallback|重排|重复)/, "explicit user ordering must forbid premature fallback, repetition, and reordering");
   assert.match(PLATFORM_RULES, /进度[^\n]*用户[^\n]*大阶段[^\n]*(?:而非|不按)[^\n]*(?:工具|小步骤)[^\n]*(?:仅在|只在)[^\n]*阶段变化[^\n]*明显延迟[^\n]*需要用户动作[^\n]*用户可感知阻塞[^\n]*同一阶段[^\n]*同一阻塞[^\n]*(?:不重复|只发送一次)/, "phase-level progress must stay bounded and user-meaningful");
-  assert.match(PLATFORM_RULES, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止重复发送[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先用 lark-cli[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/, "dependent work must be observed one call at a time before one binary retry-or-fallback decision");
+  assert.match(PLATFORM_RULES, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止重复发送[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先用 larkin[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/, "dependent work must be observed one call at a time before one binary retry-or-fallback decision");
   assert.match(PLATFORM_RULES, /不得[^\n]*(?:每次工具调用|逐次工具调用)[^\n]*(?:刷屏|发送)|(?:而非|不按)[^\n]*(?:工具|小步骤)/, "progress must not spam on every tool call");
   assert.match(PLATFORM_RULES, /不得泄露[^\n]*thinking[^\n]*凭证[^\n]*原始工具输出[^\n]*内部路径/, "progress must protect sensitive runtime details");
-  assert.match(PLATFORM_RULES, /(?:完成|无法继续|需要用户动作)[^\n]*lark-cli[^\n]*(?:最终结论|明确请求)/, "terminal outcomes must be sent through native lark-cli");
+  assert.match(PLATFORM_RULES, /(?:完成|无法继续|需要用户动作)[^\n]*larkin[^\n]*(?:最终结论|明确请求)/, "terminal outcomes must be sent through larkin");
   assert.match(PLATFORM_RULES, /不可逆|撤回|删除/, "platform rules must carry the irreversible-op convention");
   assert.match(PLATFORM_RULES, /standing instructions.*身份.*权威/, "injected identity must be authoritative");
   assert.match(PLATFORM_RULES, /仅(?:点名|指派).*其他 Agent.*不得回复/, "exclusive assignment must keep non-target agents silent");

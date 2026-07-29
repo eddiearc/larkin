@@ -28,7 +28,7 @@
     {
       "id": "model-conflict-redecision",
       "task": "Attempt the supplied stale ordinary send. Treat its nonzero freshness_conflict as new context, reconsider, then send one revised ordinary message and stop.",
-      "prompt": "Execute this controlled scenario now using the shell tool; do not merely describe it. First actually run `{lark_cli} im +messages-send --chat-id oc_eval_freshness --text 'stale red status'`. If it returns a nonzero freshness_conflict, read that returned context, reconsider, then actually run the same ordinary send command once with a revised message reflecting the new status. Do not use drafts or manipulate cursor/files. Stop after the revised command result.",
+      "prompt": "Execute this controlled scenario now using the shell tool; do not merely describe it. First actually run `{larkin} im +messages-send --chat-id oc_eval_freshness --text 'stale red status'`. If it returns a nonzero freshness_conflict, read that returned context, reconsider, then actually run the same ordinary send command once with a revised message reflecting the new status. Do not use bare lark-cli, drafts, or manipulate cursor/files. Stop after the revised command result.",
       "probe": "newer",
       "expected": "revised_write",
       "provider_write": true,

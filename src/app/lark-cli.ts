@@ -1,8 +1,7 @@
 #!/usr/bin/env bun
 
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
@@ -12,7 +11,7 @@ import {
   type FeishuImCursor, type FeishuImMessage, type FeishuImSnapshot,
 } from "../feishu/im-freshness-adapter.js";
 import * as larkinConfig from "../platform/config.js";
-import { resolvePinnedLarkCliCommand, type PinnedLarkCliCommand } from "./runtime-agent-config.js";
+import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -24,10 +23,16 @@ export interface LarkCliIo {
 export interface LarkCliLauncherDependencies {
   io?: LarkCliIo;
   spawn?: typeof spawnSync;
-  upstreamScript?: string;
-  nativeCommand?: PinnedLarkCliCommand;
+  nativeCommand?: OfficialLarkCliCommand;
   stateStore?: AgentStateStore;
   now?(): number;
+}
+
+function portableSignalCode(signal: NodeJS.Signals): number {
+  if (signal === "SIGINT") return 130;
+  if (signal === "SIGTERM") return 143;
+  if (signal === "SIGKILL") return 137;
+  return 1;
 }
 
 export type LarkCliCommandDecision =
@@ -176,11 +181,6 @@ function parsePolicyArgv(argv: readonly string[]): PolicyArgv {
   return { commandArgv, flags, help: false, error: null };
 }
 
-function resolveUpstreamScript(): string {
-  const require = createRequire(import.meta.url);
-  return path.join(path.dirname(require.resolve("@larksuite/cli/package.json")), "scripts", "run.js");
-}
-
 function policyFlagValue(argv: readonly string[], flag: string): string | null {
   return parsePolicyArgv(argv).flags.get(flag) ?? null;
 }
@@ -247,8 +247,8 @@ function callNative(
 ): SpawnSyncReturns<string> {
   const native = dependencies.nativeCommand;
   const result = (dependencies.spawn ?? spawnSync)(
-    native?.command ?? process.execPath,
-    [...(native?.argsPrefix ?? [dependencies.upstreamScript ?? resolveUpstreamScript()]), ...argv],
+    native?.command ?? resolveOfficialLarkCli({ spawn: dependencies.spawn, env }).command,
+    [...(native?.argsPrefix ?? []), ...argv],
     { encoding: "utf8", env: { ...process.env, ...env } },
   ) as SpawnSyncReturns<string>;
   return result;
@@ -261,10 +261,44 @@ function spawnNative(
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
-    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    io.stderr(`lark-cli: official launcher failed: ${result.error.message}\n`);
     return 1;
   }
-  return result.status ?? 1;
+  return result.status ?? (result.signal ? portableSignalCode(result.signal) : 1);
+}
+
+async function spawnNativeTransparent(
+  argv: readonly string[], env: Env, native: OfficialLarkCliCommand,
+): Promise<number> {
+  return await new Promise<number>((resolve) => {
+    const child = spawn(native.command, [...native.argsPrefix, ...argv], {
+      cwd: process.cwd(), env: { ...process.env, ...env }, stdio: "inherit",
+    });
+    const forward = (signal: NodeJS.Signals) => {
+      if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+    };
+    const onSigint = () => forward("SIGINT");
+    const onSigterm = () => forward("SIGTERM");
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+    const cleanup = () => {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+    };
+    child.once("error", (error) => {
+      cleanup();
+      process.stderr.write(`lark-cli: official launcher failed: ${error.message}\n`);
+      resolve(1);
+    });
+    child.once("exit", (code, signal) => {
+      cleanup();
+      if (!signal) return resolve(code ?? 1);
+      const fallback = portableSignalCode(signal);
+      try { process.kill(process.pid, signal); } catch { resolve(fallback); }
+      // A registered/unsupported platform signal may not terminate the process.
+      setImmediate(() => resolve(fallback));
+    });
+  });
 }
 
 function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarded" }>, argv: readonly string[], store: AgentStateStore): FreshnessTarget {
@@ -492,10 +526,15 @@ function passthroughWithObservation(
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
-    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    io.stderr(`lark-cli: official launcher failed: ${result.error.message}\n`);
     return 1;
   }
-  return result.status ?? 1;
+  return result.status ?? (result.signal ? portableSignalCode(result.signal) : 1);
+}
+
+function requiresCapturedPassthrough(argv: readonly string[]): boolean {
+  const effectiveArgv = boundedHistoryArgv(argv);
+  return conditionalHeadReadTarget(effectiveArgv) !== null || eligibleThreadHeadRead(effectiveArgv) !== null;
 }
 
 function writeResponseMessage(result: SpawnSyncReturns<string>): FeishuImMessage | null {
@@ -527,10 +566,10 @@ function emitNativeResult(result: SpawnSyncReturns<string>, io: LarkCliIo): numb
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
   if (result.error) {
-    io.stderr(`lark-cli: package-local launcher failed: ${result.error.message}\n`);
+    io.stderr(`lark-cli: official launcher failed: ${result.error.message}\n`);
     return 1;
   }
-  return result.status ?? 1;
+  return result.status ?? (result.signal ? portableSignalCode(result.signal) : 1);
 }
 
 function emitCommittedUnverified(
@@ -568,7 +607,16 @@ export function runLarkCli(
 ): number {
   const io = dependencies.io ?? defaultIo();
   const runtimeAgentId = larkinConfig.resolveRuntimeAuthority(env);
-  if (!runtimeAgentId) return spawnNative(argv, env, io, dependencies);
+  if (!runtimeAgentId) {
+    try {
+      const nativeDependencies = dependencies.nativeCommand ? dependencies
+        : { ...dependencies, nativeCommand: resolveOfficialLarkCli({ spawn: dependencies.spawn, env }) };
+      return spawnNative(argv, env, io, nativeDependencies);
+    } catch (error) {
+      io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
   let config: larkinConfig.HydratedConfig;
   let agent: larkinConfig.HydratedAgent;
   try {
@@ -578,13 +626,18 @@ export function runLarkCli(
     io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
-  const privateEnv = { ...env, LARKIN_AGENT_ID: agent.agentId, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
-  const nativeDependencies = dependencies.nativeCommand || dependencies.upstreamScript
-    ? dependencies
-    : { ...dependencies, nativeCommand: resolvePinnedLarkCliCommand(agent.stateDir) };
   const decision = classifyLarkCliCommand(argv);
   if (decision.kind === "denied") {
     io.stderr(`lark-cli: ${decision.reason}\n`);
+    return 2;
+  }
+  const privateEnv = { ...env, LARKIN_AGENT_ID: agent.agentId, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
+  let nativeDependencies: LarkCliLauncherDependencies;
+  try {
+    nativeDependencies = dependencies.nativeCommand ? dependencies
+      : { ...dependencies, nativeCommand: resolveOfficialLarkCli({ spawn: dependencies.spawn, env: privateEnv }) };
+  } catch (error) {
+    io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
   const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
@@ -643,9 +696,33 @@ export function runLarkCli(
   }
 }
 
-export function main(argv = process.argv.slice(2), env: Env = process.env): never {
-  process.exit(runLarkCli(argv, env));
+export async function runLarkCliProcess(argv: readonly string[], env: Env = process.env): Promise<number> {
+  const runtimeAgentId = larkinConfig.resolveRuntimeAuthority(env);
+  if (!runtimeAgentId) {
+    try {
+      return await spawnNativeTransparent(argv, env, resolveOfficialLarkCli({ env }));
+    } catch (error) {
+      process.stderr.write(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
+  try {
+    const { config } = larkinConfig.loadConfig(env);
+    const agent = larkinConfig.selectAgent(config, { ...env, LARKIN_AGENT_ID: runtimeAgentId });
+    const decision = classifyLarkCliCommand(argv);
+    if (decision.kind === "passthrough" && !requiresCapturedPassthrough(argv)) {
+      const privateEnv = { ...env, LARKIN_AGENT_ID: agent.agentId, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
+      return await spawnNativeTransparent(argv, privateEnv, resolveOfficialLarkCli({ env: privateEnv }));
+    }
+  } catch {
+    // Preserve runLarkCli's existing sanitized diagnostics and exit taxonomy.
+  }
+  return runLarkCli(argv, env);
+}
+
+export async function main(argv = process.argv.slice(2), env: Env = process.env): Promise<never> {
+  process.exit(await runLarkCliProcess(argv, env));
 }
 
 const entry = process.argv[1];
-if (entry && path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url))) main();
+if (entry && path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url))) void main();

@@ -16,7 +16,7 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
     case "setup": await (await import("./setup.js")).main(); return;
     case "runtime-process": await (await import("./runtime-process.js")).main(); return;
     case "agent-cli": await (await import("./agent-cli.js")).main(rest, process.env); return;
-    case "lark-cli": process.exitCode = (await import("./lark-cli.js")).runLarkCli(rest, process.env); return;
+    case "lark-cli": process.exitCode = await (await import("./lark-cli.js")).runLarkCliProcess(rest, process.env); return;
     case "runtime-model-directory": await (await import("./runtime-model-directory.js")).main(); return;
     case "agent-config": await import("./agent-config.js"); return;
     case "lark": await import("./lark.js"); return;

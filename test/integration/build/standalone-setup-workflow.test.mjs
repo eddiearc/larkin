@@ -15,7 +15,14 @@ function checked(result, label) {
 }
 
 function writeLarkCli(binDir) {
-  fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/bin/sh
+  const packageDir = path.join(path.dirname(binDir), "official", "node_modules", "@larksuite", "cli");
+  const launcher = path.join(packageDir, "scripts", "run.sh");
+  fs.mkdirSync(path.dirname(launcher), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+  }), { mode: 0o600 });
+  fs.writeFileSync(launcher, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '1.0.78\n'; exit 0; fi
 count=0
 if [ -f "$SETUP_LARK_CALLS" ]; then count=$(grep -c '+chat-list' "$SETUP_LARK_CALLS"); fi
 printf '%s\n' "$*" >> "$SETUP_LARK_CALLS"
@@ -31,6 +38,7 @@ else
   printf '%s\n' '{"ok":true}'
 fi
 `, { mode: 0o755 });
+  fs.symlinkSync(launcher, path.join(binDir, "lark-cli"));
 }
 
 function writeRegisterFixture(temp) {
@@ -95,8 +103,11 @@ test.skipIf(!enabled)("compiled setup-bind executes its internal stage and propa
     };
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
     writeLarkCli(binDir);
+    const fixtureHome = path.join(temp, "home");
+    fs.mkdirSync(fixtureHome, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(fixtureHome, ".bash_profile"), `export PATH=${JSON.stringify(binDir)}:/usr/bin:/bin\n`, { mode: 0o600 });
     const baseEnv = {
-      HOME: path.join(temp, "home"), LARKIN_CONFIG_DIR: configDir,
+      HOME: fixtureHome, SHELL: "/bin/bash", LARKIN_CONFIG_DIR: configDir,
       PATH: `${binDir}${path.delimiter}/usr/bin:/bin`, SETUP_APP_ID: secondAgent,
       SETUP_LARK_CALLS: path.join(temp, "lark-calls"),
     };

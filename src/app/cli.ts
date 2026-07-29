@@ -100,11 +100,12 @@ if (!runtimeAgentCommand && command === "config" && ["runtime", "model", "effort
 }
 
 // At a user terminal, unregistered non-flag commands keep the legacy lark-cli passthrough.
-// Inside an Agent Runtime, every `larkin` command stays on the Larkin-owned surface;
-// Feishu commands use the separate package-local `lark-cli` shim.
-const wantsHelp = command === "help" || command === "--help" || command === "-h" || command.startsWith("-");
+// Inside an Agent Runtime, unknown Feishu command groups enter the same Larkin-owned
+// identity and freshness AOP before delegation to the verified global official CLI.
+const wantsHelp = command === "help" || command === "--help" || command === "-h"
+  || (!runtimeAgentAuthority && command.startsWith("-"));
 if (!routes[command] && !wantsHelp) {
-  routes[command] = runtimeAgentAuthority ? ["agent-cli", command] : ["lark", command];
+  routes[command] = runtimeAgentAuthority ? ["lark-cli", command] : ["lark", command];
 }
 
 if (!routes[command]) {
@@ -136,16 +137,27 @@ const child = spawn(childSpec.command, childSpec.args, { stdio: "inherit" });
 
 // Package-manager bin shims add a wrapper process. Forward terminal signals so the actual command
 // does not become an orphan that keeps the machine lock or Feishu connection.
+const signalForwarders = new Map<NodeJS.Signals, () => void>();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
+  const forward = () => {
     if (child.exitCode === null && child.signalCode === null) child.kill(signal);
-  });
+  };
+  signalForwarders.set(signal, forward);
+  process.on(signal, forward);
 }
+const stopForwardingSignals = () => {
+  for (const [signal, forward] of signalForwarders) process.off(signal, forward);
+};
 child.on("error", (error) => {
+  stopForwardingSignals();
   console.error(`larkin ${command} 启动失败: ${error.message}`);
   process.exit(1);
 });
 child.on("exit", (code, signal) => {
+  stopForwardingSignals();
   if (code !== null) process.exit(code);
-  process.exit(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1);
+  if (!signal) process.exit(1);
+  const fallback = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : signal === "SIGKILL" ? 137 : 1;
+  try { process.kill(process.pid, signal); } catch { process.exit(fallback); }
+  setImmediate(() => process.exit(fallback));
 });

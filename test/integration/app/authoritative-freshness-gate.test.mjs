@@ -9,7 +9,6 @@ import { beforeAll, test } from "bun:test";
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const LARK_CLI = path.join(ROOT, "dist/app/lark-cli.mjs");
 const AGENT_CLI = path.join(ROOT, "dist/app/agent-cli.mjs");
-const PRELOAD = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider-preload.cjs");
 const PROVIDER = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider.mjs");
 
 beforeAll(() => {
@@ -39,15 +38,37 @@ function fixture(agentId = "cli_authoritativeA1") {
   writePrivate(path.join(stateDir, "lark-cli-config", "config.json"), `${JSON.stringify({
     apps: [{ appId: agentId, name: agentId, appSecret: "fixture-only", brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
   })}\n`);
+  const bin = path.join(root, "bin");
+  const packageDir = path.join(root, "official", "node_modules", "@larksuite", "cli");
+  const executable = path.join(packageDir, "scripts", "run.sh");
+  fs.mkdirSync(path.dirname(executable), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(bin, { mode: 0o700 });
+  fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+  }), { mode: 0o600 });
+  fs.writeFileSync(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '1.0.78\\n'; exit 0; fi
+export LARKIN_TEST_PROVIDER_PARENT_PID="$PPID"
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
+`, { mode: 0o700 });
+  fs.symlinkSync(executable, path.join(bin, "lark-cli"));
+  const home = path.join(root, "home");
+  fs.mkdirSync(home, { mode: 0o700 });
+  const profile = `export PATH=${JSON.stringify(bin)}:$PATH\n`;
+  fs.writeFileSync(path.join(home, ".bash_profile"), profile, { mode: 0o600 });
+  fs.writeFileSync(path.join(home, ".zprofile"), profile, { mode: 0o600 });
   const history = (messages, extra = {}) => JSON.stringify({ ok: true, identity: "bot", data: { messages, has_more: false, ...extra } });
   const env = {
     ...process.env,
-    HOME: path.join(root, "home"),
+    HOME: home,
+    SHELL: "/bin/bash",
+    BASH_ENV: path.join(home, ".bash_profile"),
+    ZDOTDIR: home,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`,
     LARKIN_CONFIG_DIR: root,
     LARKIN_AGENT_ID: agentId,
     LARKIN_TEST_FRESHNESS_PROVIDER: PROVIDER,
     LARKIN_TEST_PROVIDER_CALLS: callsFile,
-    BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${PRELOAD}`].filter(Boolean).join(" "),
   };
   const lark = (argv, overrides = {}) => {
     const effective = { ...overrides };

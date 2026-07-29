@@ -12,6 +12,7 @@ import {
 } from "../feishu/im-freshness-adapter.js";
 import * as larkinConfig from "../platform/config.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
+import { assertAgentWorkspaceBound, managedLarkCliEnv } from "./agent-lark-cli-workspace.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -631,7 +632,7 @@ export function runLarkCli(
     io.stderr(`lark-cli: ${decision.reason}\n`);
     return 2;
   }
-  const privateEnv = { ...env, LARKIN_AGENT_ID: agent.agentId, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
+  const privateEnv = managedLarkCliEnv(agent, { ...env, LARKIN_AGENT_ID: agent.agentId });
   let nativeDependencies: LarkCliLauncherDependencies;
   try {
     nativeDependencies = dependencies.nativeCommand ? dependencies
@@ -709,13 +710,15 @@ export async function runLarkCliProcess(argv: readonly string[], env: Env = proc
   try {
     const { config } = larkinConfig.loadConfig(env);
     const agent = larkinConfig.selectAgent(config, { ...env, LARKIN_AGENT_ID: runtimeAgentId });
+    assertAgentWorkspaceBound(agent);
     const decision = classifyLarkCliCommand(argv);
     if (decision.kind === "passthrough" && !requiresCapturedPassthrough(argv)) {
-      const privateEnv = { ...env, LARKIN_AGENT_ID: agent.agentId, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
+      const privateEnv = managedLarkCliEnv(agent, { ...env, LARKIN_AGENT_ID: agent.agentId });
       return await spawnNativeTransparent(argv, privateEnv, resolveOfficialLarkCli({ env: privateEnv }));
     }
-  } catch {
-    // Preserve runLarkCli's existing sanitized diagnostics and exit taxonomy.
+  } catch (error) {
+    process.stderr.write(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
   }
   return runLarkCli(argv, env);
 }

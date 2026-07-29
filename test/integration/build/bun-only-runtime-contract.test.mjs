@@ -13,6 +13,8 @@ const BUN_RUNNER_SEAM_ALLOWLIST = [
   "test/integration/app/runtime-profile-rollback.test.mjs",
   "test/integration/platform/process-idempotency.test.mjs",
   "test/integration/platform/process-ownership.test.mjs",
+  "test/unit/agent/agent-state-store.test.mjs",
+  "test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs",
 ].sort();
 
 function currentFiles() {

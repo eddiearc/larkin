@@ -11,6 +11,7 @@ import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
 import * as larkinConfigImport from "../platform/config.js";
+import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 
 interface RuntimeModel {
   id: string;
@@ -103,7 +104,9 @@ async function ask(question: string): Promise<string> {
 }
 
 function larkJson(args: string[]): LarkJsonResult {
-  const result = spawnSync("lark-cli", args, { encoding: "utf8", env: larkEnv() });
+  const env = larkEnv();
+  const official = resolveOfficialLarkCli({ env });
+  const result = spawnSync(official.command, [...official.argsPrefix, ...args], { encoding: "utf8", env });
   const stdout = result.stdout || "";
   const stderr = result.stderr || "";
   try {
@@ -122,12 +125,11 @@ function listProfiles(): Profile[] {
 }
 
 async function pickProfile(): Promise<Profile> {
-  const profiles = listProfiles();
   if (options.profile) {
-    const found = profiles.find((profile) => profile.name === options.profile || profile.appId === options.profile);
-    if (!found) die(`profile ${options.profile} 不存在（可用: ${profiles.map((profile) => profile.name).join(", ") || "无"}）`);
-    return found!;
+    if (!APP_ID.test(options.profile)) die(`profile ${options.profile} 不是合法 App ID`);
+    return { name: options.profile, appId: options.profile, active: true };
   }
+  const profiles = listProfiles();
   if (profiles.length === 0) die("lark-cli 里还没有 bot profile。请运行 larkin setup 创建或连接机器人");
 
   say("\n可复用的飞书机器人（lark-cli profiles）：");
@@ -224,7 +226,7 @@ export async function main(): Promise<void> {
   if (typeof profile?.appId !== "string" || !APP_ID.test(profile.appId) || profile.name !== profile.appId) {
     die("profile name 与合法 App ID 必须完全一致；未修改 Agent 配置，请重新运行 larkin setup 刷新 profile");
   }
-  verifyBot(profile);
+  if (!options.profile) verifyBot(profile);
 
   const requestedAgent = options.agent || profile.appId;
   const prior = config.agents[profile.appId];

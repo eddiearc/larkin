@@ -10,6 +10,7 @@ import { callbackCapability } from "../platform/callback-capability.js";
 import { projectAgentReadiness, type AgentReadinessStatus } from "./agent-readiness.js";
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
+import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
 
 interface RuntimeModel {
   id: string;
@@ -479,8 +480,10 @@ if (kind === "model") {
     try {
       if (!agent.larkConfigDir) throw new Error("缺少 lark-cli 隔离目录");
       fs.mkdirSync(agent.larkConfigDir, { recursive: true, mode: 0o700 });
-      const env = { ...process.env, LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir };
-      const result = spawnSync("lark-cli", ["--profile", agent.feishuProfile, "im", "+chat-list", "--json"], { encoding: "utf8", timeout: 15000, env });
+      const managed = managedOfficialLarkCli(agent, process.env);
+      const result = spawnSync(managed.command.command, [...managed.command.argsPrefix, "im", "+chat-list", "--json"], {
+        encoding: "utf8", timeout: 15000, env: managed.env,
+      });
       const parsed = JSON.parse(result.stdout) as { data?: { chats?: Array<{ chat_id: string; name?: string }> } };
       for (const chat of parsed.data?.chats || []) names[chat.chat_id] = chat.name || "";
     } catch { /* group names are optional */ }

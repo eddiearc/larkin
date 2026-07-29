@@ -172,17 +172,31 @@ function passthroughWorkspace() {
       [second]: { runtime: "claude", model: "claude-sonnet-4-5" },
     },
   }, null, 2)}\n`, { mode: 0o600 });
+  for (const agentId of [first, second]) {
+    const stateDir = path.join(temp, "state", "agents", agentId);
+    const sourceDir = path.join(stateDir, "lark-channel-source");
+    const workspaceDir = path.join(stateDir, "lark-cli-config", "lark-channel");
+    for (const directory of [sourceDir, workspaceDir]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(sourceDir, "config.json"), JSON.stringify({
+      accounts: { app: { id: agentId, secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } },
+      secrets: { providers: { "larkin-bot-credential": { source: "exec", command: process.execPath, args: [],
+        env: { LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind" } } } },
+    }), { mode: 0o600 });
+    fs.writeFileSync(path.join(workspaceDir, "config.json"), JSON.stringify({ apps: [{ appId: agentId,
+      appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [] }] }), { mode: 0o600 });
+  }
   const bin = path.join(temp, "bin");
   fs.mkdirSync(bin);
   const marker = path.join(temp, "lark-cli-calls.txt");
   const officialPackage = path.join(temp, "official", "node_modules", "@larksuite", "cli");
   fs.mkdirSync(path.join(officialPackage, "scripts"), { recursive: true });
   fs.writeFileSync(path.join(officialPackage, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
   }));
   const official = path.join(officialPackage, "scripts", "run.sh");
   fs.writeFileSync(official, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.78\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.79\n'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0; fi
 {
   printf 'CONFIGDIR=%s\\n' "$LARKSUITE_CLI_CONFIG_DIR"
   for arg in "$@"; do printf 'ARG=%s\\n' "$arg"; done
@@ -210,7 +224,7 @@ echo '{"ok":true,"data":{"mock":true}}'
   return { temp, first, second, marker, run };
 }
 
-test("larkin <group> forwards to lark-cli with locked profile and config dir", () => {
+test("larkin <group> forwards to lark-cli with locked lark-channel workspace", () => {
   const { temp, second, marker, run } = passthroughWorkspace();
   try {
     const result = run(["im", "+chat-list", "--json", "--agent", second]);
@@ -219,11 +233,8 @@ test("larkin <group> forwards to lark-cli with locked profile and config dir", (
     const lines = fs.readFileSync(marker, "utf8").trim().split("\n");
     assert.match(lines[0], /^CONFIGDIR=.+lark-cli-config$/, "config dir must be locked to the larkin passthrough config dir");
     assert.ok(lines[0].startsWith(`CONFIGDIR=${temp}`), "config dir must live under the larkin root");
-    assert.deepEqual(
-      lines.slice(1),
-      ["ARG=--profile", `ARG=${second}`, "ARG=im", "ARG=+chat-list", "ARG=--json"],
-      "profile must be injected first and caller argv forwarded verbatim",
-    );
+    assert.deepEqual(lines.slice(1), ["ARG=im", "ARG=+chat-list", "ARG=--json"],
+      "caller argv must be forwarded verbatim; workspace identity comes from env");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -235,7 +246,7 @@ test("terminal larkin <group> honours --agent selector and rejects identity esca
     const explicit = run(["docs", "+fetch", "--token", "t", "--agent", first]);
     assert.equal(explicit.status, 0, explicit.stderr);
     const lines = fs.readFileSync(marker, "utf8").trim().split("\n");
-    assert.deepEqual(lines.slice(1), ["ARG=--profile", `ARG=${first}`, "ARG=docs", "ARG=+fetch", "ARG=--token", "ARG=t"]);
+    assert.deepEqual(lines.slice(1), ["ARG=docs", "ARG=+fetch", "ARG=--token", "ARG=t"]);
 
     fs.rmSync(marker, { force: true });
     const rejected = run(["im", "send", "--chat-id", "oc_x", "--as", "user"], { LARKIN_AGENT_ID: first });

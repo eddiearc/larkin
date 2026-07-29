@@ -30,15 +30,25 @@ function fixture(shell) {
     writePrivate(path.join(root, "state", "agents", agentId, "lark-cli-config", "config.json"), `${JSON.stringify({
       apps: [{ appId: agentId, name: agentId, appSecret: "fixture", brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
     })}\n`);
+    writePrivate(path.join(root, "state", "agents", agentId, "lark-channel-source", "config.json"), `${JSON.stringify({
+      accounts: { app: { id: agentId, secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } },
+      secrets: { providers: { "larkin-bot-credential": { source: "exec", command: process.execPath, args: [], env: {
+        LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind",
+      } } } },
+    })}\n`);
+    writePrivate(path.join(root, "state", "agents", agentId, "lark-cli-config", "lark-channel", "config.json"), `${JSON.stringify({ apps: [{
+      appId: agentId, appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
+    }] })}\n`);
   }
   const packageDir = path.join(root, "official", "node_modules", "@larksuite", "cli");
   const official = path.join(packageDir, "scripts", "run.sh");
   fs.mkdirSync(path.dirname(official), { recursive: true, mode: 0o700 });
   writePrivate(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
   }));
   fs.writeFileSync(official, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.78\\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.79\\n'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\\n' '--source lark-channel --identity bot-only'; exit 0; fi
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
 `, { mode: 0o700 });
   fs.symlinkSync(official, path.join(bin, "lark-cli"));

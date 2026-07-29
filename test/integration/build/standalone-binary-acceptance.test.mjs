@@ -103,20 +103,14 @@ test.skipIf(!ENABLED)("standalone binary preserves CLI, Agent, local-control, Da
     const officialLauncher = path.join(officialPackage, "scripts", "run.sh");
     fs.mkdirSync(path.dirname(officialLauncher), { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(officialPackage, "package.json"), JSON.stringify({
-      name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+      name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
     }), { mode: 0o600 });
     fs.writeFileSync(officialLauncher, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'lark-cli version 1.0.78\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf 'lark-cli version 1.0.79\n'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0; fi
 printf '%s\n' "$*" >> "$STANDALONE_LARK_MARKER"
-if [ "$1" = "config" ] && [ "$2" = "init" ]; then
-  app_id=""; app_name=""; previous=""
-  for argument in "$@"; do
-    if [ "$previous" = "--app-id" ]; then app_id="$argument"; fi
-    if [ "$previous" = "--name" ]; then app_name="$argument"; fi
-    previous="$argument"
-  done
-  app_secret=$(cat)
-  APP_ID="$app_id" APP_NAME="$app_name" APP_SECRET="$app_secret" ${JSON.stringify(process.execPath)} --eval 'const fs=require("node:fs"),path=require("node:path");fs.writeFileSync(path.join(process.env.LARKSUITE_CLI_CONFIG_DIR,"config.json"),JSON.stringify({apps:[{appId:process.env.APP_ID,name:process.env.APP_NAME,appSecret:process.env.APP_SECRET,brand:"feishu",defaultAs:"bot",strictMode:"bot",users:[]}]}),{mode:0o600})'
+if [ "$1" = "config" ] && [ "$2" = "bind" ]; then
+  ${JSON.stringify(process.execPath)} --eval 'const fs=require("node:fs"),path=require("node:path"),source=JSON.parse(fs.readFileSync(process.env.LARK_CHANNEL_CONFIG,"utf8")),id=source.accounts.app.id,dir=path.join(process.env.LARKSUITE_CLI_CONFIG_DIR,"lark-channel");fs.mkdirSync(dir,{recursive:true,mode:0o700});fs.writeFileSync(path.join(dir,"config.json"),JSON.stringify({apps:[{appId:id,appSecret:{source:"keychain",id:"appsecret:"+id},defaultAs:"bot",strictMode:"bot",users:[]}]}),{mode:0o600})'
   exit $?
 fi
 case "$*" in
@@ -255,7 +249,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const nativeVersion = checked(spawnSync(officialLauncher, ["--version"], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     }), "standalone Runtime pinned lark-cli version");
-    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.78/);
+    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.79/);
     const evaluatorHelpArgv = ["im", "+messages-send", "--as", "user", "--chat-id", "a", "--chat-id=b", "--help"];
     const standaloneInboxState = path.join(canonicalState, "inbox-state.json");
     const beforeHelpConfig = fs.readFileSync(configFile);

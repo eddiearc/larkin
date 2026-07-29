@@ -7,7 +7,9 @@ const originalSpawnSync = childProcess.spawnSync;
 childProcess.spawnSync = (command, args = [], options = {}) => {
   const verifiedGlobalCli = process.env.LARKIN_TEST_OFFICIAL_LARK_CLI;
   if (verifiedGlobalCli && path.resolve(String(command)) === path.resolve(verifiedGlobalCli)) {
-    if (args[0] === "--version") return originalSpawnSync(command, args, options);
+    if (args[0] === "--version" || (args[0] === "config" && args[1] === "bind" && args[2] === "--help")) {
+      return originalSpawnSync(command, args, options);
+    }
     const provider = process.env.LARKIN_TEST_FRESHNESS_PROVIDER;
     if (!provider) throw new Error("freshness integration provider is not configured");
     return originalSpawnSync(process.execPath, [provider, ...args], {

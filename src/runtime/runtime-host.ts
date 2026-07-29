@@ -12,12 +12,14 @@ import {
   type RuntimeReadiness,
 } from "./runtime-readiness.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
+import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
   runtime: string; model: string; effort?: string | null; workspaceDir: string;
   stateDir?: string; sessionId?: string | null;
   larkConfigDir?: string;
+  feishuAppId?: string;
 }
 
 export type DeliveryStatus = "pending" | "submitting" | "accepted" | "consumed" | "error";
@@ -156,8 +158,9 @@ export function createRuntimeHost(options: {
     stableWindowMs: options.retryPolicy?.stableWindowMs ?? 30_000,
   };
   const emit = (event: RuntimeHostEvent): void => { for (const listener of listeners) listener(event); };
-  const runtimeEnv = (config: AgentRuntimeConfig, generation?: string): NodeJS.ProcessEnv => ({
-    LARKIN_AGENT_ID: config.agentId,
+  const runtimeEnv = (config: AgentRuntimeConfig, generation?: string): NodeJS.ProcessEnv => {
+    const base: NodeJS.ProcessEnv = {
+      LARKIN_AGENT_ID: config.agentId,
     ...(generation ? { LARKIN_RUNTIME_OBSERVATION_GENERATION: generation } : {}),
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
@@ -166,12 +169,17 @@ export function createRuntimeHost(options: {
     ...(process.env.ZDOTDIR ? { ZDOTDIR: process.env.ZDOTDIR } : {}),
     ...(process.env.BASH_ENV ? { BASH_ENV: process.env.BASH_ENV } : {}),
     PATH: [config.stateDir ? path.join(config.stateDir, "runtime-bin") : null, process.env.PATH].filter(Boolean).join(path.delimiter),
-    LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR,
-  });
+      LARKSUITE_CLI_CONFIG_DIR: config.larkConfigDir ?? process.env.LARKSUITE_CLI_CONFIG_DIR,
+    };
+    return config.larkConfigDir ? managedLarkCliEnv(config, base) : base;
+  };
   const assertOfficialCliReady = async (config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): Promise<void> => {
     if (!config.larkConfigDir) return;
     if (options.assertOfficialCliReady) await options.assertOfficialCliReady(config, env);
-    else resolveOfficialLarkCli({ env });
+    else {
+      resolveOfficialLarkCli({ env });
+      assertAgentWorkspaceBound(config as Parameters<typeof assertAgentWorkspaceBound>[0]);
+    }
   };
 
   const emitConsumed = (agent: ManagedAgent, records: DeliveryRecord[]): void => {

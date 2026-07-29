@@ -11,6 +11,8 @@ import { createHostShell, memberNamesFromPayloads } from "../../dist/feishu/host
 import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 import { InteractionStateMachine } from "../../dist/agent/interaction-state-machine.mjs";
 
+const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
+
 function callbackValue(card, index = 0) {
   const button = card.body.elements.filter((item) => item.tag === "button")[index];
   return button.behaviors.find((behavior) => behavior.type === "callback").value;
@@ -26,7 +28,7 @@ class FakeNativeSession {
   async cancel() {} async close() {}
 }
 
-test("member parser accepts the real lark-cli 1.0.78 get/bots shapes", () => {
+test("member parser accepts the real lark-cli 1.0.79 get/bots shapes", () => {
   assert.deepEqual(memberNamesFromPayloads([
     { ok: true, data: { items: [{ member_id: "ou_user", name: "User" }] } },
     { ok: true, data: { items: [{ bot_id: "cli_bot", bot_name: "Bot" }] } },
@@ -91,6 +93,7 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0",
     },
     runtimeHost,
+    managedCliForAgent: testManagedCli,
     eventSourceStartDelayMs: 0,
     channelPackage: { createLarkChannel() { return channel; } },
   });
@@ -169,6 +172,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const hostShell = createHostShell({
       env,
       runtimeHost,
+      managedCliForAgent: testManagedCli,
       execFileImpl(command, args, _options, callback) {
         memberCalls.push([command, ...args]);
         const data = args.includes("bots")
@@ -195,7 +199,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       assert.equal(canonical[0].chat_id, `oc_${runtime}`);
       assert.equal(canonical[0].thread_id, null);
       assert.equal(canonical[0].content, "first");
-      assert.deepEqual(memberCalls.slice(0, 2).map((call) => call.slice(3, 7)), [
+      assert.deepEqual(memberCalls.slice(0, 2).map((call) => call.slice(1, 5)), [
         ["im", "chat.members", "get", "--chat-id"],
         ["im", "chat.members", "bots", "--chat-id"],
       ]);
@@ -206,7 +210,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       let guardedStdout = "", guardedStderr = "";
       const guardedDependencies = {
         stateStore: store,
-        nativeCommand: { command: "/fixture/@larksuite/cli/scripts/run.js", argsPrefix: [], version: "1.0.78" },
+        nativeCommand: { command: "/fixture/@larksuite/cli/scripts/run.js", argsPrefix: [], version: "1.0.79" },
         spawn(command, args, options) {
           if (["+chat-messages-list", "+threads-messages-list"].includes(args[1])
               || (args[0] === "api" && args[1] === "GET" && args[2] === "/open-apis/im/v1/messages")) {

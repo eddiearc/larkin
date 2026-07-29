@@ -6,6 +6,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { onTestFinished, test } from "bun:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+process.env.LARKIN_BUN_TEST_RUNNER = "1";
+
 import {
   acquireGlobalLaunchLock,
   createDeferredRuntimeHost,
@@ -420,6 +422,13 @@ test("driver proves the audited sole-Host boundary without managing launchd", ()
     "live driver must not execute lark-cli configuration or keychain commands");
   assert.match(source, /writes the supported plaintext Bot-only profile/);
   for (const absolute of ["/usr/bin/plutil", "/bin/launchctl", "/bin/ps"]) assert.match(source, new RegExp(absolute));
+});
+
+test("real Codex routing stays Darwin-disabled and computes its canonical lark workspace before assertions", () => {
+  const source = fs.readFileSync(path.join(ROOT, "test/live/agent-cli-routing-codex-live.test.mjs"), "utf8");
+  assert.match(source, /process\.platform !== "darwin"/);
+  assert.match(source, /const larkConfigDir = path\.join\(configDir, "state", "agents", agentId, "lark-cli-config"\)/);
+  assert.ok(source.indexOf("const larkConfigDir =") < source.indexOf("call.config_dir === larkConfigDir"));
 });
 
 test("history capability succeeds before any drain or external send in the write harness", () => {

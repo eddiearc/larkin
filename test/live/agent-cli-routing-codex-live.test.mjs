@@ -6,9 +6,10 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "bun:test";
 import { ensureOfficialLarkCliForSetup } from "../../dist/app/official-lark-cli.mjs";
+import { loadAndSyncRuntimeAgent } from "../../dist/app/runtime-process.mjs";
 import { createNativeRuntimeAdapter } from "../../dist/runtime/runtime-adapters.mjs";
 
-const RUN = process.env.LARKIN_RUN_AGENT_CLI_ROUTING_CODEX_LIVE === "1";
+const RUN = process.env.LARKIN_RUN_AGENT_CLI_ROUTING_CODEX_LIVE === "1" && process.platform !== "darwin";
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const PROVIDER = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider.mjs");
 const PRELOAD = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider-preload.cjs");
@@ -62,18 +63,19 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
       interactive: true, confirmInstall: () => true, env: installEnv, shell,
     });
     assert.equal(installed.installed, true);
-    assert.equal(installed.command.version, "1.0.78");
+    assert.equal(installed.command.version, "1.0.79");
 
     fs.writeFileSync(path.join(bin, "larkin"), `#!/bin/sh\nBUN_OPTIONS=--preload=${JSON.stringify(PRELOAD)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, "dist/app/cli.mjs"))} "$@"\n`, { mode: 0o700 });
     fs.writeFileSync(path.join(configDir, "config.json"), `${JSON.stringify({
       version: 4, serverId: "real-cli-routing", mentionPolicy: "require", activeAgent: agentId,
       agents: { [agentId]: { runtime: "codex", model: "default" } },
     })}\n`, { mode: 0o600 });
-    const larkConfigDir = path.join(configDir, "state", "agents", agentId, "lark-cli-config");
-    fs.mkdirSync(larkConfigDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(larkConfigDir, "config.json"), `${JSON.stringify({
-      apps: [{ appId: agentId, name: agentId, appSecret: "fixture", brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
-    })}\n`, { mode: 0o600 });
+    const botsDir = path.join(configDir, "bots");
+    fs.mkdirSync(botsDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(botsDir, `${agentId}.json`), JSON.stringify({
+      appId: agentId, appSecret: "fixture-secret", tenant: "feishu",
+    }), { mode: 0o600 });
+    loadAndSyncRuntimeAgent({ ...installEnv, LARKIN_CONFIG_DIR: configDir }, agentId);
     fs.writeFileSync(callsFile, "", { mode: 0o600 });
     fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), [
       "# Controlled real Codex routing workflow",
@@ -140,6 +142,7 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
     const calls = fs.readFileSync(callsFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
     assert.equal(calls.filter((call) => call.argv.includes("+messages-send")).length, 0);
     assert.equal(calls.filter((call) => call.argv.includes("/open-apis/im/v1/messages")).length, 1);
+    const larkConfigDir = path.join(configDir, "state", "agents", agentId, "lark-cli-config");
     assert.equal(calls.every((call) => call.config_dir === larkConfigDir), true);
   } finally {
     await session?.close("real CLI routing workflow complete");

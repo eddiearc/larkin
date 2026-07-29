@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
-// larkin 顶级 lark-cli 直通入口：身份锁定（本 agent 的 lark-cli 配置目录 + bot profile）后原样转发。
+// larkin 顶级 lark-cli 直通入口：锁定当前 Agent 的 lark-channel workspace 后原样转发。
 
 import { spawn } from "node:child_process";
 import * as larkinConfig from "../platform/config.js";
 import { assessPassthrough, PASSTHROUGH_USAGE } from "../feishu/lark-passthrough.js";
+import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
 
 const decision = assessPassthrough(process.argv.slice(2), process.env);
 if (!decision.ok) {
@@ -11,24 +12,27 @@ if (!decision.ok) {
   process.exit(2);
 }
 
-let profile: string;
-let larkConfigDir: string;
+let cliEnv: NodeJS.ProcessEnv;
+let cliCommand: string;
+let cliPrefix: string[];
 try {
   const { config } = larkinConfig.loadConfig(process.env);
   const agent = larkinConfig.selectAgent(
     config,
     decision.explicitAgent ? { LARKIN_AGENT_ID: decision.explicitAgent } : process.env,
   );
-  profile = agent.feishuProfile;
-  larkConfigDir = agent.larkConfigDir;
+  const managed = managedOfficialLarkCli(agent, process.env);
+  cliEnv = managed.env;
+  cliCommand = managed.command.command;
+  cliPrefix = managed.command.argsPrefix;
 } catch (error) {
   console.error(`larkin: ${(error as Error).message}`);
   process.exit(1);
 }
 
-const child = spawn("lark-cli", ["--profile", profile, ...decision.argv!], {
+const child = spawn(cliCommand!, [...cliPrefix!, ...decision.argv!], {
   stdio: "inherit",
-  env: { ...process.env, LARKSUITE_CLI_CONFIG_DIR: larkConfigDir },
+  env: cliEnv,
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

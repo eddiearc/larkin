@@ -7,6 +7,8 @@ import { once } from "node:events";
 import { test } from "bun:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
+process.env.LARKIN_BUN_TEST_RUNNER = "1";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const moduleUrl = pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href;
 const processStateUrl = pathToFileURL(path.join(ROOT, "dist/platform/process-state.mjs")).href;

@@ -32,6 +32,8 @@ test("PR and main CI validate source without building release artifacts", () => 
   assert.ok(workflow.indexOf("gitleaks/gitleaks-action@") < workflow.indexOf("run: rm -f -- results.sarif"));
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Run full test suite"));
   assert.match(workflow, /run: bun run test/);
+  assert.match(workflow, /LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND: "1"/);
+  assert.match(workflow, /bun test --max-concurrency 1 test\/integration\/app\/official-lark-channel-bind-live\.test\.mjs/);
   assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);
   assert.match(workflow, /persist-credentials: false/);
   assert.doesNotMatch(workflow, /scripts\/release\/build\.ts|release:smoke|artifacts\/release|matrix\./);

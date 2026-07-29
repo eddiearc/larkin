@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
 
 test("production channel disconnect and RuntimeHost use one idempotent ordered shutdown", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-lifecycle-"));
@@ -170,6 +171,7 @@ test("failed durable Inbox append does not burn same-process event redelivery", 
   const agent = {
     agentId, name: agentId, runtime: "codex", model: "gpt", feishuAppId: agentId,
     feishuProfile: agentId, workspaceDir: path.join(root, "agents", agentId), stateDir,
+    larkConfigDir: path.join(stateDir, "lark-cli-config"),
   };
   const eventFile = path.join(root, "events.ndjson");
   const env = {
@@ -179,6 +181,7 @@ test("failed durable Inbox append does not burn same-process event redelivery", 
   const logs = [];
   const host = createHostShell({
     env, runtimeHost, eventSourceStartDelayMs: 60_000, logImpl: (...parts) => logs.push(parts.join(" ")),
+    managedCliForAgent: testManagedCli,
     execFileImpl(_command, _args, _options, callback) {
       callback(null, JSON.stringify({ ok: true, data: { items: [{ member_id: "ou_sender", name: "Sender" }] } }), "");
       return {};
@@ -227,11 +230,13 @@ test("production HostShell clears eyes on inactive/error and ignores heartbeat a
   };
   const agent = { agentId, name: agentId, runtime: "pi", model: "model", feishuAppId: agentId,
     feishuProfile: agentId, workspaceDir: path.join(root, "agents", agentId),
-    stateDir: path.join(root, "state", "agents", agentId) };
+    stateDir: path.join(root, "state", "agents", agentId),
+    larkConfigDir: path.join(root, "state", "agents", agentId, "lark-cli-config") };
   const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-eye-host",
     LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: eventFile };
   const host = createHostShell({
     env, runtimeHost, eventSourceStartDelayMs: 60_000,
+    managedCliForAgent: testManagedCli,
     execFileImpl(_command, args, _options, callback) {
       apiCalls.push(args);
       if (args.includes("POST")) callback(null, JSON.stringify({ data: { reaction_id: `react_${++reactionId}` } }), "");

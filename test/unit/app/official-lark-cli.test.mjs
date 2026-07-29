@@ -15,7 +15,7 @@ function officialFixture() {
   const executable = path.join(packageDir, "scripts", "run.sh");
   fs.mkdirSync(path.dirname(executable), { recursive: true });
   fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
   }));
   fs.writeFileSync(executable, "#!/bin/sh\n", { mode: 0o700 });
   return { root, executable };
@@ -28,14 +28,21 @@ test("official CLI probe distinguishes missing, unknown collision, and the verif
   try {
     const ready = probeOfficialLarkCli({ env: {}, spawn(command, args) {
       if (args?.[0] === "-lc") return result(0, `${f.executable}\n`);
-      return result(0, "1.0.78\n");
+      if (args?.[0] === "--version") return result(0, "1.0.79\n");
+      return result(0, "--source lark-channel --identity bot-only\n");
     } });
-    assert.deepEqual(ready, { state: "ready", command: { command: f.executable, argsPrefix: [], version: "1.0.78" } });
+    assert.deepEqual(ready, { state: "ready", command: { command: f.executable, argsPrefix: [], version: "1.0.79" } });
+    fs.writeFileSync(path.join(path.dirname(path.dirname(f.executable)), "package.json"), JSON.stringify({
+      name: "@larksuite/cli", version: "1.0.77", bin: { "lark-cli": "scripts/run.sh" },
+    }));
+    assert.equal(probeOfficialLarkCli({ env: {}, spawn(command, args) {
+      return args?.[0] === "-lc" ? result(0, `${f.executable}\n`) : result(0, "1.0.77\n");
+    } }).state, "outdated");
     assert.equal(probeOfficialLarkCli({ env: {}, spawn: () => result(1) }).state, "missing");
     const unknown = path.join(f.root, "unknown-lark-cli");
     fs.writeFileSync(unknown, "#!/bin/sh\n", { mode: 0o700 });
     assert.equal(probeOfficialLarkCli({ env: {}, spawn(command, args) {
-      return args?.[0] === "-lc" ? result(0, `${unknown}\n`) : result(0, "1.0.78\n");
+      return args?.[0] === "-lc" ? result(0, `${unknown}\n`) : result(0, "1.0.79\n");
     } }).state, "conflict");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -56,7 +63,8 @@ test("setup installs only after explicit interactive consent and reprobes the of
     }, spawn(command, args) {
       if (command === "npm") { installed = true; return result(0); }
       if (args?.[0] === "-lc") return installed ? result(0, `${f.executable}\n`) : result(1);
-      return result(0, "1.0.78\n");
+      if (args?.[0] === "--version") return result(0, "1.0.79\n");
+      return result(0, "--source lark-channel --identity bot-only\n");
     } });
     assert.equal(offered, OFFICIAL_LARK_CLI_INSTALL);
     assert.equal(prepared.installed, true);

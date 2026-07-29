@@ -61,3 +61,8 @@ jobs:
 
       - name: Run full test suite
         run: bun run test
+
+      - name: Exercise official lark-channel bind on hosted Linux
+        env:
+          LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND: "1"
+        run: bun test --max-concurrency 1 test/integration/app/official-lark-channel-bind-live.test.mjs

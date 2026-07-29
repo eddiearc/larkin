@@ -2,7 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-export const OFFICIAL_LARK_CLI_VERSION = "1.0.78";
+export const OFFICIAL_LARK_CLI_VERSION = "1.0.79";
 export const OFFICIAL_LARK_CLI_INSTALL = `npm install --global @larksuite/cli@${OFFICIAL_LARK_CLI_VERSION}`;
 
 export interface OfficialLarkCliCommand {
@@ -14,6 +14,7 @@ export interface OfficialLarkCliCommand {
 export type OfficialLarkCliProbe =
   | { state: "ready"; command: OfficialLarkCliCommand }
   | { state: "missing"; reason: string; nextAction: string }
+  | { state: "outdated"; reason: string; nextAction: string }
   | { state: "conflict"; reason: string; nextAction: string };
 
 export interface OfficialLarkCliDependencies {
@@ -33,6 +34,18 @@ function loginShellPath(dependencies: OfficialLarkCliDependencies): string | nul
   return path.isAbsolute(candidate) ? path.resolve(candidate) : null;
 }
 
+function compatibleVersion(version: string): boolean {
+  const parse = (value: string): [number, number, number] | null => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  };
+  const actual = parse(version);
+  const minimum = parse(OFFICIAL_LARK_CLI_VERSION)!;
+  if (!actual) return false;
+  return actual[0] > minimum[0] || (actual[0] === minimum[0]
+    && (actual[1] > minimum[1] || (actual[1] === minimum[1] && actual[2] >= minimum[2])));
+}
+
 function officialPackage(executable: string): OfficialLarkCliCommand | null {
   let resolved: string;
   try { resolved = fs.realpathSync(executable); } catch { return null; }
@@ -44,7 +57,7 @@ function officialPackage(executable: string): OfficialLarkCliCommand | null {
         name?: string; version?: string; bin?: { "lark-cli"?: string } | string;
       };
       const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.["lark-cli"];
-      if (manifest.name === "@larksuite/cli" && manifest.version === OFFICIAL_LARK_CLI_VERSION && bin) {
+      if (manifest.name === "@larksuite/cli" && typeof manifest.version === "string" && /^\d+\.\d+\.\d+$/.test(manifest.version) && bin) {
         const packageRoot = fs.realpathSync(directory);
         const requested = path.resolve(packageRoot, bin);
         const relative = path.relative(packageRoot, requested);
@@ -72,13 +85,27 @@ export function probeOfficialLarkCli(dependencies: OfficialLarkCliDependencies =
     reason: `真实 login shell 的 lark-cli 不是兼容的官方 @larksuite/cli ${OFFICIAL_LARK_CLI_VERSION}: ${executable}`,
     nextAction: "移除或调整冲突入口后重新运行 larkin setup",
   };
+  if (!compatibleVersion(command.version)) return {
+    state: "outdated",
+    reason: `真实 login shell 的官方 @larksuite/cli ${command.version} 低于最低兼容版本 ${OFFICIAL_LARK_CLI_VERSION}`,
+    nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
+  };
   const version = (dependencies.spawn ?? spawnSync)(command.command, ["--version"], {
     encoding: "utf8", env: dependencies.env ?? process.env,
   }) as SpawnSyncReturns<string>;
-  if (version.status !== 0 || version.error || !String(version.stdout || "").includes(OFFICIAL_LARK_CLI_VERSION)) return {
-    state: "conflict",
+  if (version.status !== 0 || version.error || !String(version.stdout || "").includes(command.version)) return {
+    state: "outdated",
     reason: `官方 lark-cli 版本执行验证失败: ${command.command}`,
     nextAction: `重新安装：${OFFICIAL_LARK_CLI_INSTALL}`,
+  };
+  const bindHelp = (dependencies.spawn ?? spawnSync)(command.command, ["config", "bind", "--help"], {
+    encoding: "utf8", env: dependencies.env ?? process.env,
+  }) as SpawnSyncReturns<string>;
+  const bindText = `${bindHelp.stdout || ""}\n${bindHelp.stderr || ""}`;
+  if (bindHelp.status !== 0 || bindHelp.error || !/--source/.test(bindText) || !/lark-channel/.test(bindText) || !/--identity/.test(bindText)) return {
+    state: "conflict",
+    reason: `官方 lark-cli 缺少 lark-channel bot-only bind 能力: ${command.command}`,
+    nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
   };
   return { state: "ready", command };
 }
@@ -106,7 +133,7 @@ export async function ensureOfficialLarkCliForSetup(input: OfficialLarkCliDepend
   if (probe.state === "ready") return { command: probe.command, installed: false };
   if (probe.state === "conflict") throw new Error(`${probe.reason}；${probe.nextAction}`);
   if (!input.interactive) {
-    throw new Error(`${probe.reason}；非交互 setup 不会安装依赖。请在终端运行 larkin setup，并确认：${OFFICIAL_LARK_CLI_INSTALL}`);
+    throw new Error(`${probe.reason}；非交互 setup 不会安装或升级依赖。请在终端运行 larkin setup，并确认：${OFFICIAL_LARK_CLI_INSTALL}`);
   }
   if (!await input.confirmInstall(OFFICIAL_LARK_CLI_INSTALL)) {
     throw new Error("未获得明确同意；没有安装官方 lark-cli，也没有写入 Agent 配置");

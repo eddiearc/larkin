@@ -12,10 +12,15 @@ import {
   type BotCredentialRecord,
 } from "../setup/run-credential-preflight.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
+import { internalCommandSpec } from "./internal-command.js";
+import {
+  assertAgentWorkspaceBound, larkChannelSourceConfigPath, larkChannelWorkspaceConfigPath, managedLarkCliEnv,
+} from "./agent-lark-cli-workspace.js";
 
 export interface RuntimeAgentConfig extends HydratedAgent {
   feishuAppSecret: string;
   feishuDomain: "https://open.feishu.cn" | "https://open.larksuite.com";
+  credentialRevision: string;
 }
 
 interface LarkCliConfig { apps?: Array<Record<string, unknown>>; [key: string]: unknown }
@@ -28,6 +33,7 @@ interface ProfileSnapshot {
 export interface RuntimeAgentConfigDependencies {
   resolveOfficialCli?(env: NodeJS.ProcessEnv): OfficialLarkCliCommand;
   runOfficialCli?(command: OfficialLarkCliCommand, args: readonly string[], options: Parameters<typeof spawnSync>[2]): ReturnType<typeof spawnSync>;
+  forceRebind?: boolean;
 }
 
 function assertSecureProfileDirectory(directory: string): void {
@@ -59,14 +65,14 @@ function captureProfileSnapshot(file: string): ProfileSnapshot | null {
   }
 }
 
-function atomicRestoreProfile(file: string, bytes: Buffer | string, mode = 0o600): void {
+function atomicPublishProfile(file: string, bytes: Buffer | string, mode = 0o600): void {
   const directory = path.dirname(file);
   assertSecureProfileDirectory(directory);
   const canonical = path.join(path.resolve(directory), "config.json");
   if (path.resolve(file) !== canonical || path.basename(file) !== "config.json") {
-    throw new Error("lark-cli config 恢复路径无效");
+    throw new Error("lark-cli config 发布路径无效");
   }
-  const temporary = path.join(directory, `.config.${process.pid}.${crypto.randomUUID()}.rollback-recovery`);
+  const temporary = path.join(directory, `.config.${process.pid}.${crypto.randomUUID()}.publish`);
   const fd = fs.openSync(temporary, "wx", 0o600);
   try {
     fs.writeFileSync(fd, bytes);
@@ -95,27 +101,8 @@ function atomicRestoreProfile(file: string, bytes: Buffer | string, mode = 0o600
     }
     fs.renameSync(temporary, file);
   } catch (error) {
-    throw new Error(`${error instanceof Error ? error.message : String(error)}；原始恢复快照保留于 ${temporary}`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}；待发布内容保留于 ${temporary}`);
   }
-}
-
-function restoreAbsentProfile(file: string): void {
-  assertSecureProfileDirectory(path.dirname(file));
-  try {
-    const stat = fs.lstatSync(file);
-    if ((!stat.isFile() && !stat.isSymbolicLink())
-        || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
-      throw new Error("拒绝删除不安全的 lark-cli config 路径");
-    }
-    fs.unlinkSync(file);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
-
-function restoreExactProfile(file: string, before: ProfileSnapshot | null): void {
-  if (before) atomicRestoreProfile(file, before.raw, before.mode);
-  else restoreAbsentProfile(file);
 }
 
 function containsUserToken(value: unknown): boolean {
@@ -125,11 +112,10 @@ function containsUserToken(value: unknown): boolean {
     (/token/i.test(key) && nested !== null && nested !== "" && nested !== undefined) || containsUserToken(nested));
 }
 
-function validStoredAppSecret(value: unknown, expected: string): boolean {
-  if (value === expected) return true;
+function validStoredAppSecret(value: unknown, appId: string): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const reference = value as { source?: unknown; id?: unknown };
-  return reference.source === "keychain" && typeof reference.id === "string" && !!reference.id;
+  return reference.source === "keychain" && reference.id === `appsecret:${appId}`;
 }
 
 function validateExclusiveBotProfile(snapshot: ProfileSnapshot, agent: RuntimeAgentConfig): void {
@@ -139,18 +125,13 @@ function validateExclusiveBotProfile(snapshot: ProfileSnapshot, agent: RuntimeAg
   if (app.appId !== agent.feishuAppId || (app.name !== undefined && app.name !== agent.feishuAppId)) {
     throw new Error("lark-cli profile App identity 与当前 Agent 不一致");
   }
-  if (!validStoredAppSecret(app.appSecret, agent.feishuAppSecret)) throw new Error("lark-cli profile App Secret 写入不完整");
-  if (app.defaultAs !== "bot" || app.strictMode !== "bot") throw new Error("lark-cli profile 未锁定 default-as bot / strict-mode bot");
-  if (!Array.isArray(app.users) || app.users.length !== 0) throw new Error("lark-cli profile 不得保留 user identity");
+  if (!validStoredAppSecret(app.appSecret, agent.feishuAppId)) throw new Error("lark-cli workspace App Secret 必须是当前 App 的 keychain 引用");
+  if (app.defaultAs !== "bot" || app.strictMode !== "bot") throw new Error("lark-channel workspace 未锁定 bot-only identity policy");
+  if (Array.isArray(app.users) ? app.users.length !== 0
+    : app.users && typeof app.users === "object" ? Object.keys(app.users).length !== 0 : app.users !== undefined && app.users !== null) {
+    throw new Error("lark-cli profile 不得保留 user identity");
+  }
   if (containsUserToken(snapshot.value)) throw new Error("lark-cli profile 不得保留 user token");
-}
-
-function hasExactStagedCredential(snapshot: ProfileSnapshot | null, agent: RuntimeAgentConfig): boolean {
-  const apps = snapshot?.value.apps;
-  if (!Array.isArray(apps) || apps.length !== 1) return false;
-  const app = apps[0];
-  return app.appId === agent.feishuAppId && validStoredAppSecret(app.appSecret, agent.feishuAppSecret)
-    && (app.name === undefined || app.name === agent.feishuAppId);
 }
 
 export function hydrateRuntimeAgent(configDir: string, agent: HydratedAgent): RuntimeAgentConfig {
@@ -161,10 +142,15 @@ export function hydrateRuntimeAgent(configDir: string, agent: HydratedAgent): Ru
     throw new Error(`Agent ${agent.agentId} 的 bot 凭证无效或与 App ID 不一致`);
   }
   const credential = record as BotCredentialRecord;
+  // updatedAt is the authoritative secret-rotation revision. Other credential metadata
+  // (owner/callback capability) must never cause a keychain write on the next startup.
+  // Legacy records are rebound once by setup and remain on a stable non-secret sentinel.
+  const credentialRevision = credential.updatedAt ? `updated:${credential.updatedAt}` : "legacy-unversioned";
   return {
     ...agent,
     feishuAppSecret: credential.appSecret,
     feishuDomain: credential.tenant === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn",
+    credentialRevision,
   };
 }
 
@@ -216,6 +202,51 @@ export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stat
   return commandDir;
 }
 
+function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const configDir = path.resolve(env.LARKIN_CONFIG_DIR || "");
+  if (!configDir) throw new Error("LARKIN_CONFIG_DIR required for lark-channel source projection");
+  const provider = internalCommandSpec("lark-channel-secret", [], {
+    ...env,
+    LARKIN_BINARY_ENTRY_PATH: fileURLToPath(new URL("./binary-entry.mjs", import.meta.url)),
+  });
+  return {
+    credentialRevision: agent.credentialRevision,
+    accounts: { app: {
+      id: agent.feishuAppId,
+      secret: { source: "exec", provider: "larkin-bot-credential", id: agent.feishuAppId },
+      tenant: agent.feishuDomain === "https://open.larksuite.com" ? "lark" : "feishu",
+    } },
+    secrets: { providers: { "larkin-bot-credential": {
+      source: "exec", command: provider.command, args: provider.args,
+      noOutputTimeoutMs: 5_000, maxOutputBytes: 16 * 1024, jsonOnly: true,
+      env: {
+        LARKIN_CONFIG_DIR: configDir,
+        LARKIN_AGENT_ID: agent.agentId,
+        LARKIN_SECRET_PROVIDER_CONTEXT: "bind",
+      },
+    } } },
+  };
+}
+
+function validateSourceProjection(file: string, agent: Pick<RuntimeAgentConfig, "agentId" | "feishuAppId" | "credentialRevision">): void {
+  const snapshot = captureProfileSnapshot(file);
+  if (!snapshot) throw new Error(`Agent ${agent.agentId} lark-channel source projection missing`);
+  const root = snapshot.value as Record<string, any>;
+  const app = root.accounts?.app;
+  const provider = root.secrets?.providers?.["larkin-bot-credential"];
+  if (app?.id !== agent.feishuAppId || app?.secret?.source !== "exec"
+      || app?.secret?.provider !== "larkin-bot-credential" || app?.secret?.id !== agent.feishuAppId) {
+    throw new Error(`Agent ${agent.agentId} lark-channel source projection identity mismatch`);
+  }
+  if (provider?.source !== "exec" || typeof provider.command !== "string" || !path.isAbsolute(provider.command)
+      || !Array.isArray(provider.args) || provider.env?.LARKIN_AGENT_ID !== agent.agentId
+      || provider.env?.LARKIN_SECRET_PROVIDER_CONTEXT !== "bind") {
+    throw new Error(`Agent ${agent.agentId} lark-channel source projection provider invalid`);
+  }
+  if (JSON.stringify(snapshot.value).includes("appSecret")) throw new Error("lark-channel source projection 不得包含 plaintext secret 字段");
+  if (root.credentialRevision !== agent.credentialRevision) throw new Error(`Agent ${agent.agentId} lark-channel credential revision mismatch`);
+}
+
 export function syncAgentProfile(
   agent: RuntimeAgentConfig,
   env: NodeJS.ProcessEnv,
@@ -225,67 +256,51 @@ export function syncAgentProfile(
   if (path.resolve(agent.larkConfigDir) !== expected) throw new Error("lark-cli profile 路径不是 canonical contained 路径");
   fs.mkdirSync(expected, { recursive: true, mode: 0o700 });
   assertSecureProfileDirectory(expected);
+  const sourceFile = larkChannelSourceConfigPath(agent);
+  const sourceDir = path.dirname(sourceFile);
+  fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 });
+  assertSecureProfileDirectory(sourceDir);
   const lock = acquireProcessLock(
     path.join(expected, ".larkin-profile-sync.lock.json"),
     path.basename(process.argv[1] || "node"),
   );
-  const tenant = agent.feishuDomain === "https://open.larksuite.com" ? "lark" : "feishu";
-  const configFile = path.join(expected, "config.json");
-  const stagingDir = path.join(expected, `.larkin-profile-stage-${process.pid}-${crypto.randomUUID()}`);
+  const workspaceFile = larkChannelWorkspaceConfigPath(agent);
+  const stagedSource = path.join(sourceDir, `.config.${process.pid}.${crypto.randomUUID()}.bind-source`);
   try {
-    // Existing bytes are parsed before any command and remain the exact rollback source.
-    const before = captureProfileSnapshot(configFile);
-    fs.mkdirSync(stagingDir, { mode: 0o700 });
-    const profileEnv = { ...env, LARKSUITE_CLI_CONFIG_DIR: stagingDir };
-    let stage: "sync" | "default-as" | "strict-mode" | "validate" | "publish" | "shims" = "sync";
-    let published = false;
+    // Parse/security failures are pre-bind failures; a merely stale valid state may be rebound.
+    captureProfileSnapshot(sourceFile);
+    captureProfileSnapshot(workspaceFile);
+    fs.writeFileSync(stagedSource, `${JSON.stringify(sourceProjection(agent, env), null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    validateSourceProjection(stagedSource, agent);
+    installRuntimeCommandShims(agent);
+    if (!dependencies.forceRebind) {
+      try {
+        validateSourceProjection(sourceFile, agent);
+        const existingWorkspace = captureProfileSnapshot(workspaceFile);
+        if (!existingWorkspace) throw new Error("workspace missing");
+        validateExclusiveBotProfile(existingWorkspace, agent);
+        assertAgentWorkspaceBound(agent);
+        return;
+      } catch { /* stale, absent, or mismatched state requires exactly one bind */ }
+    }
+    const profileEnv = { ...managedLarkCliEnv(agent, env), LARK_CHANNEL_CONFIG: stagedSource };
     try {
       const official = dependencies.resolveOfficialCli?.(profileEnv) ?? resolveOfficialLarkCli({ env: profileEnv });
-      const sync = runOfficialLarkCli(official, ["config", "init", "--app-id", agent.feishuAppId, "--app-secret-stdin", "--brand", tenant, "--name", agent.feishuAppId], {
-        input: agent.feishuAppSecret, encoding: "utf8", env: profileEnv,
-      }, dependencies);
-      if (sync.status !== 0 || sync.error) {
-        // Native 1.0.78 persists an exact local credential before its optional
-        // remote validation. Startup's real channel remains the credential
-        // authority; accept the local write only when its bytes are exact.
-        const local = captureProfileSnapshot(path.join(stagingDir, "config.json"));
-        if (!hasExactStagedCredential(local, agent)) {
-          throw officialFailure(`Agent ${agent.agentId} profile sync`, sync, agent.feishuAppSecret);
-        }
-      }
-      stage = "default-as";
-      const defaultAs = runOfficialLarkCli(official, ["--profile", agent.feishuAppId, "config", "default-as", "bot"], {
+      const sync = runOfficialLarkCli(official, ["config", "bind", "--source", "lark-channel", "--identity", "bot-only"], {
         encoding: "utf8", env: profileEnv,
       }, dependencies);
-      if (defaultAs.status !== 0 || defaultAs.error) throw officialFailure(`Agent ${agent.agentId} profile default-as`, defaultAs, agent.feishuAppSecret);
-      stage = "strict-mode";
-      const strictMode = runOfficialLarkCli(official, ["--profile", agent.feishuAppId, "config", "strict-mode", "bot"], {
-        encoding: "utf8", env: profileEnv,
-      }, dependencies);
-      if (strictMode.status !== 0 || strictMode.error) throw officialFailure(`Agent ${agent.agentId} profile strict-mode`, strictMode, agent.feishuAppSecret);
-      stage = "validate";
-      const staged = captureProfileSnapshot(path.join(stagingDir, "config.json"));
-      if (!staged) throw new Error(`Agent ${agent.agentId} profile config missing`);
-      validateExclusiveBotProfile(staged, agent);
-      stage = "publish";
-      atomicRestoreProfile(configFile, staged.raw, 0o600);
-      published = true;
-      const publishedSnapshot = captureProfileSnapshot(configFile);
-      if (!publishedSnapshot) throw new Error(`Agent ${agent.agentId} published profile missing`);
-      validateExclusiveBotProfile(publishedSnapshot, agent);
-      stage = "shims";
-      installRuntimeCommandShims(agent);
+      if (sync.status !== 0 || sync.error) throw officialFailure(`Agent ${agent.agentId} lark-channel bind`, sync, agent.feishuAppSecret);
+      const workspace = captureProfileSnapshot(workspaceFile);
+      if (!workspace) throw new Error(`Agent ${agent.agentId} lark-channel workspace config missing`);
+      validateExclusiveBotProfile(workspace, agent);
+      atomicPublishProfile(sourceFile, fs.readFileSync(stagedSource), 0o600);
+      assertAgentWorkspaceBound(agent);
     } catch (error) {
-      const message = error instanceof Error ? error.message : `Agent ${agent.agentId} profile ${stage} failed`;
-      try { if (published) restoreExactProfile(configFile, before); }
-      catch (restoreError) {
-        throw new Error(`${message}；profile 恢复失败：${restoreError instanceof Error ? restoreError.message : String(restoreError)}`);
-      }
-      throw new Error(`${message}${published ? "；已恢复此前 profile" : "；原 profile 未变更"}`);
-    } finally {
-      fs.rmSync(stagingDir, { recursive: true, force: true });
+      const message = error instanceof Error ? error.message : `Agent ${agent.agentId} lark-channel bind failed`;
+      throw new Error(`${message}；官方 bind/keychain 结果未被证明可回滚，当前 Agent 保持 fail-closed，请重跑 larkin setup`);
     }
   } finally {
+    try { fs.unlinkSync(stagedSource); } catch { /* renamed/absent */ }
     lock.release();
   }
 }

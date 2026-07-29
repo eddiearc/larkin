@@ -60,6 +60,7 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     fs.writeFileSync(preload, `module.exports={
   registerApp:async(opts)=>{require("node:fs").writeFileSync(process.env.REGISTER_MARKER,JSON.stringify(opts));opts.onQRCodeReady({url:"https://mock.invalid/grant",expireIn:60});return {client_id:opts.appId}},
   qrcode:{generate(){}},
+  managedOfficialCli:()=>({command:{command:"/verified/official-lark-cli",argsPrefix:[],version:"1.0.79"},env:{}}),
   spawnSync(command,args){require("node:fs").appendFileSync(process.env.SPAWN_MARKER,JSON.stringify({command,args})+"\\n");return {status:0,stdout:"{}",stderr:""}}
 };`);
     const run = (args = [], extra = {}) => spawnSync(process.execPath, [path.join(ROOT, "dist/setup/grant-scopes.mjs"), "--wait-min", "1", ...args], {
@@ -86,7 +87,7 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     assert.equal(result.status, 0, result.stderr);
     const sends = fs.readFileSync(spawnMarker, "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(sends.length, 1);
-    assert.equal(sends[0].command, "lark-cli");
+    assert.equal(sends[0].command, "/verified/official-lark-cli");
     assert.deepEqual(sends[0].args.slice(0, 4), ["im", "+messages-send", "--chat-id", "oc_explicit"]);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

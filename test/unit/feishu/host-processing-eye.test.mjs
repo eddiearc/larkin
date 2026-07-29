@@ -28,6 +28,7 @@ function createHarness({ deferPosts = false, readPending } = {}) {
   const timers = createTimers();
   let reaction = 0;
   const eye = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
     execFile(command, args, options, callback) {
       calls.push({ command, args, options });
       if (args.includes("POST")) {
@@ -193,6 +194,7 @@ test("failed reaction POST never becomes pending and terminal cleanup remains ha
   const calls = [], writes = [], logs = [];
   const timers = createTimers();
   const eye = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
     execFile(_command, args, _options, callback) {
       calls.push(args);
       callback(null, JSON.stringify({ ok: false, error: { message: "denied" } }), "");
@@ -214,6 +216,7 @@ test("failed reaction POST never becomes pending and terminal cleanup remains ha
 test("larkApi failure records exit code and stderr head instead of echoing the command line", () => {
   const errors = [];
   const eye = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
     execFile(_command, _args, _options, callback) {
       const error = Object.assign(
         new Error("Command failed: lark-cli --profile cli_eye api POST /open-apis/im/v1/messages/om_fail/reactions --data {}"),
@@ -234,6 +237,7 @@ test("larkApi failure records exit code and stderr head instead of echoing the c
 test("larkApi failure without stderr falls back to stdout head", () => {
   const errors = [];
   const eye = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
     execFile(_command, _args, _options, callback) {
       callback(Object.assign(new Error("Command failed: lark-cli …"), { code: "ENOENT" }), "partial garbage output", "");
       return {};

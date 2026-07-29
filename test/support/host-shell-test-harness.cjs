@@ -25,6 +25,7 @@ const injected = process.env.LARKIN_TEST_HOST_MODULE
 const channelPackage = injected?.channelPackage
   || (typeof injected?.createLarkChannel === "function" ? injected : undefined);
 const execFileImpl = injected?.execFileImpl;
+const managedCliForAgent = injected?.managedCliForAgent;
 const reconcileAgentWorkspaceImpl = injected?.reconcileAgentWorkspaceImpl;
 
 function fail(error) {
@@ -37,6 +38,7 @@ try {
     runtimeHost,
     ...(channelPackage ? { channelPackage } : {}),
     ...(execFileImpl ? { execFileImpl } : {}),
+    ...(managedCliForAgent ? { managedCliForAgent } : {}),
     ...(reconcileAgentWorkspaceImpl ? { reconcileAgentWorkspaceImpl } : {}),
     eventSourceStartDelayMs: Number(process.env.LARKIN_TEST_EVENT_SOURCE_START_DELAY_MS || 2_000),
     channelDisconnectTimeoutMs: Number(process.env.LARKIN_TEST_CHANNEL_DISCONNECT_TIMEOUT_MS || 2_000),

@@ -20,14 +20,17 @@ test("bot-register is strict TypeScript compiled to its direct runtime entry", (
   assert.doesNotMatch(entry, /packages\/larkin-shell|fork\/feishu/);
 });
 
-test("registration keeps verify-before-publish-before-bind ordering in the authored source", () => {
+test("registration publishes the credential before binding, then verifies the bound Bot workspace", () => {
   const source = fs.readFileSync(SOURCE, "utf8");
-  const sync = source.indexOf('spawnSync("lark-cli", ["config", "init"');
-  const verify = source.indexOf('spawnSync("lark-cli", ["--profile", id, "im", "+chat-list", "--as", "bot"]');
   const publish = source.indexOf("fs.writeFileSync(stagedBotFile");
   const bind = source.indexOf("spawnSync(bindSpec.command, bindSpec.args");
-  assert.equal([sync, verify, publish, bind].every((index) => index >= 0), true);
-  assert.equal(sync < verify && verify < publish && publish < bind, true);
+  const sync = source.indexOf("synchronizeAgentProfile(agent");
+  const verify = source.indexOf("spawnSync(official.command");
+  assert.equal([publish, bind, sync, verify].every((index) => index >= 0), true);
+  assert.equal(publish < bind && bind < sync && sync < verify, true);
+  assert.match(source, /synchronizeAgentProfile\([\s\S]*\{ forceRebind: true \}\)/,
+    "new setup credentials must explicitly force one authoritative rebind");
+  assert.doesNotMatch(source, /config["', ]+init/);
   assert.match(source, /mode: 0o700/);
   assert.match(source, /mode: 0o600, flag: "wx"/);
   assert.match(source, /callbacks:\s*\{ items: \["card\.action\.trigger"\] \}/);
@@ -60,7 +63,9 @@ test("grant-scopes is strict TypeScript compiled to its direct runtime entry", (
   assert.match(entry, /registerApp|spawnSync|TENANT_SCOPES|selectAgent/);
   assert.doesNotMatch(entry, /packages\/larkin-shell|fork\/feishu/);
   const authored = fs.readFileSync(source, "utf8");
-  assert.match(authored, /explicitAppId \? null : larkinConfig\.selectAgent/);
+  assert.match(authored, /const selected = larkinConfig\.selectAgent/);
+  assert.match(authored, /explicitAppId !== selected\.feishuAppId/);
+  assert.match(authored, /resolveManagedOfficialCli\(selected, process\.env\)/);
   assert.doesNotMatch(authored, /defaultChatId|LARKIN_FEISHU_DEFAULT_CHAT_ID/);
   assert.match(authored, /callbacks:\s*\{ items: \["card\.action\.trigger"\] \}/);
 });

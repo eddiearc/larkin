@@ -34,7 +34,7 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     output.stderr = "";
     const code = launcher.runLarkCli(argv, { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, {
       io: { stdout(text) { output.stdout += text; }, stderr(text) { output.stderr += text; } },
-      spawn, nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.78" }, stateStore: store,
+      spawn, nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.79" }, stateStore: store,
     });
     return { code, ...output };
   };

@@ -50,7 +50,7 @@ test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin 
       PATH: `${path.join(npmPrefix, "bin")}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ""}`,
     };
     fs.writeFileSync(path.join(isolatedHome, ".bash_profile"), `export PATH=${JSON.stringify(path.join(npmPrefix, "bin"))}:${JSON.stringify(path.dirname(process.execPath))}:/usr/local/bin:/usr/bin:/bin\n`, { mode: 0o600 });
-    checked("npm", ["install", "--global", "@larksuite/cli@1.0.78"], { env: isolatedEnv, timeout: 120_000 }, "install host official CLI into isolated prefix");
+    checked("npm", ["install", "--global", "@larksuite/cli@1.0.79"], { env: isolatedEnv, timeout: 120_000 }, "install host official CLI into isolated prefix");
     checked(process.execPath, ["install", "--frozen-lockfile", "--ignore-scripts"], {
       cwd: sourceRepo,
       env: isolatedEnv,
@@ -100,16 +100,37 @@ test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin 
     fs.writeFileSync(path.join(botsDir, "cli_test.json"), JSON.stringify({
       appId: "cli_test", appSecret: "installed-fixture-secret", tenant: "feishu",
     }), { mode: 0o600 });
+    if (process.platform === "darwin") {
+      const sourceDir = path.join(inboxDir, "lark-channel-source");
+      const workspaceDir = path.join(inboxDir, "lark-cli-config", "lark-channel");
+      for (const directory of [sourceDir, workspaceDir]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(sourceDir, "config.json"), JSON.stringify({
+        accounts: { app: { id: "cli_test", secret: { source: "exec", provider: "larkin-bot-credential", id: "cli_test" } } },
+        secrets: { providers: { "larkin-bot-credential": { source: "exec", command: process.execPath, args: [],
+          env: { LARKIN_AGENT_ID: "cli_test", LARKIN_SECRET_PROVIDER_CONTEXT: "bind" } } } },
+      }), { mode: 0o600 });
+      fs.writeFileSync(path.join(workspaceDir, "config.json"), JSON.stringify({ apps: [{ appId: "cli_test",
+        appSecret: { source: "keychain", id: "appsecret:cli_test" }, defaultAs: "bot", strictMode: "bot", users: null }] }), { mode: 0o600 });
+    }
     const syncResult = checked(process.execPath, ["--eval", `
       const runtimeProcess = await import(${JSON.stringify(pathToFileURL(path.join(installed, "dist", "app", "runtime-process.mjs")).href)});
-      const agent = runtimeProcess.loadAndSyncRuntimeAgent(process.env, "cli_test");
+      const runtimeConfig = await import(${JSON.stringify(pathToFileURL(path.join(installed, "dist", "app", "runtime-agent-config.mjs")).href)});
+      const platformConfig = await import(${JSON.stringify(pathToFileURL(path.join(installed, "dist", "platform", "config.mjs")).href)});
+      const agent = process.platform === "darwin"
+        ? runtimeConfig.hydrateRuntimeAgent(process.env.LARKIN_CONFIG_DIR,
+          platformConfig.selectAgent(platformConfig.loadConfig(process.env).config, process.env))
+        : runtimeProcess.loadAndSyncRuntimeAgent(process.env, "cli_test");
+      if (process.platform === "darwin") runtimeConfig.installRuntimeCommandShims(agent);
       process.stdout.write(agent.stateDir);
-    `], { cwd: consumer, env: runtimeEnv, timeout: 30_000 }, "sync installed package-local Bot-only profile");
+    `], { cwd: consumer, env: runtimeEnv, timeout: 30_000 }, process.platform === "darwin"
+      ? "prepare installed package with a keychain-safe workspace fixture"
+      : "bind installed package Agent lark-channel workspace");
     assert.equal(syncResult.stdout.trim(), inboxDir);
-    const installedProfile = JSON.parse(fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json"), "utf8"));
+    const installedProfile = JSON.parse(fs.readFileSync(path.join(inboxDir, "lark-cli-config", "lark-channel", "config.json"), "utf8"));
     assert.deepEqual(installedProfile.apps.map((app) => ({
-      appId: app.appId, name: app.name, defaultAs: app.defaultAs, strictMode: app.strictMode, users: app.users,
-    })), [{ appId: "cli_test", name: "cli_test", defaultAs: "bot", strictMode: "bot", users: [] }]);
+      appId: app.appId, defaultAs: app.defaultAs, strictMode: app.strictMode, users: app.users,
+    })), [{ appId: "cli_test", defaultAs: "bot", strictMode: "bot", users: null }]);
+    assert.deepEqual(installedProfile.apps[0].appSecret, { source: "keychain", id: "appsecret:cli_test" });
     const runtimeBin = path.join(inboxDir, "runtime-bin");
     const runtimeLarkin = path.join(runtimeBin, "larkin");
     const runtimeLarkCliPath = path.join(runtimeBin, "lark-cli");
@@ -148,11 +169,14 @@ test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin 
     const pinnedNative = officialCli.resolveOfficialLarkCli({ env: runtimeEnv });
     assert.match([pinnedNative.command, ...pinnedNative.argsPrefix].join(" "), /@larksuite[/\\]cli|lark-cli/);
     const evaluatorHelpArgv = ["im", "+messages-send", "--as", "user", "--chat-id", "a", "--chat-id=b", "--help"];
-    const beforeHelpConfig = fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json"));
+    const installedWorkspaceFile = path.join(inboxDir, "lark-cli-config", "lark-channel", "config.json");
+    const beforeHelpConfig = fs.readFileSync(installedWorkspaceFile);
     const beforeHelpState = fs.readFileSync(path.join(inboxDir, "inbox-state.json"));
     const directEvaluatorHelp = spawnSync(pinnedNative.command, [...pinnedNative.argsPrefix, ...evaluatorHelpArgv], {
       cwd: consumer,
-      env: { ...runtimeEnv, LARKSUITE_CLI_CONFIG_DIR: path.join(inboxDir, "lark-cli-config") },
+      env: { ...runtimeEnv, LARK_CHANNEL: "1",
+        LARK_CHANNEL_CONFIG: path.join(inboxDir, "lark-channel-source", "config.json"),
+        LARKSUITE_CLI_CONFIG_DIR: path.join(inboxDir, "lark-cli-config") },
       encoding: "utf8", timeout: 15_000,
     });
     const wrappedEvaluatorHelp = spawnSync(runtimeLarkCli, evaluatorHelpArgv, {
@@ -164,7 +188,7 @@ test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin 
       "Runtime help must preserve native stdout/stderr/exit exactly",
     );
     assert.equal(wrappedEvaluatorHelp.status, 0);
-    assert.deepEqual(fs.readFileSync(path.join(inboxDir, "lark-cli-config", "config.json")), beforeHelpConfig);
+    assert.deepEqual(fs.readFileSync(installedWorkspaceFile), beforeHelpConfig);
     assert.deepEqual(fs.readFileSync(path.join(inboxDir, "inbox-state.json")), beforeHelpState);
 
     const boundedHistory = checked(runtimeLarkCli, [
@@ -181,7 +205,9 @@ test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin 
     ]) {
       const nativeDryRun = checked(pinnedNative.command, [...pinnedNative.argsPrefix, ...dryRunArgv], {
         cwd: consumer,
-        env: { ...runtimeEnv, LARKSUITE_CLI_CONFIG_DIR: path.join(inboxDir, "lark-cli-config") },
+        env: { ...runtimeEnv, LARK_CHANNEL: "1",
+          LARK_CHANNEL_CONFIG: path.join(inboxDir, "lark-channel-source", "config.json"),
+          LARKSUITE_CLI_CONFIG_DIR: path.join(inboxDir, "lark-cli-config") },
         timeout: 15_000,
       }, `run native ordered flag dry-run: ${dryRunArgv.join(" ")}`);
       assert.match(nativeDryRun.stdout, /oc_native_order/);

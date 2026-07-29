@@ -51,24 +51,49 @@ test("production context renders a display-name mention and preserves exact lark
     const agentId = "cli_contextA1";
     const stateDir = path.join(temp, "state", "agents", agentId);
     const binDir = path.join(temp, "bin");
+    const packageDir = path.join(temp, "node_modules", "@larksuite", "cli");
+    const official = path.join(packageDir, "scripts", "run.mjs");
+    const loginShell = path.join(temp, "login-shell.sh");
     const sink = path.join(temp, "calls.ndjson");
     fs.mkdirSync(stateDir, { recursive: true });
     fs.mkdirSync(binDir);
     fs.writeFileSync(path.join(temp, "config.json"), JSON.stringify({ version: 3, serverId: "server-context", activeAgent: agentId, agents: { [agentId]: { runtime: "codex", model: "gpt-contract" } } }), { mode: 0o600 });
     fs.writeFileSync(path.join(stateDir, "feishu-map.json"), JSON.stringify({ "#room": "oc_room" }));
-    fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/usr/bin/env bun
-const fs=require("node:fs"); const args=process.argv.slice(2); fs.appendFileSync(process.env.CALL_SINK,JSON.stringify(args)+"\\n");
+    const larkConfigDir = path.join(stateDir, "lark-cli-config");
+    const sourceDir = path.join(stateDir, "lark-channel-source");
+    fs.mkdirSync(path.join(larkConfigDir, "lark-channel"), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(sourceDir, "config.json"), JSON.stringify({ accounts: { app: { id: agentId,
+      secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } }, secrets: { providers: {
+      "larkin-bot-credential": { source: "exec", command: process.execPath, args: [], env: {
+        LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind",
+      } },
+    } } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(larkConfigDir, "lark-channel", "config.json"), JSON.stringify({ apps: [{ appId: agentId,
+      appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
+    }] }), { mode: 0o600 });
+    fs.mkdirSync(path.dirname(official), { recursive: true });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.mjs" } }));
+    fs.writeFileSync(official, `#!/usr/bin/env bun
+const fs=require("node:fs"); const args=process.argv.slice(2);
+if(args[0]==="--version") { process.stdout.write("1.0.79\\n"); process.exit(0); }
+if(args[0]==="config"&&args[1]==="bind"&&args[2]==="--help") { process.stdout.write("--source lark-channel --identity bot-only\\n"); process.exit(0); }
+fs.appendFileSync(process.env.CALL_SINK,JSON.stringify(args)+"\\n");
 if(args.includes("+chat-members-list")) process.stdout.write(JSON.stringify({ok:true,data:{users:[{name:"林一丹",member_id:"ou_lin"}],bots:[]}}));
 else process.stdout.write(JSON.stringify({data:{message_id:"om_sent"}}));
 `, { mode: 0o755 });
+    fs.symlinkSync(official, path.join(binDir, "lark-cli"));
+    fs.writeFileSync(loginShell, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(official)}\n`, { mode: 0o755 });
     const script = `const {transport}=require(${JSON.stringify(RUNTIME)}); transport.request({method:"POST",path:"/messages/send",body:{target:"#room",content:"@林一丹 你好",idempotencyKey:"fixed"}}).then(r=>process.stdout.write("RESULT="+JSON.stringify(r))).catch(e=>{console.error(e);process.exit(1)});`;
-    const result = spawnSync(process.execPath, ["--eval", script], { cwd: ROOT, encoding: "utf8", env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: agentId, CALL_SINK: sink } });
+    const result = spawnSync(process.execPath, ["--eval", script], { cwd: ROOT, encoding: "utf8", env: { ...process.env,
+      SHELL: loginShell, PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp,
+      LARKIN_AGENT_ID: agentId, CALL_SINK: sink } });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const observed = JSON.parse(result.stdout.slice(result.stdout.indexOf("RESULT=") + 7));
     assert.equal(observed.data.messageId, "om_sent");
     const calls = fs.readFileSync(sink, "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls[0], ["--profile", agentId, "im", "+chat-members-list", "--chat-id", "oc_room", "--json"]);
-    assert.deepEqual(calls[1], ["--profile", agentId, "im", "+chat-members-list", "--chat-id", "oc_room", "--member-id-type", "user_id", "--json"]);
-    assert.deepEqual(calls[2], ["--profile", agentId, "im", "+messages-send", "--chat-id", "oc_room", "--markdown", '<at id="ou_lin"></at> 你好', "--json", "--idempotency-key", "fixed"]);
+    assert.deepEqual(calls[0], ["im", "+chat-members-list", "--chat-id", "oc_room", "--json"]);
+    assert.deepEqual(calls[1], ["im", "+chat-members-list", "--chat-id", "oc_room", "--member-id-type", "user_id", "--json"]);
+    assert.deepEqual(calls[2], ["im", "+messages-send", "--chat-id", "oc_room", "--markdown", '<at id="ou_lin"></at> 你好', "--json", "--idempotency-key", "fixed"]);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

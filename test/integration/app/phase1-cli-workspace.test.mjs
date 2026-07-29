@@ -83,7 +83,7 @@ childProcess.spawn = function capture(command, args, options = {}) {
     larkinHome: env.LARKIN_HOME || null,
     configDir: env.LARKIN_CONFIG_DIR || null,
     agents: JSON.parse(env.LARKIN_AGENTS_CONFIG || "null"),
-    larkProfileEntries: fs.readdirSync(env.LARKSUITE_CLI_CONFIG_DIR || ""),
+    larkConfigDir: env.LARKSUITE_CLI_CONFIG_DIR || null,
   }));
   return new FakeChild();
 };
@@ -92,16 +92,19 @@ childProcess.spawnSync = function(command, args, options = {}) {
   const pinned = require("node:path").resolve(String(command)) === require("node:path").resolve(process.env.OFFICIAL_CLI);
   if (!pinned) return originalSpawnSync.apply(this, arguments);
   const cli = args;
-  if (cli[0] === "--version") return { status: 0, stdout: "1.0.78\\n", stderr: "" };
-  const file = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "config.json");
-  if (cli[0] === "config" && cli[1] === "init") {
-    const appId = cli[cli.indexOf("--app-id") + 1], name = cli[cli.indexOf("--name") + 1];
-    fs.writeFileSync(file, JSON.stringify({ apps: [{ appId, name, appSecret: options.input, brand: "feishu", defaultAs: "auto", strictMode: "off", users: [] }] }), { mode: 0o600 });
-  } else {
-    const value = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (cli.includes("default-as")) value.apps[0].defaultAs = "bot";
-    if (cli.includes("strict-mode")) value.apps[0].strictMode = "bot";
-    fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
+  if (cli[0] === "--version") return { status: 0, stdout: "1.0.79\\n", stderr: "" };
+  if (cli[0] === "config" && cli[1] === "bind" && cli[2] === "--help") {
+    return { status: 0, stdout: "Usage: lark-cli config bind --source lark-channel --identity bot-only\\n", stderr: "" };
+  }
+  if (cli[0] === "config" && cli[1] === "bind") {
+    const source = JSON.parse(fs.readFileSync(options.env.LARK_CHANNEL_CONFIG, "utf8"));
+    const appId = source.accounts.app.id;
+    const directory = require("node:path").join(options.env.LARKSUITE_CLI_CONFIG_DIR, "lark-channel");
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(require("node:path").join(directory, "config.json"), JSON.stringify({ apps: [{
+      appId, name: appId, appSecret: { source: "keychain", id: "appsecret:" + appId },
+      brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [],
+    }] }), { mode: 0o600 });
   }
   return { status: 0, stdout: "", stderr: "" };
 };
@@ -140,7 +143,7 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
     const fixtureBin = path.join(temp, "bin");
     fs.mkdirSync(path.dirname(official), { recursive: true, mode: 0o700 });
     fs.mkdirSync(fixtureBin, { mode: 0o700 });
-    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" } }), { mode: 0o600 });
     fs.writeFileSync(official, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
     fs.symlinkSync(official, path.join(fixtureBin, "lark-cli"));
     const result = spawnSync(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agent", APP, "--dry-run"], {
@@ -168,7 +171,11 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
     assert.doesNotMatch(JSON.stringify(observed.args), /runtime-process\.mjs|fork\/dist\/larkin\.cjs|fork\/feishu\/host\.cjs/);
     assert.equal(observed.larkinHome, root);
     assert.equal(observed.configDir, root);
-    assert.equal(observed.larkProfileEntries.includes("user-profile-token"), true, "target-only profile sync must not rebuild the shared profile directory");
+    assert.equal(observed.larkConfigDir, null, "multi-Agent supervisor must not publish a shared lark-cli workspace");
+    assert.deepEqual(fs.readdirSync(path.join(root, "state", "agents", APP, "lark-cli-config")), ["lark-channel"],
+      "profile sync must publish only the Agent lark-channel workspace");
+    assert.equal(fs.existsSync(path.join(root, "lark-cli-config", "user-profile-token")), true,
+      "Agent binding must not rebuild the unrelated shared profile directory");
     assert.equal(fs.readdirSync(root).some((entry) => entry.startsWith(".lark-cli-config.quarantine-")), false);
     assert.equal(observed.agents.length, 1);
     assert.deepEqual(observed.agents[0], {
@@ -176,6 +183,7 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
       chatMentionPolicies: { oc_keep: "free" },
       feishuAppSecret: "fixture-secret",
       feishuDomain: "https://open.feishu.cn",
+      credentialRevision: "legacy-unversioned",
     });
     assert.equal(fs.existsSync(path.join(root, "agents", APP, "AGENTS.md")), false, "launcher must not calibrate workspace");
     assert.equal(fs.existsSync(path.join(root, "agents", APP, "CLAUDE.md")), false, "launcher must not calibrate workspace");

@@ -30,12 +30,24 @@ function fixture() {
   writePrivate(path.join(root, "state", "agents", agentId, "lark-cli-config", "config.json"), `${JSON.stringify({
     apps: [{ appId: agentId, name: agentId, appSecret: "fixture", brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
   })}\n`);
+  writePrivate(path.join(root, "state", "agents", agentId, "lark-channel-source", "config.json"), `${JSON.stringify({
+    accounts: { app: { id: agentId, secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } },
+    secrets: { providers: { "larkin-bot-credential": { source: "exec", command: process.execPath, args: [], env: {
+      LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind",
+    } } } },
+  })}\n`);
+  writePrivate(path.join(root, "state", "agents", agentId, "lark-cli-config", "lark-channel", "config.json"), `${JSON.stringify({ apps: [{
+    appId: agentId, appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
+  }] })}\n`);
   writePrivate(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.mjs" },
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.mjs" },
   }));
   writePrivate(official, `#!${process.execPath}
 import fs from "node:fs";
-if (process.argv[2] === "--version") { console.log("1.0.78"); process.exit(0); }
+if (process.argv[2] === "--version") { console.log("1.0.79"); process.exit(0); }
+if (process.argv[2] === "config" && process.argv[3] === "bind" && process.argv[4] === "--help") {
+  console.log("--source lark-channel --identity bot-only"); process.exit(0);
+}
 if (process.argv[2] === "docs" && process.argv[3] === "+stdin-echo") {
   let input = "";
   process.stdin.setEncoding("utf8");

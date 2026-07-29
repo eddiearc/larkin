@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerApp as channelRegisterApp } from "@larksuite/channel";
 import { markCallbackRequested } from "../platform/callback-capability.js";
 import * as larkinConfig from "../platform/config.js";
+import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -37,11 +38,13 @@ const testFixture = process.env.LARKIN_TEST_GRANT_SCOPES_MODULE
     registerApp?: RegisterApp;
     qrcode?: { generate(text: string, options: { small: boolean }): void };
     spawnSync?: typeof systemSpawnSync;
+    managedOfficialCli?: typeof managedOfficialLarkCli;
   }
   : null;
 const registerApp: RegisterApp = testFixture?.registerApp ?? channelRegisterApp as unknown as RegisterApp;
 const qrcode = testFixture?.qrcode ?? qrcodePackage;
 const spawnSync = testFixture?.spawnSync ?? systemSpawnSync;
+const resolveManagedOfficialCli = testFixture?.managedOfficialCli ?? managedOfficialLarkCli;
 
 const argv = process.argv.slice(2);
 const flag = (name: string, fallback: string): string => {
@@ -54,8 +57,11 @@ const flag = (name: string, fallback: string): string => {
 const { config } = larkinConfig.loadConfig(process.env);
 const explicitAppId = flag("--app-id", "");
 const explicitAgent = flag("--agent", "");
-const selected = explicitAppId ? null : larkinConfig.selectAgent(config, explicitAgent ? { LARKIN_AGENT_ID: explicitAgent } : {});
-const APP_ID = explicitAppId || selected!.agentId;
+if (explicitAppId && explicitAgent && explicitAppId !== explicitAgent) throw new Error("--app-id 必须与 --agent 指向同一 Agent");
+const selected = larkinConfig.selectAgent(config, (explicitAgent || explicitAppId)
+  ? { LARKIN_AGENT_ID: explicitAgent || explicitAppId } : process.env);
+const APP_ID = selected.agentId;
+if (explicitAppId && explicitAppId !== selected.feishuAppId) throw new Error("--app-id 必须等于所选 Agent 的 App ID");
 if (!/^cli_[A-Za-z0-9]+$/.test(APP_ID)) throw new Error(`无效飞书 App ID：${APP_ID}`);
 const SEND_TO = flag("--send-to", "");
 const TENANT = flag("--tenant", "feishu");
@@ -74,7 +80,10 @@ const log = (...args: unknown[]): void => { process.stderr.write(`${args.join(" 
 function sendUrlToChat(url: string, minutes: number): void {
   if (!SEND_TO) return;
   const text = `🔐 larkin 给机器人【${APP_ID}】增补读取权限。\n请【应用 owner 本人】打开下面链接确认(约 ${minutes} 分钟内有效)，勾选并确认这些权限：\n${TENANT_SCOPES.join("、")}\n\n${url}\n\n确认后我会自动接上并重试读取。`;
-  const result = spawnSync("lark-cli", ["im", "+messages-send", "--chat-id", SEND_TO, "--text", text, "--json"], { encoding: "utf8" });
+  const managed = resolveManagedOfficialCli(selected, process.env);
+  const result = spawnSync(managed.command.command, [...managed.command.argsPrefix, "im", "+messages-send", "--chat-id", SEND_TO, "--text", text, "--json"], {
+    encoding: "utf8", env: managed.env,
+  });
   log(result.status === 0 ? "[grant] 更新链接已发到飞书群" : `[grant] 发链接失败: ${(result.stderr || "").trim().split("\n")[0]}`);
 }
 

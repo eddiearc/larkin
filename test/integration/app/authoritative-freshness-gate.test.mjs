@@ -34,9 +34,19 @@ function fixture(agentId = "cli_authoritativeA1") {
     activeAgent: agentId,
     agents: { [agentId]: { runtime: "pi", model: "default" } },
   }, null, 2)}\n`);
-  fs.mkdirSync(path.join(stateDir, "lark-cli-config"), { recursive: true, mode: 0o700 });
-  writePrivate(path.join(stateDir, "lark-cli-config", "config.json"), `${JSON.stringify({
-    apps: [{ appId: agentId, name: agentId, appSecret: "fixture-only", brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
+  const sourceFile = path.join(stateDir, "lark-channel-source", "config.json");
+  const workspaceFile = path.join(stateDir, "lark-cli-config", "lark-channel", "config.json");
+  writePrivate(sourceFile, `${JSON.stringify({
+    accounts: { app: { id: agentId, secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } },
+    secrets: { providers: { "larkin-bot-credential": {
+      source: "exec", command: process.execPath, args: [],
+      env: { LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind" },
+    } } },
+  })}\n`);
+  writePrivate(workspaceFile, `${JSON.stringify({
+    apps: [{ appId: agentId, name: agentId,
+      appSecret: { source: "keychain", id: `appsecret:${agentId}` },
+      brand: "feishu", defaultAs: "bot", strictMode: "bot", users: [] }],
   })}\n`);
   const bin = path.join(root, "bin");
   const packageDir = path.join(root, "official", "node_modules", "@larksuite", "cli");
@@ -44,10 +54,11 @@ function fixture(agentId = "cli_authoritativeA1") {
   fs.mkdirSync(path.dirname(executable), { recursive: true, mode: 0o700 });
   fs.mkdirSync(bin, { mode: 0o700 });
   fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.78", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
   }), { mode: 0o600 });
   fs.writeFileSync(executable, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.78\\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.79\\n'; exit 0; fi
+if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\\n' 'Usage: lark-cli config bind --source lark-channel --identity bot-only'; exit 0; fi
 export LARKIN_TEST_PROVIDER_PARENT_PID="$PPID"
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
 `, { mode: 0o700 });

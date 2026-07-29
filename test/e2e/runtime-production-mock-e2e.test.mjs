@@ -41,7 +41,12 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
   const store = createAgentStateStore(root, agentId);
   const session = new FakeNativeSession("codex");
   const adapter = { id: "codex", capabilities: { busyInput: "direct" }, async createSession() { return session; } };
-  const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  const runtimeHost = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+    assertOfficialCliReady: () => {},
+  });
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
     version: 3, serverId: "server-interaction", activeAgent: agentId,
@@ -144,7 +149,12 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const store = createAgentStateStore(root, agentId);
     const session = new FakeNativeSession(runtime);
     const adapter = { id: runtime, capabilities: { busyInput: runtime === "claude" ? "gated" : "direct" }, async createSession() { return session; } };
-    const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+    const runtimeHost = createRuntimeHost({
+      adapterFor: () => adapter,
+      promptBuilder: new ContextPromptBuilder(),
+      stateStoreFor: () => store,
+      assertOfficialCliReady: () => {},
+    });
     const runtimeEvents = [];
     const memberCalls = [];
     runtimeHost.subscribe((event) => runtimeEvents.push(event));

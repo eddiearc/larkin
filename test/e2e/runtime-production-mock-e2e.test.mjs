@@ -244,19 +244,38 @@ for (const runtime of ["codex", "claude", "pi"]) {
       assert.equal(store.readNdjson("inbox").length, 2, "check must not consume the batch");
 
       stdout = ""; stderr = "";
-      const pollCode = runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
+      const pollCode = runAgentCli(["inbox", "poll", "--target", target, "--limit", "1"], runtimeEnv, {
         stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
       });
       assert.equal(pollCode, 0, stderr);
-      const drained = JSON.parse(stdout);
-      assert.equal(drained.delivery, "direct_ack");
-      assert.equal(drained.at_most_once, true);
-      assert.equal(drained.events.length, 2);
+      const partial = JSON.parse(stdout);
+      assert.equal(partial.delivery, "direct_ack");
+      assert.equal(partial.at_most_once, true);
+      assert.equal(partial.events.length, 1);
+      assert.equal(partial.pending_count, 1);
+      assert.equal(partial.has_more, true);
       assert.deepEqual(
-        Object.fromEntries(["chat_id", "message_id", "thread_id", "sender_id", "content"].map((key) => [key, drained.events[0][key]])),
+        Object.fromEntries(["chat_id", "message_id", "thread_id", "sender_id", "content"].map((key) => [key, partial.events[0][key]])),
         { chat_id: `oc_${runtime}`, message_id: `om_${runtime}_1`, thread_id: null, sender_id: "ou_sender", content: "first" },
       );
-      assert.deepEqual(new Set(drained.consumed_delivery_ids), new Set([session.prompts[0].inputId, session.busyInputs[0].inputId]));
+      assert.deepEqual(partial.consumed_delivery_ids, [session.prompts[0].inputId]);
+
+      session.emit({ type: "turn-end", turnId: `${runtime}-turn` });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(session.prompts.length, 2, "partial consumption schedules another production Runtime wake");
+      assert.equal(session.prompts[1].inputId, session.busyInputs[0].inputId, "the replacement wake retains delivery identity");
+      session.emit({ type: "turn-start", turnId: `${runtime}-rewake` });
+
+      stdout = ""; stderr = "";
+      const finalPollCode = runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
+        stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      });
+      assert.equal(finalPollCode, 0, stderr);
+      const drained = JSON.parse(stdout);
+      assert.deepEqual(drained.events.map((event) => event.message_id), [`om_${runtime}_2`]);
+      assert.equal(drained.pending_count, 0);
+      assert.equal(drained.has_more, false);
+      assert.deepEqual(drained.consumed_delivery_ids, [session.busyInputs[0].inputId]);
       guardedStdout = ""; guardedStderr = "";
       assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
       assert.equal(sent.length, 1, "the provider is called once after the target is current");
@@ -269,10 +288,11 @@ for (const runtime of ["codex", "claude", "pi"]) {
       await new Promise((resolve) => setTimeout(resolve, 300));
       assert.equal(runtimeEvents.filter((event) => event.type === "delivery" && event.status === "consumed").length, 2);
 
-      session.emit({ type: "turn-end", turnId: `${runtime}-turn` });
+      session.emit({ type: "turn-end", turnId: `${runtime}-rewake` });
       await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(session.prompts.length, 2, "draining the replacement turn must not create another wake");
       const status = store.readJson("status", {});
-      assert.equal(status.session.turns, 1);
+      assert.equal(status.session.turns, 2);
       assert.equal(status.lastActivity.state, "idle");
       if (runtime === "pi") {
         await hostShell.ingest(agentId, { chat_id: "oc_pi", chat_type: "p2p", sender_id: "ou_sender", message_id: "om_pi_auth",

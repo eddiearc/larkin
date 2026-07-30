@@ -35,4 +35,6 @@ Never commit credentials, tokens, private keys, local configuration, user data, 
 
 Contributions intentionally submitted for inclusion are licensed under Apache-2.0 as described by the repository `LICENSE` and its contribution terms.
 
+Owner policy: every bugfix or feature delivery must increment the version in `package.json` before merge. Unless the Owner explicitly selects a minor or major increment, default to exactly one patch increment. If the delivery already includes the required increment relative to its base, do not increment it again in a release-only follow-up. This policy does not authorize creating or publishing a tag or GitHub Release.
+
 Release tags use `vX.Y.Z`, must exactly match the version in `package.json`, and must point to a commit already contained in `main`. Version changes and release tags are explicit maintainer actions; do not create, move, or replace a release tag as part of an ordinary contribution.

@@ -7,6 +7,7 @@ import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 import { createHostShell } from "../../dist/feishu/host-shell.mjs";
 import { ContextPromptBuilder } from "../../dist/agent/context-prompt.mjs";
 import { createAgentStateStore } from "../../dist/agent/agent-state-store.mjs";
+import { RuntimePrerequisiteError } from "../../dist/runtime/runtime-readiness.mjs";
 
 const root = process.env.LARKIN_CONFIG_DIR;
 const calls = process.env.LARKIN_CONTROL_CALLS;
@@ -64,29 +65,19 @@ const serverOptions = {
   larkinHome: root,
   authorityToken,
   maxRememberedOperations: 3,
-  maxRememberedResetOperations: 8,
-  operationLedgerWrite(file, value) {
-    const records = value.records || [];
-    if (records.some((record) => record.operationId === "operation_pre_fail_1" && record.state === "intent")) {
-      throw new Error("injected reset intent persistence failure");
-    }
-    if (records.some((record) => record.operationId === "operation_post_fail_1" && record.state === "terminal")) {
-      throw new Error("injected reset terminal persistence failure");
-    }
-    const temporary = `${file}.${process.pid}.harness.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(temporary, file);
-  },
   async upsert(request) {
     fs.appendFileSync(calls, `start:${request.operationId}:${request.agentId}\n`);
     await new Promise((resolve) => setTimeout(resolve, Number(process.env.LARKIN_CONTROL_DELAY_MS || 0)));
+    if (request.operationId === "operation_failed_conflict_1") throw new RuntimePrerequisiteError({
+      runtime: "pi", state: "unavailable", reason: "fixture readiness must not leak",
+    });
     fs.appendFileSync(calls, `end:${request.operationId}:${request.agentId}\n`);
   },
   async resetSession(request) {
-    fs.appendFileSync(calls, `reset:${request.operationId}:${request.agentId}\n`);
-    if (request.operationId === "operation_inflight_1") await new Promise((resolve) => setTimeout(resolve, 80));
+    fs.appendFileSync(calls, `reset:${request.agentId}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 80));
     const result = await resetHost.resetSession(request.agentId, request.waitReadyMs);
-    return { ok: result.readyForFreshScenario, operationId: request.operationId, agentId: request.agentId, ...result };
+    return { ok: result.readyForFreshScenario, agentId: request.agentId, ...result };
   },
 };
 let server = createAgentControlServer(serverOptions);

@@ -78,7 +78,7 @@ Examples:
   larkin config mention chat oc_x free --agent cli_x
 
 Credentials, internal paths, serverId, activeAgent, and raw config are never exposed here.`,
-  session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>] [--operation-id <id>]
+  session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>]
 Atomically replace one idle, zero-backlog Agent Runtime session through authenticated local control.`,
 };
 

@@ -93,8 +93,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
     },
     async resetSession(request) {
       const result = await hostShell.resetSession(request.agentId, request.waitReadyMs);
-      return { ok: result.readyForFreshScenario, operationId: request.operationId, agentId: request.agentId,
-        ...result };
+      return { ok: result.readyForFreshScenario, agentId: request.agentId, ...result };
     },
   });
   await controlServer.start();

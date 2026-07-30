@@ -244,6 +244,96 @@ test("delivery ownership, dedupe and correlation survive recreation and reach co
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("turn end re-wakes only accepted canonical rows left by a partial poll, including arrivals during the turn", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-partial-rewake-"));
+  const agentId = "cli_partialRewakeA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  const config = { agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
+  try {
+    await host.start([config]);
+    const target = "chat:oc_partial";
+    const receipts = [];
+    for (const messageId of ["om_partial_1", "om_partial_2", "om_partial_3"]) {
+      store.appendNdjson("inbox", { message_id: messageId, target, content: messageId });
+      receipts.push(await host.deliver(agentId, { message_id: messageId, target }));
+    }
+    session.emit({ type: "turn-start", turnId: "turn-partial" });
+    const first = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(first.envelopes.map((row) => row.message_id), ["om_partial_1"]);
+    assert.equal(first.pendingCount, 2);
+
+    store.appendNdjson("inbox", { message_id: "om_partial_4", target, content: "arrived during turn" });
+    receipts.push(await host.deliver(agentId, { message_id: "om_partial_4", target }));
+    session.emit({ type: "turn-end", turnId: "turn-partial" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(session.prompts.length, 2, "remaining canonical rows schedule one replacement wake at the safe boundary");
+    assert.equal(session.prompts[1].inputId, receipts[1].deliveryId, "retry preserves the oldest unconsumed delivery identity");
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_partial_2", "om_partial_3", "om_partial_4"]);
+    const statusesAfterRetry = Object.fromEntries(store.readJson("runtimeDeliveries", { records: [] }).records
+      .map((record) => [record.messageId, record.status]));
+    assert.deepEqual(statusesAfterRetry, {
+      om_partial_1: "consumed",
+      om_partial_2: "accepted",
+      om_partial_3: "pending",
+      om_partial_4: "pending",
+    });
+
+    const drained = store.pollInbox({ target });
+    assert.deepEqual(drained.envelopes.map((row) => row.message_id), ["om_partial_2", "om_partial_3", "om_partial_4"]);
+    assert.equal(drained.pendingCount, 0);
+    assert.equal(drained.envelopes.some((row) => row.message_id === "om_partial_1"), false, "the direct-acked body is never replayed");
+    session.emit({ type: "turn-start", turnId: "turn-drained" });
+    session.emit({ type: "turn-end", turnId: "turn-drained" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2, "a fully drained target produces no replacement wake");
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records.every((record) => record.status === "consumed"), true);
+  } finally {
+    await host.shutdown("partial re-wake test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn end retries an accepted wake when the Agent never polls without advancing the Inbox cursor", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-no-poll-rewake-"));
+  const agentId = "cli_noPollRewakeA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const events = [];
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    const target = "chat:oc_no_poll";
+    store.appendNdjson("inbox", { message_id: "om_no_poll", target, content: "still pending" });
+    const receipt = await host.deliver(agentId, { message_id: "om_no_poll", target });
+    const stateBefore = store.readJson("inboxState", {});
+    session.emit({ type: "turn-start", turnId: "turn-no-poll" });
+    session.emit({ type: "turn-end", turnId: "turn-no-poll" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts[1].inputId, receipt.deliveryId);
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_no_poll"]);
+    assert.deepEqual(store.readJson("inboxState", {}), stateBefore, "re-waking alone must not advance model-seen state");
+    assert.ok(events.some((event) => event.type === "delivery" && event.deliveryId === receipt.deliveryId
+      && event.status === "deferred" && /before Inbox consumption/.test(event.reason)));
+  } finally {
+    await host.shutdown("no-poll re-wake test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("startup migration consumes orphan synthetic active deliveries but never guesses for real om_ messages", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-synthetic-migration-"));
   const agentId = "cli_migrateA1";

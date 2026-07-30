@@ -85,6 +85,7 @@ export interface InboxPollResult<T> {
   envelopes: T[];
   consumedDeliveryIds: string[];
   seenThroughSeq: number | null;
+  pendingCount: number;
 }
 
 interface InboxTargetState {
@@ -641,7 +642,12 @@ export class AgentStateStore {
         if (envelopes.length < limit && (!options.target || options.target === selectedTarget)) envelopes.push(row);
         else remaining.push(row);
       }
-      if (!envelopes.length) return { envelopes, consumedDeliveryIds: [], seenThroughSeq: null };
+      const pendingCount = remaining.reduce((count, row) => {
+        if (!options.target) return count + 1;
+        const rowTarget = typeof row.target === "string" ? row.target : targetKeyOfInboxEnvelope(row);
+        return count + (rowTarget === options.target ? 1 : 0);
+      }, 0);
+      if (!envelopes.length) return { envelopes, consumedDeliveryIds: [], seenThroughSeq: null, pendingCount };
       const messageIds = new Set(envelopes.flatMap((row) => {
         if (!row || typeof row !== "object") return [];
         const messageId = (row as Record<string, unknown>).message_id;
@@ -677,7 +683,7 @@ export class AgentStateStore {
       }
       this.replaceInboxUnlocked(remaining);
       this.writeJson("inboxState", state);
-      return { envelopes, consumedDeliveryIds, seenThroughSeq };
+      return { envelopes, consumedDeliveryIds, seenThroughSeq, pendingCount };
     });
   }
 

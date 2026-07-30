@@ -225,6 +225,70 @@ export function createRuntimeHost(options: {
     }
   };
 
+  const TURN_END_RETRY_REASON = "runtime turn ended before Inbox consumption was observed";
+
+  /**
+   * Runtime acceptance acknowledges only the notification. At the safe turn
+   * boundary, canonical Inbox presence decides whether that same delivery
+   * identity must become retryable again. The Inbox rows and ledger update are
+   * observed under one transaction so a concurrent poll cannot be overwritten.
+   */
+  const reconcileAcceptedAtTurnEnd = (agent: ManagedAgent): void => {
+    const store = agent.stateStore;
+    if (!store?.readNdjson) {
+      reconcileExternalConsumption(agent);
+      for (const record of agent.records.values()) {
+        if (record.status !== "accepted") continue;
+        emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
+          messageId: record.messageId, status: "deferred", reason: TURN_END_RETRY_REASON });
+      }
+      return;
+    }
+    const consumed: DeliveryRecord[] = [];
+    const deferred: DeliveryRecord[] = [];
+    try {
+      store.withInboxTransaction(() => {
+        const inboxIds = new Set(store.readNdjson!<Record<string, unknown>>("inbox").flatMap((row) =>
+          typeof row?.message_id === "string" ? [row.message_id] : []));
+        const disk = store.readJson<DeliveryFile>("runtimeDeliveries", { version: 1, records: [] });
+        let changed = false;
+        const pendingUpdates: DeliveryRecord[] = [];
+        const records = disk.records.map((candidate) => {
+          const current = agent.records.get(candidate.deliveryId);
+          if (!current) return candidate;
+          if (candidate.status === "consumed") {
+            if (current.status !== "consumed") {
+              agent.records.set(candidate.deliveryId, candidate);
+              consumed.push(candidate);
+            }
+            return candidate;
+          }
+          if (current.status !== "accepted" || candidate.status !== "accepted" || !inboxIds.has(candidate.messageId)) {
+            return candidate;
+          }
+          const next: DeliveryRecord = { ...candidate, status: "pending", updatedAt: now(),
+            reason: TURN_END_RETRY_REASON, retryable: true };
+          changed = true;
+          pendingUpdates.push(next);
+          return next;
+        });
+        if (changed) {
+          store.writeJson("runtimeDeliveries", { ...disk, records });
+          for (const next of pendingUpdates) {
+            agent.records.set(next.deliveryId, next);
+            deferred.push(next);
+          }
+        }
+      });
+    } catch (error) {
+      log("turn-end Inbox reconciliation failed", String(error));
+      return;
+    }
+    emitConsumed(agent, consumed);
+    for (const record of deferred) emit({ type: "delivery", agentId: agent.config.agentId,
+      deliveryId: record.deliveryId, messageId: record.messageId, status: "deferred", reason: TURN_END_RETRY_REASON });
+  };
+
   // Production callers persist the canonical Inbox before calling deliver(). If a
   // concurrent drain wins between that append and ledger creation, close only the
   // record created/observed by this call under the same Inbox lock.
@@ -417,12 +481,7 @@ export function createRuntimeHost(options: {
       agent.turnInProgress = false;
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
-      reconcileExternalConsumption(agent);
-      for (const record of agent.records.values()) {
-        if (record.status !== "accepted") continue;
-        emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
-          messageId: record.messageId, status: "deferred", reason: "runtime turn ended before Inbox consumption was observed" });
-      }
+      reconcileAcceptedAtTurnEnd(agent);
       if (recoveredAuthentication) {
         agent.authFailureActive = false;
         const prior = agent.readiness;

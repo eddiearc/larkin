@@ -318,6 +318,9 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
     assert.equal(polled.at_most_once, true);
     assert.equal(polled.events.length, 1);
     assert.equal(polled.events[0].content, "secret body");
+    assert.equal(polled.pending_count, 1);
+    assert.equal(polled.has_more, true);
+    assert.match(polled.next_action, /Continue polling the same Inbox scope until has_more is false/);
     assert.equal(polled.seen_through_seq, 1);
     assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_2", "om_other"]);
     const deliveries = f.store.readJson("runtimeDeliveries", null);
@@ -327,9 +330,26 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
     });
     assert.equal(deliveries.records[1].status, "pending");
     assert.equal(JSON.parse(f.run(["inbox", "check"]).stdout).targets.find((row) => row.target === "chat:oc_1").pending_count, 1);
-    assert.equal(JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout).events[0].message_id, "om_2");
-    assert.deepEqual(JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout).events, []);
+    const finalPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
+    assert.equal(finalPoll.events[0].message_id, "om_2");
+    assert.equal(finalPoll.pending_count, 0);
+    assert.equal(finalPoll.has_more, false);
+    assert.equal("next_action" in finalPoll, false);
+    const emptyPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
+    assert.deepEqual(emptyPoll.events, []);
+    assert.equal(emptyPoll.pending_count, 0);
+    assert.equal(emptyPoll.has_more, false);
     assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_other"], "unrelated target must remain pending");
+
+    f.store.appendNdjson("inbox", { message_id: "om_other_2", chat_id: "oc_3", content: "another target" });
+    const globalPartial = JSON.parse(f.run(["inbox", "poll", "--limit", "1"]).stdout);
+    assert.deepEqual(globalPartial.events.map((row) => row.message_id), ["om_other"]);
+    assert.equal(globalPartial.pending_count, 1, "an unscoped poll counts all remaining consumable rows");
+    assert.equal(globalPartial.has_more, true);
+    const globalFinal = JSON.parse(f.run(["inbox", "poll", "--limit", "1"]).stdout);
+    assert.deepEqual(globalFinal.events.map((row) => row.message_id), ["om_other_2"]);
+    assert.equal(globalFinal.pending_count, 0);
+    assert.equal(globalFinal.has_more, false);
 
     fs.writeFileSync(f.store.paths.inbox, '{"message_id":"om_bad"}\nnot-json\n');
     const deliveryBytes = fs.readFileSync(f.store.paths.runtimeDeliveries, "utf8");

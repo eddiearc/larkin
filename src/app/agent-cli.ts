@@ -489,7 +489,10 @@ export function runAgentCli(
           env.LARKIN_RUNTIME_OBSERVATION_GENERATION || "external");
       }
       const projected = projectInboxEvents(polled.envelopes);
+      const hasMore = polled.pendingCount > 0;
       emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
+        pending_count: polled.pendingCount, has_more: hasMore,
+        ...(hasMore ? { next_action: "Continue polling the same Inbox scope until has_more is false." } : {}),
         seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });
       return 0;
     }

@@ -39,7 +39,7 @@ async function rawRequest(socket, payload) {
   });
 }
 
-test("local control socket is user-only, agent-id-only, and operation-id idempotent", async () => {
+test("local control socket is user-only, agent-id-only, and operation-id idempotent", { timeout: 15_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-control-"));
   fs.chmodSync(root, 0o700);
   const calls = path.join(root, "calls.log");

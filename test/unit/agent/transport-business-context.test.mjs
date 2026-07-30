@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { formatFeishuError } from "../../../dist/agent/transport-business-context.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SOURCE = path.join(ROOT, "src/agent/transport-business-context.ts");
@@ -43,6 +44,13 @@ test("business context uses canonical AgentStateStore paths and centralizes loca
   assert.match(source, /path\.join\(paths\.root, ["']attachments\.json["']\)/);
   assert.match(source, /path\.join\(paths\.root, ["']transport\.log["']\)/);
   assert.match(fs.readFileSync(RUNTIME, "utf8"), /transport-business-context\.cjs/);
+});
+
+test("230027 is target membership guidance, not OAuth scope guidance", () => {
+  const formatted = formatFeishuError({ code: 230027, message: "target denied", missing_scopes: ["im:message"] }, "https://grant.invalid");
+  assert.match(formatted, /membership/);
+  assert.match(formatted, /target authorization/);
+  assert.doesNotMatch(formatted, /授权链接|grant\.invalid|补充.*scope/);
 });
 
 test("production context renders a display-name mention and preserves exact lark-cli ordering", () => {

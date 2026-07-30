@@ -12,6 +12,7 @@ import {
   controlSocketPath,
   initializeControlAuthority,
   requestAgentUpsert,
+  requestSessionReset,
 } from "../../../dist/app/local-control.mjs";
 import { inspectProcess, readProcessState } from "../../../dist/platform/process-state.mjs";
 
@@ -52,6 +53,13 @@ test("local control socket is user-only, agent-id-only, and operation-id idempot
   child.stderr.on("data", (chunk) => { output += chunk; });
   try {
     await waitForReady(child, () => output);
+    const restartControl = async () => {
+      const marker = path.join(root, "control-restarted");
+      fs.rmSync(marker, { force: true });
+      child.kill("SIGUSR2");
+      for (let index = 0; !fs.existsSync(marker) && index < 200; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(fs.existsSync(marker), true, output);
+    };
     const initialProcessState = readProcessState(root);
     assert.equal(initialProcessState.supervisor.state, "owned", JSON.stringify(initialProcessState.supervisor));
     assert.equal(initialProcessState.daemon.state, "owned", JSON.stringify(initialProcessState.daemon));
@@ -94,8 +102,98 @@ test("local control socket is user-only, agent-id-only, and operation-id idempot
       operationId: "operation_extra_1", agentId: "cli_newA1", authorization: authority.token, secret: "must-not-pass",
     });
     assert.equal(invalid.ok, false);
-    assert.match(invalid.error, /只允许 operationId\/agentId\/authorization/);
+    assert.match(invalid.error, /未知字段/);
     assert.doesNotMatch(output, /must-not-pass/);
+
+    const resetOperation = "operation_reset_123";
+    const reset = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", operationId: resetOperation, waitReadyMs: 10 });
+    const resetReplay = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", operationId: resetOperation, waitReadyMs: 10 });
+    assert.deepEqual(resetReplay, reset);
+    assert.equal(reset.readyForFreshScenario, true);
+    assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length, 1);
+    await restartControl();
+    const durableReplay = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", operationId: resetOperation, waitReadyMs: 10 });
+    assert.deepEqual(durableReplay, reset);
+    assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length, 1,
+      "durable replay must not execute a second reset after control-server restart");
+    const conflict = await requestSessionReset({ larkinHome: root, agentId: "cli_otherA1", operationId: resetOperation, waitReadyMs: 10 });
+    const conflictProjection = (operationId) => ({ ok: false, operationId, agentId: "cli_otherA1",
+      code: "operation_conflict", error: "operationId 已绑定其他 Agent 或操作", resetCommitted: false,
+      generationChanged: false, sessionChanged: false, turns: 0, runtimeReady: false, channelConnected: false,
+      reconnecting: false, pendingCount: 0, readyForFreshScenario: false, inboundObserved: false });
+    assert.deepEqual(conflict, conflictProjection(resetOperation), "completed conflict must not leak the original reset projection");
+    const inflightOperation = "operation_inflight_1";
+    const inflightOriginal = requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+      operationId: inflightOperation, waitReadyMs: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const inflightConflict = await requestSessionReset({ larkinHome: root, agentId: "cli_otherA1",
+      operationId: inflightOperation, waitReadyMs: 10 });
+    assert.deepEqual(inflightConflict, conflictProjection(inflightOperation),
+      "in-flight conflict must expose a complete neutral request-side reset projection");
+    assert.equal((await inflightOriginal).ok, true);
+    assert.equal(fs.lstatSync(path.join(root, "daemon-control-operations.json")).mode & 0o077, 0);
+    const unknown = await requestSessionReset({ larkinHome: root, agentId: "cli_unknownA1",
+      operationId: "operation_unknown_1", waitReadyMs: 10 });
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.resetCommitted, false);
+    assert.equal(unknown.code, "unknown_agent");
+
+    for (let index = 0; index < 6; index += 1) {
+      const churn = await requestAgentUpsert({ larkinHome: root, agentId: "cli_newA1", operationId: `operation_churn_${index}` });
+      assert.equal(churn.ok, true);
+    }
+    await restartControl();
+    assert.deepEqual(await requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+      operationId: resetOperation, waitReadyMs: 10 }), reset, "upsert churn cannot evict durable reset replay");
+
+    fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "server-control",
+      activeAgent: "cli_newA1", agents: { cli_newA1: { runtime: "codex", model: "gpt-5.2" } } }), { mode: 0o600 });
+    const deniedRuntimeCli = spawnSync(process.execPath, [path.join(ROOT, "dist/app/cli.mjs"), "session", "reset",
+      "--agent", "cli_newA1", "--json", "--operation-id", "operation_denied_cli_1"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: "cli_runtimeA1" },
+    });
+    assert.equal(deniedRuntimeCli.status, 1);
+    assert.equal(JSON.parse(deniedRuntimeCli.stdout).code, "user_authority_required");
+    const publicCli = spawnSync(process.execPath, [path.join(ROOT, "dist/app/cli.mjs"), "session", "reset",
+      "--agent", "cli_newA1", "--json", "--wait-ready", "1", "--operation-id", "operation_built_cli_1"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: root },
+    });
+    assert.equal(publicCli.status, 0, publicCli.stderr || publicCli.stdout);
+    assert.deepEqual(JSON.parse(publicCli.stdout), { ok: true, operation_id: "operation_built_cli_1", agent_id: "cli_newA1",
+      reset_committed: true, generation_changed: true, session_changed: true, turns: 0,
+      runtime_ready: true, channel_connected: true, reconnecting: false, pending_count: 0,
+      ready_for_fresh_scenario: true, inbound_observed: false });
+
+    for (let index = 0; index < 4; index += 1) {
+      const fill = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+        operationId: `operation_fill_${index}`, waitReadyMs: 10 });
+      assert.equal(fill.ok, true);
+    }
+    const callsAtFullLedger = fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length;
+    const preIntentFailure = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+      operationId: "operation_pre_fail_1", waitReadyMs: 10 });
+    assert.equal(preIntentFailure.resetCommitted, false);
+    assert.equal(preIntentFailure.code, "operation_intent_persist_failed");
+    assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length,
+      callsAtFullLedger, "failed intent persistence must prevent mutation");
+    assert.deepEqual(await requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+      operationId: resetOperation, waitReadyMs: 10 }), reset,
+    "failed full-ledger intent persistence must preserve the would-be-evicted live replay");
+    assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length,
+      callsAtFullLedger, "same-process replay of the would-be-evicted ID must not execute a second reset");
+
+    const postCommitFailure = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+      operationId: "operation_post_fail_1", waitReadyMs: 10 });
+    assert.equal(postCommitFailure.resetCommitted, true);
+    assert.equal(postCommitFailure.code, "operation_result_persist_failed");
+    const callsAfterPostCommit = fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length;
+    await restartControl();
+    const unknownPostCrash = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1",
+      operationId: "operation_post_fail_1", waitReadyMs: 10 });
+    assert.equal(unknownPostCrash.resetCommitted, null);
+    assert.equal(unknownPostCrash.code, "operation_outcome_unknown");
+    assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length,
+      callsAfterPostCommit, "restart replay of unresolved intent must never perform a second reset");
 
     const supervisorStatus = JSON.parse(fs.readFileSync(path.join(root, "supervisor-status.json"), "utf8"));
     const daemonStatus = JSON.parse(fs.readFileSync(path.join(root, "daemon-status.json"), "utf8"));

@@ -67,7 +67,8 @@ export class ProcessingEyeOrchestrator {
         const detail = (killed ? "超时(10s)被杀" : `exit=${code ?? "?"}`) + (head ? ` | ${head}` : "");
         const endpoint = apiPath.split("/").slice(-2).join("/");
         this.log(`larkApi ${method} ${endpoint} 失败 agent=${agent.name}: ${detail}`);
-        this.recordError(agent, `larkApi ${method} ${endpoint}: ${detail}`);
+        const processingReaction = /\/reactions(?:\/[^/]+)?$/.test(apiPath);
+        if (!processingReaction) this.recordError(agent, `larkApi ${method} ${endpoint}: ${detail}`);
       }
       callback?.(error, result);
     });

@@ -38,6 +38,28 @@ interface ChatMeta extends JsonObject { name: string; chat_mode: string; chat_ty
 interface FeishuReplyContext extends ReplyContext { thread_id?: string; chat_id?: string }
 interface AppInfo { name: string | null; description: string | null; avatarUrl: string | null }
 
+export function formatFeishuError(error: LarkError | null | undefined, grantLink: string | null = null): string | null {
+  if (!error) return null;
+  const parts: string[] = [];
+  if (error.message) parts.push(error.message);
+  if (error.missing_scopes?.length) parts.push(`missing_scopes: ${error.missing_scopes.join(", ")}`);
+  const tag = [error.type, error.subtype].filter(Boolean).join("/");
+  const meta = [tag, error.code != null ? `code ${error.code}` : "", error.log_id ? `log_id ${error.log_id}` : ""].filter(Boolean).join(" | ");
+  if (meta) parts.push(`(${meta})`);
+  let output = `飞书接口报错：${parts.join("　")}`;
+  const isScope = error.code !== 230027
+    && (error.subtype === "app_scope_not_applied" || error.code === 99991672 || Boolean(error.missing_scopes?.length));
+  if (error.code === 230027) {
+    output += "\n\n[系统提示] 请检查 bot/app 是否已加入目标 chat/thread（membership），并确认该目标允许当前 app 执行操作（target authorization）；这不是 OAuth scope apply 错误。";
+  }
+  if (isScope) {
+    output += grantLink
+      ? `\n\n授权链接（请 app owner 本人打开确认，约50分钟内有效，确认后即生效）：\n${grantLink}`
+      : "\n\n[系统提示] 当前没有可用的授权链接。请勿自行拼造或猜测任何 scope-apply / 开发者后台链接（那类链接对本应用无效）。只需如实说明缺少上述 scope、需有开发者后台权限者去补充；有可用链接时系统会在此处给出。";
+  }
+  return output;
+}
+
 export function createTransportBusinessContext(env: Env = process.env) {
   const { config } = larkinConfig.loadConfig(env);
   const selectedAgent = larkinConfig.selectAgent(config, env);
@@ -249,23 +271,7 @@ export function createTransportBusinessContext(env: Env = process.env) {
     } catch { return null; }
   };
   const feishuError = (result: LarkResult | null): string | null => {
-    const error = result?.error;
-    if (!error) return null;
-    const parts: string[] = [];
-    if (error.message) parts.push(error.message);
-    if (error.missing_scopes?.length) parts.push(`missing_scopes: ${error.missing_scopes.join(", ")}`);
-    const tag = [error.type, error.subtype].filter(Boolean).join("/");
-    const meta = [tag, error.code != null ? `code ${error.code}` : "", error.log_id ? `log_id ${error.log_id}` : ""].filter(Boolean).join(" | ");
-    if (meta) parts.push(`(${meta})`);
-    let output = `飞书接口报错：${parts.join("　")}`;
-    const isScope = error.subtype === "app_scope_not_applied" || error.code === 99991672 || error.code === 230027 || Boolean(error.missing_scopes?.length);
-    if (isScope) {
-      const link = liveGrantLink();
-      output += link
-        ? `\n\n授权链接（请 app owner 本人打开确认，约50分钟内有效，确认后即生效）：\n${link}`
-        : "\n\n[系统提示] 当前没有可用的授权链接。请勿自行拼造或猜测任何 scope-apply / 开发者后台链接（那类链接对本应用无效）。只需如实说明缺少上述 scope、需有开发者后台权限者去补充；有可用链接时系统会在此处给出。";
-    }
-    return output;
+    return formatFeishuError(result?.error, liveGrantLink());
   };
   const query = (requestPath: string, name: string): string | null => {
     try { return new URL(`http://x${requestPath.startsWith("/") ? requestPath : `/${requestPath}`}`).searchParams.get(name); }

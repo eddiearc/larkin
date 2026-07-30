@@ -8,10 +8,16 @@ import { readProcessState } from "../platform/process-state.js";
 import { currentProcessMetadata } from "../platform/process-inspect.cjs";
 import { processCommandToken } from "./internal-command.js";
 
-export interface AgentUpsertRequest { operationId: string; agentId: string; authorization: string }
+export interface AgentUpsertRequest { operationId: string; agentId: string; authorization: string; operation?: "session-reset"; waitReadyMs?: number }
 export type AgentUpsertOperation = Pick<AgentUpsertRequest, "operationId" | "agentId">;
 export interface AgentUpsertResponse { ok: boolean; operationId: string; agentId: string; error?: string; readiness?: RuntimeReadiness }
 export interface DashboardRecoveryResponse { ok: boolean; operationId: string; state?: string; error?: string }
+export interface SessionResetResponse {
+  ok: boolean; operationId: string; agentId: string; code?: string; error?: string;
+  resetCommitted: boolean | null; generationChanged: boolean; sessionChanged: boolean; turns: number;
+  runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+  readyForFreshScenario: boolean; inboundObserved: false; readiness?: RuntimeReadiness;
+}
 
 interface ProcessBinding { pid: number; processStartToken: string }
 interface SocketBinding { device: string; inode: string; owner: string; changeTimeNs: string }
@@ -87,8 +93,12 @@ function parseRequest(line: string): AgentUpsertRequest {
       || !AUTHORIZATION.test(String(value.authorization || ""))) {
     throw new Error("invalid agent upsert request");
   }
-  if (Object.keys(value).some((key) => !["operationId", "agentId", "authorization"].includes(key))) {
-    throw new Error("agent upsert request 只允许 operationId/agentId/authorization");
+  if (value.operation !== undefined && value.operation !== "session-reset") throw new Error("invalid agent control operation");
+  if (value.waitReadyMs !== undefined && (!Number.isSafeInteger(value.waitReadyMs) || value.waitReadyMs < 0 || value.waitReadyMs > 300_000)) {
+    throw new Error("invalid session reset waitReadyMs");
+  }
+  if (Object.keys(value).some((key) => !["operationId", "agentId", "authorization", "operation", "waitReadyMs"].includes(key))) {
+    throw new Error("agent control request 包含未知字段");
   }
   return value as AgentUpsertRequest;
 }
@@ -399,24 +409,85 @@ export function createAgentControlServer({
   larkinHome,
   authorityToken,
   upsert,
+  resetSession,
   maxRememberedOperations = 256,
+  maxRememberedResetOperations = 256,
+  operationLedgerWrite = atomicWritePrivateJson,
 }: {
   larkinHome: string;
   authorityToken: string;
   upsert(request: AgentUpsertOperation): Promise<void>;
+  resetSession?(request: AgentUpsertOperation & { waitReadyMs: number }): Promise<SessionResetResponse>;
   maxRememberedOperations?: number;
+  maxRememberedResetOperations?: number;
+  operationLedgerWrite?: (file: string, value: unknown) => void;
 }): { start(): Promise<void>; close(): Promise<void> } {
   let socket = "";
   let socketRoot = "";
   let socketIdentity: SocketBinding | null = null;
-  const completed = new Map<string, AgentUpsertResponse>();
-  const inFlight = new Map<string, { agentId: string; response: Promise<AgentUpsertResponse> }>();
+  type ControlOperation = "upsert" | "session-reset";
+  type Remembered = { agentId: string; operation: ControlOperation; response: AgentUpsertResponse | SessionResetResponse };
+  type DurableReset = { agentId: string; operation: "session-reset"; state: "intent" | "terminal"; response?: SessionResetResponse };
+  const completed = new Map<string, Remembered>();
+  const durableResets = new Map<string, DurableReset>();
+  const inFlight = new Map<string, { agentId: string; operation: ControlOperation; response: Promise<AgentUpsertResponse | SessionResetResponse> }>();
   const agentQueues = new Map<string, Promise<unknown>>();
+  const operationsFile = path.join(path.resolve(larkinHome), "daemon-control-operations.json");
+  const loadCompleted = (): void => {
+    let parsed: { version?: unknown; records?: unknown };
+    try {
+      const stat = fs.lstatSync(operationsFile);
+      if (!stat.isFile() || stat.isSymbolicLink()
+          || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) {
+        throw new Error("daemon control operation ledger 不安全");
+      }
+      parsed = JSON.parse(fs.readFileSync(operationsFile, "utf8")) as { version?: unknown; records?: unknown };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (parsed.version !== 1 || !Array.isArray(parsed.records)) throw new Error("daemon control operation ledger 无效");
+    for (const raw of parsed.records.slice(-maxRememberedResetOperations)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("daemon control operation ledger 无效");
+      const record = raw as { operationId?: unknown; agentId?: unknown; operation?: unknown; state?: unknown; response?: unknown };
+      if (!OPERATION_ID.test(String(record.operationId || "")) || !AGENT_ID.test(String(record.agentId || ""))
+          || record.operation !== "session-reset" || !["intent", "terminal"].includes(String(record.state || ""))
+          || (record.state === "terminal" && (!record.response || typeof record.response !== "object" || Array.isArray(record.response)))) {
+        throw new Error("daemon control operation ledger 无效");
+      }
+      const operationId = String(record.operationId);
+      const durable: DurableReset = { agentId: String(record.agentId), operation: "session-reset",
+        state: record.state as "intent" | "terminal", ...(record.response ? { response: record.response as SessionResetResponse } : {}) };
+      durableResets.set(operationId, durable);
+      if (durable.state === "terminal" && durable.response) completed.set(operationId, {
+        agentId: durable.agentId, operation: "session-reset", response: durable.response,
+      });
+    }
+  };
+  const persistDurableResets = (records = durableResets): void => operationLedgerWrite(operationsFile, { version: 1,
+    records: [...records].map(([operationId, record]) => ({ operationId, ...record })) });
+  const unknownOutcome = (operationId: string, agentId: string): SessionResetResponse => ({
+    ok: false, operationId, agentId, code: "operation_outcome_unknown",
+    error: "reset intent exists without a durable terminal result; inspect current Agent readiness before choosing a new operation id",
+    resetCommitted: null, generationChanged: false, sessionChanged: false, turns: 0,
+    runtimeReady: false, channelConnected: false, reconnecting: false, pendingCount: 0,
+    readyForFreshScenario: false, inboundObserved: false,
+  });
+  const operationConflict = (operationId: string, agentId: string,
+    operation: ControlOperation): AgentUpsertResponse | SessionResetResponse => {
+    const base = { ok: false, operationId, agentId, code: "operation_conflict",
+      error: "operationId 已绑定其他 Agent 或操作" };
+    if (operation !== "session-reset") return base;
+    return { ...base, resetCommitted: false, generationChanged: false, sessionChanged: false, turns: 0,
+      runtimeReady: false, channelConnected: false, reconnecting: false, pendingCount: 0,
+      readyForFreshScenario: false, inboundObserved: false };
+  };
   let server: net.Server | null = null;
   return {
     async start(): Promise<void> {
       fs.mkdirSync(larkinHome, { recursive: true, mode: 0o700 });
       assertSecureRoot(larkinHome);
+      loadCompleted();
       const authority = secureAuthority(larkinHome);
       if (!sameSecret(authority.token, authorityToken)) throw new Error("daemon control authorization 不匹配");
       const supervisor = readProcessState(larkinHome).supervisor;
@@ -457,26 +528,77 @@ export function createAgentControlServer({
                 error: "unauthorized control request" })}\n`);
               return;
             }
+            const requestedOperation: ControlOperation = request.operation ?? "upsert";
             const replay = completed.get(request.operationId);
             if (replay) {
-              if (replay.agentId !== request.agentId) {
-                connection.end(`${JSON.stringify({ ...replay, ok: false, error: "operationId 已绑定其他 Agent" })}\n`);
+              if (replay.agentId !== request.agentId || replay.operation !== requestedOperation) {
+                connection.end(`${JSON.stringify(operationConflict(request.operationId, request.agentId, requestedOperation))}\n`);
                 return;
               }
-              connection.end(`${JSON.stringify(replay)}\n`);
+              connection.end(`${JSON.stringify(replay.response)}\n`);
               return;
             }
             const existing = inFlight.get(request.operationId);
-            if (existing && existing.agentId !== request.agentId) {
-              connection.end(`${JSON.stringify({ ok: false, operationId: request.operationId, agentId: request.agentId,
-                error: "operationId 已绑定其他 Agent" })}\n`);
+            if (existing && (existing.agentId !== request.agentId || existing.operation !== requestedOperation)) {
+              connection.end(`${JSON.stringify(operationConflict(request.operationId, request.agentId, requestedOperation))}\n`);
               return;
             }
-            const execute = async (): Promise<AgentUpsertResponse> => {
+            if (requestedOperation === "session-reset") {
+              const durable = durableResets.get(request.operationId);
+              if (durable) {
+                if (durable.agentId !== request.agentId) {
+                  connection.end(`${JSON.stringify(operationConflict(request.operationId, request.agentId, requestedOperation))}\n`);
+                  return;
+                }
+                connection.end(`${JSON.stringify(durable.state === "terminal" && durable.response
+                  ? durable.response : unknownOutcome(request.operationId, request.agentId))}\n`);
+                return;
+              }
+              const candidateResets = new Map(durableResets);
+              while (candidateResets.size >= maxRememberedResetOperations) {
+                const terminal = [...candidateResets].find(([, record]) => record.state === "terminal");
+                if (!terminal) {
+                  connection.end(`${JSON.stringify({ ...unknownOutcome(request.operationId, request.agentId),
+                    resetCommitted: false, code: "operation_ledger_full", error: "reset operation ledger is full of unresolved intents" })}\n`);
+                  return;
+                }
+                candidateResets.delete(terminal[0]);
+              }
+              candidateResets.set(request.operationId, { agentId: request.agentId, operation: "session-reset", state: "intent" });
+              try { persistDurableResets(candidateResets); }
+              catch (error) {
+                connection.end(`${JSON.stringify({ ...unknownOutcome(request.operationId, request.agentId), resetCommitted: false,
+                  code: "operation_intent_persist_failed", error: error instanceof Error ? error.message : String(error) })}\n`);
+                return;
+              }
+              for (const operationId of durableResets.keys()) {
+                if (!candidateResets.has(operationId)) completed.delete(operationId);
+              }
+              durableResets.clear();
+              for (const [operationId, record] of candidateResets) durableResets.set(operationId, record);
+            }
+            const execute = async (): Promise<AgentUpsertResponse | SessionResetResponse> => {
               try {
+                if (request.operation === "session-reset") {
+                  if (!resetSession) throw new Error("session reset control unavailable");
+                  return await resetSession({ operationId: request.operationId, agentId: request.agentId, waitReadyMs: request.waitReadyMs ?? 30_000 });
+                }
                 await upsert({ operationId: request.operationId, agentId: request.agentId });
                 return { ok: true, operationId: request.operationId, agentId: request.agentId };
               } catch (error) {
+                if (request.operation === "session-reset") {
+                  const code = typeof (error as { code?: unknown }).code === "string"
+                    ? String((error as { code: string }).code)
+                    : error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable"
+                      ? "runtime_unavailable" : "reset_refused";
+                  return { ok: false, operationId: request.operationId, agentId: request.agentId, code,
+                    error: error instanceof Error ? error.message : String(error), resetCommitted: false,
+                    generationChanged: false, sessionChanged: false, turns: 0, runtimeReady: false,
+                    channelConnected: false, reconnecting: false,
+                    pendingCount: Number((error as { pendingCount?: unknown }).pendingCount) || 0,
+                    readyForFreshScenario: false, inboundObserved: false,
+                    ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) };
+                }
                 return { ok: false, operationId: request.operationId, agentId: request.agentId,
                   error: error instanceof Error ? error.message : String(error),
                   ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) };
@@ -490,13 +612,30 @@ export function createAgentControlServer({
                 if (agentQueues.get(request.agentId) === queued) agentQueues.delete(request.agentId);
               });
               agentQueues.set(request.agentId, queued);
-              inFlight.set(request.operationId, { agentId: request.agentId, response: operation });
+              inFlight.set(request.operationId, { agentId: request.agentId, operation: requestedOperation, response: operation });
             }
             const response = await operation;
             inFlight.delete(request.operationId);
-            completed.set(request.operationId, response);
-            while (completed.size > maxRememberedOperations) completed.delete(completed.keys().next().value as string);
-            connection.end(`${JSON.stringify(response)}\n`);
+            let finalResponse = response;
+            if (requestedOperation === "session-reset") {
+              const resetResponse = response as SessionResetResponse;
+              durableResets.set(request.operationId, { agentId: request.agentId, operation: "session-reset",
+                state: "terminal", response: resetResponse });
+              try { persistDurableResets(); }
+              catch (error) {
+                durableResets.set(request.operationId, { agentId: request.agentId, operation: "session-reset", state: "intent" });
+                finalResponse = { ...resetResponse, ok: false, readyForFreshScenario: false,
+                  code: "operation_result_persist_failed",
+                  error: `reset result could not be persisted: ${error instanceof Error ? error.message : String(error)}` };
+              }
+            }
+            completed.set(request.operationId, { agentId: request.agentId, operation: requestedOperation, response: finalResponse });
+            while ([...completed.values()].filter((record) => record.operation === "upsert").length > maxRememberedOperations) {
+              const oldestUpsert = [...completed].find(([, record]) => record.operation === "upsert");
+              if (!oldestUpsert) break;
+              completed.delete(oldestUpsert[0]);
+            }
+            connection.end(`${JSON.stringify(finalResponse)}\n`);
           })();
         });
       });
@@ -577,17 +716,19 @@ export async function requestDashboardRecovery({
   throw lastError instanceof Error ? lastError : new Error("supervisor control unavailable");
 }
 
-export async function requestAgentUpsert({
+async function requestAgentControl<T>({
   larkinHome,
   agentId,
   operationId = crypto.randomUUID(),
   timeoutMs = 30_000,
+  request = {},
 }: {
   larkinHome: string;
   agentId: string;
   operationId?: string;
   timeoutMs?: number;
-}): Promise<AgentUpsertResponse> {
+  request?: Pick<AgentUpsertRequest, "operation" | "waitReadyMs">;
+}): Promise<T> {
   const { supervisor, daemon } = readProcessState(larkinHome);
   if (supervisor.state !== "owned") throw new Error(`supervisor control ownership=${supervisor.state}（${supervisor.reason}）`);
   if (daemon.state !== "owned") throw new Error(`daemon control ownership=${daemon.state}（${daemon.reason}）`);
@@ -598,23 +739,50 @@ export async function requestAgentUpsert({
   if (!stat.isSocket() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
       || (stat.mode & 0o077) !== 0) throw new Error("daemon control socket 不安全");
-  return await new Promise<AgentUpsertResponse>((resolve, reject) => {
+  return await new Promise<T>((resolve, reject) => {
     const client = net.createConnection(socket);
-    const timer = setTimeout(() => { client.destroy(); reject(new Error("agent upsert control timeout")); }, timeoutMs);
+    const timer = setTimeout(() => { client.destroy(); reject(new Error("agent control timeout")); }, timeoutMs);
     let input = "";
     client.setEncoding("utf8");
     client.once("error", (error) => { clearTimeout(timer); reject(error); });
-    client.once("connect", () => client.write(`${JSON.stringify({ operationId, agentId, authorization: authority.token })}\n`));
+    client.once("connect", () => client.write(`${JSON.stringify({ operationId, agentId, authorization: authority.token, ...request })}\n`));
     client.on("data", (chunk) => {
       input += chunk;
       const newline = input.indexOf("\n");
       if (newline < 0) return;
       clearTimeout(timer);
       client.end();
-      try { resolve(JSON.parse(input.slice(0, newline)) as AgentUpsertResponse); }
+      try { resolve(JSON.parse(input.slice(0, newline)) as T); }
       catch (error) { reject(error); }
     });
   });
+}
+
+export async function requestAgentUpsert(input: {
+  larkinHome: string;
+  agentId: string;
+  operationId?: string;
+  timeoutMs?: number;
+}): Promise<AgentUpsertResponse> {
+  return requestAgentControl<AgentUpsertResponse>(input);
+}
+
+export async function requestSessionReset({
+  larkinHome,
+  agentId,
+  operationId = crypto.randomUUID(),
+  waitReadyMs = 30_000,
+}: {
+  larkinHome: string;
+  agentId: string;
+  operationId?: string;
+  waitReadyMs?: number;
+}): Promise<SessionResetResponse> {
+  const response = await requestAgentControl<SessionResetResponse>({
+    larkinHome, agentId, operationId, timeoutMs: Math.max(1_000, waitReadyMs + 1_000),
+    request: { operation: "session-reset", waitReadyMs },
+  });
+  return response;
 }
 
 export function cleanupStaleAgentControlSocket(larkinHome: string, expectedToken: string): "removed" | "absent" {

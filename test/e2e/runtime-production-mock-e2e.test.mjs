@@ -19,14 +19,143 @@ function callbackValue(card, index = 0) {
 }
 
 class FakeNativeSession {
-  listeners = new Set(); prompts = []; busyInputs = []; sessionId;
+  listeners = new Set(); prompts = []; busyInputs = []; closes = []; sessionId;
   constructor(runtime) { this.sessionId = `${runtime}-session`; }
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   emit(event) { for (const listener of this.listeners) listener(event); }
   async prompt(input) { this.prompts.push(input); return { status: "accepted", inputId: input.inputId }; }
   async busyInput(input) { this.busyInputs.push(input); return { status: "accepted", inputId: input.inputId }; }
-  async cancel() {} async close() {}
+  async cancel() {} async close(reason) { this.closes.push(reason); }
 }
+
+test("production HostShell fresh reset blocks issue-14 backlog, then preserves durable state and other Agents", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-reset-"));
+  const ids = ["cli_resetMockA1", "cli_resetOtherA1"];
+  const stores = new Map(ids.map((id) => [id, createAgentStateStore(root, id)]));
+  const created = new Map(ids.map((id) => [id, []]));
+  let onCreate = () => {};
+  const adapter = { id: "codex", capabilities: {}, async createSession(input) {
+    const list = created.get(input.agentId);
+    const session = new FakeNativeSession("codex");
+    session.sessionId = `${input.agentId}-session-${list.length + 1}`;
+    list.push(session);
+    onCreate(input, session);
+    return session;
+  } };
+  const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: (id) => stores.get(id), assertOfficialCliReady: () => {} });
+  const agents = ids.map((agentId) => ({ agentId, name: agentId, runtime: "codex", model: "mock",
+    feishuAppId: agentId, feishuProfile: agentId, feishuAppSecret: "fixture-secret",
+    feishuDomain: "https://open.feishu.cn",
+    larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir: path.join(root, "agents", agentId),
+    stateDir: path.join(root, "state", "agents", agentId) }));
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "server-reset",
+    activeAgent: ids[0], agents: Object.fromEntries(ids.map((id) => [id, { runtime: "codex", model: "mock" }])) }), { mode: 0o600 });
+  fs.mkdirSync(path.join(root, "bots"), { recursive: true });
+  fs.writeFileSync(path.join(root, "bots", `${ids[0]}.json`), JSON.stringify({ fixture: "credential-preserved" }), { mode: 0o600 });
+  const host = createHostShell({ env: { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-reset",
+    LARKIN_AGENTS_CONFIG: JSON.stringify(agents), LARKIN_INBOUND_DROUGHT_SEC: "0" }, runtimeHost,
+    stateStoreForImpl: (_root, id) => stores.get(id),
+    managedCliForAgent: testManagedCli, eventSourceStartDelayMs: 60_000,
+    channelPackage: { createLarkChannel() { throw new Error("event source must not start in reset fixture"); } } });
+  try {
+    await host.start();
+    const connectedAt = new Date().toISOString();
+    for (const [id, store] of stores) store.writeJson("status", { ...store.readJson("status", {}), connectedAt, connectedVia: "mock" });
+    const target = stores.get(ids[0]);
+    target.appendNdjson("conversation", { text: "preserve transcript" });
+    target.writeJson("pendingReact", { items: [{ msgId: "om_eye", reactionId: "react_eye" }] });
+    const issue14Bodies = ["consumed-body-must-not-replay", "remaining-body-must-stay-pending"];
+    const issue14Receipts = [];
+    for (const [index, messageId] of ["om_reset_partial_1", "om_reset_partial_2"].entries()) {
+      const envelope = { message_id: messageId, target: "chat:oc_reset", content: issue14Bodies[index] };
+      target.appendNdjson("inbox", envelope);
+      issue14Receipts.push(await runtimeHost.deliver(ids[0], envelope));
+    }
+    assert.deepEqual(issue14Receipts.map((receipt) => receipt.status), ["accepted", "accepted"]);
+    assert.equal(created.get(ids[0])[0].prompts.length + created.get(ids[0])[0].busyInputs.length, 2,
+      "production RuntimeHost prompt/busy-input paths own both issue-14 deliveries before any poll");
+    const transcriptBefore = target.readNdjson("conversation");
+    const otherStateBefore = stores.get(ids[1]).readJson("agentState", {});
+    const configBefore = fs.readFileSync(path.join(root, "config.json"));
+    const credentialBefore = fs.readFileSync(path.join(root, "bots", `${ids[0]}.json`));
+    const nonSessionBefore = target.readJson("pendingReact", {});
+    await assert.rejects(host.resetSession("cli_unknownA1"), (error) => error.code === "unknown_agent");
+    await assert.rejects(host.resetSession(ids[0]), (error) => error.code === "agent_busy");
+    assert.equal(created.get(ids[0]).length, 1, "backlog refusal occurs before fresh Runtime creation");
+    assert.equal(target.readNdjson("inbox").length, 2, "no-poll reset refusal preserves the full canonical backlog");
+    const partial = target.pollInbox({ limit: 1 });
+    assert.deepEqual(partial.envelopes.map((row) => row.message_id), ["om_reset_partial_1"]);
+    assert.deepEqual(partial.consumedDeliveryIds, [issue14Receipts[0].deliveryId]);
+    assert.deepEqual(target.readNdjson("inbox").map((row) => row.content), [issue14Bodies[1]],
+      "partial consumption preserves the unpolled canonical backlog body");
+    await assert.rejects(host.resetSession(ids[0]), (error) => error.code === "agent_busy");
+    assert.equal(target.readNdjson("inbox").length, 1, "partial-poll reset refusal preserves the remaining backlog");
+    const drained = target.pollInbox();
+    assert.deepEqual(drained.envelopes.map((row) => row.message_id), ["om_reset_partial_2"]);
+    assert.deepEqual(drained.consumedDeliveryIds, [issue14Receipts[1].deliveryId]);
+    created.get(ids[0])[0].emit({ type: "turn-end", turnId: "issue-14-drained" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const ledgerBefore = target.readJson("runtimeDeliveries", {});
+    const reset = await host.resetSession(ids[0]);
+    assert.equal(reset.readyForFreshScenario, true);
+    assert.equal(reset.inboundObserved, false);
+    assert.equal(created.get(ids[0]).length, 2);
+    assert.deepEqual(created.get(ids[0])[0].closes, ["fresh session reset committed"]);
+    assert.deepEqual(created.get(ids[1])[0].closes, []);
+    assert.deepEqual(target.readNdjson("conversation"), transcriptBefore);
+    assert.deepEqual(target.readJson("pendingReact", {}), nonSessionBefore);
+    assert.deepEqual(target.readJson("runtimeDeliveries", {}), ledgerBefore);
+    assert.deepEqual(fs.readFileSync(path.join(root, "config.json")), configBefore);
+    assert.deepEqual(fs.readFileSync(path.join(root, "bots", `${ids[0]}.json`)), credentialBefore);
+    assert.deepEqual(stores.get(ids[1]).readJson("agentState", {}), otherStateBefore);
+    assert.equal(target.readNdjson("inbox").length, 0);
+    assert.equal(created.get(ids[0])[1].prompts.length, 0, "consumed issue-14 ledger rows are not replayed into the fresh session");
+    assert.equal(issue14Bodies.some((body) => JSON.stringify(created.get(ids[0])[1].prompts).includes(body)), false,
+      "the fresh session never receives either drained body");
+
+    const originalResetSession = runtimeHost.resetSession.bind(runtimeHost);
+    runtimeHost.resetSession = async (agentId) => {
+      const result = await originalResetSession(agentId);
+      const status = target.readJson("status", {});
+      target.writeJson("status", { ...status, runtimeReadiness: { runtime: "codex", state: "ready" },
+        session: { ...(status.session || {}), turns: 1 } });
+      return result;
+    };
+    const contaminated = await host.resetSession(ids[0], 0);
+    assert.equal(contaminated.resetCommitted, true);
+    assert.equal(contaminated.turns, 1);
+    assert.equal(contaminated.runtimeReady, true);
+    assert.equal(contaminated.readyForFreshScenario, false);
+    assert.equal(contaminated.code, "fresh_scenario_contaminated");
+    runtimeHost.resetSession = originalResetSession;
+
+    onCreate = (input) => {
+      if (input.agentId === ids[0]) target.writeJson("status", { ...target.readJson("status", {}), reconnectingAt: new Date().toISOString() });
+    };
+    const reconnectRace = await host.resetSession(ids[0], 0);
+    assert.equal(reconnectRace.resetCommitted, true);
+    assert.equal(reconnectRace.readyForFreshScenario, false);
+    assert.equal(reconnectRace.code, "reset_timeout");
+    target.writeJson("status", { ...target.readJson("status", {}), reconnectedAt: new Date(Date.now() + 1).toISOString() });
+    onCreate = () => {};
+
+    const originalWriteJson = target.writeJson.bind(target);
+    target.writeJson = (key, value) => {
+      if (key === "agentState") throw new Error("injected agent-state persistence failure");
+      return originalWriteJson(key, value);
+    };
+    const persistenceFailure = await host.resetSession(ids[0], 0);
+    assert.equal(persistenceFailure.resetCommitted, true);
+    assert.equal(persistenceFailure.readyForFreshScenario, false);
+    assert.equal(persistenceFailure.code, "state_persistence_failed");
+    target.writeJson = originalWriteJson;
+  } finally {
+    await host.shutdown("reset Mock E2E complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("member parser accepts the real lark-cli 1.0.79 get/bots shapes", () => {
   assert.deepEqual(memberNamesFromPayloads([

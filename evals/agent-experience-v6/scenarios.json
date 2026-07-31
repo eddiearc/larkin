@@ -1,6 +1,6 @@
 {
   "dataset": "agent-experience-v6",
-  "version": 5,
+  "version": 6,
   "model": {
     "selection": "deterministic-trace",
     "standing_prompt_version": "larkin-standing-v6"
@@ -10,7 +10,7 @@
   },
   "grader": {
     "name": "agent-experience-v6-trace-grader",
-    "version": 5,
+    "version": 6,
     "threshold": 1.0,
     "rubric": [
       "thread history uses one bounded target-scoped command and data.messages",
@@ -18,7 +18,8 @@
       "failed reads do not fall back to memory or produce false success",
       "verbatim punctuation reaches the provider without shell interpolation",
       "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
-      "tool-sourced verbatim text flows from one canonical scoped read through native --jq into one guarded --content reply without model rewriting or extra discovery",
+      "tool-sourced verbatim text uses exactly one exclusive source selector and flows from one canonical scoped read through native --jq into one guarded --content reply without preview, selector switching, model rewriting, or extra discovery",
+      "after Inbox poll, a known-thread latest-human task makes one model tool call containing one thread read plus one reply, while a known-message-ID task makes one model tool call containing one mget plus one reply",
       "thread-latest-human and message-ID sources preserve Unicode, whitespace, and normalization in the complete text JSON document",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
@@ -179,6 +180,10 @@
         "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
         "exact_text": "引用：“抢到”  保留空格",
         "exact_source_dataflow": {
+          "source_selector": "thread",
+          "post_poll_model_tool_calls": 1,
+          "total_source_reads": 1,
+          "composite_internal_commands": 2,
           "source_command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == \"user\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"引用：\" + .content)}' --json",
           "source_target": "thread:oc_eval_verbatim:omt_eval_verbatim",
           "source_read_path": "data.messages",
@@ -208,6 +213,8 @@
           "source_read_count": 1,
           "source_exit_code": 0,
           "source_field": "content",
+          "source_selector": "thread",
+          "composite_internal_commands": 2,
           "source_msg_type": "text",
           "literal_prefix": "引用：",
           "source_text": "“抢到”  保留空格",
@@ -239,6 +246,10 @@
         "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
         "exact_text": "作者's：消息原文：“保持”  不改",
         "exact_source_dataflow": {
+          "source_selector": "message",
+          "post_poll_model_tool_calls": 1,
+          "total_source_reads": 1,
+          "composite_internal_commands": 2,
           "source_command": "larkin im +messages-mget --message-ids om_eval_mget_source --no-reactions --jq '(first(.data.messages[] | select(.message_id == \"om_eval_mget_source\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"作者'\\''s：\" + .content)}' --json",
           "source_target": "message:om_eval_mget_source",
           "source_read_path": "data.messages",
@@ -268,6 +279,8 @@
           "source_read_count": 1,
           "source_exit_code": 0,
           "source_field": "content",
+          "source_selector": "message",
+          "composite_internal_commands": 2,
           "source_msg_type": "post",
           "literal_prefix": "作者's：",
           "source_text": "消息原文：“保持”  不改",

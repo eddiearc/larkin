@@ -91,7 +91,7 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   const badToolSourcedReply = gradeAgentExperienceV6Trace(
     byId["tool-sourced-verbatim-thread-reply"], normalizedAndRediscovered);
   assert.deepEqual(new Set(badToolSourcedReply.failures.map((item) => item.rule)), new Set([
-    "bounded_calls", "tool_call_count", "redundant_discovery_read", "exact_text",
+    "bounded_calls", "tool_call_count", "redundant_discovery_read", "exclusive_source_selector", "exact_text",
   ]));
 
   for (const hiddenAction of [
@@ -102,6 +102,193 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
     hiddenDiscovery.splice(1, 0, hiddenAction);
     assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], hiddenDiscovery)
       .failures.some((item) => item.rule === "trace_action_schema"), true, hiddenAction.action);
+  }
+
+  const threadScenario = byId["tool-sourced-verbatim-thread-reply"];
+  const messageScenario = byId["tool-sourced-verbatim-message-reply"];
+  const threadPreview = {
+    action: "tool", command: "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
+    exit_code: 0, read_path: "data.messages",
+  };
+  const useSource = (write, sourceCommand, sourceTarget, sourceSelector) => {
+    write.command = `larkin im +messages-reply --message-id ${write.message_id} --content "$(${sourceCommand})" --json`;
+    write.source_command = sourceCommand;
+    write.source_target = sourceTarget;
+    write.source_selector = sourceSelector;
+    write.composite_internal_commands = 2;
+  };
+  const mgetForThread = messageScenario.expected.exact_source_dataflow.source_command
+    .replaceAll("om_eval_mget_source", "om_eval_discovered")
+    .replace("作者'\\''s：", "引用：");
+  const threadForMessage = threadScenario.expected.exact_source_dataflow.source_command
+    .replaceAll("omt_eval_verbatim", "omt_eval_wrong")
+    .replace("引用：", "作者'\\''s：");
+
+  const previewThenMget = structuredClone(threadScenario.trace);
+  previewThenMget.splice(1, 0, threadPreview);
+  useSource(previewThenMget[2], mgetForThread, "message:om_eval_discovered", "message");
+  const previewThenMgetGrade = gradeAgentExperienceV6Trace(threadScenario, previewThenMget);
+  assert.equal(previewThenMgetGrade.failures.some((item) => item.rule === "exact_text"), false);
+  assert.equal(previewThenMgetGrade.failures.some((item) => item.rule === "exclusive_source_selector"), true);
+
+  const threadUsingMget = structuredClone(threadScenario.trace);
+  useSource(threadUsingMget[1], mgetForThread, "message:om_eval_discovered", "message");
+  assert.equal(gradeAgentExperienceV6Trace(threadScenario, threadUsingMget)
+    .failures.some((item) => item.rule === "exclusive_source_selector"), true);
+
+  const messageUsingThread = structuredClone(messageScenario.trace);
+  useSource(messageUsingThread[1], threadForMessage, "thread:oc_eval_wrong:omt_eval_wrong", "thread");
+  assert.equal(gradeAgentExperienceV6Trace(messageScenario, messageUsingThread)
+    .failures.some((item) => item.rule === "exclusive_source_selector"), true);
+
+  const crossTargetThread = structuredClone(threadScenario);
+  const crossTargetSource = crossTargetThread.expected.exact_source_dataflow.source_command
+    .replaceAll("omt_eval_verbatim", "omt_other");
+  const crossTargetWrite = `larkin im +messages-reply --message-id om_eval_verbatim --content "$(${crossTargetSource})" --json`;
+  crossTargetThread.expected.exact_source_dataflow.source_target = "thread:oc_other:omt_other";
+  crossTargetThread.expected.exact_source_dataflow.source_command = crossTargetSource;
+  crossTargetThread.expected.ordered_commands[1] = crossTargetWrite;
+  crossTargetThread.expected.reply_anchor.write_command = crossTargetWrite;
+  crossTargetThread.trace[1].source_target = "thread:oc_other:omt_other";
+  crossTargetThread.trace[1].source_command = crossTargetSource;
+  crossTargetThread.trace[1].command = crossTargetWrite;
+  assert.equal(gradeAgentExperienceV6Trace(crossTargetThread, crossTargetThread.trace)
+    .failures.some((item) => item.rule === "exclusive_source_selector"), true,
+  "thread source target must match the polled target");
+
+  const twoThreadReads = structuredClone(threadScenario.trace);
+  twoThreadReads.splice(1, 0, threadPreview);
+  assert.equal(gradeAgentExperienceV6Trace(threadScenario, twoThreadReads)
+    .failures.some((item) => item.rule === "exclusive_source_selector"), true);
+
+  const wrongInternalCount = structuredClone(threadScenario.trace);
+  wrongInternalCount[1].composite_internal_commands = 3;
+  assert.equal(gradeAgentExperienceV6Trace(threadScenario, wrongInternalCount)
+    .failures.some((item) => item.rule === "exclusive_source_selector"), true);
+
+  const hiddenInternalPreview = structuredClone(threadScenario);
+  const previewPrefix = "larkin im +chat-messages-list --chat-id oc_eval_verbatim --order desc --page-size 1 --no-reactions --json >/dev/null; ";
+  const originalSourceCommand = hiddenInternalPreview.expected.exact_source_dataflow.source_command;
+  const previewedSourceCommand = `${previewPrefix}${originalSourceCommand}`;
+  const previewedWriteCommand = `larkin im +messages-reply --message-id om_eval_verbatim --content "$(${previewedSourceCommand})" --json`;
+  hiddenInternalPreview.expected.exact_source_dataflow.source_command = previewedSourceCommand;
+  hiddenInternalPreview.expected.ordered_commands[1] = previewedWriteCommand;
+  hiddenInternalPreview.expected.reply_anchor.write_command = previewedWriteCommand;
+  hiddenInternalPreview.trace[1].source_command = previewedSourceCommand;
+  hiddenInternalPreview.trace[1].command = previewedWriteCommand;
+  const hiddenInternalPreviewGrade = gradeAgentExperienceV6Trace(hiddenInternalPreview, hiddenInternalPreview.trace);
+  assert.equal(hiddenInternalPreviewGrade.failures.some((item) => item.rule === "exact_text"), false);
+  assert.equal(hiddenInternalPreviewGrade.failures.some((item) => item.rule === "exclusive_source_selector"), true);
+
+  for (const suffix of [
+    "; lark''in im +chat-messages-''list --chat-id oc_eval_verbatim --json >/dev/null",
+    "; $LARKIN_BIN im +chat-messages-''list --chat-id oc_eval_verbatim --json >/dev/null",
+  ]) {
+    const tokenBypass = structuredClone(threadScenario);
+    const bypassedSourceCommand = `${tokenBypass.expected.exact_source_dataflow.source_command}${suffix}`;
+    const bypassedWriteCommand = `larkin im +messages-reply --message-id om_eval_verbatim --content "$(${bypassedSourceCommand})" --json`;
+    tokenBypass.expected.exact_source_dataflow.source_command = bypassedSourceCommand;
+    tokenBypass.expected.ordered_commands[1] = bypassedWriteCommand;
+    tokenBypass.expected.reply_anchor.write_command = bypassedWriteCommand;
+    tokenBypass.trace[1].source_command = bypassedSourceCommand;
+    tokenBypass.trace[1].command = bypassedWriteCommand;
+    assert.equal(gradeAgentExperienceV6Trace(tokenBypass, tokenBypass.trace)
+      .failures.some((item) => item.rule === "exclusive_source_selector"), true, suffix);
+  }
+
+  const literalLarkinPrefix = structuredClone(threadScenario);
+  const originalPrefix = literalLarkinPrefix.expected.exact_source_dataflow.literal_prefix;
+  const replacementPrefix = "larkin 引用：";
+  const prefixSourceCommand = literalLarkinPrefix.expected.exact_source_dataflow.source_command
+    .replace(JSON.stringify(originalPrefix), JSON.stringify(replacementPrefix));
+  const prefixWriteCommand = `larkin im +messages-reply --message-id om_eval_verbatim --content "$(${prefixSourceCommand})" --json`;
+  literalLarkinPrefix.expected.exact_source_dataflow.literal_prefix = replacementPrefix;
+  literalLarkinPrefix.expected.exact_source_dataflow.source_command = prefixSourceCommand;
+  literalLarkinPrefix.expected.exact_text = replacementPrefix + literalLarkinPrefix.trace[1].source_text;
+  literalLarkinPrefix.expected.ordered_commands[1] = prefixWriteCommand;
+  literalLarkinPrefix.expected.reply_anchor.write_command = prefixWriteCommand;
+  literalLarkinPrefix.trace[1].literal_prefix = replacementPrefix;
+  literalLarkinPrefix.trace[1].source_command = prefixSourceCommand;
+  literalLarkinPrefix.trace[1].command = prefixWriteCommand;
+  literalLarkinPrefix.trace[1].content_argument = JSON.stringify({ text: literalLarkinPrefix.expected.exact_text });
+  literalLarkinPrefix.trace[1].transported_text = literalLarkinPrefix.expected.exact_text;
+  assert.equal(gradeAgentExperienceV6Trace(literalLarkinPrefix, literalLarkinPrefix.trace).passed, true,
+    "literal prefix containing larkin text");
+
+  for (const disguisedExecution of [
+    { action: "final", command: threadPreview.command, read_path: "data.messages", exit_code: 0 },
+    { action: "final", tool_name: "read", command: "read /skills/lark-im/SKILL.md",
+      resource_path: "/skills/lark-im/SKILL.md", exit_code: 0 },
+  ]) {
+    const disguisedTrace = structuredClone(threadScenario.trace);
+    disguisedTrace.splice(1, 0, disguisedExecution);
+    const disguisedGrade = gradeAgentExperienceV6Trace(threadScenario, disguisedTrace);
+    assert.equal(disguisedGrade.failures.some((item) => item.rule === "exact_text"), false);
+    assert.equal(disguisedGrade.failures.some((item) => item.rule === "trace_action_schema"), true,
+      `${disguisedExecution.command}`);
+  }
+
+  for (const [label, mutate] of [
+    ["tool unknown field", (trace) => { trace[0].executed_command = threadPreview.command; }],
+    ["provider unknown field", (trace) => { trace[1].executed_command = threadPreview.command; }],
+    ["provider nested result", (trace) => { trace[1].result = { command: threadPreview.command }; }],
+    ["final visible_failure type", (trace) => {
+      trace.splice(1, 0, { action: "final", visible_failure: threadPreview.command });
+    }],
+    ["final reused_memory type", (trace) => {
+      trace.splice(1, 0, { action: "final", reused_memory: { command: "read /skills/lark-im/SKILL.md" } });
+    }],
+  ]) {
+    const disguisedTrace = structuredClone(threadScenario.trace);
+    mutate(disguisedTrace);
+    const disguisedGrade = gradeAgentExperienceV6Trace(threadScenario, disguisedTrace);
+    if (!label.startsWith("provider")) {
+      assert.equal(disguisedGrade.failures.some((item) => item.rule === "exact_text"), false, label);
+    }
+    assert.equal(disguisedGrade.failures.some((item) => item.rule === "trace_action_schema"), true, label);
+  }
+
+  for (const malformedEvent of [null, "primitive", []]) {
+    const malformedTrace = structuredClone(threadScenario.trace);
+    malformedTrace.splice(1, 0, malformedEvent);
+    let malformedGrade;
+    assert.doesNotThrow(() => { malformedGrade = gradeAgentExperienceV6Trace(threadScenario, malformedTrace); });
+    assert.equal(malformedGrade.failures.some((item) => item.rule === "trace_action_schema"), true,
+      String(malformedEvent));
+    assert.equal(malformedGrade.failures.some((item) => item.rule === "exact_text"), false,
+      String(malformedEvent));
+  }
+
+  for (const malformedTrace of [null, "primitive", 7]) {
+    let malformedGrade;
+    assert.doesNotThrow(() => { malformedGrade = gradeAgentExperienceV6Trace(threadScenario, malformedTrace); });
+    assert.equal(malformedGrade.failures.some((item) => item.rule === "trace_action_schema"), true,
+      `trace=${String(malformedTrace)}`);
+  }
+
+  for (const [label, mutate] of [
+    ["content key drift", (scenario) => {
+      scenario.expected.exact_source_dataflow.content_key = "foo";
+      scenario.trace[1].content_argument = JSON.stringify({ foo: scenario.expected.exact_text });
+    }],
+    ["source exit drift", (scenario) => {
+      scenario.expected.exact_source_dataflow.source_exit_code = 2;
+      scenario.trace[1].source_exit_code = 2;
+    }],
+    ["source path drift", (scenario) => {
+      scenario.expected.exact_source_dataflow.source_read_path = "wrong.path";
+      scenario.trace[1].source_read_path = "wrong.path";
+    }],
+    ["substitution mode drift", (scenario) => {
+      scenario.expected.exact_source_dataflow.shell_substitution = "unquoted";
+      scenario.trace[1].shell_substitution = "unquoted";
+    }],
+  ]) {
+    const structuralDrift = structuredClone(threadScenario);
+    mutate(structuralDrift);
+    const driftGrade = gradeAgentExperienceV6Trace(structuralDrift, structuralDrift.trace);
+    assert.equal(driftGrade.failures.some((item) => item.rule === "exact_text"), false, label);
+    assert.equal(driftGrade.failures.some((item) => item.rule === "exact_source_dataflow"), true, label);
   }
 
   for (const id of ["tool-sourced-verbatim-thread-reply", "tool-sourced-verbatim-message-reply"]) {

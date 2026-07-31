@@ -7,10 +7,10 @@ function nonempty(value, label) {
 
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (value.dataset !== "agent-experience-v6" || value.version !== 5) throw new Error("eval dataset/version mismatch");
+  if (value.dataset !== "agent-experience-v6" || value.version !== 6) throw new Error("eval dataset/version mismatch");
   if (value.model?.standing_prompt_version !== "larkin-standing-v6") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
-  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 5 || value.grader.threshold !== 1) {
+  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 6 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");
   }
   if (!Array.isArray(value.grader.rubric) || value.grader.rubric.length < 6) throw new Error("eval rubric is incomplete");
@@ -25,6 +25,15 @@ export function loadAgentExperienceV6Eval(file) {
     if (!scenario.expected || !Number.isSafeInteger(scenario.expected.max_tool_calls)) throw new Error(`${label}.expected.max_tool_calls is required`);
     if (!Number.isSafeInteger(scenario.expected.provider_writes)) throw new Error(`${label}.expected.provider_writes is required`);
     if (!Array.isArray(scenario.trace)) throw new Error(`${label}.trace must be an array`);
+    const dataflow = scenario.expected.exact_source_dataflow;
+    if (dataflow && (!["thread", "message"].includes(dataflow.source_selector)
+      || dataflow.post_poll_model_tool_calls !== 1 || dataflow.total_source_reads !== 1
+      || dataflow.composite_internal_commands !== 2 || dataflow.content_key !== "text"
+      || dataflow.source_read_path !== "data.messages" || dataflow.source_read_count !== 1
+      || dataflow.source_exit_code !== 0 || dataflow.source_field !== "content"
+      || dataflow.shell_substitution !== "quoted")) {
+      throw new Error(`${label}.expected.exact_source_dataflow selector/count contract is invalid`);
+    }
   }
   return value;
 }
@@ -32,13 +41,52 @@ export function loadAgentExperienceV6Eval(file) {
 export function gradeAgentExperienceV6Trace(scenario, trace) {
   const failures = [];
   const fail = (rule, detail) => failures.push({ rule, detail });
+  const rawTrace = Array.isArray(trace) ? trace : [];
+  if (!Array.isArray(trace)) fail("trace_action_schema", "trace must be an array");
   const allowedActions = new Set(["tool", "provider_write", "final"]);
-  const invalidActions = trace.filter((event) => !event || !allowedActions.has(event.action));
+  const allowedFields = {
+    tool: new Set(["action", "command", "exit_code", "message_id", "provider_reached", "read_path",
+      "resource_path", "stderr", "stdout_documents", "subtype", "tool_name"]),
+    provider_write: new Set(["action", "command", "composite_internal_commands", "content_argument", "exit_code",
+      "literal_prefix", "message_id", "result", "shell_interpolation", "shell_substitution", "source_command",
+      "source_exit_code", "source_field", "source_msg_type", "source_read_count", "source_read_path",
+      "source_selector", "source_target", "source_text", "stderr", "stdout_documents", "transported_text"]),
+    final: new Set(["action", "visible_failure", "reused_memory"]),
+  };
+  const optionalFieldsHaveType = (event, fields, type) => fields.every((field) =>
+    !Object.hasOwn(event, field) || typeof event[field] === type);
+  const optionalIntegerFields = (event, fields) => fields.every((field) =>
+    !Object.hasOwn(event, field) || Number.isInteger(event[field]));
+  const validResult = (result) => result === undefined || (result && typeof result === "object" && !Array.isArray(result)
+    && Object.keys(result).length === 4
+    && ["ok", "committed", "verified", "cursor_advanced"].every((field) => typeof result[field] === "boolean"));
+  const validActionFields = (event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event) || !allowedActions.has(event.action)) return false;
+    if (Object.keys(event).some((field) => !allowedFields[event.action].has(field))) return false;
+    if (event.action === "final") {
+      return optionalFieldsHaveType(event, ["visible_failure", "reused_memory"], "boolean");
+    }
+    if (typeof event.command !== "string" || !event.command || !Number.isInteger(event.exit_code)) return false;
+    if (event.action === "tool") {
+      return optionalFieldsHaveType(event,
+        ["message_id", "read_path", "resource_path", "stderr", "subtype", "tool_name"], "string")
+        && optionalFieldsHaveType(event, ["provider_reached"], "boolean")
+        && optionalIntegerFields(event, ["stdout_documents"]);
+    }
+    return optionalFieldsHaveType(event, ["content_argument", "literal_prefix", "message_id", "shell_substitution",
+      "source_command", "source_field", "source_msg_type", "source_read_path", "source_selector", "source_target",
+      "source_text", "stderr", "transported_text"], "string")
+      && optionalFieldsHaveType(event, ["shell_interpolation"], "boolean")
+      && optionalIntegerFields(event, ["composite_internal_commands", "source_exit_code", "source_read_count", "stdout_documents"])
+      && validResult(event.result);
+  };
+  const invalidActions = rawTrace.filter((event) => !validActionFields(event));
   if (invalidActions.length) {
-    fail("trace_action_schema", `unrecognized trace actions: ${invalidActions.map((event) => event?.action ?? "missing").join(", ")}`);
+    fail("trace_action_schema", `unrecognized or disguised trace actions: ${invalidActions.map((event) => event?.action ?? "missing").join(", ")}`);
   }
-  const tools = trace.filter((event) => event.action === "tool" || event.action === "provider_write");
-  const writes = trace.filter((event) => event.action === "provider_write");
+  const events = rawTrace.filter((event) => validActionFields(event));
+  const tools = events.filter((event) => event.action === "tool" || event.action === "provider_write");
+  const writes = events.filter((event) => event.action === "provider_write");
   if (tools.length > scenario.expected.max_tool_calls) fail("bounded_calls", `${tools.length} > ${scenario.expected.max_tool_calls}`);
   if (Number.isSafeInteger(scenario.expected.exact_tool_calls) && tools.length !== scenario.expected.exact_tool_calls) {
     fail("tool_call_count", `${tools.length} != ${scenario.expected.exact_tool_calls}`);
@@ -86,14 +134,51 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
       fail("redundant_discovery_read", fragment);
     }
   }
-  if (scenario.expected.response_path && !trace.some((event) => event.read_path === scenario.expected.response_path)) {
+  if (scenario.expected.response_path && !events.some((event) => event.read_path === scenario.expected.response_path)) {
     fail("stable_response_path", scenario.expected.response_path);
   }
-  const final = trace.findLast((event) => event.action === "final");
+  const final = events.findLast((event) => event.action === "final");
   if (scenario.expected.visible_failure === true && final?.visible_failure !== true) fail("visible_failure", "missing");
   if (scenario.expected.reused_memory === false && final?.reused_memory !== false) fail("no_memory_fallback", "memory use was not rejected");
   if (scenario.expected.exact_source_dataflow) {
     const expected = scenario.expected.exact_source_dataflow;
+    const shellSafePrefix = JSON.stringify(expected.literal_prefix).replaceAll("'", "'\\''");
+    const threadTarget = /^thread:[A-Za-z0-9_-]+:([A-Za-z0-9_-]+)$/.exec(expected.source_target);
+    const messageTarget = /^message:(om_[A-Za-z0-9_]+)$/.exec(expected.source_target);
+    const canonicalSourceCommand = expected.source_selector === "thread" && threadTarget
+      ? `larkin im +threads-messages-list --thread ${threadTarget[1]} --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == "user" and (.content | type == "string"))) // error("missing exact text source")) | {text: (${shellSafePrefix} + .content)}' --json`
+      : expected.source_selector === "message" && messageTarget
+        ? `larkin im +messages-mget --message-ids ${messageTarget[1]} --no-reactions --jq '(first(.data.messages[] | select(.message_id == "${messageTarget[1]}" and (.content | type == "string"))) // error("missing exact text source")) | {text: (${shellSafePrefix} + .content)}' --json`
+        : null;
+    const pollCommand = scenario.expected.reply_anchor?.poll_command;
+    const pollTargetMatch = /^larkin inbox poll --target (chat:[A-Za-z0-9_-]+|thread:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+) --limit 1$/.exec(pollCommand || "");
+    const pollTarget = pollTargetMatch?.[1] || null;
+    const sourceTargetBound = expected.source_selector === "thread"
+      ? pollTarget === expected.source_target
+      : messageTarget !== null && pollTarget !== null;
+    const pollIndex = tools.findIndex((tool) => tool.action === "tool" && tool.command === pollCommand);
+    const postPollTools = pollIndex >= 0 ? tools.slice(pollIndex + 1) : [];
+    const observedWrite = writes[0];
+    const canonicalWriteCommand = canonicalSourceCommand
+      ? `larkin im +messages-reply --message-id ${observedWrite?.message_id} --content "$(${canonicalSourceCommand})" --json`
+      : null;
+    const exactCompositeShape = canonicalSourceCommand !== null
+      && expected.source_command === canonicalSourceCommand
+      && observedWrite?.source_command === canonicalSourceCommand
+      && observedWrite?.command === canonicalWriteCommand;
+    const exclusiveSelector = observedWrite?.source_selector === expected.source_selector
+      && exactCompositeShape
+      && sourceTargetBound
+      && tools.length === 2
+      && pollIndex === 0
+      && postPollTools.length === expected.post_poll_model_tool_calls
+      && postPollTools[0] === observedWrite
+      && expected.total_source_reads === 1
+      && observedWrite?.composite_internal_commands === expected.composite_internal_commands
+      && expected.composite_internal_commands === 2;
+    if (!exclusiveSelector) {
+      fail("exclusive_source_selector", "source selector switched, previewed, or exceeded the one-read/one-write composite budget");
+    }
     const candidates = writes.filter((event) => event.source_command === expected.source_command
       && event.source_target === expected.source_target && event.source_read_path === expected.source_read_path);
     const event = candidates[0];
@@ -107,19 +192,20 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
       ? scenario.expected.exact_text.slice(expected.literal_prefix.length)
       : null;
     const exactContent = content && typeof content === "object" && !Array.isArray(content)
-      && Object.keys(content).length === 1 && content[expected.content_key] === scenario.expected.exact_text;
-    const quotedSubstitution = event?.shell_substitution === expected.shell_substitution
+      && Object.keys(content).length === 1 && content.text === scenario.expected.exact_text;
+    const quotedSubstitution = event?.shell_substitution === "quoted"
       && String(event.command || "").includes(`--content "$(${expected.source_command})"`);
     const unsafeShell = /(?:\beval\b|\becho\b|\bmktemp\b|2>&1|\/tmp\/)/.test(String(event?.command || ""));
     const normalizedSchema = expected.source_field === "content" && event?.source_field === "content"
       && String(expected.source_command).includes(".content") && !String(expected.source_command).includes(".body");
-    const shellSafePrefix = JSON.stringify(expected.literal_prefix).replaceAll("'", "'\\''");
     const safelyEmbeddedPrefix = String(expected.source_command).includes(shellSafePrefix);
-    if (candidates.length !== 1 || event?.literal_prefix !== expected.literal_prefix
+    const fixedStructuralContract = expected.content_key === "text" && expected.source_read_path === "data.messages"
+      && expected.source_read_count === 1 && expected.source_exit_code === 0 && expected.source_field === "content"
+      && expected.shell_substitution === "quoted";
+    if (!fixedStructuralContract || candidates.length !== 1 || event?.literal_prefix !== expected.literal_prefix
       || event?.source_text !== exactSource || event?.source_msg_type !== expected.source_msg_type
-      || event?.source_read_count !== expected.source_read_count
-      || event?.source_exit_code !== expected.source_exit_code
-      || sourceOccurrences !== expected.source_read_count || !normalizedSchema || !safelyEmbeddedPrefix
+      || event?.source_read_path !== "data.messages" || event?.source_read_count !== 1
+      || event?.source_exit_code !== 0 || sourceOccurrences !== 1 || !normalizedSchema || !safelyEmbeddedPrefix
       || !exactContent || !quotedSubstitution || unsafeShell) {
       fail("exact_source_dataflow", "exact source did not flow through one safe quoted JSON projection");
     }
@@ -132,18 +218,18 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     fail("shell_interpolation", "exact text used shell interpolation");
   }
   if (scenario.expected.poll_before_write === true) {
-    const pollIndex = trace.findIndex((event) => event.action === "tool" && String(event.command || "").startsWith("larkin inbox poll "));
-    const writeIndex = trace.findIndex((event) => event.action === "provider_write");
+    const pollIndex = events.findIndex((event) => event.action === "tool" && String(event.command || "").startsWith("larkin inbox poll "));
+    const writeIndex = events.findIndex((event) => event.action === "provider_write");
     if (pollIndex < 0 || writeIndex < 0 || pollIndex >= writeIndex) fail("poll_before_write", `${pollIndex} !< ${writeIndex}`);
   }
   if (scenario.expected.precommit_retry) {
     const expected = scenario.expected.precommit_retry;
-    const precommitAttempts = trace
+    const precommitAttempts = events
       .map((event, index) => ({ event, index }))
       .filter(({ event }) => event.action === "tool" && typeof event.subtype === "string");
     const precommit = precommitAttempts[0]?.event;
     const precommitIndex = precommitAttempts[0]?.index ?? -1;
-    const writeIndex = trace.findIndex((event) => event.action === "provider_write");
+    const writeIndex = events.findIndex((event) => event.action === "provider_write");
     const allowed = Array.isArray(expected.allowed_subtypes) ? expected.allowed_subtypes : [];
     if (precommitAttempts.length !== 1 || !precommit || precommitIndex >= writeIndex
       || !Number.isInteger(precommit.exit_code) || precommit.exit_code === 0
@@ -152,7 +238,7 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
       fail("safe_precommit_retry", "retry was not proven pre-commit with the same canonical command");
     }
   }
-  if (scenario.expected.stay_silent === true && trace.length !== 0) fail("exclusive_silence", "excluded Agent acted");
+  if (scenario.expected.stay_silent === true && events.length !== 0) fail("exclusive_silence", "excluded Agent acted");
   if (scenario.expected.committed_result) {
     const event = writes[0];
     const expected = scenario.expected.committed_result;

@@ -11,7 +11,8 @@ import {
   parseStableVersion,
 } from "../versioning.mjs";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const ROOT = path.resolve(process.env.RELEASE_SOURCE_ROOT || TOOL_ROOT);
 const SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const RELEASE_STATES = new Set(["absent", "draft", "published"]);
@@ -167,28 +168,53 @@ function tagTarget(repo, tag) {
   throw new Error(`${tag} exceeds the supported annotated-tag depth`);
 }
 
-function releaseState(repo, tag) {
-  const release = queryJson(
-    `repos/${repo}/releases/tags/${tag}`,
-    "{tagName: .tag_name, isDraft: .draft}",
-    { allowNotFound: true },
-  );
-  if (release === null) return "absent";
-  if (release.tagName !== tag) throw new Error(`GitHub Release tag mismatch: ${release.tagName}`);
-  return release.isDraft ? "draft" : "published";
-}
-
-function publishedVersions(repo) {
+function releaseInventory(repo) {
   const result = gh([
     "api",
     "--method", "GET",
     "--paginate",
     `repos/${repo}/releases?per_page=100`,
-    "--jq", ".[] | select(.draft == false) | .tag_name",
+    "--jq", ".[] | {id: .id, tagName: .tag_name, isDraft: .draft}",
   ]);
-  return String(result.stdout || "")
+  const releases = String(result.stdout || "")
     .split(/\r?\n/)
-    .map((tag) => tag.trim())
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        throw new Error("GitHub Releases list returned invalid JSON");
+      }
+    });
+
+  const byTag = new Map();
+  for (const release of releases) {
+    if (!Number.isSafeInteger(release.id) || release.id <= 0) {
+      throw new Error("GitHub Releases list returned an invalid release id");
+    }
+    if (typeof release.tagName !== "string" || release.tagName.length === 0 || typeof release.isDraft !== "boolean") {
+      throw new Error(`GitHub Releases list returned invalid metadata for release ${release.id}`);
+    }
+    const previous = byTag.get(release.tagName);
+    if (previous !== undefined) {
+      throw new Error(`duplicate GitHub Releases for ${release.tagName}: ${previous} and ${release.id}`);
+    }
+    byTag.set(release.tagName, release.id);
+  }
+  return releases;
+}
+
+function releaseState(repo, tag) {
+  const release = releaseInventory(repo).find((candidate) => candidate.tagName === tag);
+  if (release === undefined) return "absent";
+  return release.isDraft ? "draft" : "published";
+}
+
+function publishedVersions(repo) {
+  return releaseInventory(repo)
+    .filter((release) => !release.isDraft)
+    .map((release) => release.tagName)
     .filter((tag) => /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag))
     .map((tag) => tag.slice(1));
 }
@@ -240,11 +266,20 @@ function appendOutputs(values) {
 }
 
 async function resolveCommand() {
-  if (process.env.RELEASE_EVENT_NAME !== "push") throw new Error("release intent requires a push event");
+  const eventName = String(process.env.RELEASE_EVENT_NAME || "");
+  if (eventName !== "push" && eventName !== "workflow_dispatch") {
+    throw new Error("release intent requires a push or workflow_dispatch event");
+  }
   const repo = repository();
   const ref = String(process.env.RELEASE_REF || "");
   const eventSha = checkedSha(process.env.RELEASE_SOURCE_SHA, "release event SHA");
   const checkedOutSha = checkedSha(git(["rev-parse", "HEAD"]).stdout.trim(), "checked-out HEAD");
+  if (eventName === "workflow_dispatch" && eventSha !== checkedOutSha) {
+    throw new Error(`workflow dispatch source ${eventSha} does not match checked-out HEAD ${checkedOutSha}`);
+  }
+  if (eventName === "workflow_dispatch" && !ref.startsWith("refs/tags/")) {
+    throw new Error("workflow dispatch must use tag recovery mode");
+  }
   const sourceSha = ref.startsWith("refs/tags/") ? checkedOutSha : eventSha;
   assertImmutableMainSource(sourceSha);
 
@@ -286,7 +321,24 @@ async function resolveCommand() {
   });
 }
 
-function createExactTag(repo, tag, sourceSha) {
+async function waitForExactTagVisibility(repo, tag, sourceSha, creation) {
+  const attempts = boundedEnvironmentInteger("RELEASE_TAG_VISIBILITY_ATTEMPTS", 15, 1, 120);
+  const delayMs = boundedEnvironmentInteger("RELEASE_TAG_VISIBILITY_DELAY_MS", 2_000, 0, 60_000);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const target = tagTarget(repo, tag);
+    if (target === sourceSha) return;
+    if (target !== null) throw new Error(`${tag} became visible at another source commit ${target}`);
+    if (attempt === attempts) break;
+    process.stderr.write(`waiting for exact tag ${tag} visibility (${attempt}/${attempts})\n`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  const diagnostic = creation.status === 0
+    ? "reference creation succeeded"
+    : String(creation.stderr || creation.stdout || `reference creation exited ${creation.status}`).trim().slice(0, 800);
+  throw new Error(`exact tag ${tag} was not visible after ${attempts} attempts: ${diagnostic}`);
+}
+
+async function createExactTag(repo, tag, sourceSha) {
   const existing = tagTarget(repo, tag);
   if (existing !== null) {
     if (existing !== sourceSha) throw new Error(`${tag} already points at another source commit`);
@@ -302,22 +354,34 @@ function createExactTag(repo, tag, sourceSha) {
     "-f", `ref=refs/tags/${tag}`,
     "-f", `sha=${sourceSha}`,
   ], { allowFailure: true });
-  const target = tagTarget(repo, tag);
-  if (target !== sourceSha) {
-    const diagnostic = String(created.stderr || created.stdout || "no diagnostic").trim().slice(0, 800);
-    throw new Error(`failed to create immutable tag ${tag}: ${diagnostic}`);
-  }
+  await waitForExactTagVisibility(repo, tag, sourceSha, created);
   return created.status === 0;
 }
 
-function prepareCommand() {
+async function waitForReleaseVisibility(repo, tag, creation) {
+  const attempts = boundedEnvironmentInteger("RELEASE_VISIBILITY_ATTEMPTS", 15, 1, 120);
+  const delayMs = boundedEnvironmentInteger("RELEASE_VISIBILITY_DELAY_MS", 2_000, 0, 60_000);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const state = releaseState(repo, tag);
+    if (state !== "absent") return state;
+    if (attempt === attempts) break;
+    process.stderr.write(`waiting for release ${tag} visibility (${attempt}/${attempts})\n`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  const diagnostic = creation.status === 0
+    ? "draft creation succeeded"
+    : String(creation.stderr || creation.stdout || `draft creation exited ${creation.status}`).trim().slice(0, 800);
+  throw new Error(`release ${tag} was not visible after ${attempts} attempts: ${diagnostic}`);
+}
+
+async function prepareCommand() {
   const repo = repository();
   const tag = String(process.env.RELEASE_TAG || "");
   const sourceSha = checkedSha(process.env.RELEASE_SOURCE_SHA, "release source SHA");
   if (!tag.startsWith("v")) throw new Error(`invalid release tag: ${tag || "missing"}`);
   assertReleaseTag(manifestVersionAt(sourceSha), tag);
   assertImmutableMainSource(sourceSha);
-  createExactTag(repo, tag, sourceSha);
+  await createExactTag(repo, tag, sourceSha);
 
   let state = releaseState(repo, tag);
   if (state === "published") {
@@ -333,11 +397,7 @@ function prepareCommand() {
       "--generate-notes",
       "--title", `Larkin ${tag}`,
     ], { allowFailure: true });
-    state = releaseState(repo, tag);
-    if (state === "absent") {
-      const diagnostic = String(created.stderr || created.stdout || "no diagnostic").trim().slice(0, 800);
-      throw new Error(`failed to create draft release ${tag}: ${diagnostic}`);
-    }
+    state = await waitForReleaseVisibility(repo, tag, created);
   }
   appendOutputs({ should_publish: state === "draft" });
 }
@@ -355,7 +415,7 @@ function assertDraftCommand() {
 if (import.meta.main) {
   const command = process.argv[2];
   if (command === "resolve") await resolveCommand();
-  else if (command === "prepare") prepareCommand();
+  else if (command === "prepare") await prepareCommand();
   else if (command === "assert-draft") assertDraftCommand();
   else throw new Error("usage: bun scripts/release/intent.mjs <resolve|prepare|assert-draft>");
 }

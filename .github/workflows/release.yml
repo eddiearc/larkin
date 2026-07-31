@@ -8,12 +8,22 @@ on:
       - "v*.*.*"
     paths:
       - package.json
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to recover (for example, v0.2.35)
+        required: true
+        type: string
+      source_sha:
+        description: Full immutable source commit SHA on main
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-release-${{ github.sha }}
+  group: publish-release-${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -27,12 +37,32 @@ jobs:
       should_create_tag: ${{ steps.intent.outputs.should_create_tag }}
       should_publish: ${{ steps.intent.outputs.should_publish }}
     steps:
+      - name: Check out release workflow tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tooling
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
+          path: release-source
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Require default-branch workflow code for recovery
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$WORKFLOW_REF" = "refs/heads/$DEFAULT_BRANCH" || {
+            echo "Refusing recovery: workflow_dispatch must run from the default branch" >&2
+            exit 1
+          }
 
       - name: Set up pinned Bun
         uses: oven-sh/setup-bun@v2
@@ -44,12 +74,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_EVENT_NAME: ${{ github.event_name }}
-          RELEASE_REF: ${{ github.ref }}
-          RELEASE_SOURCE_SHA: ${{ github.sha }}
+          RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          RELEASE_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
           RELEASE_BEFORE_SHA: ${{ github.event.before }}
+          RELEASE_SOURCE_ROOT: ${{ github.workspace }}/release-source
           RELEASE_PREDECESSOR_ATTEMPTS: "120"
           RELEASE_PREDECESSOR_DELAY_MS: "15000"
-        run: bun scripts/release/intent.mjs resolve
+        run: bun "$GITHUB_WORKSPACE/release-tooling/scripts/release/intent.mjs" resolve
 
   validate:
     needs: resolve-release
@@ -130,10 +161,19 @@ jobs:
     outputs:
       should_publish: ${{ steps.prepare.outputs.should_publish }}
     steps:
+      - name: Check out release workflow tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tooling
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-release.outputs.source_sha }}
+          path: release-source
           fetch-depth: 0
           persist-credentials: false
 
@@ -148,7 +188,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
           RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
-        run: bun scripts/release/intent.mjs prepare
+          RELEASE_SOURCE_ROOT: ${{ github.workspace }}/release-source
+          RELEASE_TAG_VISIBILITY_ATTEMPTS: "15"
+          RELEASE_TAG_VISIBILITY_DELAY_MS: "2000"
+          RELEASE_VISIBILITY_ATTEMPTS: "15"
+          RELEASE_VISIBILITY_DELAY_MS: "2000"
+        run: bun "$GITHUB_WORKSPACE/release-tooling/scripts/release/intent.mjs" prepare
 
   build:
     needs:
@@ -171,11 +216,23 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+    defaults:
+      run:
+        working-directory: release-source
     steps:
+      - name: Check out release workflow tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tooling
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-release.outputs.source_sha }}
+          path: release-source
           fetch-depth: 0
           persist-credentials: false
 
@@ -212,8 +269,9 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
           RELEASE_TARGET: ${{ matrix.target }}
           RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_ROOT: ${{ github.workspace }}/release-source
         run: |
-          bun scripts/release/intent.mjs assert-draft
+          bun "$GITHUB_WORKSPACE/release-tooling/scripts/release/intent.mjs" assert-draft
           manifest="artifacts/release/release-manifest-${RELEASE_TARGET}.json"
           mv artifacts/release/release-manifest.json "$manifest"
           gh release upload "$RELEASE_TAG" \
@@ -229,11 +287,23 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    defaults:
+      run:
+        working-directory: release-source
     steps:
+      - name: Check out release workflow tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tooling
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-release.outputs.source_sha }}
+          path: release-source
           fetch-depth: 0
           persist-credentials: false
 
@@ -268,8 +338,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
           RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_ROOT: ${{ github.workspace }}/release-source
         run: |
-          bun scripts/release/intent.mjs assert-draft
+          bun "$GITHUB_WORKSPACE/release-tooling/scripts/release/intent.mjs" assert-draft
           gh release upload "$RELEASE_TAG" \
             artifacts/release/SHA256SUMS artifacts/release/release-manifest.json \
             artifacts/release/LICENSE artifacts/release/THIRD_PARTY_NOTICES.txt \

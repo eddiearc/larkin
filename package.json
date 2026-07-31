@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.2.41",
+  "version": "0.2.42",
   "private": true,
   "larkinPackageRole": "development-source-checkout",
   "packageManager": "bun@1.3.14",

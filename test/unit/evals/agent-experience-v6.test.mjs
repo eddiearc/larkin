@@ -19,6 +19,7 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "exact-text-punctuation",
     "exact-reply-no-help",
     "precommit-exact-reply-safe-retry",
+    "tool-sourced-verbatim-thread-reply",
     "exclusive-other-agent-silence",
     "committed-unverified-no-retry",
   ]);
@@ -32,7 +33,7 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
   assert.equal(result.results.every((item) => item.passed), true);
 });
 
-test("grader rejects chat-wide fallback, stderr merging, false success, text mutation, excluded replies, and duplicate retry", () => {
+test("grader rejects fallback, false success, text mutation, redundant discovery, unsafe retry, and duplicate writes", () => {
   const byId = Object.fromEntries(DATASET.scenarios.map((scenario) => [scenario.id, scenario]));
   const badThread = gradeAgentExperienceV6Trace(byId["target-scoped-thread-read"], [{
     action: "tool", command: "larkin im +chat-messages-list --chat-id oc_eval_thread 2>&1", exit_code: 0,
@@ -77,7 +78,47 @@ test("grader rejects chat-wide fallback, stderr merging, false success, text mut
   assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], committedRetry)
     .failures.some((item) => item.rule === "safe_precommit_retry"), true);
 
-  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "precommit-exact-reply-safe-retry"]) {
+  const normalizedAndRediscovered = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+  normalizedAndRediscovered.splice(1, 0,
+    { action: "tool", tool_name: "read", resource_path: "/skills/lark-im/SKILL.md", command: "read /skills/lark-im/SKILL.md", exit_code: 0 },
+    { action: "tool", tool_name: "read", resource_path: "/skills/lark-im/references/messages.md", command: "read /skills/lark-im/references/messages.md", exit_code: 0 });
+  normalizedAndRediscovered.at(-1).transported_text = '引用："抢到" 保留空格';
+  const badToolSourcedReply = gradeAgentExperienceV6Trace(
+    byId["tool-sourced-verbatim-thread-reply"], normalizedAndRediscovered);
+  assert.deepEqual(new Set(badToolSourcedReply.failures.map((item) => item.rule)), new Set([
+    "bounded_calls", "tool_call_count", "redundant_discovery_read", "exact_text",
+  ]));
+
+  const changedToolSource = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+  changedToolSource[1].source_text = '引用："抢到" 保留空格';
+  changedToolSource[2].transported_text = changedToolSource[1].source_text;
+  assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], changedToolSource)
+    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text"]));
+
+  const sourceMovedToPoll = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+  sourceMovedToPoll[0].source_text = byId["tool-sourced-verbatim-thread-reply"].expected.exact_text;
+  sourceMovedToPoll[1].source_text = '引用："抢到" 保留空格';
+  assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], sourceMovedToPoll)
+    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text"]));
+
+  const reorderedToolSourcedReply = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+  [reorderedToolSourcedReply[1], reorderedToolSourcedReply[2]] = [reorderedToolSourcedReply[2], reorderedToolSourcedReply[1]];
+  assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], reorderedToolSourcedReply)
+    .failures.some((item) => item.rule === "canonical_order"), true);
+
+  for (const index of [0, 1]) {
+    const failedCanonicalRead = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+    failedCanonicalRead[index].exit_code = 2;
+    assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], failedCanonicalRead)
+      .failures.some((item) => item.rule === "canonical_result"), true, `canonical read ${index}`);
+  }
+
+  const mismatchedReplyAnchor = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+  mismatchedReplyAnchor[0].message_id = "om_other";
+  assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], mismatchedReplyAnchor)
+    .failures.some((item) => item.rule === "reply_anchor"), true);
+
+  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "precommit-exact-reply-safe-retry", "tool-sourced-verbatim-thread-reply"]) {
     const failedWrite = structuredClone(byId[id].trace);
     failedWrite.find((event) => event.action === "provider_write").exit_code = 9;
     assert.equal(gradeAgentExperienceV6Trace(byId[id], failedWrite)

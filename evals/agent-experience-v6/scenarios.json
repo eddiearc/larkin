@@ -1,6 +1,6 @@
 {
   "dataset": "agent-experience-v6",
-  "version": 2,
+  "version": 3,
   "model": {
     "selection": "deterministic-trace",
     "standing_prompt_version": "larkin-standing-v6"
@@ -10,7 +10,7 @@
   },
   "grader": {
     "name": "agent-experience-v6-trace-grader",
-    "version": 2,
+    "version": 3,
     "threshold": 1.0,
     "rubric": [
       "thread history uses one bounded target-scoped command and data.messages",
@@ -18,6 +18,7 @@
       "failed reads do not fall back to memory or produce false success",
       "verbatim punctuation reaches the provider without shell interpolation",
       "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
+      "tool-sourced verbatim text preserves Unicode and whitespace byte-for-byte through the known poll, scoped-history, and reply path without skill/reference rediscovery",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
     ]
@@ -151,6 +152,57 @@
           "action": "provider_write",
           "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
           "transported_text": "收到：“A/B”",
+          "shell_interpolation": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "tool-sourced-verbatim-thread-reply",
+      "task": "Poll the known thread target, read its canonical scoped history once, then reply with the returned text byte-for-byte without rediscovering the known recipes.",
+      "expected": {
+        "max_tool_calls": 3,
+        "exact_tool_calls": 3,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "ordered_commands": [
+          "larkin inbox poll --target thread:oc_eval_verbatim:omt_eval_verbatim --limit 1",
+          "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
+          "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json"
+        ],
+        "ordered_command_exit_code": 0,
+        "reply_anchor": {
+          "poll_command": "larkin inbox poll --target thread:oc_eval_verbatim:omt_eval_verbatim --limit 1",
+          "write_command": "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json"
+        },
+        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
+        "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
+        "exact_text": "引用：“抢到”  保留空格",
+        "exact_text_source": {
+          "command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
+          "read_path": "data.messages"
+        },
+        "shell_interpolation": false
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target thread:oc_eval_verbatim:omt_eval_verbatim --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_verbatim"
+        },
+        {
+          "action": "tool",
+          "command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
+          "exit_code": 0,
+          "read_path": "data.messages",
+          "source_text": "引用：“抢到”  保留空格"
+        },
+        {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json",
+          "message_id": "om_eval_verbatim",
+          "transported_text": "引用：“抢到”  保留空格",
           "shell_interpolation": false,
           "exit_code": 0
         }

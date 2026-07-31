@@ -7,10 +7,10 @@ function nonempty(value, label) {
 
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (value.dataset !== "agent-experience-v6" || value.version !== 3) throw new Error("eval dataset/version mismatch");
+  if (value.dataset !== "agent-experience-v6" || value.version !== 4) throw new Error("eval dataset/version mismatch");
   if (value.model?.standing_prompt_version !== "larkin-standing-v6") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
-  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 3 || value.grader.threshold !== 1) {
+  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 4 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");
   }
   if (!Array.isArray(value.grader.rubric) || value.grader.rubric.length < 6) throw new Error("eval rubric is incomplete");
@@ -100,6 +100,10 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     }
     if (typeof sourceText !== "string" || !writes.some((event) => event.transported_text === sourceText)) {
       fail("exact_text", "provider text changed from the exact source");
+    }
+    if (scenario.expected.argv_text_from_source === true
+      && (typeof sourceText !== "string" || !writes.some((event) => event.argv_text === sourceText))) {
+      fail("argv_source_binding", "planned argv literal changed from the exact source before execution");
     }
   }
   if (scenario.expected.shell_interpolation === false && writes.some((event) => event.shell_interpolation !== false)) {

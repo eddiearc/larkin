@@ -107,6 +107,9 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /fail visibly.*remembered.*hard-coded text/i);
   assert.match(prompt.content, /exact text.*one literal `--text` argument/i);
   assert.match(prompt.content, /tool result.*byte-for-byte.*Unicode.*punctuation.*whitespace.*content/i);
+  assert.match(prompt.content, /before.*tool-sourced.*write.*internally compare.*planned literal.*original tool result.*Unicode code point/i);
+  assert.match(prompt.content, /U\+201C.*U\+201D.*(?:never|must not).*ASCII.*U\+0022/i);
+  assert.match(prompt.content, /model-internal.*preflight.*(?:does not|must not).*tool call/i);
   assert.match(prompt.content, /never.*command substitution.*`eval`.*unquoted variable/i);
   assert.match(prompt.content,
     /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);

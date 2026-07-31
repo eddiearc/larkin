@@ -93,13 +93,40 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   changedToolSource[1].source_text = '引用："抢到" 保留空格';
   changedToolSource[2].transported_text = changedToolSource[1].source_text;
   assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], changedToolSource)
-    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text"]));
+    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text", "argv_source_binding"]));
 
   const sourceMovedToPoll = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
   sourceMovedToPoll[0].source_text = byId["tool-sourced-verbatim-thread-reply"].expected.exact_text;
   sourceMovedToPoll[1].source_text = '引用："抢到" 保留空格';
   assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], sourceMovedToPoll)
-    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text"]));
+    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text", "argv_source_binding"]));
+
+  for (const [label, argvText] of [
+    ["ASCII quotes", '引用："抢到"  保留空格'],
+    ["collapsed whitespace", "引用：“抢到” 保留空格"],
+  ]) {
+    const changedPlannedArgv = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+    changedPlannedArgv[2].argv_text = argvText;
+    assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], changedPlannedArgv)
+      .failures.some((item) => item.rule === "argv_source_binding"), true, label);
+  }
+
+  const normalizationScenario = structuredClone(byId["tool-sourced-verbatim-thread-reply"]);
+  const decomposedText = "Cafe\u0301";
+  const normalizedText = decomposedText.normalize("NFC");
+  const originalWriteCommand = normalizationScenario.expected.reply_anchor.write_command;
+  const decomposedWriteCommand = originalWriteCommand.replace(normalizationScenario.expected.exact_text, decomposedText);
+  normalizationScenario.expected.exact_text = decomposedText;
+  normalizationScenario.expected.ordered_commands[2] = decomposedWriteCommand;
+  normalizationScenario.expected.reply_anchor.write_command = decomposedWriteCommand;
+  normalizationScenario.trace[1].source_text = decomposedText;
+  normalizationScenario.trace[2] = {
+    ...normalizationScenario.trace[2], command: decomposedWriteCommand,
+    argv_text: normalizedText, transported_text: decomposedText,
+  };
+  assert.notEqual(normalizedText, decomposedText);
+  assert.equal(gradeAgentExperienceV6Trace(normalizationScenario, normalizationScenario.trace)
+    .failures.some((item) => item.rule === "argv_source_binding"), true, "Unicode normalization");
 
   const reorderedToolSourcedReply = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
   [reorderedToolSourcedReply[1], reorderedToolSourcedReply[2]] = [reorderedToolSourcedReply[2], reorderedToolSourcedReply[1]];

@@ -117,6 +117,21 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
 
   const threadScenario = byId["tool-sourced-verbatim-thread-reply"];
   const messageScenario = byId["tool-sourced-verbatim-message-reply"];
+  const wrongDiscriminatorRetry = structuredClone(threadScenario.trace);
+  const wrongDiscriminatorCommand = wrongDiscriminatorRetry[1].command
+    .replaceAll('sender.sender_type == "user"', 'sender.sender_type == "human"');
+  assert.notEqual(wrongDiscriminatorCommand, wrongDiscriminatorRetry[1].command);
+  wrongDiscriminatorRetry.splice(1, 0, {
+    action: "tool", command: wrongDiscriminatorCommand, exit_code: 1, provider_reached: false,
+  });
+  const providerExactAfterWrongDiscriminator = gradeAgentExperienceV6Trace(
+    threadScenario, wrongDiscriminatorRetry);
+  assert.equal(providerExactAfterWrongDiscriminator.passed, false);
+  assert.equal(providerExactAfterWrongDiscriminator.failures.some((item) => item.rule === "exact_text"), false,
+    "byte-exact provider text does not excuse a failed paraphrased discriminator attempt");
+  assert.deepEqual(new Set(providerExactAfterWrongDiscriminator.failures.map((item) => item.rule)), new Set([
+    "bounded_calls", "tool_call_count", "exclusive_source_selector",
+  ]));
   const threadPreview = {
     action: "tool", command: "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
     exit_code: 0, read_path: "data.messages",

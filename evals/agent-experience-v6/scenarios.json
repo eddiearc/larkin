@@ -1,6 +1,6 @@
 {
   "dataset": "agent-experience-v6",
-  "version": 1,
+  "version": 2,
   "model": {
     "selection": "deterministic-trace",
     "standing_prompt_version": "larkin-standing-v6"
@@ -10,13 +10,14 @@
   },
   "grader": {
     "name": "agent-experience-v6-trace-grader",
-    "version": 1,
+    "version": 2,
     "threshold": 1.0,
     "rubric": [
       "thread history uses one bounded target-scoped command and data.messages",
       "structured JSON parsing never merges stderr",
       "failed reads do not fall back to memory or produce false success",
       "verbatim punctuation reaches the provider without shell interpolation",
+      "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
     ]
@@ -69,7 +70,11 @@
       "task": "Send this exact text: 原文：“修复 A/B”；不要改成 ASCII 引号。",
       "expected": {
         "max_tool_calls": 1,
+        "exact_tool_calls": 1,
         "provider_writes": 1,
+        "write_exit_code": 0,
+        "required_command": "larkin im +messages-send --chat-id oc_eval_exact --text '原文：“修复 A/B”；不要改成 ASCII 引号。' --json",
+        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
         "exact_text": "原文：“修复 A/B”；不要改成 ASCII 引号。",
         "shell_interpolation": false
       },
@@ -78,6 +83,74 @@
           "action": "provider_write",
           "command": "larkin im +messages-send --chat-id oc_eval_exact --text '原文：“修复 A/B”；不要改成 ASCII 引号。' --json",
           "transported_text": "原文：“修复 A/B”；不要改成 ASCII 引号。",
+          "shell_interpolation": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "exact-reply-no-help",
+      "task": "Poll the known DM target, then reply exactly 收到：“A/B” to its real om_ message without opening help.",
+      "expected": {
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "poll_before_write": true,
+        "required_commands": [
+          "larkin inbox poll --target chat:oc_eval_exact_reply --limit 1",
+          "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json"
+        ],
+        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
+        "exact_text": "收到：“A/B”",
+        "shell_interpolation": false
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target chat:oc_eval_exact_reply --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_exact_reply"
+        },
+        {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json",
+          "transported_text": "收到：“A/B”",
+          "shell_interpolation": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "precommit-exact-reply-safe-retry",
+      "task": "The exact reply receives a pre-commit freshness failure; safely retry the same canonical --text operation once.",
+      "expected": {
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "required_command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
+        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
+        "exact_text": "收到：“A/B”",
+        "shell_interpolation": false,
+        "precommit_retry": {
+          "allowed_subtypes": ["freshness_unavailable", "freshness_conflict"],
+          "provider_reached": false,
+          "same_command": true
+        }
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
+          "exit_code": 3,
+          "subtype": "freshness_unavailable",
+          "provider_reached": false
+        },
+        {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
+          "transported_text": "收到：“A/B”",
           "shell_interpolation": false,
           "exit_code": 0
         }

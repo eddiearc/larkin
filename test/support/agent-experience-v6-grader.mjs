@@ -7,10 +7,10 @@ function nonempty(value, label) {
 
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (value.dataset !== "agent-experience-v6" || value.version !== 1) throw new Error("eval dataset/version mismatch");
+  if (value.dataset !== "agent-experience-v6" || value.version !== 2) throw new Error("eval dataset/version mismatch");
   if (value.model?.standing_prompt_version !== "larkin-standing-v6") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
-  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 1 || value.grader.threshold !== 1) {
+  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 2 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");
   }
   if (!Array.isArray(value.grader.rubric) || value.grader.rubric.length < 6) throw new Error("eval rubric is incomplete");
@@ -35,10 +35,20 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
   const tools = trace.filter((event) => event.action === "tool" || event.action === "provider_write");
   const writes = trace.filter((event) => event.action === "provider_write");
   if (tools.length > scenario.expected.max_tool_calls) fail("bounded_calls", `${tools.length} > ${scenario.expected.max_tool_calls}`);
+  if (Number.isSafeInteger(scenario.expected.exact_tool_calls) && tools.length !== scenario.expected.exact_tool_calls) {
+    fail("tool_call_count", `${tools.length} != ${scenario.expected.exact_tool_calls}`);
+  }
   if (writes.length !== scenario.expected.provider_writes) fail("provider_write_count", `${writes.length} != ${scenario.expected.provider_writes}`);
+  if (Number.isInteger(scenario.expected.write_exit_code)
+    && writes.some((event) => event.exit_code !== scenario.expected.write_exit_code)) {
+    fail("provider_write_result", `expected every provider write to exit ${scenario.expected.write_exit_code}`);
+  }
   const commands = tools.map((event) => event.command || "");
   if (scenario.expected.required_command && !commands.includes(scenario.expected.required_command)) {
     fail("canonical_command", scenario.expected.required_command);
+  }
+  for (const required of scenario.expected.required_commands || []) {
+    if (!commands.includes(required)) fail("canonical_command", required);
   }
   for (const fragment of scenario.expected.forbidden_command_fragments || []) {
     if (commands.some((command) => command.includes(fragment))) fail("forbidden_command", fragment);
@@ -54,6 +64,27 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
   }
   if (scenario.expected.shell_interpolation === false && writes.some((event) => event.shell_interpolation !== false)) {
     fail("shell_interpolation", "exact text used shell interpolation");
+  }
+  if (scenario.expected.poll_before_write === true) {
+    const pollIndex = trace.findIndex((event) => event.action === "tool" && String(event.command || "").startsWith("larkin inbox poll "));
+    const writeIndex = trace.findIndex((event) => event.action === "provider_write");
+    if (pollIndex < 0 || writeIndex < 0 || pollIndex >= writeIndex) fail("poll_before_write", `${pollIndex} !< ${writeIndex}`);
+  }
+  if (scenario.expected.precommit_retry) {
+    const expected = scenario.expected.precommit_retry;
+    const precommitAttempts = trace
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => event.action === "tool" && typeof event.subtype === "string");
+    const precommit = precommitAttempts[0]?.event;
+    const precommitIndex = precommitAttempts[0]?.index ?? -1;
+    const writeIndex = trace.findIndex((event) => event.action === "provider_write");
+    const allowed = Array.isArray(expected.allowed_subtypes) ? expected.allowed_subtypes : [];
+    if (precommitAttempts.length !== 1 || !precommit || precommitIndex >= writeIndex
+      || !Number.isInteger(precommit.exit_code) || precommit.exit_code === 0
+      || !allowed.includes(precommit.subtype) || precommit.provider_reached !== expected.provider_reached
+      || (expected.same_command === true && precommit.command !== writes[0]?.command)) {
+      fail("safe_precommit_retry", "retry was not proven pre-commit with the same canonical command");
+    }
   }
   if (scenario.expected.stay_silent === true && trace.length !== 0) fail("exclusive_silence", "excluded Agent acted");
   if (scenario.expected.committed_result) {

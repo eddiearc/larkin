@@ -17,6 +17,8 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",
     "exact-text-punctuation",
+    "exact-reply-no-help",
+    "precommit-exact-reply-safe-retry",
     "exclusive-other-agent-silence",
     "committed-unverified-no-retry",
   ]);
@@ -50,6 +52,37 @@ test("grader rejects chat-wide fallback, stderr merging, false success, text mut
   changedText[0].shell_interpolation = true;
   assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["exact-text-punctuation"], changedText).failures.map((item) => item.rule)),
     new Set(["exact_text", "shell_interpolation"]));
+
+  const helpAndMarkdown = structuredClone(byId["exact-reply-no-help"].trace);
+  helpAndMarkdown.splice(1, 0, {
+    action: "tool", command: "larkin im +messages-reply --help", exit_code: 0,
+  });
+  helpAndMarkdown[2].command = "larkin im +messages-reply --message-id om_eval_exact_reply --markdown '收到：“A/B”' --json";
+  const badExactReply = gradeAgentExperienceV6Trace(byId["exact-reply-no-help"], helpAndMarkdown);
+  assert.deepEqual(new Set(badExactReply.failures.map((item) => item.rule)),
+    new Set(["bounded_calls", "tool_call_count", "canonical_command", "forbidden_command"]));
+
+  const conflictRetry = structuredClone(byId["precommit-exact-reply-safe-retry"].trace);
+  conflictRetry[0].subtype = "freshness_conflict";
+  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], conflictRetry).passed, true);
+  const reversedRetry = [conflictRetry[1], conflictRetry[0]];
+  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], reversedRetry)
+    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
+  const zeroExitRetry = structuredClone(conflictRetry);
+  zeroExitRetry[0].exit_code = 0;
+  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], zeroExitRetry)
+    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
+  const committedRetry = structuredClone(conflictRetry);
+  committedRetry[0].provider_reached = true;
+  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], committedRetry)
+    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
+
+  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "precommit-exact-reply-safe-retry"]) {
+    const failedWrite = structuredClone(byId[id].trace);
+    failedWrite.find((event) => event.action === "provider_write").exit_code = 9;
+    assert.equal(gradeAgentExperienceV6Trace(byId[id], failedWrite)
+      .failures.some((item) => item.rule === "provider_write_result"), true, id);
+  }
 
   assert.equal(gradeAgentExperienceV6Trace(byId["exclusive-other-agent-silence"], [{
     action: "provider_write", command: "larkin im +messages-send", exit_code: 0,

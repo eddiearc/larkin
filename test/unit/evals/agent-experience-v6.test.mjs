@@ -94,6 +94,17 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
     "bounded_calls", "tool_call_count", "redundant_discovery_read", "exclusive_source_selector", "exact_text",
   ]));
 
+  const prePollCheck = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+  prePollCheck.unshift({ action: "tool", command: "larkin inbox check", exit_code: 0 });
+  const providerExactAfterCheck = gradeAgentExperienceV6Trace(
+    byId["tool-sourced-verbatim-thread-reply"], prePollCheck);
+  assert.equal(providerExactAfterCheck.passed, false);
+  assert.equal(providerExactAfterCheck.failures.some((item) => item.rule === "exact_text"), false,
+    "byte-exact provider text does not excuse pre-poll Inbox discovery");
+  assert.deepEqual(new Set(providerExactAfterCheck.failures.map((item) => item.rule)), new Set([
+    "bounded_calls", "tool_call_count", "exclusive_source_selector",
+  ]));
+
   for (const hiddenAction of [
     { action: "read", command: "read /skills/lark-im/SKILL.md", resource_path: "/skills/lark-im/SKILL.md" },
     { action: "command", command: "larkin im +messages-reply --help", exit_code: 0 },

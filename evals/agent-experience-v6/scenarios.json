@@ -19,7 +19,7 @@
       "verbatim punctuation reaches the provider without shell interpolation",
       "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
       "tool-sourced verbatim text uses exactly one exclusive source selector and flows from one canonical scoped read through native --jq into one guarded --content reply without preview, selector switching, model rewriting, or extra discovery",
-      "after Inbox poll, a known-thread latest-human task makes one model tool call containing one thread read plus one reply, while a known-message-ID task makes one model tool call containing one mget plus one reply",
+      "for a regular current Inbox event, the event-targeted poll is the first model tool call with no preceding Inbox check or discovery; afterward a known-thread latest-human task makes one composite thread-read/reply call while a known-message-ID task makes one composite mget/reply call",
       "thread-latest-human and message-ID sources preserve Unicode, whitespace, and normalization in the complete text JSON document",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
@@ -161,7 +161,7 @@
     },
     {
       "id": "tool-sourced-verbatim-thread-reply",
-      "task": "Poll the known thread target, then reply with its latest human text through the canonical scoped --jq to --content dataflow without copying it.",
+      "task": "From the current Inbox event, poll its known thread target first without any preceding Inbox check or discovery, then reply with the latest human text through the canonical scoped --jq to --content dataflow without copying it.",
       "expected": {
         "max_tool_calls": 2,
         "exact_tool_calls": 2,
@@ -227,7 +227,7 @@
     },
     {
       "id": "tool-sourced-verbatim-message-reply",
-      "task": "Poll the known target, then reply with the exact text of one known source message through the canonical mget --jq to --content dataflow.",
+      "task": "From the current Inbox event, poll its known target first without any preceding Inbox check or discovery, then reply with the exact text of one known source message through the canonical mget --jq to --content dataflow.",
       "expected": {
         "max_tool_calls": 2,
         "exact_tool_calls": 2,

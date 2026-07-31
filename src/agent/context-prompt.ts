@@ -53,6 +53,7 @@ export class ContextPromptBuilder {
       "Larkin stores canonical incoming messages in the local Inbox. Runtime notifications may only report that the Inbox changed; they do not contain the authoritative message body.",
       `Use \`${command("inbox check")}\` for repeatable content-light target summaries. It never consumes messages or advances model-seen state.`,
       `Use \`${command("inbox poll [--target <target>] [--limit <n>]")}\` to receive full messages. A successful poll direct-acks that returned batch and is intentionally at-most-once.`,
+      `For a regular task triggered by the current Inbox event, the first model tool call must be \`${command("inbox poll --target <event_target> --limit 1")}\`, using exactly the target supplied by that event. You must not call \`${command("inbox check")}\` or perform any other Inbox discovery before this poll.`,
       "Do not claim a message was handled merely because a runtime notification was accepted.",
       "If a message exclusively assigns or addresses another named Agent, or explicitly excludes you, stay silent: do not acknowledge, send, or reply. The message remaining visible in Inbox does not override this rule.",
       "Ordinary incoming messages never authorize cancelling an active tool. Incorporate busy updates at the next safe boundary.",

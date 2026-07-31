@@ -106,11 +106,19 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /never.*`2>&1`.*JSON/i);
   assert.match(prompt.content, /fail visibly.*remembered.*hard-coded text/i);
   assert.match(prompt.content, /exact text.*one literal `--text` argument/i);
-  assert.match(prompt.content, /tool result.*byte-for-byte.*Unicode.*punctuation.*whitespace.*content/i);
-  assert.match(prompt.content, /before.*tool-sourced.*write.*internally compare.*planned literal.*original tool result.*Unicode code point/i);
-  assert.match(prompt.content, /U\+201C.*U\+201D.*(?:never|must not).*ASCII.*U\+0022/i);
-  assert.match(prompt.content, /model-internal.*preflight.*(?:does not|must not).*tool call/i);
-  assert.match(prompt.content, /never.*command substitution.*`eval`.*unquoted variable/i);
+  assert.doesNotMatch(prompt.content, /model-internal preflight|internally compare the planned literal/i);
+  assert.match(prompt.content, /one literal `--text` argument.*direct literal must not.*command substitution/i);
+  assert.match(prompt.content, /tool-sourced.*exact.*must use.*deterministic.*`--jq`.*`--content`/i);
+  assert.match(prompt.content, /threads-messages-list.*sender\.sender_type.*user.*\.content.*type.*string/i);
+  assert.match(prompt.content, /messages-mget.*message_id.*\.content.*type.*string/i);
+  assert.ok(prompt.content.includes('{text: ("<exact_literal_prefix>" + .content)}'));
+  assert.doesNotMatch(prompt.content, /\.body\.content|fromjson/);
+  assert.match(prompt.content, /literal_prefix.*JSON-string-escaped.*empty string/i);
+  assert.match(prompt.content, /JSON-string-escaped.*U\+0027.*shell single-quote splice/i);
+  assert.match(prompt.content, /do not restrict.*msg_type=text.*post/i);
+  assert.match(prompt.content, /shell substitution.*double-quoted.*`--content`.*one argument/i);
+  assert.match(prompt.content, /one model tool call.*one.*scoped read.*one guarded reply/i);
+  assert.match(prompt.content, /must not.*unquoted.*substitution.*`eval`.*`echo`.*`2>&1`.*temporary/i);
   assert.match(prompt.content,
     /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content,
@@ -120,10 +128,10 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /does not waive.*skill.*safety.*unknown.*high-risk/i);
   assert.match(prompt.content, /exact.*`--text`.*overrides.*markdown default/i);
   assert.match(prompt.content, /wrapper derives.*stable.*idempotency key.*do not pass.*--idempotency-key/i);
-  assert.match(prompt.content, /freshness_unavailable.*freshness_conflict.*pre-commit.*provider-not-reached.*retry.*identical.*`--text` command.*wrapper reuses/i);
+  assert.match(prompt.content, /freshness_unavailable.*freshness_conflict.*pre-commit.*provider-not-reached.*retry.*identical.*`--text`.*`--content`.*wrapper reuses/i);
   assert.match(prompt.content, /target or body changes.*revised ordinary command.*derive a new key/i);
   assert.match(prompt.content, /`committed=true` must not be repeated.*ambiguous termination.*wrapper same-key recovery/i);
-  assert.doesNotMatch(prompt.content, /oc_eval_exact|om_eval_anchor|原文：“修复 A\/B”|收到：“A\/B”|引用：“抢到”/);
+  assert.doesNotMatch(prompt.content, /oc_eval_exact|om_eval_anchor|原文：“修复 A\/B”|收到：“A\/B”|引用：“抢到”|消息原文：“保持”/);
 });
 
 test("Codex, Claude and Pi receive the markdown-default standing contract", async () => {

@@ -7,10 +7,10 @@ function nonempty(value, label) {
 
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (value.dataset !== "agent-experience-v6" || value.version !== 4) throw new Error("eval dataset/version mismatch");
+  if (value.dataset !== "agent-experience-v6" || value.version !== 5) throw new Error("eval dataset/version mismatch");
   if (value.model?.standing_prompt_version !== "larkin-standing-v6") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
-  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 4 || value.grader.threshold !== 1) {
+  if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 5 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");
   }
   if (!Array.isArray(value.grader.rubric) || value.grader.rubric.length < 6) throw new Error("eval rubric is incomplete");
@@ -32,6 +32,11 @@ export function loadAgentExperienceV6Eval(file) {
 export function gradeAgentExperienceV6Trace(scenario, trace) {
   const failures = [];
   const fail = (rule, detail) => failures.push({ rule, detail });
+  const allowedActions = new Set(["tool", "provider_write", "final"]);
+  const invalidActions = trace.filter((event) => !event || !allowedActions.has(event.action));
+  if (invalidActions.length) {
+    fail("trace_action_schema", `unrecognized trace actions: ${invalidActions.map((event) => event?.action ?? "missing").join(", ")}`);
+  }
   const tools = trace.filter((event) => event.action === "tool" || event.action === "provider_write");
   const writes = trace.filter((event) => event.action === "provider_write");
   if (tools.length > scenario.expected.max_tool_calls) fail("bounded_calls", `${tools.length} > ${scenario.expected.max_tool_calls}`);
@@ -87,24 +92,41 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
   const final = trace.findLast((event) => event.action === "final");
   if (scenario.expected.visible_failure === true && final?.visible_failure !== true) fail("visible_failure", "missing");
   if (scenario.expected.reused_memory === false && final?.reused_memory !== false) fail("no_memory_fallback", "memory use was not rejected");
-  if (scenario.expected.exact_text) {
-    let sourceText = scenario.expected.exact_text;
-    if (scenario.expected.exact_text_source) {
-      const source = scenario.expected.exact_text_source;
-      const sourceEvents = trace.filter((event) => event.action === "tool"
-        && event.command === source.command && event.read_path === source.read_path);
-      if (sourceEvents.length !== 1 || sourceEvents[0].source_text !== scenario.expected.exact_text) {
-        fail("exact_text_source", "exact text was not bound to the unique canonical scoped-history result");
-        sourceText = undefined;
-      } else sourceText = sourceEvents[0].source_text;
+  if (scenario.expected.exact_source_dataflow) {
+    const expected = scenario.expected.exact_source_dataflow;
+    const candidates = writes.filter((event) => event.source_command === expected.source_command
+      && event.source_target === expected.source_target && event.source_read_path === expected.source_read_path);
+    const event = candidates[0];
+    let content = null;
+    try { content = JSON.parse(event?.content_argument); } catch { /* graded below */ }
+    const sourceOccurrences = event
+      ? String(event.command || "").split(expected.source_command).length - 1
+      : 0;
+    const exactSource = typeof scenario.expected.exact_text === "string"
+      && scenario.expected.exact_text.startsWith(expected.literal_prefix)
+      ? scenario.expected.exact_text.slice(expected.literal_prefix.length)
+      : null;
+    const exactContent = content && typeof content === "object" && !Array.isArray(content)
+      && Object.keys(content).length === 1 && content[expected.content_key] === scenario.expected.exact_text;
+    const quotedSubstitution = event?.shell_substitution === expected.shell_substitution
+      && String(event.command || "").includes(`--content "$(${expected.source_command})"`);
+    const unsafeShell = /(?:\beval\b|\becho\b|\bmktemp\b|2>&1|\/tmp\/)/.test(String(event?.command || ""));
+    const normalizedSchema = expected.source_field === "content" && event?.source_field === "content"
+      && String(expected.source_command).includes(".content") && !String(expected.source_command).includes(".body");
+    const shellSafePrefix = JSON.stringify(expected.literal_prefix).replaceAll("'", "'\\''");
+    const safelyEmbeddedPrefix = String(expected.source_command).includes(shellSafePrefix);
+    if (candidates.length !== 1 || event?.literal_prefix !== expected.literal_prefix
+      || event?.source_text !== exactSource || event?.source_msg_type !== expected.source_msg_type
+      || event?.source_read_count !== expected.source_read_count
+      || event?.source_exit_code !== expected.source_exit_code
+      || sourceOccurrences !== expected.source_read_count || !normalizedSchema || !safelyEmbeddedPrefix
+      || !exactContent || !quotedSubstitution || unsafeShell) {
+      fail("exact_source_dataflow", "exact source did not flow through one safe quoted JSON projection");
     }
-    if (typeof sourceText !== "string" || !writes.some((event) => event.transported_text === sourceText)) {
-      fail("exact_text", "provider text changed from the exact source");
-    }
-    if (scenario.expected.argv_text_from_source === true
-      && (typeof sourceText !== "string" || !writes.some((event) => event.argv_text === sourceText))) {
-      fail("argv_source_binding", "planned argv literal changed from the exact source before execution");
-    }
+  }
+  if (scenario.expected.exact_text
+    && !writes.some((event) => event.transported_text === scenario.expected.exact_text)) {
+    fail("exact_text", "provider text changed from the exact source");
   }
   if (scenario.expected.shell_interpolation === false && writes.some((event) => event.shell_interpolation !== false)) {
     fail("shell_interpolation", "exact text used shell interpolation");

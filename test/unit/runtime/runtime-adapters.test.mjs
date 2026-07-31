@@ -107,6 +107,17 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /fail visibly.*remembered.*hard-coded text/i);
   assert.match(prompt.content, /exact text.*one literal `--text` argument/i);
   assert.match(prompt.content, /never.*command substitution.*`eval`.*unquoted variable/i);
+  assert.match(prompt.content,
+    /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);
+  assert.match(prompt.content,
+    /larkin im \+messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json/i);
+  assert.match(prompt.content, /complete canonical exact send and reply paths.*must not.*messages-send --help.*messages-reply --help/i);
+  assert.match(prompt.content, /exact.*`--text`.*overrides.*markdown default/i);
+  assert.match(prompt.content, /wrapper derives.*stable.*idempotency key.*do not pass.*--idempotency-key/i);
+  assert.match(prompt.content, /freshness_unavailable.*freshness_conflict.*pre-commit.*provider-not-reached.*retry.*identical.*`--text` command.*wrapper reuses/i);
+  assert.match(prompt.content, /target or body changes.*revised ordinary command.*derive a new key/i);
+  assert.match(prompt.content, /`committed=true` must not be repeated.*ambiguous termination.*wrapper same-key recovery/i);
+  assert.doesNotMatch(prompt.content, /oc_eval_exact|om_eval_anchor|原文：“修复 A\/B”|收到：“A\/B”/);
 });
 
 test("Codex, Claude and Pi receive the markdown-default standing contract", async () => {

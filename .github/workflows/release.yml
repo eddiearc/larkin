@@ -138,11 +138,52 @@ jobs:
       - name: Verify public source, refs, and history
         run: bun run scripts/check-publication.mjs --trusted --denylist "$RUNNER_TEMP/larkin-publication-denylist.txt"
 
+      - name: Check out recovery secret baseline
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-tooling
+          sparse-checkout: .gitleaksignore
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply exact recovery secret baseline
+        id: recovery-secret-baseline
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if git ls-files --error-unmatch .gitleaksignore >/dev/null 2>&1; then
+            cp -- .gitleaksignore "$RUNNER_TEMP/larkin-source-gitleaksignore"
+            echo "source_baseline=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_baseline=absent" >> "$GITHUB_OUTPUT"
+          fi
+          cp -- "$GITHUB_WORKSPACE/release-tooling/.gitleaksignore" "$GITHUB_WORKSPACE/.gitleaksignore"
+
       - name: Scan tagged history for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+
+      - name: Restore immutable source secret baseline
+        if: always() && github.event_name == 'workflow_dispatch'
+        env:
+          SOURCE_BASELINE: ${{ steps.recovery-secret-baseline.outputs.source_baseline }}
+        run: |
+          case "$SOURCE_BASELINE" in
+            present)
+              cp -- "$RUNNER_TEMP/larkin-source-gitleaksignore" .gitleaksignore
+              ;;
+            absent)
+              rm -f -- .gitleaksignore
+              ;;
+            *)
+              echo "Refusing to continue: immutable source baseline state was not recorded" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Remove Gitleaks SARIF output
         run: rm -f -- results.sarif

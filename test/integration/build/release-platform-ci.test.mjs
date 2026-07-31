@@ -5,10 +5,14 @@ import { test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
+const GITLEAKS_BASELINE = [
+  "26a9006be595b4bc86b851d797bbc58bb815a772:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:202",
+  "1e12236e5462a361cf45e1b1b218aae035ed7451:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:138",
+];
 
 test("PR and main CI validate source without building release artifacts", () => {
   const workflow = read(".github/workflows/release-platform-smoke.yml");
-  assert.equal(fs.existsSync(path.join(ROOT, ".gitleaksignore")), false, "synthetic secrets must be constructed at runtime without fingerprint exceptions");
+  assert.equal(read(".gitleaksignore"), `${GITLEAKS_BASELINE.join("\n")}\n`, "only the two verified synthetic history fingerprints may be ignored");
   assert.equal(fs.existsSync(path.join(ROOT, "THIRD_PARTY_NOTICES.md")), false, "complete lock-graph notices must not be tracked at the repository root");
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/);
@@ -91,10 +95,17 @@ test("package version and explicit tag publication share one immutable combined-
   assert.match(workflow, /secrets\.LARKIN_PUBLICATION_DENYLIST/);
   assert.match(workflow, /--trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt"/);
   assert.match(workflow, /gitleaks\/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3/);
+  assert.match(workflow, /name: Check out recovery secret baseline\n\s+if: github\.event_name == 'workflow_dispatch'[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*path: release-tooling[\s\S]*sparse-checkout: \.gitleaksignore[\s\S]*sparse-checkout-cone-mode: false/);
+  assert.match(workflow, /name: Apply exact recovery secret baseline\n\s+id: recovery-secret-baseline\n\s+if: github\.event_name == 'workflow_dispatch'[\s\S]*git ls-files --error-unmatch \.gitleaksignore[\s\S]*cp -- \.gitleaksignore "\$RUNNER_TEMP\/larkin-source-gitleaksignore"[\s\S]*source_baseline=present[\s\S]*source_baseline=absent[\s\S]*cp -- "\$GITHUB_WORKSPACE\/release-tooling\/\.gitleaksignore" "\$GITHUB_WORKSPACE\/\.gitleaksignore"/);
+  assert.match(workflow, /name: Restore immutable source secret baseline\n\s+if: always\(\) && github\.event_name == 'workflow_dispatch'[\s\S]*SOURCE_BASELINE: \$\{\{ steps\.recovery-secret-baseline\.outputs\.source_baseline \}\}[\s\S]*present\)[\s\S]*cp -- "\$RUNNER_TEMP\/larkin-source-gitleaksignore" \.gitleaksignore[\s\S]*absent\)[\s\S]*rm -f -- \.gitleaksignore/);
   assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}\n\s+GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false/);
-  assert.match(workflow, /GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false\n\n\s+- name: Remove Gitleaks SARIF output\n\s+run: rm -f -- results\.sarif/);
+  assert.match(workflow, /GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false[\s\S]*- name: Remove Gitleaks SARIF output\n\s+run: rm -f -- results\.sarif/);
   assert.equal(workflow.match(/rm -f -- results\.sarif/g)?.length, 1, "only the generated Gitleaks SARIF path may be removed");
   assert.ok(workflow.indexOf("gitleaks/gitleaks-action@") < workflow.indexOf("run: rm -f -- results.sarif"));
+  assert.ok(workflow.indexOf("- name: Verify public source, refs, and history") < workflow.indexOf("- name: Check out recovery secret baseline"));
+  assert.ok(workflow.indexOf("- name: Apply exact recovery secret baseline") < workflow.indexOf("gitleaks/gitleaks-action@"));
+  assert.ok(workflow.indexOf("gitleaks/gitleaks-action@") < workflow.indexOf("- name: Restore immutable source secret baseline"));
+  assert.ok(workflow.indexOf("- name: Restore immutable source secret baseline") < workflow.indexOf("- name: Run full test suite"));
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Build current platform release"));
   assert.match(workflow, /bun run scripts\/check-publication\.mjs --trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt" artifacts\/release\/larkin-v\*/);
   assert.match(workflow, /artifacts\/release\/larkin-v\* artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);

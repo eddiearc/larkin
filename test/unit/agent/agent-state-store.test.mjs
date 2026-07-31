@@ -167,6 +167,67 @@ test("Inbox lock reclaims a verifiably dead owner record", async () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Inbox contender retries when the owner releases its lock directory during state inspection", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-released-lock-race-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateReleasedLockRaceA1");
+    store.writeJson("status", { prepared: true });
+    const lockDir = `${store.paths.inbox}.lock`;
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    const readOwner = store.readInboxLockOwner.bind(store);
+    let released = false;
+    store.readInboxLockOwner = (candidate) => {
+      const owner = readOwner(candidate);
+      if (!released && candidate === lockDir && owner === null) {
+        released = true;
+        fs.rmdirSync(lockDir);
+      }
+      return owner;
+    };
+
+    store.appendNdjson("inbox", { message_id: "om_after_release_race", chat_id: "oc_lock" });
+
+    assert.equal(released, true, "the lock owner must release between owner read and directory inspection");
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_after_release_race"]);
+    assert.equal(fs.existsSync(lockDir), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Inbox contender retries when the lock directory disappears after guarded reclaim inspection", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-guarded-reclaim-race-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateGuardedReclaimRaceA1");
+    store.writeJson("status", { prepared: true });
+    const lockDir = `${store.paths.inbox}.lock`;
+    const ownerFile = path.join(lockDir, "owner.json");
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    fs.writeFileSync(ownerFile, `${JSON.stringify({
+      version: 1, pid: 2_147_483_647, processStartToken: "dead-process",
+      nonce: "00000000-0000-4000-8000-000000000003",
+    })}\n`, { mode: 0o600 });
+    const inspectState = store.inboxLockState.bind(store);
+    let stateChecks = 0;
+    let released = false;
+    store.inboxLockState = (candidate) => {
+      const state = inspectState(candidate);
+      if (candidate === lockDir && state === "reclaimable" && ++stateChecks === 2) {
+        fs.unlinkSync(ownerFile);
+        fs.rmdirSync(lockDir);
+        released = true;
+      }
+      return state;
+    };
+
+    store.appendNdjson("inbox", { message_id: "om_after_guarded_reclaim_race", chat_id: "oc_lock" });
+
+    assert.equal(released, true, "the owner must release after guarded state inspection and before directory read");
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_after_guarded_reclaim_race"]);
+    assert.equal(fs.existsSync(lockDir), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("EPERM inspection of a live Inbox owner fails closed without reclaim", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-eperm-lock-"));
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "ignore" });

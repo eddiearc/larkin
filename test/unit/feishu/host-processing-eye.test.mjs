@@ -213,7 +213,7 @@ test("failed reaction POST never becomes pending and terminal cleanup remains ha
   assert.match(logs.join("\n"), /点上失败/);
 });
 
-test("larkApi failure records exit code and stderr head instead of echoing the command line", () => {
+test("non-reaction larkApi failure records exit code and stderr head instead of echoing the command line", () => {
   const errors = [];
   const eye = new ProcessingEyeOrchestrator({
     cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
@@ -228,10 +228,27 @@ test("larkApi failure records exit code and stderr head instead of echoing the c
     recordStatusError(_agent, text) { errors.push(text); },
     writePending() {}, setTimer: () => ({ fake: true }), clearTimer() {},
   });
-  eye.add(agent, "om_fail");
+  eye.larkApi(agent, "GET", "/open-apis/im/v1/messages/om_fail", null);
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /^larkApi POST om_fail\/reactions: exit=1 \| FetchError: request to/);
+  assert.match(errors[0], /^larkApi GET messages\/om_fail: exit=1 \| FetchError: request to/);
   assert.doesNotMatch(errors[0], /Command failed/);
+});
+
+test("processing reaction timeout stays in best-effort diagnostics instead of generic status errors", () => {
+  const errors = [], logs = [];
+  const eye = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
+    execFile(_command, _args, _options, callback) {
+      callback(Object.assign(new Error("timed out"), { killed: true, code: "ETIMEDOUT" }), "", "");
+      return {};
+    },
+    recordStatusError(_agent, text) { errors.push(text); },
+    log(...parts) { logs.push(parts.join(" ")); },
+    writePending() {}, setTimer: () => ({ fake: true }), clearTimer() {},
+  });
+  eye.add(agent, "om_timeout");
+  assert.deepEqual(errors, []);
+  assert.match(logs.join("\n"), /超时/);
 });
 
 test("larkApi failure without stderr falls back to stdout head", () => {
@@ -245,6 +262,6 @@ test("larkApi failure without stderr falls back to stdout head", () => {
     recordStatusError(_agent, text) { errors.push(text); },
     writePending() {}, setTimer: () => ({ fake: true }), clearTimer() {},
   });
-  eye.add(agent, "om_fail2");
+  eye.larkApi(agent, "GET", "/open-apis/im/v1/messages/om_fail2", null);
   assert.match(errors[0], /exit=ENOENT \| partial garbage output/);
 });

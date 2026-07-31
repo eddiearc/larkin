@@ -91,6 +91,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
       // are never quarantined or rebuilt during hot attach.
       await hostShell.upsertAgent(agent);
     },
+    async resetSession(request) {
+      const result = await hostShell.resetSession(request.agentId, request.waitReadyMs);
+      return { ok: result.readyForFreshScenario, agentId: request.agentId, ...result };
+    },
   });
   await controlServer.start();
   await markConfigAppliedAfterRuntimeReady(env, hostShell.agents, hostShell.start());

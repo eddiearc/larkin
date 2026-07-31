@@ -10,8 +10,17 @@ import { processCommandToken } from "./internal-command.js";
 
 export interface AgentUpsertRequest { operationId: string; agentId: string; authorization: string }
 export type AgentUpsertOperation = Pick<AgentUpsertRequest, "operationId" | "agentId">;
-export interface AgentUpsertResponse { ok: boolean; operationId: string; agentId: string; error?: string; readiness?: RuntimeReadiness }
+export interface AgentUpsertResponse { ok: boolean; operationId: string; agentId: string; code?: string; error?: string; readiness?: RuntimeReadiness }
 export interface DashboardRecoveryResponse { ok: boolean; operationId: string; state?: string; error?: string }
+export interface SessionResetResponse {
+  ok: boolean; agentId: string; code?: string; error?: string;
+  resetCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
+  runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+  readyForFreshScenario: boolean; inboundObserved: false; readiness?: RuntimeReadiness;
+}
+interface SessionResetControlRequest { operation: "session-reset"; agentId: string; authorization: string; waitReadyMs?: number }
+type AgentControlRequest = AgentUpsertRequest | SessionResetControlRequest;
+type AgentControlPayload = Omit<AgentUpsertRequest, "authorization"> | Omit<SessionResetControlRequest, "authorization">;
 
 interface ProcessBinding { pid: number; processStartToken: string }
 interface SocketBinding { device: string; inode: string; owner: string; changeTimeNs: string }
@@ -81,14 +90,43 @@ function assertSecureRoot(root: string): void {
       || (stat.mode & 0o077) !== 0) throw new Error("Larkin config root 必须由当前用户拥有且不可被其他用户访问");
 }
 
-function parseRequest(line: string): AgentUpsertRequest {
-  const value = JSON.parse(line) as Partial<AgentUpsertRequest>;
-  if (!OPERATION_ID.test(String(value.operationId || "")) || !AGENT_ID.test(String(value.agentId || ""))
-      || !AUTHORIZATION.test(String(value.authorization || ""))) {
+function removeLegacyResetLedger(larkinHome: string): void {
+  const file = path.join(path.resolve(larkinHome), "daemon-control-operations.json");
+  let stat: fs.Stats;
+  try { stat = fs.lstatSync(file); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) {
+    throw new Error("legacy daemon control operation ledger 不安全");
+  }
+  fs.unlinkSync(file);
+}
+
+function parseRequest(line: string): AgentControlRequest {
+  const value = JSON.parse(line) as Partial<AgentUpsertRequest & SessionResetControlRequest>;
+  if (!AGENT_ID.test(String(value.agentId || "")) || !AUTHORIZATION.test(String(value.authorization || ""))) {
+    throw new Error("invalid agent control request");
+  }
+  if (value.operation === "session-reset") {
+    if (value.waitReadyMs !== undefined && (!Number.isSafeInteger(value.waitReadyMs) || value.waitReadyMs < 0 || value.waitReadyMs > 300_000)) {
+      throw new Error("invalid session reset waitReadyMs");
+    }
+    if (Object.keys(value).some((key) => !["agentId", "authorization", "operation", "waitReadyMs"].includes(key))) {
+      throw new Error("session reset control request 包含未知字段");
+    }
+    return value as SessionResetControlRequest;
+  }
+  if (value.operation !== undefined || !OPERATION_ID.test(String(value.operationId || ""))) {
     throw new Error("invalid agent upsert request");
   }
+  if (value.waitReadyMs !== undefined) {
+    throw new Error("invalid session reset waitReadyMs");
+  }
   if (Object.keys(value).some((key) => !["operationId", "agentId", "authorization"].includes(key))) {
-    throw new Error("agent upsert request 只允许 operationId/agentId/authorization");
+    throw new Error("agent control request 包含未知字段");
   }
   return value as AgentUpsertRequest;
 }
@@ -399,11 +437,13 @@ export function createAgentControlServer({
   larkinHome,
   authorityToken,
   upsert,
+  resetSession,
   maxRememberedOperations = 256,
 }: {
   larkinHome: string;
   authorityToken: string;
   upsert(request: AgentUpsertOperation): Promise<void>;
+  resetSession?(request: { agentId: string; waitReadyMs: number }): Promise<SessionResetResponse>;
   maxRememberedOperations?: number;
 }): { start(): Promise<void>; close(): Promise<void> } {
   let socket = "";
@@ -411,12 +451,17 @@ export function createAgentControlServer({
   let socketIdentity: SocketBinding | null = null;
   const completed = new Map<string, AgentUpsertResponse>();
   const inFlight = new Map<string, { agentId: string; response: Promise<AgentUpsertResponse> }>();
+  const resetInFlight = new Map<string, Promise<SessionResetResponse>>();
   const agentQueues = new Map<string, Promise<unknown>>();
+  const upsertConflict = (operationId: string, agentId: string): AgentUpsertResponse => ({
+    ok: false, operationId, agentId, code: "operation_conflict", error: "operationId 已绑定其他 Agent 或操作",
+  });
   let server: net.Server | null = null;
   return {
     async start(): Promise<void> {
       fs.mkdirSync(larkinHome, { recursive: true, mode: 0o700 });
       assertSecureRoot(larkinHome);
+      removeLegacyResetLedger(larkinHome);
       const authority = secureAuthority(larkinHome);
       if (!sameSecret(authority.token, authorityToken)) throw new Error("daemon control authorization 不匹配");
       const supervisor = readProcessState(larkinHome).supervisor;
@@ -443,58 +488,92 @@ export function createAgentControlServer({
           const line = input.slice(0, newline);
           input = "";
           void (async () => {
-            let request: AgentUpsertRequest;
+            let request: AgentControlRequest;
             try { request = parseRequest(line); }
             catch (error) {
-              connection.end(`${JSON.stringify({ ok: false, operationId: "invalid", agentId: "invalid", error: (error as Error).message })}\n`);
+              connection.end(`${JSON.stringify({ ok: false, agentId: "invalid", error: (error as Error).message })}\n`);
               return;
             }
             try {
               const live = assertLiveAuthority(larkinHome, authorityToken);
               if (!sameSecret(live.token, request.authorization)) throw new Error("unauthorized control request");
             } catch {
-              connection.end(`${JSON.stringify({ ok: false, operationId: request.operationId, agentId: request.agentId,
-                error: "unauthorized control request" })}\n`);
+              connection.end(`${JSON.stringify({ ok: false, ...("operation" in request ? {} : { operationId: request.operationId }),
+                agentId: request.agentId, error: "unauthorized control request" })}\n`);
               return;
             }
-            const replay = completed.get(request.operationId);
-            if (replay) {
-              if (replay.agentId !== request.agentId) {
-                connection.end(`${JSON.stringify({ ...replay, ok: false, error: "operationId 已绑定其他 Agent" })}\n`);
-                return;
+            if ("operation" in request) {
+              const resetRequest = request;
+              let operation = resetInFlight.get(resetRequest.agentId);
+              if (!operation) {
+                const executeReset = async (): Promise<SessionResetResponse> => {
+                  try {
+                    if (!resetSession) throw new Error("session reset control unavailable");
+                    return await resetSession({ agentId: resetRequest.agentId, waitReadyMs: resetRequest.waitReadyMs ?? 30_000 });
+                  } catch (error) {
+                    const code = typeof (error as { code?: unknown }).code === "string"
+                      ? String((error as { code: string }).code)
+                      : error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable"
+                        ? "runtime_unavailable" : "reset_refused";
+                    return { ok: false, agentId: resetRequest.agentId, code,
+                      error: error instanceof Error ? error.message : String(error), resetCommitted: false,
+                      generationChanged: false, sessionChanged: false, turns: 0, runtimeReady: false,
+                      channelConnected: false, reconnecting: false,
+                      pendingCount: Number((error as { pendingCount?: unknown }).pendingCount) || 0,
+                      readyForFreshScenario: false, inboundObserved: false,
+                      ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) };
+                  }
+                };
+                const prior = agentQueues.get(resetRequest.agentId) ?? Promise.resolve();
+                const executing = prior.catch(() => {}).then(executeReset);
+                let queued: Promise<SessionResetResponse>;
+                queued = executing.finally(() => {
+                  if (agentQueues.get(resetRequest.agentId) === queued) agentQueues.delete(resetRequest.agentId);
+                  if (resetInFlight.get(resetRequest.agentId) === queued) resetInFlight.delete(resetRequest.agentId);
+                });
+                agentQueues.set(resetRequest.agentId, queued);
+                resetInFlight.set(resetRequest.agentId, queued);
+                operation = queued;
               }
-              connection.end(`${JSON.stringify(replay)}\n`);
+              const response = await operation;
+              connection.end(`${JSON.stringify(response)}\n`);
               return;
             }
-            const existing = inFlight.get(request.operationId);
-            if (existing && existing.agentId !== request.agentId) {
-              connection.end(`${JSON.stringify({ ok: false, operationId: request.operationId, agentId: request.agentId,
-                error: "operationId 已绑定其他 Agent" })}\n`);
+            const upsertRequest = request;
+            const replay = completed.get(upsertRequest.operationId);
+            if (replay) {
+              connection.end(`${JSON.stringify(replay.agentId === upsertRequest.agentId
+                ? replay : upsertConflict(upsertRequest.operationId, upsertRequest.agentId))}\n`);
+              return;
+            }
+            const existing = inFlight.get(upsertRequest.operationId);
+            if (existing && existing.agentId !== upsertRequest.agentId) {
+              connection.end(`${JSON.stringify(upsertConflict(upsertRequest.operationId, upsertRequest.agentId))}\n`);
               return;
             }
             const execute = async (): Promise<AgentUpsertResponse> => {
               try {
-                await upsert({ operationId: request.operationId, agentId: request.agentId });
-                return { ok: true, operationId: request.operationId, agentId: request.agentId };
+                await upsert({ operationId: upsertRequest.operationId, agentId: upsertRequest.agentId });
+                return { ok: true, operationId: upsertRequest.operationId, agentId: upsertRequest.agentId };
               } catch (error) {
-                return { ok: false, operationId: request.operationId, agentId: request.agentId,
+                return { ok: false, operationId: upsertRequest.operationId, agentId: upsertRequest.agentId,
                   error: error instanceof Error ? error.message : String(error),
                   ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) };
               }
             };
             let operation = existing?.response;
             if (!operation) {
-              const prior = agentQueues.get(request.agentId) ?? Promise.resolve();
+              const prior = agentQueues.get(upsertRequest.agentId) ?? Promise.resolve();
               operation = prior.catch(() => {}).then(execute);
               const queued = operation.finally(() => {
-                if (agentQueues.get(request.agentId) === queued) agentQueues.delete(request.agentId);
+                if (agentQueues.get(upsertRequest.agentId) === queued) agentQueues.delete(upsertRequest.agentId);
               });
-              agentQueues.set(request.agentId, queued);
-              inFlight.set(request.operationId, { agentId: request.agentId, response: operation });
+              agentQueues.set(upsertRequest.agentId, queued);
+              inFlight.set(upsertRequest.operationId, { agentId: upsertRequest.agentId, response: operation });
             }
             const response = await operation;
-            inFlight.delete(request.operationId);
-            completed.set(request.operationId, response);
+            inFlight.delete(upsertRequest.operationId);
+            completed.set(upsertRequest.operationId, response);
             while (completed.size > maxRememberedOperations) completed.delete(completed.keys().next().value as string);
             connection.end(`${JSON.stringify(response)}\n`);
           })();
@@ -577,17 +656,15 @@ export async function requestDashboardRecovery({
   throw lastError instanceof Error ? lastError : new Error("supervisor control unavailable");
 }
 
-export async function requestAgentUpsert({
+async function requestAgentControl<T>({
   larkinHome,
-  agentId,
-  operationId = crypto.randomUUID(),
   timeoutMs = 30_000,
+  request,
 }: {
   larkinHome: string;
-  agentId: string;
-  operationId?: string;
   timeoutMs?: number;
-}): Promise<AgentUpsertResponse> {
+  request: AgentControlPayload;
+}): Promise<T> {
   const { supervisor, daemon } = readProcessState(larkinHome);
   if (supervisor.state !== "owned") throw new Error(`supervisor control ownership=${supervisor.state}（${supervisor.reason}）`);
   if (daemon.state !== "owned") throw new Error(`daemon control ownership=${daemon.state}（${daemon.reason}）`);
@@ -598,22 +675,47 @@ export async function requestAgentUpsert({
   if (!stat.isSocket() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
       || (stat.mode & 0o077) !== 0) throw new Error("daemon control socket 不安全");
-  return await new Promise<AgentUpsertResponse>((resolve, reject) => {
+  return await new Promise<T>((resolve, reject) => {
     const client = net.createConnection(socket);
-    const timer = setTimeout(() => { client.destroy(); reject(new Error("agent upsert control timeout")); }, timeoutMs);
+    const timer = setTimeout(() => { client.destroy(); reject(new Error("agent control timeout")); }, timeoutMs);
     let input = "";
     client.setEncoding("utf8");
     client.once("error", (error) => { clearTimeout(timer); reject(error); });
-    client.once("connect", () => client.write(`${JSON.stringify({ operationId, agentId, authorization: authority.token })}\n`));
+    client.once("connect", () => client.write(`${JSON.stringify({ ...request, authorization: authority.token })}\n`));
     client.on("data", (chunk) => {
       input += chunk;
       const newline = input.indexOf("\n");
       if (newline < 0) return;
       clearTimeout(timer);
       client.end();
-      try { resolve(JSON.parse(input.slice(0, newline)) as AgentUpsertResponse); }
+      try { resolve(JSON.parse(input.slice(0, newline)) as T); }
       catch (error) { reject(error); }
     });
+  });
+}
+
+export async function requestAgentUpsert(input: {
+  larkinHome: string;
+  agentId: string;
+  operationId?: string;
+  timeoutMs?: number;
+}): Promise<AgentUpsertResponse> {
+  return requestAgentControl<AgentUpsertResponse>({ larkinHome: input.larkinHome, timeoutMs: input.timeoutMs,
+    request: { operationId: input.operationId ?? crypto.randomUUID(), agentId: input.agentId } });
+}
+
+export async function requestSessionReset({
+  larkinHome,
+  agentId,
+  waitReadyMs = 30_000,
+}: {
+  larkinHome: string;
+  agentId: string;
+  waitReadyMs?: number;
+}): Promise<SessionResetResponse> {
+  return requestAgentControl<SessionResetResponse>({
+    larkinHome, timeoutMs: Math.max(1_000, waitReadyMs + 1_000),
+    request: { operation: "session-reset", agentId, waitReadyMs },
   });
 }
 

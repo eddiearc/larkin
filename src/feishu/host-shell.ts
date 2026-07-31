@@ -77,6 +77,12 @@ export interface HostShell {
   resumeSession(agent: ConfiguredAgent, runtime: string): string | null;
   ingest(agentId: string, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void>;
   upsertAgent(agent: ConfiguredAgent): Promise<"added" | "updated" | "unchanged">;
+  resetSession(agentId: string, waitReadyMs?: number): Promise<{
+    resetCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
+    runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+    readyForFreshScenario: boolean; inboundObserved: false;
+    code?: string; error?: string;
+  }>;
   start(): Promise<void>;
   shutdown(reason?: string): Promise<void>;
 }
@@ -173,6 +179,7 @@ export function createHostShell({
   execFileImpl = execFile,
   managedCliForAgent = (agent: ConfiguredAgent) => managedOfficialLarkCli(agent, env),
   reconcileAgentWorkspaceImpl = reconcileAgentWorkspace,
+  stateStoreForImpl = createAgentStateStore,
   logImpl = (...parts: unknown[]): void => { process.stderr.write(`[host] ${parts.join(" ")}\n`); },
   onOrderedShutdownComplete,
 }: {
@@ -184,6 +191,7 @@ export function createHostShell({
   execFileImpl?: typeof execFile;
   managedCliForAgent?: (agent: ConfiguredAgent) => ReturnType<typeof managedOfficialLarkCli>;
   reconcileAgentWorkspaceImpl?: typeof reconcileAgentWorkspace;
+  stateStoreForImpl?: typeof createAgentStateStore;
   logImpl?: (...parts: unknown[]) => void;
   onOrderedShutdownComplete?: (exitCode: number) => void;
 }): HostShell {
@@ -209,7 +217,7 @@ export function createHostShell({
     if (!agent) throw new Error(`未知 Agent state store: ${subject.agentId}`);
     let store = stores.get(agent.agentId);
     if (!store) {
-      store = createAgentStateStore(larkinHome, agent.agentId);
+      store = stateStoreForImpl(larkinHome, agent.agentId);
       if (path.resolve(store.paths.root) !== path.resolve(agent.stateDir)) throw new Error(`Agent ${agent.agentId} state store 路径不一致`);
       stores.set(agent.agentId, store);
     }
@@ -935,7 +943,7 @@ export function createHostShell({
     resumeSession(agent, runtime): string | null { return agentStates.get(agent.agentId)?.state.sessions[runtime] || null; },
     async ingest(agentId, event, options): Promise<void> {
       const agent = agents.find((candidate) => candidate.agentId === agentId);
-      if (!agent) throw new Error(`未知 Agent: ${agentId}`);
+      if (!agent) throw Object.assign(new Error(`未知 Agent: ${agentId}`), { code: "unknown_agent" });
       await onFeishuMessage(agent, event, options);
     },
     async upsertAgent(candidate): Promise<"added" | "updated" | "unchanged"> {
@@ -943,6 +951,76 @@ export function createHostShell({
       if (!hotUpsert) throw new Error("Agent control plane 尚未就绪");
       if (runtimeHost.isBusy?.(validated.agentId)) throw new Error(`Agent ${validated.agentId} 正在执行 turn，拒绝中断；请在 idle 后重试`);
       return hotUpsert(validated);
+    },
+    async resetSession(agentId, waitReadyMs = 30_000): Promise<{
+      resetCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
+      runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+      readyForFreshScenario: boolean; inboundObserved: false;
+      code?: string; error?: string;
+    }> {
+      const agent = agents.find((candidate) => candidate.agentId === agentId);
+      if (!agent) throw Object.assign(new Error(`未知 Agent: ${agentId}`), { code: "unknown_agent" });
+      if (!runtimeHost.resetSession) throw Object.assign(new Error("Runtime session reset 尚未就绪"), { code: "runtime_unavailable" });
+      const connectionState = (): { channelConnected: boolean; reconnecting: boolean } => {
+        const status = hostState.readStatus(agent);
+        const connectedAt = Date.parse(String(status.connectedAt || ""));
+        const channelConnected = Number.isFinite(connectedAt) && connectedAt >= Date.parse(daemonStartedAt) - 1000;
+        const reconnectingAt = Date.parse(String(status.reconnectingAt || ""));
+        const reconnectedAt = Date.parse(String(status.reconnectedAt || ""));
+        const reconnecting = Number.isFinite(reconnectingAt) && (!Number.isFinite(reconnectedAt) || reconnectingAt > reconnectedAt);
+        return { channelConnected, reconnecting };
+      };
+      const readinessProjection = (): { turns: number; runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number } => {
+        const status = hostState.readStatus(agent);
+        const turns = status.session && typeof status.session === "object"
+          ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
+        const runtimeReady = Boolean(status.runtimeReadiness && typeof status.runtimeReadiness === "object"
+          && (status.runtimeReadiness as { state?: unknown }).state === "ready");
+        const pendingCount = stateStore(agent).withInboxTransaction(() => stateStore(agent).readNdjson("inbox").length);
+        return { turns, runtimeReady, ...connectionState(), pendingCount };
+      };
+      const initialConnection = connectionState();
+      const { channelConnected, reconnecting } = initialConnection;
+      if (!channelConnected) throw Object.assign(new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable" });
+      if (reconnecting) throw Object.assign(new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting" });
+      const reset = await runtimeHost.resetSession(agentId);
+      const record = agentStates.get(agentId);
+      try {
+        if (record) {
+          if (reset.sessionId) record.state.sessions[agent.runtime] = reset.sessionId;
+          else delete record.state.sessions[agent.runtime];
+          record.store.writeJson("agentState", record.state);
+        }
+        if (!reset.sessionId) hostState.updateStatus(agent, {
+          session: { runtime: agent.runtime, id: null, launchId: null, startedAt: new Date().toISOString(),
+            lastSeenAt: null, lastTurnAt: null, turns: 0 }, runtimeReadiness: { runtime: agent.runtime, state: "ready" },
+        });
+      } catch (error) {
+        const projection = readinessProjection();
+        return { resetCommitted: true, generationChanged: reset.generationChanged, sessionChanged: reset.sessionChanged,
+          ...projection,
+          readyForFreshScenario: false, inboundObserved: false, code: "state_persistence_failed",
+          error: error instanceof Error ? error.message : String(error) };
+      }
+      const deadline = Date.now() + Math.max(0, waitReadyMs);
+      let projection = readinessProjection();
+      do {
+        projection = readinessProjection();
+        if (projection.turns === 0 && projection.runtimeReady && projection.channelConnected && !projection.reconnecting && projection.pendingCount === 0) {
+          return { resetCommitted: true, generationChanged: reset.generationChanged, sessionChanged: reset.sessionChanged,
+            ...projection, readyForFreshScenario: true, inboundObserved: false };
+        }
+        if (Date.now() >= deadline) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+      } while (true);
+      const unavailable = !projection.runtimeReady || !projection.channelConnected;
+      const contaminated = projection.turns > 0 || projection.pendingCount > 0;
+      return { resetCommitted: true, generationChanged: reset.generationChanged, sessionChanged: reset.sessionChanged,
+        ...projection, readyForFreshScenario: false, inboundObserved: false,
+        code: contaminated ? "fresh_scenario_contaminated" : unavailable ? "runtime_unavailable" : "reset_timeout",
+        error: contaminated ? "reset committed but the fresh scenario was contaminated by a turn or Inbox arrival"
+          : unavailable ? "reset committed but Runtime/channel readiness is unavailable"
+            : "reset committed but readiness did not converge before timeout" };
     },
     async start(): Promise<void> {
       try {

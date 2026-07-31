@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-export type RuntimeReadinessState = "missing" | "unauthenticated" | "incompatible" | "ready";
+export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
 
 export interface RuntimeReadiness {
   runtime: "codex" | "claude" | "pi";
@@ -63,9 +63,17 @@ export function classifyRuntimePrerequisite(runtime: RuntimeReadiness["runtime"]
     runtime, state: "unauthenticated", ...(executable ? { executable } : {}), reason,
     nextAction: runtime === "pi" ? "Run the official `pi` login flow, then retry." : `Authenticate ${runtime}, then retry.`,
   };
-  return {
+  if (/protocol (?:version )?(?:mismatch|unsupported|incompatible)|unsupported (?:rpc|protocol|schema)|schema (?:mismatch|incompatible)|requires (?:a )?newer version/i.test(reason)) return {
     runtime, state: "incompatible", ...(executable ? { executable } : {}), reason,
     nextAction: runtime === "pi" ? "Upgrade local Pi to a version that supports the documented RPC protocol." : `Upgrade ${runtime}, then retry.`,
+  };
+  if (/timeout|timed out|unexpected EOF|\bEOF\b|TLS|ECONNRESET|socket hang up|network|temporar(?:y|ily)|unavailable/i.test(reason)) return {
+    runtime, state: "unavailable", ...(executable ? { executable } : {}), reason,
+    nextAction: `Retry ${runtime}; Larkin will use its bounded Runtime recreate/backoff policy.`,
+  };
+  return {
+    runtime, state: "unavailable", ...(executable ? { executable } : {}), reason,
+    nextAction: `Retry ${runtime}; the failure is not proven to be a protocol incompatibility.`,
   };
 }
 

@@ -10,8 +10,10 @@ import { fileURLToPath } from "node:url";
 import {
   cleanupStaleAgentControlSocket,
   controlSocketPath,
+  createAgentControlServer,
   initializeControlAuthority,
   requestAgentUpsert,
+  requestSessionReset,
 } from "../../../dist/app/local-control.mjs";
 import { inspectProcess, readProcessState } from "../../../dist/platform/process-state.mjs";
 
@@ -38,9 +40,12 @@ async function rawRequest(socket, payload) {
   });
 }
 
-test("local control socket is user-only, agent-id-only, and operation-id idempotent", async () => {
+test("local control keeps upsert ID idempotency and coalesces only concurrent reset requests", { timeout: 15_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-control-"));
   fs.chmodSync(root, 0o700);
+  const legacyResetLedger = path.join(root, "daemon-control-operations.json");
+  fs.writeFileSync(legacyResetLedger, JSON.stringify({ version: 1, records: [{ operationId: "legacy-reset-id",
+    agentId: "cli_newA1", operation: "session-reset", state: "terminal", response: { ok: true } }] }), { mode: 0o600 });
   const calls = path.join(root, "calls.log");
   const daemonTmp = fs.mkdtempSync("/tmp/lct-");
   fs.chmodSync(daemonTmp, 0o700);
@@ -52,6 +57,14 @@ test("local control socket is user-only, agent-id-only, and operation-id idempot
   child.stderr.on("data", (chunk) => { output += chunk; });
   try {
     await waitForReady(child, () => output);
+    assert.equal(fs.existsSync(legacyResetLedger), false, "startup removes the valid private legacy reset ledger");
+    const restartControl = async () => {
+      const marker = path.join(root, "control-restarted");
+      fs.rmSync(marker, { force: true });
+      child.kill("SIGUSR2");
+      for (let index = 0; !fs.existsSync(marker) && index < 200; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(fs.existsSync(marker), true, output);
+    };
     const initialProcessState = readProcessState(root);
     assert.equal(initialProcessState.supervisor.state, "owned", JSON.stringify(initialProcessState.supervisor));
     assert.equal(initialProcessState.daemon.state, "owned", JSON.stringify(initialProcessState.daemon));
@@ -78,7 +91,24 @@ test("local control socket is user-only, agent-id-only, and operation-id idempot
     assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n"), [
       `start:${operationId}:cli_newA1`, `end:${operationId}:cli_newA1`,
     ]);
+    const conflictProjection = (conflictOperationId) => ({ ok: false, operationId: conflictOperationId,
+      agentId: "cli_otherA1", code: "operation_conflict", error: "operationId 已绑定其他 Agent 或操作" });
+    assert.deepEqual(await requestAgentUpsert({ larkinHome: root, agentId: "cli_otherA1", operationId }),
+      conflictProjection(operationId), "completed successful upsert conflict remains neutral");
 
+    const failedConflictId = "operation_failed_conflict_1";
+    const failedUpsert = await requestAgentUpsert({ larkinHome: root, agentId: "cli_newA1", operationId: failedConflictId });
+    assert.equal(failedUpsert.ok, false);
+    assert.equal(failedUpsert.readiness.reason, "fixture readiness must not leak");
+    assert.deepEqual(await requestAgentUpsert({ larkinHome: root, agentId: "cli_otherA1", operationId: failedConflictId }),
+      conflictProjection(failedConflictId), "completed failed upsert conflict never leaks original readiness");
+
+    const inFlightConflictId = "operation_inflight_conflict_1";
+    const inFlightOriginal = requestAgentUpsert({ larkinHome: root, agentId: "cli_newA1", operationId: inFlightConflictId });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(await requestAgentUpsert({ larkinHome: root, agentId: "cli_otherA1", operationId: inFlightConflictId }),
+      conflictProjection(inFlightConflictId), "in-flight upsert conflict uses the same exact neutral envelope");
+    assert.equal((await inFlightOriginal).ok, true);
     const [differentOne, differentTwo] = await Promise.all([
       requestAgentUpsert({ larkinHome: root, agentId: "cli_newA1", operationId: "operation_different_1" }),
       requestAgentUpsert({ larkinHome: root, agentId: "cli_newA1", operationId: "operation_different_2" }),
@@ -94,8 +124,61 @@ test("local control socket is user-only, agent-id-only, and operation-id idempot
       operationId: "operation_extra_1", agentId: "cli_newA1", authorization: authority.token, secret: "must-not-pass",
     });
     assert.equal(invalid.ok, false);
-    assert.match(invalid.error, /只允许 operationId\/agentId\/authorization/);
+    assert.match(invalid.error, /未知字段/);
     assert.doesNotMatch(output, /must-not-pass/);
+
+    const resetCalls = () => fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length;
+    const [reset, concurrentReset] = await Promise.all([
+      requestSessionReset({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 10 }),
+      requestSessionReset({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 250 }),
+    ]);
+    assert.deepEqual(concurrentReset, reset, "concurrent reset requests for one Agent share one in-flight result");
+    assert.equal(reset.readyForFreshScenario, true);
+    assert.equal("operationId" in reset, false);
+    assert.equal(resetCalls(), 1);
+    const laterReset = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 10 });
+    assert.equal(laterReset.readyForFreshScenario, true);
+    assert.equal(resetCalls(), 2, "a completed invocation is not replayed and starts a new reset");
+    await restartControl();
+    const afterRestart = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 10 });
+    assert.equal(afterRestart.readyForFreshScenario, true);
+    assert.equal(resetCalls(), 3, "reset completion is not persisted or replayed across control-server restart");
+    assert.equal(fs.existsSync(legacyResetLedger), false, "reset execution never recreates the removed legacy ledger");
+    const forbiddenResetId = await rawRequest(socket, { operation: "session-reset", agentId: "cli_newA1",
+      authorization: authority.token, waitReadyMs: 10, operationId: "operation_reset_forbidden" });
+    assert.equal(forbiddenResetId.ok, false);
+    assert.equal("operationId" in forbiddenResetId, false);
+    assert.match(forbiddenResetId.error, /未知字段/);
+    assert.equal(resetCalls(), 3);
+    const unknown = await requestSessionReset({ larkinHome: root, agentId: "cli_unknownA1", waitReadyMs: 10 });
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.resetCommitted, false);
+    assert.equal(unknown.code, "unknown_agent");
+
+    for (let index = 0; index < 6; index += 1) {
+      const churn = await requestAgentUpsert({ larkinHome: root, agentId: "cli_newA1", operationId: `operation_churn_${index}` });
+      assert.equal(churn.ok, true);
+    }
+
+    fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "server-control",
+      activeAgent: "cli_newA1", agents: { cli_newA1: { runtime: "codex", model: "gpt-5.2" } } }), { mode: 0o600 });
+    const deniedRuntimeCli = spawnSync(process.execPath, [path.join(ROOT, "dist/app/cli.mjs"), "session", "reset",
+      "--agent", "cli_newA1", "--json"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: "cli_runtimeA1" },
+    });
+    assert.equal(deniedRuntimeCli.status, 1);
+    assert.equal(JSON.parse(deniedRuntimeCli.stdout).code, "user_authority_required");
+    const publicCli = spawnSync(process.execPath, [path.join(ROOT, "dist/app/cli.mjs"), "session", "reset",
+      "--agent", "cli_newA1", "--json", "--wait-ready", "1"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: root },
+    });
+    assert.equal(publicCli.status, 0, publicCli.stderr || publicCli.stdout);
+    const publicResult = JSON.parse(publicCli.stdout);
+    assert.equal("operation_id" in publicResult, false);
+    assert.deepEqual(publicResult, { ok: true, agent_id: "cli_newA1",
+      reset_committed: true, generation_changed: true, session_changed: true, turns: 0,
+      runtime_ready: true, channel_connected: true, reconnecting: false, pending_count: 0,
+      ready_for_fresh_scenario: true, inbound_observed: false });
 
     const supervisorStatus = JSON.parse(fs.readFileSync(path.join(root, "supervisor-status.json"), "utf8"));
     const daemonStatus = JSON.parse(fs.readFileSync(path.join(root, "daemon-status.json"), "utf8"));
@@ -121,6 +204,44 @@ test("local control socket is user-only, agent-id-only, and operation-id idempot
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(daemonTmp, { recursive: true, force: true });
   }
+});
+
+test("legacy reset-ledger cleanup refuses unsafe paths without unlinking or following them", async () => {
+  const makeServer = (root) => createAgentControlServer({ larkinHome: root, authorityToken: "A".repeat(43), async upsert() {} });
+
+  const symlinkRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-ledger-symlink-"));
+  fs.chmodSync(symlinkRoot, 0o700);
+  try {
+    const target = path.join(symlinkRoot, "target.json");
+    const ledger = path.join(symlinkRoot, "daemon-control-operations.json");
+    fs.writeFileSync(target, "target-must-survive", { mode: 0o600 });
+    fs.symlinkSync(target, ledger);
+    await assert.rejects(makeServer(symlinkRoot).start(), /legacy daemon control operation ledger 不安全/);
+    assert.equal(fs.lstatSync(ledger).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(target, "utf8"), "target-must-survive");
+  } finally { fs.rmSync(symlinkRoot, { recursive: true, force: true }); }
+
+  const directoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-ledger-directory-"));
+  fs.chmodSync(directoryRoot, 0o700);
+  try {
+    const ledger = path.join(directoryRoot, "daemon-control-operations.json");
+    fs.mkdirSync(ledger, { mode: 0o700 });
+    fs.writeFileSync(path.join(ledger, "marker"), "directory-must-survive", { mode: 0o600 });
+    await assert.rejects(makeServer(directoryRoot).start(), /legacy daemon control operation ledger 不安全/);
+    assert.equal(fs.lstatSync(ledger).isDirectory(), true);
+    assert.equal(fs.readFileSync(path.join(ledger, "marker"), "utf8"), "directory-must-survive");
+  } finally { fs.rmSync(directoryRoot, { recursive: true, force: true }); }
+
+  const publicModeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-ledger-mode-"));
+  fs.chmodSync(publicModeRoot, 0o700);
+  try {
+    const ledger = path.join(publicModeRoot, "daemon-control-operations.json");
+    fs.writeFileSync(ledger, "public-file-must-survive", { mode: 0o644 });
+    fs.chmodSync(ledger, 0o644);
+    await assert.rejects(makeServer(publicModeRoot).start(), /legacy daemon control operation ledger 不安全/);
+    assert.equal(fs.readFileSync(ledger, "utf8"), "public-file-must-survive");
+    assert.equal(fs.lstatSync(ledger).mode & 0o777, 0o644);
+  } finally { fs.rmSync(publicModeRoot, { recursive: true, force: true }); }
 });
 
 test("stale socket cleanup refuses a different server even when the filesystem reuses its inode", async () => {

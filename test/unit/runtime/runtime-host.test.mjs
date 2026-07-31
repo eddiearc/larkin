@@ -53,6 +53,90 @@ test("RuntimeHost stages a candidate session without stopping the old healthy Ag
   await host.shutdown("done");
 });
 
+test("RuntimeHost fresh reset replaces only an idle zero-backlog Agent and is generation-isolated", async () => {
+  const sessions = [];
+  const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+    const session = new FakeSession();
+    session.sessionId = `session-${sessions.length + 1}`;
+    sessions.push({ session, input });
+    return session;
+  } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  const base = { name: "reset", runtime: "pi", model: "model", workspaceDir: "/tmp" };
+  await host.start([
+    { ...base, agentId: "cli_resetA1", sessionId: "resume-old" },
+    { ...base, agentId: "cli_otherA1", sessionId: "other-old" },
+  ]);
+  const result = await host.resetSession("cli_resetA1");
+  assert.equal(result.generationChanged, true);
+  assert.equal(result.sessionChanged, true);
+  assert.equal(result.turns, 0);
+  assert.equal(result.runtimeReady, true);
+  assert.equal(sessions[2].input.resumeSessionId, null);
+  assert.deepEqual(sessions[0].session.closes, ["fresh session reset committed"]);
+  assert.deepEqual(sessions[1].session.closes, []);
+  await host.shutdown("done");
+});
+
+test("RuntimeHost fresh reset refuses busy and canonical Inbox backlog without mutation", async () => {
+  const session = new FakeSession();
+  const store = {
+    readJson(_key, fallback) { return fallback; },
+    readNdjson() { return [{ message_id: "om_pending" }]; },
+    writeJson() {},
+    withInboxTransaction(operation) { return operation(); },
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  await host.start([{ agentId: "cli_resetBlockedA1", name: "blocked", runtime: "codex", model: "model", workspaceDir: "/tmp" }]);
+  await assert.rejects(host.resetSession("cli_resetBlockedA1"), (error) => error.code === "inbox_backlog" && error.pendingCount === 1);
+  assert.deepEqual(session.closes, []);
+  session.emit({ type: "turn-start" });
+  store.readNdjson = () => [];
+  await assert.rejects(host.resetSession("cli_resetBlockedA1"), (error) => error.code === "agent_busy");
+  assert.deepEqual(session.closes, []);
+  await host.shutdown("done");
+});
+
+test("RuntimeHost aborts a staged reset when Inbox arrival or turn start races creation", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reset-race-"));
+  const agentId = "cli_resetRaceA1";
+  const store = createAgentStateStore(root, agentId);
+  const old = new FakeSession(); old.sessionId = "old-race";
+  let creates = 0, release;
+  const adapter = { id: "codex", capabilities: {}, async createSession() {
+    creates += 1;
+    if (creates === 1) return old;
+    const fresh = new FakeSession(); fresh.sessionId = `fresh-race-${creates}`;
+    await new Promise((resolve) => { release = resolve; });
+    return fresh;
+  } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId, name: "race", runtime: "codex", model: "model", workspaceDir: "/tmp" }]);
+    const inboxRace = host.resetSession(agentId);
+    await new Promise((resolve) => setImmediate(resolve));
+    store.appendNdjson("inbox", { message_id: "om_raced", target: "chat:oc_race" });
+    release();
+    await assert.rejects(inboxRace, (error) => error.code === "inbox_backlog");
+    assert.deepEqual(old.closes, []);
+    store.pollInbox();
+
+    const turnRace = host.resetSession(agentId);
+    await new Promise((resolve) => setImmediate(resolve));
+    old.emit({ type: "turn-start" });
+    release();
+    await assert.rejects(turnRace, (error) => error.code === "agent_busy");
+    assert.deepEqual(old.closes, []);
+    old.emit({ type: "turn-end" });
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeHost isolates a missing runtime and keeps healthy agents active", async () => {
   const healthy = new FakeSession();
   const events = [];
@@ -71,6 +155,41 @@ test("RuntimeHost isolates a missing runtime and keeps healthy agents active", a
   ]);
   assert.ok(events.some((event) => event.type === "agent-status" && event.agentId === "cli_badPiA1" && event.readiness?.state === "missing"));
   assert.ok(events.some((event) => event.type === "agent-status" && event.agentId === "cli_goodCodexA1" && event.status === "active"));
+  await host.shutdown("done");
+});
+
+test("RuntimeHost retries unavailable readiness through bounded recreate instead of disabling the Agent", async () => {
+  const session = new FakeSession();
+  let probes = 0;
+  const adapter = { id: "pi", capabilities: {}, async probe() {
+    probes += 1;
+    return probes === 1 ? { runtime: "pi", state: "unavailable", reason: "get_state timeout", nextAction: "retry" }
+      : { runtime: "pi", state: "ready" };
+  }, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 2 } });
+  await host.start([{ agentId: "cli_transientPiA1", name: "transient", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(probes, 2);
+  assert.equal((await host.deliver("cli_transientPiA1", { message_id: "om_after_retry" })).status, "accepted");
+  await host.shutdown("done");
+});
+
+test("RuntimeHost stops recreate when the latest probe changes from unavailable to fatal", async () => {
+  let probes = 0;
+  const events = [];
+  const adapter = { id: "pi", capabilities: {}, async probe() {
+    probes += 1;
+    return probes === 1 ? { runtime: "pi", state: "unavailable", reason: "network timeout", nextAction: "retry" }
+      : { runtime: "pi", state: "unauthenticated", reason: "login required", nextAction: "login" };
+  }, async createSession() { throw new Error("must not create"); } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 5 } });
+  host.subscribe((event) => events.push(event));
+  await host.start([{ agentId: "cli_transitionPiA1", name: "transition", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(probes, 2);
+  assert.ok(events.some((event) => event.type === "agent-status" && event.readiness?.state === "unauthenticated"));
   await host.shutdown("done");
 });
 

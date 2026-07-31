@@ -7,6 +7,7 @@ import type {
   NormalizedRuntimeEvent, RuntimeAdapter, RuntimeInput, RuntimeInputResult, RuntimeSession,
 } from "./runtime-contracts.js";
 import {
+  classifyRuntimePrerequisite,
   providerAuthenticationFailureReadiness,
   RuntimePrerequisiteError,
   type RuntimeReadiness,
@@ -70,6 +71,23 @@ export interface RuntimeHost {
   shutdown(reason: string): Promise<void>;
   subscribe(listener: (event: RuntimeHostEvent) => void): () => void;
   isBusy?(agentId: string): boolean;
+  resetSession?(agentId: string): Promise<RuntimeSessionResetResult>;
+}
+
+export interface RuntimeSessionResetResult {
+  generationChanged: boolean;
+  sessionChanged: boolean;
+  turns: 0;
+  runtimeReady: true;
+  pendingCount: 0;
+  sessionId: string | null;
+}
+
+export class RuntimeSessionResetError extends Error {
+  constructor(readonly code: "unknown_agent" | "agent_busy" | "inbox_backlog", message: string, readonly pendingCount = 0) {
+    super(message);
+    this.name = "RuntimeSessionResetError";
+  }
 }
 
 export interface StagedRuntimeCandidate {
@@ -401,7 +419,17 @@ export function createRuntimeHost(options: {
       if (agent.stopped) return;
       void ensureSession(agent).then(() => {
         return retryPending(agent);
-      }).catch((error) => scheduleRecreate(agent, error instanceof Error ? error.message : String(error)));
+      }).catch((error) => {
+        const readiness = error instanceof RuntimePrerequisiteError ? error.readiness
+          : classifyRuntimePrerequisite(agent.adapter.id as RuntimeReadiness["runtime"], error);
+        agent.readiness = readiness;
+        const nextReason = error instanceof Error ? error.message : String(error);
+        if (readiness.state === "unavailable") scheduleRecreate(agent, nextReason);
+        else {
+          agent.disabledReason = nextReason;
+          emit({ type: "agent-status", agentId: agent.config.agentId, status: "error", error: nextReason, readiness });
+        }
+      });
     }, delay);
     agent.retryTimer.unref?.();
   };
@@ -669,8 +697,80 @@ export function createRuntimeHost(options: {
       };
     },
     isBusy(agentId): boolean { const agent = managed.get(agentId); return Boolean(agent?.busy || agent?.submitting || agent?.starting); },
+    async resetSession(agentId): Promise<RuntimeSessionResetResult> {
+      const agent = managed.get(agentId);
+      if (!agent || agent.stopped) throw new RuntimeSessionResetError("unknown_agent", `unknown runtime Agent: ${agentId}`);
+      if (agent.busy || agent.turnInProgress || agent.submitting || agent.starting) {
+        throw new RuntimeSessionResetError("agent_busy", `Agent ${agentId} is not idle`);
+      }
+      const countPending = (): number => agent.stateStore
+        ? agent.stateStore.withInboxTransaction(() => agent.stateStore!.readNdjson?.<Record<string, unknown>>("inbox").length ?? 0)
+        : [...agent.records.values()].filter((record) => isActiveDelivery(record.status)).length;
+      const pendingCount = countPending();
+      if (pendingCount > 0) throw new RuntimeSessionResetError("inbox_backlog", `Agent ${agentId} has unconsumed Inbox backlog`, pendingCount);
+      const oldSession = agent.session;
+      if (!oldSession) throw new RuntimeSessionResetError("agent_busy", `Agent ${agentId} Runtime session is unavailable`);
+      const oldSessionId = oldSession.sessionId;
+      const probeEnv = runtimeEnv(agent.config, `${agent.launchId}:reset`);
+      await assertOfficialCliReady(agent.config, probeEnv);
+      const readiness = agent.adapter.probe ? await agent.adapter.probe({ workspaceDir: agent.config.workspaceDir,
+        env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
+          LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...probeEnv } })
+        : { runtime: agent.adapter.id, state: "ready" as const };
+      if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
+      const standingPrompt = options.promptBuilder.build({
+        agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
+        description: agent.config.description || "", runtime: agent.adapter.id,
+        cli: agentCliPromptCapabilities("larkin"),
+      });
+      const create = agent.adapter.createSession({
+        agentId: agent.config.agentId, model: agent.config.model, reasoningEffort: agent.config.effort || null,
+        workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
+        resumeSessionId: null, standingPrompt, env: probeEnv,
+      });
+      agent.starting = create;
+      let fresh: RuntimeSession;
+      try { fresh = await create; }
+      finally { if (agent.starting === create) agent.starting = null; }
+      const commit = (): void => {
+        if (agent.session !== oldSession || agent.busy || agent.turnInProgress || agent.submitting || agent.stopped) {
+          throw new RuntimeSessionResetError("agent_busy", `Agent ${agentId} changed during reset`);
+        }
+        const pendingAfterCreate = agent.stateStore?.readNdjson?.<Record<string, unknown>>("inbox").length
+          ?? [...agent.records.values()].filter((record) => isActiveDelivery(record.status)).length;
+        if (pendingAfterCreate > 0) {
+          throw new RuntimeSessionResetError("inbox_backlog", `Agent ${agentId} received Inbox backlog during reset`, pendingAfterCreate);
+        }
+        agent.generation += 1;
+        agent.launchId = crypto.randomUUID();
+        agent.config.sessionId = null;
+        agent.session = fresh;
+        agent.readiness = readiness;
+        agent.disabledReason = null;
+      };
+      try {
+        if (agent.stateStore) agent.stateStore.withInboxTransaction(commit);
+        else commit();
+      } catch (error) {
+        await fresh.close("fresh session reset precondition changed");
+        throw error;
+      }
+      fresh.subscribe((event) => observe(agent, fresh, event));
+      if (fresh.sessionId) {
+        agent.config.sessionId = fresh.sessionId;
+        emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: fresh.sessionId, launchId: agent.launchId,
+          ...(fresh.effectiveModel ? { model: fresh.effectiveModel } : {}),
+          ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
+      }
+      emit({ type: "agent-status", agentId, status: "active", readiness });
+      await oldSession.close("fresh session reset committed")
+        .catch((error) => log("previous runtime close after fresh reset failed", String(error)));
+      return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
+        runtimeReady: true, pendingCount: 0, sessionId: fresh.sessionId };
+    },
     async start(configs): Promise<void> {
       let activeCount = 0;
+      let recoveringCount = 0;
       const startupFailures: string[] = [];
       for (const config of configs) {
         if (managed.has(config.agentId)) { activeCount += 1; continue; }
@@ -709,14 +809,16 @@ export function createRuntimeHost(options: {
           await retryPending(agent);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
-          agent.disabledReason = reason;
+          const transient = error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable";
+          agent.disabledReason = transient ? null : reason;
+          if (transient) { recoveringCount += 1; scheduleRecreate(agent, reason); }
           startupFailures.push(`${config.agentId}: ${reason}`);
           emit({ type: "agent-status", agentId: config.agentId, status: "error", error: reason,
             ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) });
         }
         agent.poller = setInterval(() => reconcileExternalConsumption(agent), 250); agent.poller.unref?.();
       }
-      if (configs.length > 0 && activeCount === 0) {
+      if (configs.length > 0 && activeCount === 0 && recoveringCount === 0) {
         throw new Error(`No runtime Agent started: ${startupFailures.join("; ")}`);
       }
     },

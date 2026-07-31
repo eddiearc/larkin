@@ -118,6 +118,10 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /do not restrict.*msg_type=text.*post/i);
   assert.match(prompt.content, /shell substitution.*double-quoted.*`--content`.*one argument/i);
   assert.match(prompt.content, /one model tool call.*one.*scoped read.*one guarded reply/i);
+  assert.match(prompt.content, /known thread.*latest human.*first and only post-poll model tool call/i);
+  assert.match(prompt.content, /thread.*never.*preview.*extract.*message id.*switch.*messages-mget/i);
+  assert.match(prompt.content, /known source message id.*messages-mget.*first and only post-poll model tool call.*no preview/i);
+  assert.match(prompt.content, /inner read.*replaces.*separate.*history read/i);
   assert.match(prompt.content, /must not.*unquoted.*substitution.*`eval`.*`echo`.*`2>&1`.*temporary/i);
   assert.match(prompt.content,
     /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);

@@ -1,6 +1,6 @@
 {
   "dataset": "agent-experience-v6",
-  "version": 3,
+  "version": 4,
   "model": {
     "selection": "deterministic-trace",
     "standing_prompt_version": "larkin-standing-v6"
@@ -10,7 +10,7 @@
   },
   "grader": {
     "name": "agent-experience-v6-trace-grader",
-    "version": 3,
+    "version": 4,
     "threshold": 1.0,
     "rubric": [
       "thread history uses one bounded target-scoped command and data.messages",
@@ -19,6 +19,7 @@
       "verbatim punctuation reaches the provider without shell interpolation",
       "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
       "tool-sourced verbatim text preserves Unicode and whitespace byte-for-byte through the known poll, scoped-history, and reply path without skill/reference rediscovery",
+      "the model-internal preflight binds the planned argv literal to the scoped-history source code point for code point without adding a tool call",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
     ]
@@ -182,6 +183,7 @@
           "command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
           "read_path": "data.messages"
         },
+        "argv_text_from_source": true,
         "shell_interpolation": false
       },
       "trace": [
@@ -202,6 +204,7 @@
           "action": "provider_write",
           "command": "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json",
           "message_id": "om_eval_verbatim",
+          "argv_text": "引用：“抢到”  保留空格",
           "transported_text": "引用：“抢到”  保留空格",
           "shell_interpolation": false,
           "exit_code": 0

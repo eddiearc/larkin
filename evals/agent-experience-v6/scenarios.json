@@ -1,6 +1,6 @@
 {
   "dataset": "agent-experience-v6",
-  "version": 4,
+  "version": 5,
   "model": {
     "selection": "deterministic-trace",
     "standing_prompt_version": "larkin-standing-v6"
@@ -10,7 +10,7 @@
   },
   "grader": {
     "name": "agent-experience-v6-trace-grader",
-    "version": 4,
+    "version": 5,
     "threshold": 1.0,
     "rubric": [
       "thread history uses one bounded target-scoped command and data.messages",
@@ -18,8 +18,8 @@
       "failed reads do not fall back to memory or produce false success",
       "verbatim punctuation reaches the provider without shell interpolation",
       "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
-      "tool-sourced verbatim text preserves Unicode and whitespace byte-for-byte through the known poll, scoped-history, and reply path without skill/reference rediscovery",
-      "the model-internal preflight binds the planned argv literal to the scoped-history source code point for code point without adding a tool call",
+      "tool-sourced verbatim text flows from one canonical scoped read through native --jq into one guarded --content reply without model rewriting or extra discovery",
+      "thread-latest-human and message-ID sources preserve Unicode, whitespace, and normalization in the complete text JSON document",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
     ]
@@ -160,31 +160,36 @@
     },
     {
       "id": "tool-sourced-verbatim-thread-reply",
-      "task": "Poll the known thread target, read its canonical scoped history once, then reply with the returned text byte-for-byte without rediscovering the known recipes.",
+      "task": "Poll the known thread target, then reply with its latest human text through the canonical scoped --jq to --content dataflow without copying it.",
       "expected": {
-        "max_tool_calls": 3,
-        "exact_tool_calls": 3,
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
         "provider_writes": 1,
         "write_exit_code": 0,
         "ordered_commands": [
           "larkin inbox poll --target thread:oc_eval_verbatim:omt_eval_verbatim --limit 1",
-          "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
-          "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json"
+          "larkin im +messages-reply --message-id om_eval_verbatim --content \"$(larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == \"user\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"引用：\" + .content)}' --json)\" --json"
         ],
         "ordered_command_exit_code": 0,
         "reply_anchor": {
           "poll_command": "larkin inbox poll --target thread:oc_eval_verbatim:omt_eval_verbatim --limit 1",
-          "write_command": "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json"
+          "write_command": "larkin im +messages-reply --message-id om_eval_verbatim --content \"$(larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == \"user\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"引用：\" + .content)}' --json)\" --json"
         },
-        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
+        "forbidden_command_fragments": ["--help", " -h", "--markdown", "--text", "--idempotency-key", "2>&1", "eval ", "echo ", "mktemp", "/tmp/"],
         "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
         "exact_text": "引用：“抢到”  保留空格",
-        "exact_text_source": {
-          "command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
-          "read_path": "data.messages"
-        },
-        "argv_text_from_source": true,
-        "shell_interpolation": false
+        "exact_source_dataflow": {
+          "source_command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == \"user\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"引用：\" + .content)}' --json",
+          "source_target": "thread:oc_eval_verbatim:omt_eval_verbatim",
+          "source_read_path": "data.messages",
+          "source_read_count": 1,
+          "source_exit_code": 0,
+          "source_field": "content",
+          "source_msg_type": "text",
+          "literal_prefix": "引用：",
+          "shell_substitution": "quoted",
+          "content_key": "text"
+        }
       },
       "trace": [
         {
@@ -194,19 +199,81 @@
           "message_id": "om_eval_verbatim"
         },
         {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_verbatim --content \"$(larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == \"user\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"引用：\" + .content)}' --json)\" --json",
+          "message_id": "om_eval_verbatim",
+          "source_command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --jq '(first(.data.messages[] | select(.sender.sender_type == \"user\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"引用：\" + .content)}' --json",
+          "source_target": "thread:oc_eval_verbatim:omt_eval_verbatim",
+          "source_read_path": "data.messages",
+          "source_read_count": 1,
+          "source_exit_code": 0,
+          "source_field": "content",
+          "source_msg_type": "text",
+          "literal_prefix": "引用：",
+          "source_text": "“抢到”  保留空格",
+          "content_argument": "{\"text\":\"引用：“抢到”  保留空格\"}",
+          "transported_text": "引用：“抢到”  保留空格",
+          "shell_substitution": "quoted",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "tool-sourced-verbatim-message-reply",
+      "task": "Poll the known target, then reply with the exact text of one known source message through the canonical mget --jq to --content dataflow.",
+      "expected": {
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "ordered_commands": [
+          "larkin inbox poll --target chat:oc_eval_mget --limit 1",
+          "larkin im +messages-reply --message-id om_eval_mget_anchor --content \"$(larkin im +messages-mget --message-ids om_eval_mget_source --no-reactions --jq '(first(.data.messages[] | select(.message_id == \"om_eval_mget_source\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"作者'\\''s：\" + .content)}' --json)\" --json"
+        ],
+        "ordered_command_exit_code": 0,
+        "reply_anchor": {
+          "poll_command": "larkin inbox poll --target chat:oc_eval_mget --limit 1",
+          "write_command": "larkin im +messages-reply --message-id om_eval_mget_anchor --content \"$(larkin im +messages-mget --message-ids om_eval_mget_source --no-reactions --jq '(first(.data.messages[] | select(.message_id == \"om_eval_mget_source\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"作者'\\''s：\" + .content)}' --json)\" --json"
+        },
+        "forbidden_command_fragments": ["--help", " -h", "--markdown", "--text", "--idempotency-key", "2>&1", "eval ", "echo ", "mktemp", "/tmp/"],
+        "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
+        "exact_text": "作者's：消息原文：“保持”  不改",
+        "exact_source_dataflow": {
+          "source_command": "larkin im +messages-mget --message-ids om_eval_mget_source --no-reactions --jq '(first(.data.messages[] | select(.message_id == \"om_eval_mget_source\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"作者'\\''s：\" + .content)}' --json",
+          "source_target": "message:om_eval_mget_source",
+          "source_read_path": "data.messages",
+          "source_read_count": 1,
+          "source_exit_code": 0,
+          "source_field": "content",
+          "source_msg_type": "post",
+          "literal_prefix": "作者's：",
+          "shell_substitution": "quoted",
+          "content_key": "text"
+        }
+      },
+      "trace": [
+        {
           "action": "tool",
-          "command": "larkin im +threads-messages-list --thread omt_eval_verbatim --order desc --page-size 10 --no-reactions --json",
+          "command": "larkin inbox poll --target chat:oc_eval_mget --limit 1",
           "exit_code": 0,
-          "read_path": "data.messages",
-          "source_text": "引用：“抢到”  保留空格"
+          "message_id": "om_eval_mget_anchor"
         },
         {
           "action": "provider_write",
-          "command": "larkin im +messages-reply --message-id om_eval_verbatim --text '引用：“抢到”  保留空格' --json",
-          "message_id": "om_eval_verbatim",
-          "argv_text": "引用：“抢到”  保留空格",
-          "transported_text": "引用：“抢到”  保留空格",
-          "shell_interpolation": false,
+          "command": "larkin im +messages-reply --message-id om_eval_mget_anchor --content \"$(larkin im +messages-mget --message-ids om_eval_mget_source --no-reactions --jq '(first(.data.messages[] | select(.message_id == \"om_eval_mget_source\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"作者'\\''s：\" + .content)}' --json)\" --json",
+          "message_id": "om_eval_mget_anchor",
+          "source_command": "larkin im +messages-mget --message-ids om_eval_mget_source --no-reactions --jq '(first(.data.messages[] | select(.message_id == \"om_eval_mget_source\" and (.content | type == \"string\"))) // error(\"missing exact text source\")) | {text: (\"作者'\\''s：\" + .content)}' --json",
+          "source_target": "message:om_eval_mget_source",
+          "source_read_path": "data.messages",
+          "source_read_count": 1,
+          "source_exit_code": 0,
+          "source_field": "content",
+          "source_msg_type": "post",
+          "literal_prefix": "作者's：",
+          "source_text": "消息原文：“保持”  不改",
+          "content_argument": "{\"text\":\"作者's：消息原文：“保持”  不改\"}",
+          "transported_text": "作者's：消息原文：“保持”  不改",
+          "shell_substitution": "quoted",
           "exit_code": 0
         }
       ]

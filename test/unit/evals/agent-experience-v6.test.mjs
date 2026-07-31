@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { test } from "bun:test";
 import {
@@ -20,6 +21,7 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "exact-reply-no-help",
     "precommit-exact-reply-safe-retry",
     "tool-sourced-verbatim-thread-reply",
+    "tool-sourced-verbatim-message-reply",
     "exclusive-other-agent-silence",
     "committed-unverified-no-retry",
   ]);
@@ -31,6 +33,9 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
   assert.equal(result.passed, true);
   assert.equal(result.pass_rate, 1);
   assert.equal(result.results.every((item) => item.passed), true);
+  const apostrophePrefix = DATASET.scenarios.find((scenario) => scenario.id === "tool-sourced-verbatim-message-reply");
+  const shellSyntax = spawnSync("sh", ["-n", "-c", apostrophePrefix.trace[1].command], { encoding: "utf8" });
+  assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
 });
 
 test("grader rejects fallback, false success, text mutation, redundant discovery, unsafe retry, and duplicate writes", () => {
@@ -89,47 +94,68 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
     "bounded_calls", "tool_call_count", "redundant_discovery_read", "exact_text",
   ]));
 
-  const changedToolSource = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
-  changedToolSource[1].source_text = '引用："抢到" 保留空格';
-  changedToolSource[2].transported_text = changedToolSource[1].source_text;
-  assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], changedToolSource)
-    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text", "argv_source_binding"]));
-
-  const sourceMovedToPoll = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
-  sourceMovedToPoll[0].source_text = byId["tool-sourced-verbatim-thread-reply"].expected.exact_text;
-  sourceMovedToPoll[1].source_text = '引用："抢到" 保留空格';
-  assert.deepEqual(new Set(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], sourceMovedToPoll)
-    .failures.map((item) => item.rule)), new Set(["exact_text_source", "exact_text", "argv_source_binding"]));
-
-  for (const [label, argvText] of [
-    ["ASCII quotes", '引用："抢到"  保留空格'],
-    ["collapsed whitespace", "引用：“抢到” 保留空格"],
+  for (const hiddenAction of [
+    { action: "read", command: "read /skills/lark-im/SKILL.md", resource_path: "/skills/lark-im/SKILL.md" },
+    { action: "command", command: "larkin im +messages-reply --help", exit_code: 0 },
   ]) {
-    const changedPlannedArgv = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
-    changedPlannedArgv[2].argv_text = argvText;
-    assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], changedPlannedArgv)
-      .failures.some((item) => item.rule === "argv_source_binding"), true, label);
+    const hiddenDiscovery = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
+    hiddenDiscovery.splice(1, 0, hiddenAction);
+    assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], hiddenDiscovery)
+      .failures.some((item) => item.rule === "trace_action_schema"), true, hiddenAction.action);
   }
 
-  const normalizationScenario = structuredClone(byId["tool-sourced-verbatim-thread-reply"]);
+  for (const id of ["tool-sourced-verbatim-thread-reply", "tool-sourced-verbatim-message-reply"]) {
+    const scenario = byId[id];
+    for (const [label, mutate] of [
+      ["normalized JSON content", (event) => { event.content_argument = JSON.stringify({ text: '引用："改写" 单空格' }); }],
+      ["wrong source", (event) => { event.source_text = "wrong source"; }],
+      ["wrong target", (event) => { event.source_target = "message:om_wrong"; }],
+      ["changed prefix", (event) => { event.literal_prefix = "changed:"; }],
+      ["omitted prefix", (event) => {
+        event.literal_prefix = "";
+        event.content_argument = JSON.stringify({ text: event.source_text });
+      }],
+      ["raw schema drift", (event) => { event.source_command = event.source_command.replaceAll(".content", ".body.content"); }],
+      ["extra inner read", (event) => { event.source_read_count = 2; }],
+      ["failed inner read", (event) => { event.source_exit_code = 2; }],
+      ["unquoted substitution", (event) => { event.shell_substitution = "unquoted"; }],
+    ]) {
+      const changedDataflow = structuredClone(scenario.trace);
+      mutate(changedDataflow[1]);
+      assert.equal(gradeAgentExperienceV6Trace(scenario, changedDataflow)
+        .failures.some((item) => item.rule === "exact_source_dataflow"), true, `${id}: ${label}`);
+    }
+  }
+
+  const unsafePrefix = structuredClone(byId["tool-sourced-verbatim-message-reply"]);
+  const safePrefixFragment = "作者'\\''s：";
+  const unsafePrefixFragment = "作者's：";
+  unsafePrefix.expected.exact_source_dataflow.source_command = unsafePrefix.expected.exact_source_dataflow.source_command
+    .replace(safePrefixFragment, unsafePrefixFragment);
+  unsafePrefix.expected.ordered_commands[1] = unsafePrefix.expected.ordered_commands[1]
+    .replace(safePrefixFragment, unsafePrefixFragment);
+  unsafePrefix.expected.reply_anchor.write_command = unsafePrefix.expected.reply_anchor.write_command
+    .replace(safePrefixFragment, unsafePrefixFragment);
+  unsafePrefix.trace[1].source_command = unsafePrefix.trace[1].source_command
+    .replace(safePrefixFragment, unsafePrefixFragment);
+  unsafePrefix.trace[1].command = unsafePrefix.trace[1].command.replace(safePrefixFragment, unsafePrefixFragment);
+  assert.equal(gradeAgentExperienceV6Trace(unsafePrefix, unsafePrefix.trace)
+    .failures.some((item) => item.rule === "exact_source_dataflow"), true, "unsafe apostrophe prefix");
+
+  const normalizationScenario = structuredClone(byId["tool-sourced-verbatim-message-reply"]);
   const decomposedText = "Cafe\u0301";
   const normalizedText = decomposedText.normalize("NFC");
-  const originalWriteCommand = normalizationScenario.expected.reply_anchor.write_command;
-  const decomposedWriteCommand = originalWriteCommand.replace(normalizationScenario.expected.exact_text, decomposedText);
-  normalizationScenario.expected.exact_text = decomposedText;
-  normalizationScenario.expected.ordered_commands[2] = decomposedWriteCommand;
-  normalizationScenario.expected.reply_anchor.write_command = decomposedWriteCommand;
+  const prefix = normalizationScenario.expected.exact_source_dataflow.literal_prefix;
+  normalizationScenario.expected.exact_text = prefix + decomposedText;
   normalizationScenario.trace[1].source_text = decomposedText;
-  normalizationScenario.trace[2] = {
-    ...normalizationScenario.trace[2], command: decomposedWriteCommand,
-    argv_text: normalizedText, transported_text: decomposedText,
-  };
+  normalizationScenario.trace[1].content_argument = JSON.stringify({ text: prefix + normalizedText });
+  normalizationScenario.trace[1].transported_text = prefix + decomposedText;
   assert.notEqual(normalizedText, decomposedText);
   assert.equal(gradeAgentExperienceV6Trace(normalizationScenario, normalizationScenario.trace)
-    .failures.some((item) => item.rule === "argv_source_binding"), true, "Unicode normalization");
+    .failures.some((item) => item.rule === "exact_source_dataflow"), true, "Unicode normalization");
 
   const reorderedToolSourcedReply = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
-  [reorderedToolSourcedReply[1], reorderedToolSourcedReply[2]] = [reorderedToolSourcedReply[2], reorderedToolSourcedReply[1]];
+  [reorderedToolSourcedReply[0], reorderedToolSourcedReply[1]] = [reorderedToolSourcedReply[1], reorderedToolSourcedReply[0]];
   assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], reorderedToolSourcedReply)
     .failures.some((item) => item.rule === "canonical_order"), true);
 
@@ -145,7 +171,15 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   assert.equal(gradeAgentExperienceV6Trace(byId["tool-sourced-verbatim-thread-reply"], mismatchedReplyAnchor)
     .failures.some((item) => item.rule === "reply_anchor"), true);
 
-  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "precommit-exact-reply-safe-retry", "tool-sourced-verbatim-thread-reply"]) {
+  for (const id of ["tool-sourced-verbatim-thread-reply", "tool-sourced-verbatim-message-reply"]) {
+    const wrongProvider = structuredClone(byId[id].trace);
+    wrongProvider[1].transported_text = "wrong provider text";
+    assert.equal(gradeAgentExperienceV6Trace(byId[id], wrongProvider)
+      .failures.some((item) => item.rule === "exact_text"), true, id);
+  }
+
+  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "precommit-exact-reply-safe-retry",
+    "tool-sourced-verbatim-thread-reply", "tool-sourced-verbatim-message-reply"]) {
     const failedWrite = structuredClone(byId[id].trace);
     failedWrite.find((event) => event.action === "provider_write").exit_code = 9;
     assert.equal(gradeAgentExperienceV6Trace(byId[id], failedWrite)

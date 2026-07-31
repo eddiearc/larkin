@@ -40,15 +40,38 @@ test("PR and main CI validate source without building release artifacts", () => 
   assert.doesNotMatch(workflow, /continue-on-error|actions\/(?:upload|download)-artifact|\b(?:node|npm|pnpm)\b/);
 });
 
-test("tag publication validates an explicit version and publishes one combined release", () => {
+test("package version and explicit tag publication share one immutable combined-release run", () => {
   const workflow = read(".github/workflows/release.yml");
+  const intent = read("scripts/release/intent.mjs");
   assert.equal(fs.existsSync(path.join(ROOT, ".github/workflows/bump-patch-version.yml")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "scripts/bump-patch-version.mjs")), false);
+  assert.match(workflow, /branches:\n\s+- main/);
   assert.match(workflow, /tags:\n\s+- "v\*\.\*\.\*"/);
+  assert.match(workflow, /paths:\n\s+- package\.json/);
+  assert.match(workflow, /group: publish-release-\$\{\{ github\.sha \}\}/);
+  assert.doesNotMatch(workflow, /group: publish-release\n/);
+  assert.match(workflow, /resolve-release:/);
+  assert.match(workflow, /timeout-minutes: 40/);
+  assert.match(workflow, /RELEASE_PREDECESSOR_ATTEMPTS: "120"/);
+  assert.match(workflow, /RELEASE_PREDECESSOR_DELAY_MS: "15000"/);
+  assert.match(workflow, /bun scripts\/release\/intent\.mjs resolve/);
+  assert.match(workflow, /bun scripts\/release\/intent\.mjs prepare/);
+  assert.equal(workflow.match(/bun scripts\/release\/intent\.mjs assert-draft/g)?.length, 2);
+  assert.match(workflow, /source_sha: \$\{\{ steps\.intent\.outputs\.source_sha \}\}/);
+  assert.ok((workflow.match(/ref: \$\{\{ needs\.resolve-release\.outputs\.source_sha \}\}/g) ?? []).length >= 4);
+  assert.match(workflow, /RELEASE_TAG: \$\{\{ needs\.resolve-release\.outputs\.release_tag \}\}/);
+  assert.match(workflow, /should_publish: \$\{\{ steps\.prepare\.outputs\.should_publish \}\}/);
+  assert.match(workflow, /needs\.prepare-release\.outputs\.should_publish == 'true'/);
+  assert.match(intent, /refs\/heads\/main/);
+  assert.match(intent, /refs\/tags\//);
+  assert.match(intent, /git\(\["merge-base", "--is-ancestor"/);
+  assert.match(intent, /repos\/\$\{repo\}\/git\/refs/);
+  assert.match(intent, /"release", "create", tag/);
+  assert.match(intent, /refusing to modify non-draft release/);
+  assert.match(intent, /waitForPublishedPredecessor/);
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /git show-ref --verify --quiet refs\/remotes\/origin\/main/);
-  assert.match(workflow, /git merge-base --is-ancestor "\$GITHUB_SHA" origin\/main/);
-  assert.match(workflow, /bun run release:check-version "\$\{GITHUB_REF_NAME\}"/);
+  assert.match(workflow, /bun run release:check-version "\$RELEASE_TAG"/);
   assert.match(workflow, /bun run test/);
   assert.match(workflow, /bun run licenses:check/);
   assert.doesNotMatch(workflow, /actions\/setup-go|go-version:/);
@@ -65,13 +88,12 @@ test("tag publication validates an explicit version and publishes one combined r
   for (const target of ["linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"]) {
     assert.match(workflow, new RegExp(`target: ${target}`));
   }
-  assert.match(workflow, /gh release create[\s\S]*--draft/);
   assert.match(workflow, /gh release upload/);
   assert.match(workflow, /gh release download/);
   assert.match(workflow, /gh release edit[\s\S]*--draft=false/);
   assert.match(workflow, /bun scripts\/release\/assemble\.ts/);
   assert.match(workflow, /artifacts\/release\/LICENSE artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);
-  assert.match(workflow, /gh release create/);
   assert.match(workflow, /publish:\n[\s\S]*permissions:\n\s+contents: write/);
   assert.doesNotMatch(workflow, /git (?:commit|push)|continue-on-error|\b(?:node|npm|pnpm)\b/);
+  assert.doesNotMatch(intent, /git push|--force/);
 });

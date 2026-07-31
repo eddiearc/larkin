@@ -2,23 +2,64 @@ name: Publish release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
+    paths:
+      - package.json
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-release-${{ github.ref }}
+  group: publish-release-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
-  validate:
+  resolve-release:
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      mode: ${{ steps.intent.outputs.mode }}
+      release_tag: ${{ steps.intent.outputs.release_tag }}
+      source_sha: ${{ steps.intent.outputs.source_sha }}
+      should_create_tag: ${{ steps.intent.outputs.should_create_tag }}
+      should_publish: ${{ steps.intent.outputs.should_publish }}
     steps:
-      - name: Check out tagged source
+      - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Resolve package-version release intent
+        id: intent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SOURCE_SHA: ${{ github.sha }}
+          RELEASE_BEFORE_SHA: ${{ github.event.before }}
+          RELEASE_PREDECESSOR_ATTEMPTS: "120"
+          RELEASE_PREDECESSOR_DELAY_MS: "15000"
+        run: bun scripts/release/intent.mjs resolve
+
+  validate:
+    needs: resolve-release
+    if: needs.resolve-release.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -28,18 +69,26 @@ jobs:
           bun-version: 1.3.14
 
       - name: Verify tagged commit belongs to main
+        env:
+          SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
         run: |
           git show-ref --verify --quiet refs/remotes/origin/main || {
             echo "Refusing to publish: origin/main is unavailable in the checkout" >&2
             exit 1
           }
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
-            echo "Refusing to publish: tagged commit $GITHUB_SHA is not contained in origin/main" >&2
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA" || {
+            echo "Refusing to publish: checkout does not match immutable source $SOURCE_SHA" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "Refusing to publish: source $SOURCE_SHA is not contained in origin/main" >&2
             exit 1
           }
 
       - name: Validate release version
-        run: bun run release:check-version "${GITHUB_REF_NAME}"
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: bun run release:check-version "$RELEASE_TAG"
 
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
@@ -71,28 +120,41 @@ jobs:
         run: bun run test
 
   prepare-release:
-    needs: validate
+    needs:
+      - resolve-release
+      - validate
+    if: needs.resolve-release.outputs.should_publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      should_publish: ${{ steps.prepare.outputs.should_publish }}
     steps:
-      - name: Create reusable draft release
+      - name: Check out immutable release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Materialize immutable tag and reusable draft
+        id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true || {
-              echo "Refusing to overwrite published release $RELEASE_TAG" >&2
-              exit 1
-            }
-          else
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-              --generate-notes --title "Larkin $RELEASE_TAG"
-          fi
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+        run: bun scripts/release/intent.mjs prepare
 
   build:
-    needs: prepare-release
+    needs:
+      - resolve-release
+      - prepare-release
+    if: needs.prepare-release.outputs.should_publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -110,9 +172,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Check out tagged source
+      - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up pinned Bun
@@ -145,9 +209,11 @@ jobs:
       - name: Upload platform artifact to draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
           RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
         run: |
+          bun scripts/release/intent.mjs assert-draft
           manifest="artifacts/release/release-manifest-${RELEASE_TARGET}.json"
           mv artifacts/release/release-manifest.json "$manifest"
           gh release upload "$RELEASE_TAG" \
@@ -155,14 +221,20 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --clobber
 
   publish:
-    needs: build
+    needs:
+      - resolve-release
+      - prepare-release
+      - build
+    if: needs.prepare-release.outputs.should_publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Check out tagged source
+      - name: Check out immutable release source
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up pinned Bun
@@ -176,7 +248,7 @@ jobs:
       - name: Download platform artifacts from draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
         run: |
           mkdir -p artifacts/platform
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
@@ -194,8 +266,10 @@ jobs:
       - name: Finalize GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
         run: |
+          bun scripts/release/intent.mjs assert-draft
           gh release upload "$RELEASE_TAG" \
             artifacts/release/SHA256SUMS artifacts/release/release-manifest.json \
             artifacts/release/LICENSE artifacts/release/THIRD_PARTY_NOTICES.txt \

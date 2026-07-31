@@ -214,17 +214,26 @@ export class HostReminderOrchestrator {
     try {
       lines = String((this.options.readFile ?? fs.readFileSync)(this.options.stateStore(agent).paths.inbox, "utf8"))
         .split("\n").filter(Boolean);
-    } catch { return; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.options.deliveryTarget) {
+        this.redelivered.add(agent.agentId);
+      }
+      return;
+    }
     const parsed = lines.map((line) => {
       try {
         return { line, value: JSON.parse(line) as Record<string, unknown> };
       } catch { return { line, value: null }; }
     });
+    if (parsed.some(({ value }) => value === null)) return;
     const existing = parsed.find(({ value }) => typeof value?.message_id === "string" && value.message_id.startsWith("redeliver_"))?.value;
     const wakeCount = countWakeEnvelopes(parsed
       .filter(({ value }) => !(typeof value?.message_id === "string" && value.message_id.startsWith("redeliver_")))
       .map(({ line }) => line));
-    if (!wakeCount && !existing) return;
+    if (!wakeCount && !existing) {
+      if (this.options.deliveryTarget) this.redelivered.add(agent.agentId);
+      return;
+    }
     const envelope = existing ?? this.options.envelopeProjector.createRedeliveryEnvelope(agent.agentId, wakeCount);
     if (!existing) {
       try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }

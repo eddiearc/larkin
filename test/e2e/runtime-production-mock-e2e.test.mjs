@@ -168,6 +168,81 @@ test("production HostShell fresh reset blocks issue-14 backlog, then preserves d
   }
 });
 
+test("production HostShell startup zero-unread one-shot cannot redeliver post-reset inbound work", { timeout: 25_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-redelivery-reset-"));
+  const agentId = "cli_redeliveryResetA1";
+  const store = createAgentStateStore(root, agentId);
+  const sessions = [];
+  const adapter = { id: "codex", capabilities: {}, async createSession() {
+    const session = new FakeNativeSession("codex");
+    session.sessionId = `redelivery-reset-session-${sessions.length + 1}`;
+    sessions.push(session);
+    return session;
+  } };
+  const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store, assertOfficialCliReady: () => {} });
+  const agent = { agentId, name: agentId, runtime: "codex", model: "mock",
+    feishuAppId: agentId, feishuProfile: agentId, feishuAppSecret: "fixture-secret",
+    feishuDomain: "https://open.feishu.cn", larkConfigDir: path.join(root, "lark-cli-config"),
+    workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
+  fs.mkdirSync(store.paths.root, { recursive: true });
+  fs.writeFileSync(store.paths.inbox, "", { mode: 0o600 });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "server-redelivery-reset",
+    activeAgent: agentId, agents: { [agentId]: { runtime: "codex", model: "mock" } } }), { mode: 0o600 });
+  const host = createHostShell({ env: { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root,
+    LARKIN_SERVER_ID: "server-redelivery-reset", LARKIN_AGENTS_CONFIG: JSON.stringify([agent]),
+    LARKIN_INBOUND_DROUGHT_SEC: "0" }, runtimeHost, stateStoreForImpl: () => store,
+    managedCliForAgent: testManagedCli, eventSourceStartDelayMs: 60_000,
+    execFileImpl(_command, args, _options, callback) {
+      const data = args.includes("bots")
+        ? { items: [{ bot_id: agentId, bot_name: "Mock Bot" }] }
+        : { items: [{ member_id: "ou_sender", name: "Sender" }] };
+      callback(null, JSON.stringify({ ok: true, data }), "");
+    },
+    channelPackage: { createLarkChannel() { throw new Error("event source must not start in redelivery fixture"); } } });
+  try {
+    await host.start();
+    await new Promise((resolve) => setTimeout(resolve, 5_100));
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].prompts.length + sessions[0].busyInputs.length, 0);
+    assert.deepEqual(store.readNdjson("inbox"), []);
+
+    store.writeJson("status", { ...store.readJson("status", {}), connectedAt: new Date().toISOString(), connectedVia: "mock" });
+    const reset = await host.resetSession(agentId);
+    assert.equal(reset.readyForFreshScenario, true);
+    assert.equal(sessions.length, 2);
+    await host.ingest(agentId, { chat_id: "oc_redelivery_reset", chat_type: "p2p", sender_id: "ou_sender",
+      message_id: "om_after_reset", event_id: "evt_after_reset", content: "fresh formal scenario",
+      create_time: "1785542400000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
+    assert.equal(sessions[1].prompts.length + sessions[1].busyInputs.length, 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5_100));
+    assert.equal(sessions[1].prompts.length + sessions[1].busyInputs.length, 1,
+      "the reset active timer must not synthesize a startup redelivery for a new inbound");
+    assert.deepEqual(store.pollInbox().envelopes.map((row) => row.message_id), ["om_after_reset"]);
+    assert.deepEqual(store.readNdjson("inbox"), []);
+
+    sessions[1].emit({ type: "turn-start", turnId: "first-business-turn" });
+    sessions[1].emit({ type: "turn-end", turnId: "first-business-turn" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const secondReset = await host.resetSession(agentId);
+    assert.equal(secondReset.readyForFreshScenario, true);
+    assert.equal(sessions.length, 3);
+    await host.ingest(agentId, { chat_id: "oc_redelivery_reset", chat_type: "p2p", sender_id: "ou_sender",
+      message_id: "om_after_second_reset", event_id: "evt_after_second_reset", content: "fresh polled scenario",
+      create_time: "1785542401000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
+    assert.equal(sessions[2].prompts.length + sessions[2].busyInputs.length, 1);
+    assert.deepEqual(store.pollInbox().envelopes.map((row) => row.message_id), ["om_after_second_reset"]);
+    await new Promise((resolve) => setTimeout(resolve, 5_100));
+    assert.equal(sessions[2].prompts.length + sessions[2].busyInputs.length, 1,
+      "polling the unique business message before the timer still leaves exactly one business Runtime input");
+    assert.deepEqual(store.readNdjson("inbox"), []);
+  } finally {
+    await host.shutdown("redelivery reset Mock E2E complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("member parser accepts the real lark-cli 1.0.79 get/bots shapes", () => {
   assert.deepEqual(memberNamesFromPayloads([
     { ok: true, data: { items: [{ member_id: "ou_user", name: "User" }] } },

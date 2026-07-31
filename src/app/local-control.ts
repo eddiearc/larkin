@@ -515,11 +515,14 @@ export function createAgentControlServer({
                       ? String((error as { code: string }).code)
                       : error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable"
                         ? "runtime_unavailable" : "reset_refused";
+                    const projection = error as Partial<Pick<SessionResetResponse,
+                      "turns" | "runtimeReady" | "channelConnected" | "reconnecting" | "pendingCount">>;
                     return { ok: false, agentId: resetRequest.agentId, code,
                       error: error instanceof Error ? error.message : String(error), resetCommitted: false,
-                      generationChanged: false, sessionChanged: false, turns: 0, runtimeReady: false,
-                      channelConnected: false, reconnecting: false,
-                      pendingCount: Number((error as { pendingCount?: unknown }).pendingCount) || 0,
+                      generationChanged: false, sessionChanged: false,
+                      turns: Math.max(0, Number(projection.turns) || 0), runtimeReady: projection.runtimeReady === true,
+                      channelConnected: projection.channelConnected === true, reconnecting: projection.reconnecting === true,
+                      pendingCount: Math.max(0, Number(projection.pendingCount) || 0),
                       readyForFreshScenario: false, inboundObserved: false,
                       ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) };
                   }

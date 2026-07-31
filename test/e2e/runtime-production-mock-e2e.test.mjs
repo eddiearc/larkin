@@ -98,6 +98,8 @@ test("production HostShell fresh reset blocks issue-14 backlog, then preserves d
     created.get(ids[0])[0].emit({ type: "turn-end", turnId: "issue-14-drained" });
     await new Promise((resolve) => setImmediate(resolve));
     const ledgerBefore = target.readJson("runtimeDeliveries", {});
+    target.writeJson("status", { ...target.readJson("status", {}),
+      reconnectingAt: "2020-01-01T00:00:02.000Z", reconnectedAt: "2020-01-01T00:00:01.000Z" });
     const reset = await host.resetSession(ids[0]);
     assert.equal(reset.readyForFreshScenario, true);
     assert.equal(reset.inboundObserved, false);
@@ -131,14 +133,23 @@ test("production HostShell fresh reset blocks issue-14 backlog, then preserves d
     assert.equal(contaminated.code, "fresh_scenario_contaminated");
     runtimeHost.resetSession = originalResetSession;
 
+    target.writeJson("status", { ...target.readJson("status", {}), reconnectingAt: new Date(Date.now() + 1_000).toISOString() });
+    const createdBeforeReconnectRefusal = created.get(ids[0]).length;
+    await assert.rejects(host.resetSession(ids[0], 0), (error) => error.code === "channel_reconnecting"
+      && error.runtimeReady === true && error.channelConnected === true && error.reconnecting === true
+      && error.pendingCount === 0 && error.turns === 1);
+    assert.equal(created.get(ids[0]).length, createdBeforeReconnectRefusal,
+      "a current reconnect refusal occurs before fresh Runtime creation");
+    target.writeJson("status", { ...target.readJson("status", {}), reconnectingAt: null });
+
     onCreate = (input) => {
-      if (input.agentId === ids[0]) target.writeJson("status", { ...target.readJson("status", {}), reconnectingAt: new Date().toISOString() });
+      if (input.agentId === ids[0]) target.writeJson("status", { ...target.readJson("status", {}), reconnectingAt: new Date(Date.now() + 1).toISOString() });
     };
     const reconnectRace = await host.resetSession(ids[0], 0);
     assert.equal(reconnectRace.resetCommitted, true);
     assert.equal(reconnectRace.readyForFreshScenario, false);
     assert.equal(reconnectRace.code, "reset_timeout");
-    target.writeJson("status", { ...target.readJson("status", {}), reconnectedAt: new Date(Date.now() + 1).toISOString() });
+    target.writeJson("status", { ...target.readJson("status", {}), reconnectedAt: new Date(Date.now() + 2).toISOString() });
     onCreate = () => {};
 
     const originalWriteJson = target.writeJson.bind(target);

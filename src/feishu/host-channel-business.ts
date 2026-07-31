@@ -139,7 +139,7 @@ export class HostChannelBusiness {
       });
     } catch (error) { this.log(`bot-identity 写入失败 agent=${agent.name}: ${messageOf(error)}`); }
     this.log(`bot 身份就绪(${via}) agent=${agent.name} bot=${name || "?"}(${openId})`);
-    this.options.state.updateStatus(agent, { connectedAt: this.now().toISOString(), connectedVia: via });
+    this.options.state.updateStatus(agent, { connectedAt: this.now().toISOString(), connectedVia: via, reconnectingAt: null });
   }
 
   async connected(agent: ChannelAgent, channel: ConnectedChannel, onFatal?: (error: Error) => void): Promise<void> {

@@ -36,6 +36,31 @@ test("public session reset emits stable truthful JSON without raw session identi
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("public session reset preserves a truthful reconnect refusal projection", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-session-cli-refusal-"));
+  const agentId = "cli_resetRefusedA1";
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "server-test", activeAgent: agentId,
+    agents: { [agentId]: { runtime: "codex", model: "gpt-5.3-codex" } } }), { mode: 0o600 });
+  let stdout = "";
+  try {
+    const code = await runSessionCli(["reset", "--agent", agentId, "--json"],
+      { ...process.env, LARKIN_CONFIG_DIR: root }, {
+        async request() { return { ok: false, agentId, code: "channel_reconnecting", error: "channel is reconnecting",
+          resetCommitted: false, generationChanged: false, sessionChanged: false, turns: 2,
+          runtimeReady: true, channelConnected: true, reconnecting: true, pendingCount: 3,
+          readyForFreshScenario: false, inboundObserved: false }; },
+        io: { stdout: (value) => { stdout += value; }, stderr() {} },
+      });
+    assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(stdout), {
+      ok: false, agent_id: agentId, reset_committed: false, generation_changed: false,
+      session_changed: false, turns: 2, runtime_ready: true, channel_connected: true,
+      reconnecting: true, pending_count: 3, ready_for_fresh_scenario: false,
+      inbound_observed: false, code: "channel_reconnecting", error: "channel is reconnecting",
+    });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("session reset is user-only and rejects malformed argv before control access", async () => {
   const cases = [
     [[], /unsupported session subcommand/],

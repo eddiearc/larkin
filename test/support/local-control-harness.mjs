@@ -60,7 +60,8 @@ const resetHost = createHostShell({ env: { ...process.env, LARKIN_HOME: root, LA
   managedCliForAgent: () => ({ command: { command: "/test/lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} }),
   channelPackage: { createLarkChannel() { throw new Error("not started in control harness"); } }, logImpl: () => {} });
 await resetHost.start();
-resetStore.writeJson("status", { ...resetStore.readJson("status", {}), connectedAt: new Date().toISOString(), connectedVia: "mock" });
+resetStore.writeJson("status", { ...resetStore.readJson("status", {}), connectedAt: new Date().toISOString(), connectedVia: "mock",
+  reconnectingAt: "2020-01-01T00:00:02.000Z", reconnectedAt: "2020-01-01T00:00:01.000Z" });
 const serverOptions = {
   larkinHome: root,
   authorityToken,

@@ -7,7 +7,7 @@ import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type PiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { callbackCapability } from "../platform/callback-capability.js";
-import { projectAgentReadiness, type AgentReadinessStatus } from "./agent-readiness.js";
+import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus } from "./agent-readiness.js";
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
@@ -238,8 +238,7 @@ if (kind === "agents") {
     if (status?.runtimeReadiness) say(`    runtime readiness=${status.runtimeReadiness.state || "incompatible"}${status.runtimeReadiness.reason ? `：${status.runtimeReadiness.reason}` : ""}${status.runtimeReadiness.nextAction ? `；下一步：${status.runtimeReadiness.nextAction}` : ""}`);
     if (status?.runtimeReadiness?.executable) say(`    runtime executable=${status.runtimeReadiness.executable}${status.runtimeReadiness.version ? `  version=${status.runtimeReadiness.version}` : ""}`);
     say(`    bot=${bot ? `${bot.name}(${bot.open_id})` : "（未连接过，无身份缓存）"}`);
-    const reconnecting = connected && !!status?.reconnectingAt
-      && Date.parse(String(status.reconnectingAt)) > Date.parse(String(status?.reconnectedAt || 0));
+    const reconnecting = connected && isChannelReconnecting(status);
     say(`    连接=${connected ? `已建立（${status?.connectedVia || "channel"}，${status?.connectedAt}）${reconnecting ? "（ws 重连中）" : ""}` : "未建立"}`);
     // 三态：已验证 / 未证实（连上但长时间零事件=疑似僵尸，host 会预防性重连）/ 尚未验证（连接还年轻）。
     const silenceMin = connected && status?.connectedAt ? Math.floor((Date.now() - Date.parse(status.connectedAt)) / 60_000) : 0;

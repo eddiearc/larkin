@@ -27,6 +27,7 @@ import { verifyCallbackProbe } from "../platform/callback-capability.js";
 import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
+import { isChannelReconnecting } from "../app/agent-readiness.js";
 
 interface ConfiguredAgent {
   agentId: string;
@@ -961,14 +962,10 @@ export function createHostShell({
       const agent = agents.find((candidate) => candidate.agentId === agentId);
       if (!agent) throw Object.assign(new Error(`未知 Agent: ${agentId}`), { code: "unknown_agent" });
       if (!runtimeHost.resetSession) throw Object.assign(new Error("Runtime session reset 尚未就绪"), { code: "runtime_unavailable" });
-      const connectionState = (): { channelConnected: boolean; reconnecting: boolean } => {
-        const status = hostState.readStatus(agent);
+      const connectionState = (status = hostState.readStatus(agent)): { channelConnected: boolean; reconnecting: boolean } => {
         const connectedAt = Date.parse(String(status.connectedAt || ""));
         const channelConnected = Number.isFinite(connectedAt) && connectedAt >= Date.parse(daemonStartedAt) - 1000;
-        const reconnectingAt = Date.parse(String(status.reconnectingAt || ""));
-        const reconnectedAt = Date.parse(String(status.reconnectedAt || ""));
-        const reconnecting = Number.isFinite(reconnectingAt) && (!Number.isFinite(reconnectedAt) || reconnectingAt > reconnectedAt);
-        return { channelConnected, reconnecting };
+        return { channelConnected, reconnecting: isChannelReconnecting(status) };
       };
       const readinessProjection = (): { turns: number; runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number } => {
         const status = hostState.readStatus(agent);
@@ -977,13 +974,18 @@ export function createHostShell({
         const runtimeReady = Boolean(status.runtimeReadiness && typeof status.runtimeReadiness === "object"
           && (status.runtimeReadiness as { state?: unknown }).state === "ready");
         const pendingCount = stateStore(agent).withInboxTransaction(() => stateStore(agent).readNdjson("inbox").length);
-        return { turns, runtimeReady, ...connectionState(), pendingCount };
+        return { turns, runtimeReady, ...connectionState(status), pendingCount };
       };
-      const initialConnection = connectionState();
-      const { channelConnected, reconnecting } = initialConnection;
-      if (!channelConnected) throw Object.assign(new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable" });
-      if (reconnecting) throw Object.assign(new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting" });
-      const reset = await runtimeHost.resetSession(agentId);
+      const initialProjection = readinessProjection();
+      if (!initialProjection.channelConnected) throw Object.assign(
+        new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable", ...initialProjection });
+      if (initialProjection.reconnecting) throw Object.assign(
+        new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting", ...initialProjection });
+      let reset;
+      try { reset = await runtimeHost.resetSession(agentId); }
+      catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), readinessProjection());
+      }
       const record = agentStates.get(agentId);
       try {
         if (record) {

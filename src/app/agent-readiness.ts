@@ -15,6 +15,14 @@ function timestamp(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export function isChannelReconnecting(status?: AgentReadinessStatus | null): boolean {
+  const reconnectingAt = timestamp(status?.reconnectingAt);
+  const connectedAt = timestamp(status?.connectedAt);
+  const reconnectedAt = timestamp(status?.reconnectedAt);
+  const latestConnectedAt = Math.max(connectedAt ?? Number.NEGATIVE_INFINITY, reconnectedAt ?? Number.NEGATIVE_INFINITY);
+  return reconnectingAt !== null && reconnectingAt > latestConnectedAt;
+}
+
 export function projectAgentReadiness(input: {
   agentId: string;
   daemon: OwnedProcessRecord;
@@ -38,15 +46,11 @@ export function projectAgentReadiness(input: {
     && daemonStartedAt !== null
     && connectedAt !== null
     && connectedAt >= daemonStartedAt;
-  const reconnectingAt = timestamp(status?.reconnectingAt);
-  const reconnectedAt = timestamp(status?.reconnectedAt);
-  const latestConnectedAt = Math.max(connectedAt ?? Number.NEGATIVE_INFINITY, reconnectedAt ?? Number.NEGATIVE_INFINITY);
-  const reconnecting = reconnectingAt !== null && reconnectingAt > latestConnectedAt;
   const readiness = {
     daemon_owned: daemonOwned,
     runtime_ready: status?.runtimeReadiness?.state === "ready",
     channel_connected: channelConnected,
-    channel_not_reconnecting: !reconnecting,
+    channel_not_reconnecting: !isChannelReconnecting(status),
   };
   return {
     ready: Object.values(readiness).every(Boolean),

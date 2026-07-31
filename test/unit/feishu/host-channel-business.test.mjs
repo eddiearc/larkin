@@ -94,7 +94,9 @@ test("read receipt and connected identity preserve persistence/status order and 
   });
   assert.equal(agent.botOpenId, "ou_bot");
   assert.deepEqual(f.json.get("bot"), { open_id: "ou_bot", name: "New", avatar_url: "https://avatar", updated_at: "2026-07-16T04:00:00.000Z" });
-  assert.deepEqual(f.statuses.at(-1), { connectedAt: "2026-07-16T04:00:00.000Z", connectedVia: "channel" });
+  assert.deepEqual(f.statuses.at(-1), {
+    connectedAt: "2026-07-16T04:00:00.000Z", connectedVia: "channel", reconnectingAt: null,
+  });
 });
 
 test("ws reconnecting/reconnected transitions are visible in status, not just logs", () => {

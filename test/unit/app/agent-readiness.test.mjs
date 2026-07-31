@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
-const { projectAgentReadiness } = await import(pathToFileURL(path.join(ROOT, "dist/app/agent-readiness.mjs")).href);
+const { isChannelReconnecting, projectAgentReadiness } = await import(pathToFileURL(path.join(ROOT, "dist/app/agent-readiness.mjs")).href);
 
 const daemon = {
   state: "owned",
@@ -70,16 +70,19 @@ test("stale channels, unready Runtimes, foreign daemons, and active reconnects s
 });
 
 test("a newer current connection clears older reconnect markers", () => {
+  const status = {
+    connectedAt: "2026-07-29T01:00:04.000Z",
+    connectedVia: "channel",
+    runtimeReadiness: { state: "ready" },
+    reconnectingAt: "2026-07-29T01:00:03.000Z",
+    reconnectedAt: "2026-07-29T01:00:02.000Z",
+  };
+  assert.equal(isChannelReconnecting(status), false);
+  assert.equal(isChannelReconnecting({ ...status, reconnectingAt: "2026-07-29T01:00:05.000Z" }), true);
   const result = projectAgentReadiness({
     agentId: "cli_ready",
     daemon,
-    status: {
-      connectedAt: "2026-07-29T01:00:04.000Z",
-      connectedVia: "channel",
-      runtimeReadiness: { state: "ready" },
-      reconnectingAt: "2026-07-29T01:00:03.000Z",
-      reconnectedAt: "2026-07-29T01:00:02.000Z",
-    },
+    status,
   });
   assert.equal(result.ready, true);
   assert.equal(result.readiness.channel_not_reconnecting, true);

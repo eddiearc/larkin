@@ -15,6 +15,7 @@ import {
   requestAgentUpsert,
   requestSessionReset,
 } from "../../../dist/app/local-control.mjs";
+import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
 import { inspectProcess, readProcessState } from "../../../dist/platform/process-state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -179,6 +180,31 @@ test("local control keeps upsert ID idempotency and coalesces only concurrent re
       reset_committed: true, generation_changed: true, session_changed: true, turns: 0,
       runtime_ready: true, channel_connected: true, reconnecting: false, pending_count: 0,
       ready_for_fresh_scenario: true, inbound_observed: false });
+
+    const publicStore = createAgentStateStore(root, "cli_newA1");
+    const status = publicStore.readJson("status", {});
+    publicStore.writeJson("status", { ...status, reconnectingAt: new Date(Date.now() + 1_000).toISOString() });
+    publicStore.appendNdjson("inbox", { message_id: "om_reconnect_refusal", content: "pending during reconnect" });
+    const refused = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 0 });
+    assert.deepEqual(refused, {
+      ok: false, agentId: "cli_newA1", code: "channel_reconnecting",
+      error: "Agent cli_newA1 channel is reconnecting", resetCommitted: false,
+      generationChanged: false, sessionChanged: false, turns: 0, runtimeReady: true,
+      channelConnected: true, reconnecting: true, pendingCount: 1,
+      readyForFreshScenario: false, inboundObserved: false,
+    });
+    const refusedCli = spawnSync(process.execPath, [path.join(ROOT, "dist/app/cli.mjs"), "session", "reset",
+      "--agent", "cli_newA1", "--json", "--wait-ready", "0"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: root },
+    });
+    assert.equal(refusedCli.status, 1, refusedCli.stderr || refusedCli.stdout);
+    assert.deepEqual(JSON.parse(refusedCli.stdout), {
+      ok: false, agent_id: "cli_newA1", reset_committed: false,
+      generation_changed: false, session_changed: false, turns: 0, runtime_ready: true,
+      channel_connected: true, reconnecting: true, pending_count: 1,
+      ready_for_fresh_scenario: false, inbound_observed: false, code: "channel_reconnecting",
+      error: "Agent cli_newA1 channel is reconnecting",
+    });
 
     const supervisorStatus = JSON.parse(fs.readFileSync(path.join(root, "supervisor-status.json"), "utf8"));
     const daemonStatus = JSON.parse(fs.readFileSync(path.join(root, "daemon-status.json"), "utf8"));

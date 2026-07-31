@@ -245,10 +245,10 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       reconnectingAt: null,
       runtimeReadiness: { state: "ready" },
     });
-    const run = () => spawnSync(process.execPath, [ENTRY, "agents", "--json"], {
+    const run = (...args) => spawnSync(process.execPath, [ENTRY, "agents", ...args], {
       cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
     });
-    const ready = run();
+    const ready = run("--json");
     assert.equal(ready.status, 0, ready.stderr);
     const readyPayload = JSON.parse(ready.stdout);
     assert.equal(readyPayload.daemon.owned, true);
@@ -262,14 +262,31 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       reconnectedAt: "2026-07-29T01:00:02.000Z",
       runtimeReadiness: { state: "ready" },
     });
-    const reconnecting = JSON.parse(run().stdout).agents[0];
+    const reconnecting = JSON.parse(run("--json").stdout).agents[0];
     assert.equal(reconnecting.ready, false);
     assert.equal(reconnecting.readiness.channel_not_reconnecting, false);
+    const reconnectingHuman = run();
+    assert.equal(reconnectingHuman.status, 0, reconnectingHuman.stderr);
+    assert.match(reconnectingHuman.stdout, /ws 重连中/);
+
+    writeStatus({
+      connectedAt: "2026-07-29T01:00:04.000Z",
+      connectedVia: "channel",
+      reconnectingAt: "2026-07-29T01:00:03.000Z",
+      reconnectedAt: "2026-07-29T01:00:02.000Z",
+      runtimeReadiness: { state: "ready" },
+    });
+    const reconnected = JSON.parse(run("--json").stdout).agents[0];
+    assert.equal(reconnected.ready, true);
+    assert.equal(reconnected.readiness.channel_not_reconnecting, true);
+    const human = run();
+    assert.equal(human.status, 0, human.stderr);
+    assert.doesNotMatch(human.stdout, /ws 重连中/);
 
     fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
       version: 4, serverId: "server-ready-json", mentionPolicy: "require", activeAgent: null, agents: {},
     })}\n`, { mode: 0o600 });
-    const empty = JSON.parse(run().stdout);
+    const empty = JSON.parse(run("--json").stdout);
     assert.deepEqual(empty.daemon, { owned: true, pid: child.pid, started_at: startedAt });
     assert.deepEqual(empty.agents, []);
   } finally {

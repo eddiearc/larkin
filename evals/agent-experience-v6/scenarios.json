@@ -471,7 +471,7 @@
     },
     {
       "id": "poll-only-silent-phase-then-next-trigger-work",
-      "task": "Two independent current-Inbox triggers form one collaboration. Phase A is a verified instruction to poll, remain silent, and wait for B: do no read, write, control, or no-op tool. End that phase immediately after its poll. Only after the separate phase-B trigger, poll again, read the chat evidence, and send the exact requested reply.",
+      "task": "Two independent current-Inbox triggers form one collaboration. Phase A is a verified instruction to poll, remain silent, and wait for B: emit no assistant text and do not use bash, shell, echo, a placeholder, or any read, write, control, or no-op tool. End the model turn immediately after its poll. Only after the separate phase-B trigger, poll again, read the chat evidence, and send the exact requested reply.",
       "expected": {
         "max_tool_calls": 5,
         "provider_writes": 1,

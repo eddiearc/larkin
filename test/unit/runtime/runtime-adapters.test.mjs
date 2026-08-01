@@ -105,6 +105,8 @@ test("default context prompt consumes the Agent CLI manifest", () => {
     /must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool/i);
   assert.match(prompt.content,
     /next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
+  assert.match(prompt.content,
+    /poll succeeds.*end.*model turn.*do not (?:emit|output).*assistant text.*bash.*shell.*echo.*no-op placeholder.*zero.*post-poll.*(?:calls|tool calls)/i);
   assert.match(prompt.content, /thread:<chat_id>:<thread_id>/);
   assert.match(prompt.content, /\+threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json/);
   assert.match(prompt.content, /response messages.*data\.messages/i);

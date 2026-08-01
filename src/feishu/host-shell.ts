@@ -313,14 +313,18 @@ export function createHostShell({
     undefined,
     "larkin",
   );
-  const prepareAgentState = (agent: ConfiguredAgent): void => {
-    fs.mkdirSync(agent.stateDir, { recursive: true });
+  const hydrateBotIdentity = (agent: ConfiguredAgent): void => {
     if (!agent.botOpenId) {
       try {
         const cached = stateStore(agent).readJson<{ open_id?: string; name?: string | null }>("botIdentity", {});
         if (cached.open_id) { agent.botOpenId = cached.open_id; agent.botName = cached.name || null; }
       } catch { /* first run */ }
     }
+    agent.displayName = agent.botName || agent.displayName || null;
+  };
+  const prepareAgentState = (agent: ConfiguredAgent): void => {
+    fs.mkdirSync(agent.stateDir, { recursive: true });
+    hydrateBotIdentity(agent);
     processingEyes.restoreAndClear(agent);
     try {
       const known = new Set(Object.values(hostState.loadMap(agent)).filter((value) => /^oc_/.test(String(value))));
@@ -649,6 +653,7 @@ export function createHostShell({
 
       // Runtime replacement is target-only. The old channel remains connected until the
       // candidate Runtime and channel are both ready, so unrelated Agents are untouched.
+      hydrateBotIdentity(candidate);
       const runtimeCandidate = { ...candidate,
         sessionId: agentStates.get(candidate.agentId)?.state.sessions[candidate.runtime] || null };
       const staged = previous && runtimeHost.stage ? await runtimeHost.stage(runtimeCandidate) : null;

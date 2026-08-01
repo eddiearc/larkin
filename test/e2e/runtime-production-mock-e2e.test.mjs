@@ -168,6 +168,144 @@ test("production HostShell fresh reset blocks issue-14 backlog, then preserves d
   }
 });
 
+test("production HostShell projects cached Bot display identity into cold, reset, and hot-staged Runtime prompts", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-bot-display-identity-"));
+  const agentId = "cli_botDisplayA1";
+  const store = createAgentStateStore(root, agentId);
+  const sessionInputs = [];
+  const sessions = [];
+  const adapter = { id: "codex", capabilities: {}, async createSession(input) {
+    const session = new FakeNativeSession("codex");
+    session.sessionId = `bot-display-session-${sessions.length + 1}`;
+    sessionInputs.push(input);
+    sessions.push(session);
+    return session;
+  } };
+  const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store, assertOfficialCliReady: () => {} });
+  const agent = { agentId, name: agentId, runtime: "codex", model: "mock-cold",
+    feishuAppId: agentId, feishuProfile: agentId, feishuAppSecret: "fixture-secret",
+    feishuDomain: "https://open.feishu.cn", larkConfigDir: path.join(root, "lark-cli-config"),
+    workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
+  store.writeJson("botIdentity", { open_id: "ou_bot_display", name: "二蛋", updated_at: "2026-08-01T00:00:00.000Z" });
+  const channels = [];
+  const channelPackage = { createLarkChannel() {
+    const channel = {
+      botIdentity: { openId: "ou_bot_display", name: "二蛋" }, disconnected: 0,
+      on() {}, dispatcher: { register() {} }, async connect() {},
+      async disconnect() { this.disconnected += 1; }, async updateCard() {},
+      rawClient: { async request() { return { bot: { open_id: "ou_bot_display", app_name: "二蛋" } }; } },
+    };
+    channels.push(channel);
+    return channel;
+  } };
+  const host = createHostShell({ env: { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root,
+    LARKIN_SERVER_ID: "server-bot-display", LARKIN_AGENTS_CONFIG: JSON.stringify([agent]),
+    LARKIN_INBOUND_DROUGHT_SEC: "0" }, runtimeHost, stateStoreForImpl: () => store,
+    managedCliForAgent: testManagedCli, eventSourceStartDelayMs: 0, channelPackage });
+  const assertIdentity = (input, phase) => {
+    assert.match(input.standingPrompt.content, /persistent Larkin agent \*\*二蛋\*\*/i, phase);
+    assert.equal(input.standingPrompt.content.toLowerCase().includes(
+      `authoritative self identity is **二蛋** (agent id: \`${agentId}\`)`.toLowerCase()), true, phase);
+    assert.doesNotMatch(input.standingPrompt.content,
+      new RegExp(`authoritative self identity is \\*\\*${agentId}\\*\\*`, "i"), phase);
+  };
+  try {
+    await host.start();
+    const channelDeadline = Date.now() + 2_000;
+    while (!store.readJson("status", {}).connectedAt && Date.now() < channelDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sessionInputs.length, 1);
+    assertIdentity(sessionInputs[0], "cold startup");
+
+    const reset = await host.resetSession(agentId);
+    assert.equal(reset.readyForFreshScenario, true);
+    assert.equal(sessionInputs.length, 2);
+    assertIdentity(sessionInputs[1], "fresh reset");
+
+    assert.equal(await host.upsertAgent({ ...agent, model: "mock-hot" }), "updated");
+    assert.equal(sessionInputs.length, 3);
+    assertIdentity(sessionInputs[2], "hot staged candidate");
+    assert.deepEqual(sessionInputs.map((input) => input.model), ["mock-cold", "mock-cold", "mock-hot"]);
+    assert.equal(host.agents[0].displayName, "二蛋");
+  } finally {
+    await host.shutdown("bot display identity Mock E2E complete");
+    assert.equal(channels.every((channel) => channel.disconnected === 1), true);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("production HostShell safely falls back without Bot cache, then uses persisted identity on the next cold start", { timeout: 10_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-bot-display-next-start-"));
+  const agentId = "cli_botNextStartA1";
+  const store = createAgentStateStore(root, agentId);
+  const baseAgent = { agentId, name: agentId, runtime: "codex", model: "mock",
+    feishuAppId: agentId, feishuProfile: agentId, feishuAppSecret: "fixture-secret",
+    feishuDomain: "https://open.feishu.cn", larkConfigDir: path.join(root, "lark-cli-config"),
+    workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
+  let run = 0;
+  const startOnce = async (agent = baseAgent) => {
+    run += 1;
+    const inputs = [];
+    const adapter = { id: "codex", capabilities: {}, async createSession(input) {
+      inputs.push(input);
+      const session = new FakeNativeSession("codex");
+      session.sessionId = `bot-next-start-${run}`;
+      return session;
+    } };
+    const runtimeHost = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+      stateStoreFor: () => store, assertOfficialCliReady: () => {} });
+    const channels = [];
+    const channelPackage = { createLarkChannel() {
+      const channel = {
+        connected: false, botIdentity: { openId: "ou_bot_next_start", name: "二蛋" },
+        on() {}, dispatcher: { register() {} }, async connect() { this.connected = true; },
+        async disconnect() {}, async updateCard() {},
+        rawClient: { async request() { return { bot: { open_id: "ou_bot_next_start", app_name: "二蛋" } }; } },
+      };
+      channels.push(channel);
+      return channel;
+    } };
+    const host = createHostShell({ env: { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root,
+      LARKIN_SERVER_ID: `server-bot-next-start-${run}`, LARKIN_AGENTS_CONFIG: JSON.stringify([agent]),
+      LARKIN_INBOUND_DROUGHT_SEC: "0" }, runtimeHost, stateStoreForImpl: () => store,
+      managedCliForAgent: testManagedCli, eventSourceStartDelayMs: 0, channelPackage });
+    try {
+      await host.start();
+      const deadline = Date.now() + 2_000;
+      while (!channels[0]?.connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(inputs.length, 1);
+      return inputs[0].standingPrompt.content;
+    } finally {
+      await host.shutdown(`bot next-start run ${run}`);
+    }
+  };
+  try {
+    const firstPrompt = await startOnce();
+    assert.match(firstPrompt, new RegExp(`persistent Larkin agent \\*\\*${agentId}\\*\\*`, "i"),
+      "first run without cache must retain the safe App ID fallback");
+    assert.doesNotMatch(firstPrompt, /persistent Larkin agent \*\*二蛋\*\*/i,
+      "the first connection must not silently replace the already-created Runtime session");
+    const persistedIdentity = store.readJson("botIdentity", {});
+    assert.equal(persistedIdentity.open_id, "ou_bot_next_start");
+    assert.equal(persistedIdentity.name, "二蛋");
+    assert.equal(Number.isFinite(Date.parse(persistedIdentity.updated_at)), true);
+
+    const nextPrompt = await startOnce();
+    assert.match(nextPrompt, /persistent Larkin agent \*\*二蛋\*\*/i,
+      "the identity persisted by the first channel connection must reach the next cold Runtime start");
+
+    store.writeJson("botIdentity", { open_id: "ou_bot_next_start", name: "" });
+    const configuredPrompt = await startOnce({ ...baseAgent, displayName: "Configured Alias" });
+    assert.match(configuredPrompt, /persistent Larkin agent \*\*Configured Alias\*\*/i,
+      "an empty cached Bot name must not erase an existing displayName");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("production HostShell startup zero-unread one-shot cannot redeliver post-reset inbound work", { timeout: 25_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-redelivery-reset-"));
   const agentId = "cli_redeliveryResetA1";

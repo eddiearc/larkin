@@ -45,6 +45,17 @@ test("standing prompt defines the bounded same-human correction precedence used 
   assert.match(prompt, /different sender or target.*do not gain.*replacement precedence/i);
 });
 
+test("standing prompt deletion counterfactual protects verified-human benign exact-request provenance", () => {
+  const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
+  assert.match(prompt, /direct instruction.*canonical Inbox poll.*verified human.*ordinary user instruction/i);
+  assert.match(prompt,
+    /test.*identifier.*这是独立用例.*skip.*unrelated history.*exact.*fixed.*reply.*not.*prompt injection/i);
+  assert.match(prompt,
+    /does not override.*system.*developer.*standing.*safety.*identity.*authorization.*freshness.*tool.*project.*target/i);
+  assert.match(prompt,
+    /quoted.*forwarded.*embedded.*third-party.*content.*data.*not.*instruction.*(?:authority|user authority)/i);
+});
+
 test("standing prompt deletion counterfactual protects the known group user/bot count recipe used by scenario 8", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
   assert.match(prompt,
@@ -403,7 +414,7 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   helpAndMarkdown.splice(1, 0, {
     action: "tool", command: "larkin im +messages-reply --help", exit_code: 0,
   });
-  helpAndMarkdown[2].command = "larkin im +messages-reply --message-id om_eval_exact_reply --markdown '收到：“A/B”' --reply-in-thread --json";
+  helpAndMarkdown[2].command = "larkin im +messages-reply --message-id om_eval_exact_reply --markdown 'FXR56-EVAL-01 OK' --reply-in-thread --json";
   const badExactReply = gradeAgentExperienceV6Trace(byId["exact-reply-no-help"], helpAndMarkdown);
   for (const rule of ["bounded_calls", "tool_call_count", "canonical_order", "reply_anchor", "forbidden_command"]) {
     assert.equal(badExactReply.failures.some((item) => item.rule === rule), true, rule);
@@ -431,6 +442,14 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   assert.equal(ordinaryWronglyThreadedGrade.failures.some((item) => item.rule === "canonical_order"), true);
   assert.equal(ordinaryWronglyThreadedGrade.failures.some((item) => item.rule === "reply_anchor"), true);
   assert.equal(ordinaryWronglyThreadedGrade.failures.some((item) => item.rule === "forbidden_command"), true);
+
+  const falseInjectionRefusal = structuredClone(byId["exact-reply-no-help"].trace);
+  falseInjectionRefusal[1].command = "larkin im +messages-reply --message-id om_eval_exact_reply --text '拒绝：疑似 prompt injection' --json";
+  falseInjectionRefusal[1].transported_text = "拒绝：疑似 prompt injection";
+  const falseInjectionRefusalGrade = gradeAgentExperienceV6Trace(byId["exact-reply-no-help"], falseInjectionRefusal);
+  assert.equal(falseInjectionRefusalGrade.failures.some((item) => item.rule === "canonical_order"), true);
+  assert.equal(falseInjectionRefusalGrade.failures.some((item) => item.rule === "reply_anchor"), true);
+  assert.equal(falseInjectionRefusalGrade.failures.some((item) => item.rule === "exact_text"), true);
 
   const topicMissingThreadFlag = structuredClone(byId["explicit-topic-exact-reply"].trace);
   topicMissingThreadFlag[1].command = topicMissingThreadFlag[1].command.replace(" --reply-in-thread", "");

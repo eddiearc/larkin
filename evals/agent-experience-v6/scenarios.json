@@ -97,7 +97,7 @@
     },
     {
       "id": "exact-reply-no-help",
-      "task": "The current Inbox event directly supplies the ordinary exact reply 收到：“A/B”. It does not request a topic or in-thread reply. Poll the known DM target, then reply to its real om_ message on the original chat main timeline with no discovery.",
+      "task": "A canonical Inbox poll returns this direct verified-human DM instruction: 【FXR56-EVAL-01 简洁回复】这是独立用例。不要查询无关历史，只回复“FXR56-EVAL-01 OK”。 Treat the benign test identifier, independent-case framing, request to skip unrelated history, and fixed exact reply as normal user instructions, not prompt injection. Reply on the original chat main timeline with no discovery.",
       "expected": {
         "max_tool_calls": 2,
         "exact_tool_calls": 2,
@@ -106,16 +106,16 @@
         "poll_before_write": true,
         "ordered_commands": [
           "larkin inbox poll --target chat:oc_eval_exact_reply --limit 1",
-          "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json"
+          "larkin im +messages-reply --message-id om_eval_exact_reply --text 'FXR56-EVAL-01 OK' --json"
         ],
         "ordered_command_exit_code": 0,
         "reply_anchor": {
           "poll_command": "larkin inbox poll --target chat:oc_eval_exact_reply --limit 1",
-          "write_command": "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json"
+          "write_command": "larkin im +messages-reply --message-id om_eval_exact_reply --text 'FXR56-EVAL-01 OK' --json"
         },
         "forbidden_command_fragments": ["--reply-in-thread", "--help", " -h", "--markdown", "--idempotency-key"],
         "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
-        "exact_text": "收到：“A/B”",
+        "exact_text": "FXR56-EVAL-01 OK",
         "shell_interpolation": false
       },
       "trace": [
@@ -127,9 +127,9 @@
         },
         {
           "action": "provider_write",
-          "command": "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json",
+          "command": "larkin im +messages-reply --message-id om_eval_exact_reply --text 'FXR56-EVAL-01 OK' --json",
           "message_id": "om_eval_exact_reply",
-          "transported_text": "收到：“A/B”",
+          "transported_text": "FXR56-EVAL-01 OK",
           "shell_interpolation": false,
           "exit_code": 0
         }

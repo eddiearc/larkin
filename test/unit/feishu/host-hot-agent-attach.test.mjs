@@ -46,11 +46,23 @@ test("HostShell hot attach adds only the target Agent and duplicate upsert is id
   fs.chmodSync(root, 0o700);
   const existing = configFor(root, "cli_existingA1");
   const added = configFor(root, "cli_addedB2");
+  createAgentStateStore(root, existing.agentId).writeJson("botIdentity", {
+    open_id: "ou_existing", name: "Existing Bot",
+  });
+  createAgentStateStore(root, added.agentId).writeJson("botIdentity", {
+    open_id: "ou_added", name: "Added Bot",
+  });
   const starts = [];
+  const startInputs = [];
+  const stageInputs = [];
   const stops = [];
   const subscribers = [];
   const runtimeHost = {
-    async start(configs) { starts.push(configs.map(({ agentId }) => agentId)); for (const config of configs) for (const listener of subscribers) listener({ type: "agent-status", agentId: config.agentId, status: "active" }); },
+    async start(configs) { startInputs.push(configs.map((config) => ({ ...config }))); starts.push(configs.map(({ agentId }) => agentId)); for (const config of configs) for (const listener of subscribers) listener({ type: "agent-status", agentId: config.agentId, status: "active" }); },
+    async stage(config) {
+      stageInputs.push({ ...config });
+      return { readiness: { runtime: config.runtime, state: "ready" }, async commit() {}, async rollback() {} };
+    },
     async stop(agentId) { stops.push(agentId); },
     async shutdown() {}, async deliver() { return { status: "accepted", deliveryId: "delivery" }; },
     subscribe(listener) { subscribers.push(listener); return () => {}; },
@@ -59,10 +71,11 @@ test("HostShell hot attach adds only the target Agent and duplicate upsert is id
   const channels = new Map();
   const channelPackage = {
     createLarkChannel(options) {
+      const botName = options.appId === existing.agentId ? "Existing Bot" : "Added Bot";
       const channel = {
         options, handlers: null, disconnected: 0, registrations: {}, cardUpdates: [],
-        botIdentity: { openId: `ou_${options.appId}`, name: options.appId },
-        rawClient: { async request() { return { bot: { open_id: `ou_${options.appId}`, app_name: options.appId } }; } },
+        botIdentity: { openId: `ou_${options.appId}`, name: botName },
+        rawClient: { async request() { return { bot: { open_id: `ou_${options.appId}`, app_name: botName } }; } },
         dispatcher: { register: (map) => Object.assign(channel.registrations, map) }, on(handlers) { this.handlers = handlers; },
         async connect() {}, async disconnect() { this.disconnected += 1; }, async updateCard(messageId, card) { this.cardUpdates.push({ messageId, card }); },
       };
@@ -81,6 +94,9 @@ test("HostShell hot attach adds only the target Agent and duplicate upsert is id
     assert.equal(await shell.upsertAgent(added), "added");
     assert.deepEqual(shell.agents.map(({ agentId }) => agentId), ["cli_existingA1", "cli_addedB2"]);
     assert.deepEqual(starts, [["cli_existingA1"], ["cli_addedB2"]]);
+    assert.equal(startInputs[0][0].displayName, "Existing Bot", "cold Runtime start must receive cached Bot display identity");
+    assert.equal(startInputs[1][0].displayName, "Added Bot", "hot add Runtime start must be hydrated before start");
+    assert.deepEqual(stageInputs, [], "hot add has no previous Runtime and must not stage");
     assert.deepEqual(stops, [], "new attach must not stop the existing Agent Runtime");
     assert.equal(channels.get("cli_existingA1").disconnected, 0, "existing channel must stay connected");
     const addedChannel = channels.get("cli_addedB2");
@@ -89,7 +105,11 @@ test("HostShell hot attach adds only the target Agent and duplicate upsert is id
     assert.match(JSON.stringify(addedResponse), /Agent 正在处理/);
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(addedChannel.cardUpdates.length, 1, "hot-added Agent must project its card through the new channel");
-    assert.equal(await shell.upsertAgent(added), "unchanged");
+    const updated = { ...added, model: "gpt-5.6-updated" };
+    assert.equal(await shell.upsertAgent(updated), "updated");
+    assert.equal(stageInputs.length, 1, "hot update must stage exactly one replacement Runtime");
+    assert.equal(stageInputs[0].displayName, "Added Bot", "hot update must hydrate Bot identity before stage");
+    assert.equal(await shell.upsertAgent(updated), "unchanged");
     assert.deepEqual(starts, [["cli_existingA1"], ["cli_addedB2"]], "duplicate operation must not create a second Runtime");
   } finally {
     await shell.shutdown("test");

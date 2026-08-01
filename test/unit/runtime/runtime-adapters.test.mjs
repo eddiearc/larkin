@@ -129,6 +129,10 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content,
     /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content,
+    /current Inbox.*directly supplies.*exact literal.*reply.*topic.*required.*poll.*larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json/i);
+  assert.match(prompt.content,
+    /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
+  assert.match(prompt.content,
     /larkin im \+messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content, /complete canonical exact send and reply paths.*must not.*messages-send --help.*messages-reply --help/i);
   assert.match(prompt.content, /known canonical.*Inbox poll.*scoped.*history.*exact send.*reply.*directly.*must not.*(?:read|re-read).*skill.*reference/i);

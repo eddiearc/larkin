@@ -80,6 +80,8 @@ test("standing prompt deletion counterfactual protects poll-only silence until t
     /must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool/i);
   assert.match(prompt,
     /next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
+  assert.match(prompt,
+    /poll succeeds.*end.*model turn.*do not (?:emit|output).*assistant text.*bash.*shell.*echo.*no-op placeholder.*zero.*post-poll.*(?:calls|tool calls)/i);
 });
 
 test("eval loader rejects drift in the fixed authoritative group-count dataflow contract", () => {
@@ -262,6 +264,7 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
     { action: "tool", command: ":", exit_code: 0 },
     { action: "tool", command: "sleep 1", exit_code: 0 },
     { action: "tool", command: "echo waiting", exit_code: 0 },
+    { action: "tool", command: "echo \"no-op placeholder\"", exit_code: 0 },
     { action: "tool", command: "pwd", exit_code: 0 },
     { action: "tool", command: "larkin status", exit_code: 0 },
     { action: "tool", command: "larkin goal get", exit_code: 0 },

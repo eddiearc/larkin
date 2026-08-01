@@ -26,6 +26,7 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "precommit-exact-reply-safe-retry",
     "tool-sourced-verbatim-thread-reply",
     "tool-sourced-verbatim-message-reply",
+    "known-group-user-bot-counts",
     "exclusive-other-agent-silence",
     "committed-unverified-no-retry",
   ]);
@@ -40,6 +41,34 @@ test("standing prompt defines the bounded same-human correction precedence used 
   assert.match(prompt, /cannot.*(?:grant|expand).*permission/i);
   assert.match(prompt, /within this Agent's Inbox/i);
   assert.match(prompt, /different sender or target.*do not gain.*replacement precedence/i);
+});
+
+test("standing prompt deletion counterfactual protects the known group user/bot count recipe used by scenario 8", () => {
+  const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
+  assert.match(prompt,
+    /exact group name.*user.*bot counts.*\+chat-search --query '<exact_group_name>' --json.*exact name.*oc_.*chats get --chat-id <confirmed_oc_chat_id> --json.*user_count.*bot_count/i);
+  assert.match(prompt,
+    /exactly two.*post-poll.*read calls.*must not.*skill.*reference.*help.*schema.*bare.*lark-cli.*chat\.members.*\+chat-members-list/i);
+});
+
+test("eval loader rejects drift in the fixed authoritative group-count dataflow contract", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-group-count-eval-"));
+  try {
+    for (const mutate of [
+      (expected) => { delete expected.group_count_dataflow.exact_group_name; },
+      (expected) => { expected.group_count_dataflow.search_read_path = "wrong.path"; },
+      (expected) => { expected.group_count_dataflow.chat_get_read_path = "wrong.path"; },
+      (expected) => { expected.group_count_dataflow.reply_prefix = ""; },
+    ]) {
+      const invalid = structuredClone(DATASET);
+      mutate(invalid.scenarios.find((scenario) => scenario.id === "known-group-user-bot-counts").expected);
+      const file = path.join(root, "invalid.json");
+      fs.writeFileSync(file, JSON.stringify(invalid));
+      assert.throws(() => loadAgentExperienceV6Eval(file), /group_count_dataflow/);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("eval loader rejects correction batches without a stable human, target, Agent, and strictly newer effective envelope", () => {
@@ -78,6 +107,89 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
 
 test("grader rejects fallback, false success, text mutation, redundant discovery, unsafe retry, and duplicate writes", () => {
   const byId = Object.fromEntries(DATASET.scenarios.map((scenario) => [scenario.id, scenario]));
+  const groupCounts = byId["known-group-user-bot-counts"];
+  const expectGroupCountBindingFailure = (label, mutate) => {
+    const changed = structuredClone(groupCounts.trace);
+    mutate(changed);
+    const grade = gradeAgentExperienceV6Trace(groupCounts, changed);
+    assert.equal(grade.passed, false, label);
+    assert.equal(grade.failures.some((item) => item.rule === "group_count_dataflow"), true, label);
+  };
+  for (const count of [0, 2]) {
+    expectGroupCountBindingFailure(`${count} exact-name matches`, (trace) => {
+      trace[1].exact_name_match_count = count;
+    });
+  }
+  expectGroupCountBindingFailure("wrong selected group name", (trace) => {
+    trace[1].selected_chat_name = "AX审计-20260729-copy";
+  });
+  expectGroupCountBindingFailure("non-oc selected id", (trace) => {
+    trace[1].confirmed_chat_id = "chat_eval_audit";
+  });
+  expectGroupCountBindingFailure("selected id does not bind the next read", (trace) => {
+    trace[1].confirmed_chat_id = "oc_eval_other";
+  });
+  expectGroupCountBindingFailure("get command uses a different id", (trace) => {
+    trace[2].command = "larkin im chats get --chat-id oc_eval_other --json";
+  });
+  expectGroupCountBindingFailure("get payload uses a different id", (trace) => {
+    trace[2].returned_chat_id = "oc_eval_other";
+  });
+  expectGroupCountBindingFailure("get payload uses a different name", (trace) => {
+    trace[2].returned_chat_name = "AX审计-20260729-copy";
+  });
+  expectGroupCountBindingFailure("get payload omits a count", (trace) => {
+    delete trace[2].user_count;
+  });
+  expectGroupCountBindingFailure("get payload substitutes the wrong field", (trace) => {
+    delete trace[2].bot_count;
+    trace[2].member_count = 2;
+  });
+  expectGroupCountBindingFailure("get payload has an invalid count", (trace) => {
+    trace[2].bot_count = -1;
+  });
+  expectGroupCountBindingFailure("hard-coded correct output disagrees with authority counts", (trace) => {
+    trace[2].user_count = 9;
+  });
+  expectGroupCountBindingFailure("reply command count disagrees with authority counts", (trace) => {
+    trace[3].command = "larkin im +messages-reply --message-id om_eval_member_counts --text 'FXR51-R8T2-EVAL-08：users=1, bots=9' --json";
+  });
+  for (const extra of [
+    { action: "tool", tool_name: "read", resource_path: "/skills/lark-im/SKILL.md",
+      command: "read /skills/lark-im/SKILL.md", exit_code: 0 },
+    { action: "tool", command: "larkin im +chat-search --help", exit_code: 0 },
+    { action: "tool", command: "lark-cli schema im.chats.get", exit_code: 0 },
+  ]) {
+    const rediscovered = structuredClone(groupCounts.trace);
+    rediscovered.splice(1, 0, extra);
+    const grade = gradeAgentExperienceV6Trace(groupCounts, rediscovered);
+    assert.equal(grade.passed, false);
+    assert.equal(grade.failures.some((item) => ["bounded_calls", "tool_call_count"].includes(item.rule)), true);
+    assert.equal(grade.failures.some((item) => ["redundant_discovery_read", "forbidden_command"].includes(item.rule)), true);
+  }
+
+  for (const forbiddenMemberRead of [
+    "larkin im chat.members get --chat-id oc_eval_audit --json",
+    "larkin im +chat-members-list --chat-id oc_eval_audit --member-types user,bot --page-all --json",
+  ]) {
+    const wrongRead = structuredClone(groupCounts.trace);
+    wrongRead[2].command = forbiddenMemberRead;
+    const grade = gradeAgentExperienceV6Trace(groupCounts, wrongRead);
+    assert.equal(grade.failures.some((item) => item.rule === "canonical_order"), true);
+    assert.equal(grade.failures.some((item) => item.rule === "forbidden_command"), true);
+  }
+
+  const reorderedCounts = structuredClone(groupCounts.trace);
+  [reorderedCounts[1], reorderedCounts[2]] = [reorderedCounts[2], reorderedCounts[1]];
+  assert.equal(gradeAgentExperienceV6Trace(groupCounts, reorderedCounts)
+    .failures.some((item) => item.rule === "canonical_order"), true);
+
+  const wrongCounts = structuredClone(groupCounts.trace);
+  wrongCounts[3].transported_text = "FXR51-R8T2-EVAL-08：users=1, bots=1";
+  const wrongCountsGrade = gradeAgentExperienceV6Trace(groupCounts, wrongCounts);
+  assert.equal(wrongCountsGrade.failures.some((item) => item.rule === "exact_text"), true);
+  assert.equal(wrongCountsGrade.failures.some((item) => item.rule === "group_count_dataflow"), true);
+
   const badThread = gradeAgentExperienceV6Trace(byId["target-scoped-thread-read"], [{
     action: "tool", command: "larkin im +chat-messages-list --chat-id oc_eval_thread 2>&1", exit_code: 0,
   }]);

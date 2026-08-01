@@ -69,6 +69,16 @@ export function loadAgentExperienceV6Eval(file) {
       || dataflow.shell_substitution !== "quoted")) {
       throw new Error(`${label}.expected.exact_source_dataflow selector/count contract is invalid`);
     }
+    const groupCountDataflow = scenario.expected.group_count_dataflow;
+    if (scenario.id === "known-group-user-bot-counts"
+      && (!groupCountDataflow || typeof groupCountDataflow !== "object" || Array.isArray(groupCountDataflow)
+        || Object.keys(groupCountDataflow).length !== 4
+        || typeof groupCountDataflow.exact_group_name !== "string" || !groupCountDataflow.exact_group_name
+        || groupCountDataflow.search_read_path !== "data.chats"
+        || groupCountDataflow.chat_get_read_path !== "data"
+        || typeof groupCountDataflow.reply_prefix !== "string" || !groupCountDataflow.reply_prefix)) {
+      throw new Error(`${label}.expected.group_count_dataflow contract is invalid`);
+    }
   }
   return value;
 }
@@ -80,8 +90,9 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
   if (!Array.isArray(trace)) fail("trace_action_schema", "trace must be an array");
   const allowedActions = new Set(["tool", "provider_write", "final"]);
   const allowedFields = {
-    tool: new Set(["action", "command", "exit_code", "message_id", "provider_reached", "read_path",
-      "resource_path", "stderr", "stdout_documents", "subtype", "tool_name"]),
+    tool: new Set(["action", "bot_count", "command", "confirmed_chat_id", "exact_name_match_count", "exit_code",
+      "message_id", "provider_reached", "read_path", "resource_path", "returned_chat_id", "returned_chat_name",
+      "selected_chat_name", "stderr", "stdout_documents", "subtype", "tool_name", "user_count"]),
     provider_write: new Set(["action", "command", "composite_internal_commands", "content_argument", "exit_code",
       "literal_prefix", "message_id", "result", "shell_interpolation", "shell_substitution", "source_command",
       "source_exit_code", "source_field", "source_msg_type", "source_read_count", "source_read_path",
@@ -104,9 +115,10 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     if (typeof event.command !== "string" || !event.command || !Number.isInteger(event.exit_code)) return false;
     if (event.action === "tool") {
       return optionalFieldsHaveType(event,
-        ["message_id", "read_path", "resource_path", "stderr", "subtype", "tool_name"], "string")
+        ["confirmed_chat_id", "message_id", "read_path", "resource_path", "returned_chat_id", "returned_chat_name",
+          "selected_chat_name", "stderr", "subtype", "tool_name"], "string")
         && optionalFieldsHaveType(event, ["provider_reached"], "boolean")
-        && optionalIntegerFields(event, ["stdout_documents"]);
+        && optionalIntegerFields(event, ["bot_count", "exact_name_match_count", "stdout_documents", "user_count"]);
     }
     return optionalFieldsHaveType(event, ["content_argument", "literal_prefix", "message_id", "shell_substitution",
       "source_command", "source_field", "source_msg_type", "source_read_path", "source_selector", "source_target",
@@ -167,6 +179,43 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     if (tools.some((event) => (event.tool_name === "read" || String(event.command || "").startsWith("read "))
       && `${event.resource_path || ""} ${event.command || ""}`.includes(fragment))) {
       fail("redundant_discovery_read", fragment);
+    }
+  }
+  if (scenario.expected.group_count_dataflow) {
+    const expected = scenario.expected.group_count_dataflow;
+    const canonicalSearchCommand = `larkin im +chat-search --query '${expected.exact_group_name}' --json`;
+    const searchIndex = tools.findIndex((event) => event.action === "tool" && event.command === canonicalSearchCommand);
+    const search = searchIndex >= 0 ? tools[searchIndex] : null;
+    const confirmedChatId = search?.confirmed_chat_id;
+    const validConfirmedChatId = typeof confirmedChatId === "string" && /^oc_[A-Za-z0-9_-]+$/.test(confirmedChatId);
+    const get = searchIndex >= 0 ? tools[searchIndex + 1] : null;
+    const canonicalGetCommand = validConfirmedChatId
+      ? `larkin im chats get --chat-id ${confirmedChatId} --json`
+      : null;
+    const validCounts = Number.isSafeInteger(get?.user_count) && get.user_count >= 0
+      && Number.isSafeInteger(get?.bot_count) && get.bot_count >= 0;
+    const authoritativeText = validCounts
+      ? `${expected.reply_prefix}users=${get.user_count}, bots=${get.bot_count}`
+      : null;
+    const write = writes[0];
+    const canonicalWriteCommand = authoritativeText && typeof write?.message_id === "string"
+      ? `larkin im +messages-reply --message-id ${write.message_id} --text '${authoritativeText}' --json`
+      : null;
+    const bound = search?.action === "tool" && search.exit_code === 0
+      && search.read_path === expected.search_read_path
+      && search.exact_name_match_count === 1
+      && search.selected_chat_name === expected.exact_group_name
+      && validConfirmedChatId
+      && get?.action === "tool" && get.exit_code === 0
+      && get.command === canonicalGetCommand
+      && get.read_path === expected.chat_get_read_path
+      && get.returned_chat_id === confirmedChatId
+      && get.returned_chat_name === expected.exact_group_name
+      && validCounts
+      && write?.transported_text === authoritativeText
+      && write?.command === canonicalWriteCommand;
+    if (!bound) {
+      fail("group_count_dataflow", "reply counts were not bound to one exact-name match and the confirmed chat's authoritative user_count/bot_count fields");
     }
   }
   if (Object.hasOwn(scenario, "inbox_batch") || Object.hasOwn(scenario, "effective_message_id")) {

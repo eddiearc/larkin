@@ -132,6 +132,10 @@ test("default context prompt consumes the Agent CLI manifest", () => {
     /larkin im \+messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content, /complete canonical exact send and reply paths.*must not.*messages-send --help.*messages-reply --help/i);
   assert.match(prompt.content, /known canonical.*Inbox poll.*scoped.*history.*exact send.*reply.*directly.*must not.*(?:read|re-read).*skill.*reference/i);
+  assert.match(prompt.content,
+    /exact group name.*user.*bot counts.*required Inbox poll.*\+chat-search --query '<exact_group_name>' --json.*exact name.*oc_.*chats get --chat-id <confirmed_oc_chat_id> --json.*user_count.*bot_count/i);
+  assert.match(prompt.content,
+    /group.*user.*bot counts.*exactly two.*post-poll.*read calls.*must not.*skill.*reference.*help.*schema.*bare.*lark-cli.*chat\.members.*\+chat-members-list/i);
   assert.match(prompt.content, /does not waive.*skill.*safety.*unknown.*high-risk/i);
   assert.match(prompt.content, /exact.*`--text`.*overrides.*markdown default/i);
   assert.match(prompt.content, /wrapper derives.*stable.*idempotency key.*do not pass.*--idempotency-key/i);

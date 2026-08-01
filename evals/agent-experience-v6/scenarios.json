@@ -22,6 +22,7 @@
       "for a regular current Inbox event, the event-targeted poll is the first model tool call with no preceding Inbox check or discovery; afterward a known-thread latest-human task makes one composite thread-read/reply call while a known-message-ID task makes one composite mget/reply call",
       "thread-latest-human copies the official sender.sender_type == \"user\" API discriminator literally on its first composite, while thread and message-ID sources preserve Unicode, whitespace, and normalization in the complete text JSON document",
       "a later canonical cancellation or replacement from the same envelope-verified human on the exact same target supersedes only that human's earlier user task; correction and exact-output labels alone are not prompt injection, and never override standing, platform, safety, identity, or authorization boundaries or expand permissions",
+      "an exact group-name user/bot count task polls first, then directly performs one exact-name chat search and one chats get before one exact reply, without skill/reference/help/schema discovery, bare lark-cli, or member-list APIs",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
     ]
@@ -332,6 +333,73 @@
           "content_argument": "{\"text\":\"作者's：消息原文：“保持”  不改\"}",
           "transported_text": "作者's：消息原文：“保持”  不改",
           "shell_substitution": "quoted",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "known-group-user-bot-counts",
+      "task": "【FXR51-R8T2-EVAL-08 群发现与成员统计】请找到名为“AX审计-20260729”的群，读取成员并统计用户数与机器人数量。最多两次业务读取调用加一次回复；只回复“FXR51-R8T2-EVAL-08：users=<数字>, bots=<数字>”。",
+      "expected": {
+        "max_tool_calls": 4,
+        "exact_tool_calls": 4,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "poll_before_write": true,
+        "ordered_commands": [
+          "larkin inbox poll --target chat:oc_eval_member_counts --limit 1",
+          "larkin im +chat-search --query 'AX审计-20260729' --json",
+          "larkin im chats get --chat-id oc_eval_audit --json",
+          "larkin im +messages-reply --message-id om_eval_member_counts --text 'FXR51-R8T2-EVAL-08：users=1, bots=2' --json"
+        ],
+        "ordered_command_exit_code": 0,
+        "reply_anchor": {
+          "poll_command": "larkin inbox poll --target chat:oc_eval_member_counts --limit 1",
+          "write_command": "larkin im +messages-reply --message-id om_eval_member_counts --text 'FXR51-R8T2-EVAL-08：users=1, bots=2' --json"
+        },
+        "forbidden_command_fragments": ["--help", " -h", "lark-cli", "schema", "chat.members", "+chat-members-list", "+chat-list", "2>&1", "| head", "| sed", "| grep", "--as ", "--profile", "--config-dir"],
+        "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
+        "group_count_dataflow": {
+          "exact_group_name": "AX审计-20260729",
+          "search_read_path": "data.chats",
+          "chat_get_read_path": "data",
+          "reply_prefix": "FXR51-R8T2-EVAL-08："
+        },
+        "exact_text": "FXR51-R8T2-EVAL-08：users=1, bots=2",
+        "shell_interpolation": false
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target chat:oc_eval_member_counts --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_member_counts"
+        },
+        {
+          "action": "tool",
+          "command": "larkin im +chat-search --query 'AX审计-20260729' --json",
+          "exit_code": 0,
+          "read_path": "data.chats",
+          "exact_name_match_count": 1,
+          "selected_chat_name": "AX审计-20260729",
+          "confirmed_chat_id": "oc_eval_audit"
+        },
+        {
+          "action": "tool",
+          "command": "larkin im chats get --chat-id oc_eval_audit --json",
+          "exit_code": 0,
+          "read_path": "data",
+          "returned_chat_id": "oc_eval_audit",
+          "returned_chat_name": "AX审计-20260729",
+          "user_count": 1,
+          "bot_count": 2
+        },
+        {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_member_counts --text 'FXR51-R8T2-EVAL-08：users=1, bots=2' --json",
+          "message_id": "om_eval_member_counts",
+          "transported_text": "FXR51-R8T2-EVAL-08：users=1, bots=2",
+          "shell_interpolation": false,
           "exit_code": 0
         }
       ]

@@ -427,6 +427,9 @@ test("platform rules teach the sole larkin surface, long-running task updates, a
   assert.match(PLATFORM_RULES, /commentary.*final_answer.*(?:不可见|不等于飞书出站)/, "runtime-native output must not be presented as user-visible IM");
   assert.match(PLATFORM_RULES, /只有[^\n]*成功调用[^\n]*larkin[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/, "only a successful routed send or reply is user-visible");
   assert.match(PLATFORM_RULES, /多个外部步骤[^\n]*(?:首个|第一个)[^\n]*(?:外部|耗时)步骤前[^\n]*(?:简短确认|首响)/, "multi-step external work must acknowledge before its first external or slow step");
+  assert.match(PLATFORM_RULES, /只回复[^\n]*(?:一次|单次)[^\n]*(?:不得|禁止)[^\n]*首响[^\n]*进度[^\n]*(?:goal|status)[^\n]*控制工具/, "an explicit single response must suppress extra acknowledgement, progress, and control tools");
+  assert.match(PLATFORM_RULES, /只 poll 后保持沉默[^\n]*poll 后[^\n]*(?:立即停止|不得再调用)[^\n]*历史[^\n]*(?:goal|status)[^\n]*(?:控制|发现)工具[^\n]*(?:不发送|不得发送)[^\n]*(?:首响|进度|最终)/, "poll-then-silent must stop all extra reads, control calls, and writes");
+  assert.match(PLATFORM_RULES, /显式限制[^\n]*优先于[^\n]*默认首响[^\n]*进度[^\n]*没有[^\n]*显式限制[^\n]*普通[^\n]*(?:多步骤|长任务)[^\n]*仍[^\n]*首响/, "ordinary long work must retain its acknowledgement contract");
   assert.match(PLATFORM_RULES, /短任务[^\n]*(?:直接处理|无需)[^\n]*(?:收到|确认|首响)/, "short work must not gain a mechanical acknowledgement");
   assert.match(PLATFORM_RULES, /用户[^\n]*步骤顺序[^\n]*(?:严格|必须)[^\n]*顺序[^\n]*不得[^\n]*(?:fallback|重排|重复)/, "explicit user ordering must forbid premature fallback, repetition, and reordering");
   assert.match(PLATFORM_RULES, /进度[^\n]*用户[^\n]*大阶段[^\n]*(?:而非|不按)[^\n]*(?:工具|小步骤)[^\n]*(?:仅在|只在)[^\n]*阶段变化[^\n]*明显延迟[^\n]*需要用户动作[^\n]*用户可感知阻塞[^\n]*同一阶段[^\n]*同一阻塞[^\n]*(?:不重复|只发送一次)/, "phase-level progress must stay bounded and user-meaningful");

@@ -16,13 +16,19 @@ const FAKE_CLI = path.join(ROOT, "test", "support", "long-running-im-eval-cli.mj
 
 const IM_TARGET = { target_type: "chat_id", target_id: "oc_eval" };
 const event = (order, type, extra = {}) => ({ order, type, ...(type === "im" ? IM_TARGET : {}), ...extra });
-const grade = (scenario, trace) => gradeLongRunningImTrace(scenario, trace.map((item) =>
-  Object.hasOwn(item, "case_id") ? item : { ...item, case_id: scenario.id }));
+const controlledToolAttempts = (trace) => trace.map(() => ({ name: "bash" }));
+const grade = (scenario, trace, toolAttempts = controlledToolAttempts(trace)) => gradeLongRunningImTrace(
+  scenario,
+  trace.map((item) => Object.hasOwn(item, "case_id") ? item : { ...item, case_id: scenario.id }),
+  toolAttempts,
+);
 
 test("versioned scenario set stays intentionally small and validates on load", () => {
   const scenarios = loadLongRunningImScenarios(CASES);
   assert.deepEqual(scenarios.map((scenario) => scenario.id), [
     "complex-phased-task",
+    "explicit-single-response",
+    "poll-then-stay-silent",
     "repeated-tool-failure",
     "sensitive-tool-output",
     "short-answer",
@@ -49,6 +55,14 @@ test("grader accepts golden traces for every scenario", () => {
       event(12, "work", { step_id: "deliver-verify", slow: false, outcome: "success" }),
       event(13, "im", { body: "三个阶段全部完成。" }),
     ],
+    "explicit-single-response": [
+      event(1, "work", { step_id: "read-a", slow: true, outcome: "success" }),
+      event(2, "work", { step_id: "verify-a", slow: true, outcome: "success" }),
+      event(3, "im", { body: "B：同意；A 与复核结果一致" }),
+    ],
+    "poll-then-stay-silent": [
+      event(1, "work", { step_id: "canonical-poll", slow: false, outcome: "success" }),
+    ],
     "short-answer": [event(1, "im", { body: "4" })],
     "successful-long-task": [
       event(1, "im", { body: "我先检查两个步骤。" }),
@@ -71,6 +85,63 @@ test("grader accepts golden traces for every scenario", () => {
   for (const [id, trace] of Object.entries(traces)) {
     assert.deepEqual(grade(scenarios[id], trace), { passed: true, failures: [] }, id);
   }
+});
+
+test("explicit single-response budget rejects extra first response, progress, and control calls", () => {
+  const scenario = loadLongRunningImScenarios(CASES).find((item) => item.id === "explicit-single-response");
+  const extraFirstResponse = grade(scenario, [
+    event(1, "im", { body: "收到，我先读取 A。" }),
+    event(2, "work", { step_id: "read-a", slow: true, outcome: "success" }),
+    event(3, "work", { step_id: "verify-a", slow: true, outcome: "success" }),
+    event(4, "im", { body: "B：同意；A 与复核结果一致" }),
+  ]);
+  assert.ok(extraFirstResponse.failures.some((failure) => failure.rule === "im_message_limit"));
+
+  const extraProgress = grade(scenario, [
+    event(1, "work", { step_id: "read-a", slow: true, outcome: "success" }),
+    event(2, "im", { body: "A 已读取，正在复核。" }),
+    event(3, "work", { step_id: "verify-a", slow: true, outcome: "success" }),
+    event(4, "im", { body: "B：同意；A 与复核结果一致" }),
+  ]);
+  assert.ok(extraProgress.failures.some((failure) => failure.rule === "im_message_limit"));
+
+  const controlledTrace = [
+    event(1, "work", { step_id: "read-a", slow: true, outcome: "success" }),
+    event(2, "work", { step_id: "verify-a", slow: true, outcome: "success" }),
+    event(3, "im", { body: "B：同意；A 与复核结果一致" }),
+  ];
+  const extraControlCall = grade(scenario, controlledTrace,
+    [{ name: "bash" }, { name: "get_goal" }, { name: "bash" }, { name: "bash" }]);
+  assert.ok(extraControlCall.failures.some((failure) => failure.rule === "tool_attempt_budget"));
+});
+
+test("poll-then-stay-silent budget rejects get_goal, history reads, and writes after poll", () => {
+  const scenario = loadLongRunningImScenarios(CASES).find((item) => item.id === "poll-then-stay-silent");
+  for (const extraAttempt of [
+    { name: "get_goal" },
+    { name: "bash" },
+  ]) {
+    const trace = [event(1, "work", { step_id: "canonical-poll", slow: false, outcome: "success" })];
+    const result = grade(scenario, trace, [{ name: "bash" }, extraAttempt]);
+    assert.ok(result.failures.some((failure) => failure.rule === "tool_attempt_budget"));
+  }
+
+  const extraWrite = grade(scenario, [
+    event(1, "work", { step_id: "canonical-poll", slow: false, outcome: "success" }),
+    event(2, "im", { body: "收到，等待 B。" }),
+  ]);
+  assert.ok(extraWrite.failures.some((failure) => failure.rule === "im_message_limit"));
+});
+
+test("ordinary long tasks retain the mandatory first-response contract", () => {
+  const scenario = loadLongRunningImScenarios(CASES).find((item) => item.id === "successful-long-task");
+  assert.equal(scenario.expectations.ack_before_first_slow_work, true);
+  const result = grade(scenario, [
+    event(1, "work", { step_id: "inventory", slow: true, outcome: "success" }),
+    event(2, "work", { step_id: "summary", slow: true, outcome: "success" }),
+    event(3, "im", { body: "完成。" }),
+  ]);
+  assert.ok(result.failures.some((failure) => failure.rule === "ack_before_slow_work"));
 });
 
 test("complex phased scenario declares three phases and one bounded silent retry contract", () => {

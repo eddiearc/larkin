@@ -33,8 +33,8 @@ export function parseLongRunningImScenario(value, source = "scenario") {
   for (const key of ["ack_before_first_slow_work", "terminal_im_after_work", "progress_after_repeated_failure", "short_task_terminal_only"]) {
     if (typeof expected[key] !== "boolean") throw new Error(`${source}.expectations.${key} must be boolean`);
   }
-  if (!Number.isInteger(expected.max_im_messages) || expected.max_im_messages < 1) {
-    throw new Error(`${source}.expectations.max_im_messages must be a positive integer`);
+  if (!Number.isInteger(expected.max_im_messages) || expected.max_im_messages < 0) {
+    throw new Error(`${source}.expectations.max_im_messages must be a non-negative integer`);
   }
   if (!Array.isArray(expected.forbidden_sentinels) || expected.forbidden_sentinels.some((item) => typeof item !== "string" || !item)) {
     throw new Error(`${source}.expectations.forbidden_sentinels must contain non-empty strings`);
@@ -99,9 +99,14 @@ export function loadLongRunningImScenarios(directory) {
     });
 }
 
-export function gradeLongRunningImTrace(scenario, trace) {
+export function gradeLongRunningImTrace(scenario, trace, toolAttempts) {
   const failures = [];
   const fail = (rule, message) => { failures.push({ rule, message }); };
+  if (!Array.isArray(toolAttempts)
+      || toolAttempts.some((attempt) => !attempt || typeof attempt !== "object" || typeof attempt.name !== "string" || !attempt.name)) {
+    fail("tool_attempt_schema", "native tool attempts must contain non-empty tool names");
+    toolAttempts = [];
+  }
   const ordered = [...trace].sort((left, right) => left.order - right.order);
   if (ordered.some((item, index) => item.order !== trace[index]?.order || !Number.isInteger(item.order) || item.order < 1)
       || new Set(ordered.map((item) => item.order)).size !== ordered.length) {
@@ -116,6 +121,10 @@ export function gradeLongRunningImTrace(scenario, trace) {
     item.target_type === scenario.im_target.type && item.target_id === scenario.im_target.id);
   const eligibleImEvents = targetedImEvents.filter((item) => typeof item.body === "string" && item.body.trim().length > 0);
   const workEvents = ordered.filter((item) => item.type === "work");
+  if (toolAttempts.length !== workEvents.length + imEvents.length) {
+    fail("tool_attempt_budget",
+      `expected exactly one native tool attempt per controlled work/IM event, got ${toolAttempts.length} attempts for ${workEvents.length + imEvents.length} events`);
+  }
   const workContractMatches = workEvents.length === scenario.steps.length && workEvents.every((event, index) => {
     const expectedStep = scenario.steps[index];
     return event.step_id === expectedStep.id && event.slow === expectedStep.slow && event.outcome === expectedStep.outcome;

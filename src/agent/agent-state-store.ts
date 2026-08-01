@@ -280,7 +280,9 @@ export class AgentStateStore {
   private inboxLockState(lockDir: string): InboxLockState {
     const owner = this.readInboxLockOwner(lockDir);
     if (!owner) {
-      const age = Date.now() - fs.lstatSync(lockDir).mtimeMs;
+      const stat = lstatIfExists(lockDir);
+      if (!stat) return "reclaimable";
+      const age = Date.now() - stat.mtimeMs;
       return age >= INBOX_MALFORMED_LOCK_GRACE_MS ? "reclaimable" : "unknown";
     }
     const inspected = this.inspect(owner.pid);
@@ -318,16 +320,43 @@ export class AgentStateStore {
         throw new Error(`invalid inbox lock path: ${lockDir}`);
       }
       if (this.inboxLockState(lockDir) !== "reclaimable") return false;
-      const entries = fs.readdirSync(lockDir);
+      let entries: string[];
+      try { entries = fs.readdirSync(lockDir); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          if (!lstatIfExists(lockDir)) return true;
+          return false;
+        }
+        throw error;
+      }
       if (entries.some((entry) => entry !== INBOX_LOCK_OWNER_FILE)) {
         throw new Error(`Inbox lock 包含未知内容，拒绝回收：${lockDir}`);
       }
       if (entries.includes(INBOX_LOCK_OWNER_FILE)) {
-        const ownerStat = fs.lstatSync(path.join(lockDir, INBOX_LOCK_OWNER_FILE));
+        const ownerFile = path.join(lockDir, INBOX_LOCK_OWNER_FILE);
+        const ownerStat = lstatIfExists(ownerFile);
+        if (!ownerStat) {
+          if (!lstatIfExists(lockDir)) return true;
+          return false;
+        }
         if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) throw new Error(`Inbox lock owner 路径无效：${lockDir}`);
-        fs.unlinkSync(path.join(lockDir, INBOX_LOCK_OWNER_FILE));
+        try { fs.unlinkSync(ownerFile); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            if (!lstatIfExists(lockDir)) return true;
+            return false;
+          }
+          throw error;
+        }
       }
-      fs.rmdirSync(lockDir);
+      try { fs.rmdirSync(lockDir); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          if (!lstatIfExists(lockDir)) return true;
+          return false;
+        }
+        throw error;
+      }
       return true;
     } finally {
       reclaim.release();

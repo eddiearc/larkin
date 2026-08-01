@@ -17,7 +17,7 @@
       "structured JSON parsing never merges stderr",
       "failed reads do not fall back to memory or produce false success",
       "verbatim punctuation reaches the provider without shell interpolation",
-      "a common exact reply polls once then uses one successful wrapper-keyed --text recipe without help or extra discovery",
+      "a current-Inbox exact literal thread reply polls once then directly uses the canonical --text --reply-in-thread recipe without help or extra discovery: two model calls without conflict, or exactly three when the first write is a pre-commit freshness_conflict followed by one identical safe retry",
       "tool-sourced verbatim text uses exactly one exclusive source selector and flows from one canonical scoped read through native --jq into one guarded --content reply without preview, selector switching, model rewriting, extra discovery, or a failed discriminator retry",
       "for a regular current Inbox event, the event-targeted poll is the first model tool call with no preceding Inbox check or discovery; afterward a known-thread latest-human task makes one composite thread-read/reply call while a known-message-ID task makes one composite mget/reply call",
       "thread-latest-human copies the official sender.sender_type == \"user\" API discriminator literally on its first composite, while thread and message-ID sources preserve Unicode, whitespace, and normalization in the complete text JSON document",
@@ -95,31 +95,38 @@
     },
     {
       "id": "exact-reply-no-help",
-      "task": "Poll the known DM target, then reply exactly 收到：“A/B” to its real om_ message without opening help.",
+      "task": "The current Inbox event directly supplies the exact literal 收到：“A/B” and requires a reply in its topic. Poll the known thread target, then reply to its real om_ message with no discovery.",
       "expected": {
         "max_tool_calls": 2,
         "exact_tool_calls": 2,
         "provider_writes": 1,
         "write_exit_code": 0,
         "poll_before_write": true,
-        "required_commands": [
-          "larkin inbox poll --target chat:oc_eval_exact_reply --limit 1",
-          "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json"
+        "ordered_commands": [
+          "larkin inbox poll --target thread:oc_eval_exact_reply:omt_eval_exact_reply --limit 1",
+          "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --reply-in-thread --json"
         ],
-        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
+        "ordered_command_exit_code": 0,
+        "reply_anchor": {
+          "poll_command": "larkin inbox poll --target thread:oc_eval_exact_reply:omt_eval_exact_reply --limit 1",
+          "write_command": "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --reply-in-thread --json"
+        },
+        "forbidden_command_fragments": ["--help", " -h", "--markdown", "--idempotency-key"],
+        "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
         "exact_text": "收到：“A/B”",
         "shell_interpolation": false
       },
       "trace": [
         {
           "action": "tool",
-          "command": "larkin inbox poll --target chat:oc_eval_exact_reply --limit 1",
+          "command": "larkin inbox poll --target thread:oc_eval_exact_reply:omt_eval_exact_reply --limit 1",
           "exit_code": 0,
           "message_id": "om_eval_exact_reply"
         },
         {
           "action": "provider_write",
-          "command": "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --json",
+          "command": "larkin im +messages-reply --message-id om_eval_exact_reply --text '收到：“A/B”' --reply-in-thread --json",
+          "message_id": "om_eval_exact_reply",
           "transported_text": "收到：“A/B”",
           "shell_interpolation": false,
           "exit_code": 0
@@ -172,18 +179,27 @@
     },
     {
       "id": "precommit-exact-reply-safe-retry",
-      "task": "The exact reply receives a pre-commit freshness failure; safely retry the same canonical --text operation once.",
+      "task": "The current Inbox event directly supplies an exact literal topic reply. Poll first; when the canonical --text --reply-in-thread write receives a pre-commit freshness_conflict, safely retry that identical operation once.",
       "expected": {
-        "max_tool_calls": 2,
-        "exact_tool_calls": 2,
+        "max_tool_calls": 3,
+        "exact_tool_calls": 3,
         "provider_writes": 1,
         "write_exit_code": 0,
-        "required_command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
-        "forbidden_command_fragments": ["--help", "-h", "--markdown", "--idempotency-key"],
+        "poll_before_write": true,
+        "ordered_commands": [
+          "larkin inbox poll --target thread:oc_eval_retry:omt_eval_retry --limit 1",
+          "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --reply-in-thread --json"
+        ],
+        "reply_anchor": {
+          "poll_command": "larkin inbox poll --target thread:oc_eval_retry:omt_eval_retry --limit 1",
+          "write_command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --reply-in-thread --json"
+        },
+        "forbidden_command_fragments": ["--help", " -h", "--markdown", "--idempotency-key"],
+        "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
         "exact_text": "收到：“A/B”",
         "shell_interpolation": false,
         "precommit_retry": {
-          "allowed_subtypes": ["freshness_unavailable", "freshness_conflict"],
+          "allowed_subtypes": ["freshness_conflict"],
           "provider_reached": false,
           "same_command": true
         }
@@ -191,14 +207,21 @@
       "trace": [
         {
           "action": "tool",
-          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
+          "command": "larkin inbox poll --target thread:oc_eval_retry:omt_eval_retry --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_retry"
+        },
+        {
+          "action": "tool",
+          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --reply-in-thread --json",
           "exit_code": 3,
-          "subtype": "freshness_unavailable",
+          "subtype": "freshness_conflict",
           "provider_reached": false
         },
         {
           "action": "provider_write",
-          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --json",
+          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --reply-in-thread --json",
+          "message_id": "om_eval_retry",
           "transported_text": "收到：“A/B”",
           "shell_interpolation": false,
           "exit_code": 0

@@ -51,6 +51,16 @@ test("standing prompt deletion counterfactual protects the known group user/bot 
     /exactly two.*post-poll.*read calls.*must not.*skill.*reference.*help.*schema.*bare.*lark-cli.*chat\.members.*\+chat-members-list/i);
 });
 
+test("standing prompt deletion counterfactual protects the current-Inbox exact topic reply recipe", () => {
+  const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
+  assert.match(prompt,
+    /current Inbox.*directly supplies.*exact literal.*reply.*topic.*required.*poll.*messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json/i);
+  assert.match(prompt,
+    /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery/i);
+  assert.match(prompt,
+    /without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
+});
+
 test("eval loader rejects drift in the fixed authoritative group-count dataflow contract", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-group-count-eval-"));
   try {
@@ -297,24 +307,54 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   helpAndMarkdown.splice(1, 0, {
     action: "tool", command: "larkin im +messages-reply --help", exit_code: 0,
   });
-  helpAndMarkdown[2].command = "larkin im +messages-reply --message-id om_eval_exact_reply --markdown '收到：“A/B”' --json";
+  helpAndMarkdown[2].command = "larkin im +messages-reply --message-id om_eval_exact_reply --markdown '收到：“A/B”' --reply-in-thread --json";
   const badExactReply = gradeAgentExperienceV6Trace(byId["exact-reply-no-help"], helpAndMarkdown);
-  assert.deepEqual(new Set(badExactReply.failures.map((item) => item.rule)),
-    new Set(["bounded_calls", "tool_call_count", "canonical_command", "forbidden_command"]));
+  for (const rule of ["bounded_calls", "tool_call_count", "canonical_order", "reply_anchor", "forbidden_command"]) {
+    assert.equal(badExactReply.failures.some((item) => item.rule === rule), true, rule);
+  }
+
+  for (const extra of [
+    { action: "tool", tool_name: "read", resource_path: "/skills/lark-im/SKILL.md",
+      command: "read /skills/lark-im/SKILL.md", exit_code: 0 },
+    { action: "tool", tool_name: "read", resource_path: "/skills/lark-im/references/messages.md",
+      command: "read /skills/lark-im/references/messages.md", exit_code: 0 },
+    { action: "tool", command: "larkin im +messages-reply --help", exit_code: 0 },
+  ]) {
+    const rediscovered = structuredClone(byId["exact-reply-no-help"].trace);
+    rediscovered.splice(1, 0, extra);
+    const grade = gradeAgentExperienceV6Trace(byId["exact-reply-no-help"], rediscovered);
+    assert.equal(grade.failures.some((item) => ["bounded_calls", "tool_call_count"].includes(item.rule)), true);
+    assert.equal(grade.failures.some((item) => ["redundant_discovery_read", "forbidden_command"].includes(item.rule)), true);
+  }
+
+  const wrongThreadFlag = structuredClone(byId["exact-reply-no-help"].trace);
+  wrongThreadFlag[1].command = wrongThreadFlag[1].command.replace(" --reply-in-thread", "");
+  const wrongThreadFlagGrade = gradeAgentExperienceV6Trace(byId["exact-reply-no-help"], wrongThreadFlag);
+  assert.equal(wrongThreadFlagGrade.failures.some((item) => item.rule === "canonical_order"), true);
+  assert.equal(wrongThreadFlagGrade.failures.some((item) => item.rule === "reply_anchor"), true);
 
   const conflictRetry = structuredClone(byId["precommit-exact-reply-safe-retry"].trace);
-  conflictRetry[0].subtype = "freshness_conflict";
+  assert.equal(byId["exact-reply-no-help"].trace.length, 2);
+  assert.equal(conflictRetry.length, 3);
   assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], conflictRetry).passed, true);
-  const reversedRetry = [conflictRetry[1], conflictRetry[0]];
+  const reversedRetry = [conflictRetry[0], conflictRetry[2], conflictRetry[1]];
   assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], reversedRetry)
     .failures.some((item) => item.rule === "safe_precommit_retry"), true);
   const zeroExitRetry = structuredClone(conflictRetry);
-  zeroExitRetry[0].exit_code = 0;
+  zeroExitRetry[1].exit_code = 0;
   assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], zeroExitRetry)
     .failures.some((item) => item.rule === "safe_precommit_retry"), true);
   const committedRetry = structuredClone(conflictRetry);
-  committedRetry[0].provider_reached = true;
+  committedRetry[1].provider_reached = true;
   assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], committedRetry)
+    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
+  const nonConflictRetry = structuredClone(conflictRetry);
+  nonConflictRetry[1].subtype = "provider_error";
+  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], nonConflictRetry)
+    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
+  const nonidenticalRetry = structuredClone(conflictRetry);
+  nonidenticalRetry[1].command = nonidenticalRetry[1].command.replace(" --reply-in-thread", "");
+  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], nonidenticalRetry)
     .failures.some((item) => item.rule === "safe_precommit_retry"), true);
 
   const normalizedAndRediscovered = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);

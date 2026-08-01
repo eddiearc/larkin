@@ -79,6 +79,15 @@ export function loadAgentExperienceV6Eval(file) {
         || typeof groupCountDataflow.reply_prefix !== "string" || !groupCountDataflow.reply_prefix)) {
       throw new Error(`${label}.expected.group_count_dataflow contract is invalid`);
     }
+    const twoStage = scenario.expected.two_stage_poll_silence;
+    if (scenario.id === "poll-only-silent-phase-then-next-trigger-work"
+      && (!twoStage || typeof twoStage !== "object" || Array.isArray(twoStage)
+        || Object.keys(twoStage).length !== 5
+        || [twoStage.phase_a_poll_command, twoStage.phase_b_poll_command, twoStage.phase_b_read_command,
+          twoStage.phase_b_write_command].some((command) => typeof command !== "string" || !command)
+        || twoStage.allow_identical_precommit_freshness_conflict_retry !== true)) {
+      throw new Error(`${label}.expected.two_stage_poll_silence contract is invalid`);
+    }
   }
   return value;
 }
@@ -90,7 +99,7 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
   if (!Array.isArray(trace)) fail("trace_action_schema", "trace must be an array");
   const allowedActions = new Set(["tool", "provider_write", "final"]);
   const allowedFields = {
-    tool: new Set(["action", "bot_count", "command", "confirmed_chat_id", "exact_name_match_count", "exit_code",
+    tool: new Set(["action", "assistant_text", "bot_count", "command", "confirmed_chat_id", "exact_name_match_count", "exit_code",
       "message_id", "provider_reached", "read_path", "resource_path", "returned_chat_id", "returned_chat_name",
       "selected_chat_name", "stderr", "stdout_documents", "subtype", "tool_name", "user_count"]),
     provider_write: new Set(["action", "command", "composite_internal_commands", "content_argument", "exit_code",
@@ -103,6 +112,9 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     !Object.hasOwn(event, field) || typeof event[field] === type);
   const optionalIntegerFields = (event, fields) => fields.every((field) =>
     !Object.hasOwn(event, field) || Number.isInteger(event[field]));
+  const optionalStringArrayFields = (event, fields) => fields.every((field) =>
+    !Object.hasOwn(event, field) || (Array.isArray(event[field])
+      && event[field].every((item) => typeof item === "string")));
   const validResult = (result) => result === undefined || (result && typeof result === "object" && !Array.isArray(result)
     && Object.keys(result).length === 4
     && ["ok", "committed", "verified", "cursor_advanced"].every((field) => typeof result[field] === "boolean"));
@@ -118,6 +130,7 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
         ["confirmed_chat_id", "message_id", "read_path", "resource_path", "returned_chat_id", "returned_chat_name",
           "selected_chat_name", "stderr", "subtype", "tool_name"], "string")
         && optionalFieldsHaveType(event, ["provider_reached"], "boolean")
+        && optionalStringArrayFields(event, ["assistant_text"])
         && optionalIntegerFields(event, ["bot_count", "exact_name_match_count", "stdout_documents", "user_count"]);
     }
     return optionalFieldsHaveType(event, ["content_argument", "literal_prefix", "message_id", "shell_substitution",
@@ -170,6 +183,43 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
       || write?.message_id !== pollMessageId
       || !String(write?.command || "").includes(`--message-id ${pollMessageId} `)) {
       fail("reply_anchor", "reply was not bound to the real om_ message id returned by the canonical poll");
+    }
+  }
+  if (scenario.expected.two_stage_poll_silence) {
+    const expected = scenario.expected.two_stage_poll_silence;
+    const finalIndexes = events
+      .map((event, index) => event.action === "final" ? index : -1)
+      .filter((index) => index >= 0);
+    const phaseAPoll = events[0];
+    const phaseBoundary = events[1];
+    const phaseBPoll = events[2];
+    const phaseBRead = events[3];
+    const phaseBWrite = events.at(-1);
+    const retry = events.length === 6 ? events[4] : null;
+    const phaseAPollId = phaseAPoll?.message_id;
+    const phaseBPollId = phaseBPoll?.message_id;
+    const commonShape = [5, 6].includes(events.length)
+      && finalIndexes.length === 1 && finalIndexes[0] === 1
+      && phaseAPoll?.action === "tool" && phaseAPoll.command === expected.phase_a_poll_command
+      && phaseAPoll.exit_code === 0 && typeof phaseAPollId === "string" && /^om_[A-Za-z0-9_]+$/.test(phaseAPollId)
+      && Array.isArray(phaseAPoll.assistant_text) && phaseAPoll.assistant_text.length === 0
+      && phaseBoundary?.action === "final" && Object.keys(phaseBoundary).length === 1
+      && phaseBPoll?.action === "tool" && phaseBPoll.command === expected.phase_b_poll_command
+      && phaseBPoll.exit_code === 0 && typeof phaseBPollId === "string" && /^om_[A-Za-z0-9_]+$/.test(phaseBPollId)
+      && phaseBPollId !== phaseAPollId
+      && phaseBRead?.action === "tool" && phaseBRead.command === expected.phase_b_read_command
+      && phaseBRead.exit_code === 0 && phaseBRead.read_path === "data.messages"
+      && phaseBWrite?.action === "provider_write" && phaseBWrite.command === expected.phase_b_write_command
+      && phaseBWrite.message_id === phaseBPollId
+      && String(phaseBWrite.command).includes(`--message-id ${phaseBPollId} `);
+    const retryShape = events.length === 5
+      ? retry === null
+      : expected.allow_identical_precommit_freshness_conflict_retry === true
+        && retry?.action === "tool" && retry.command === phaseBWrite?.command
+        && Number.isInteger(retry.exit_code) && retry.exit_code !== 0
+        && retry.subtype === "freshness_conflict" && retry.provider_reached === false;
+    if (!commonShape || !retryShape) {
+      fail("two_stage_poll_silence", "phase A did not stop immediately after its sole poll, or phase B did not begin with a fresh poll before its bounded read/reply work");
     }
   }
   for (const fragment of scenario.expected.forbidden_command_fragments || []) {

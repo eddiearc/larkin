@@ -28,6 +28,7 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "tool-sourced-verbatim-thread-reply",
     "tool-sourced-verbatim-message-reply",
     "known-group-user-bot-counts",
+    "poll-only-silent-phase-then-next-trigger-work",
     "exclusive-other-agent-silence",
     "committed-unverified-no-retry",
   ]);
@@ -69,6 +70,16 @@ test("standing prompt deletion counterfactual protects the explicitly requested 
     /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery/i);
   assert.match(prompt,
     /without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
+});
+
+test("standing prompt deletion counterfactual protects poll-only silence until the next independent trigger", () => {
+  const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
+  assert.match(prompt,
+    /verified.*instruction.*poll.*remain silent.*wait.*next trigger.*poll.*only model tool call.*immediately stop/i);
+  assert.match(prompt,
+    /must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool/i);
+  assert.match(prompt,
+    /next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
 });
 
 test("eval loader rejects drift in the fixed authoritative group-count dataflow contract", () => {
@@ -209,6 +220,78 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   const wrongCountsGrade = gradeAgentExperienceV6Trace(groupCounts, wrongCounts);
   assert.equal(wrongCountsGrade.failures.some((item) => item.rule === "exact_text"), true);
   assert.equal(wrongCountsGrade.failures.some((item) => item.rule === "group_count_dataflow"), true);
+
+  const twoStage = byId["poll-only-silent-phase-then-next-trigger-work"];
+  const nonemptyPhaseAAssistantText = structuredClone(twoStage.trace);
+  nonemptyPhaseAAssistantText[0].assistant_text = ["已 poll，等待下一阶段。"];
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, nonemptyPhaseAAssistantText)
+    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
+
+  const visiblePhaseAFinal = structuredClone(twoStage.trace);
+  visiblePhaseAFinal[1].visible_failure = true;
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, visiblePhaseAFinal)
+    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
+
+  const reusedMemoryPhaseAFinal = structuredClone(twoStage.trace);
+  reusedMemoryPhaseAFinal[1].reused_memory = true;
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, reusedMemoryPhaseAFinal)
+    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
+
+  const twoStageSafeRetry = structuredClone(twoStage.trace);
+  twoStageSafeRetry.splice(4, 0, {
+    action: "tool",
+    command: twoStageSafeRetry[4].command,
+    exit_code: 3,
+    subtype: "freshness_conflict",
+    provider_reached: false,
+  });
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageSafeRetry).passed, true);
+
+  const twoStageNonidenticalRetry = structuredClone(twoStageSafeRetry);
+  twoStageNonidenticalRetry[4].command = twoStageNonidenticalRetry[4].command.replace("同意", "不同意");
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageNonidenticalRetry)
+    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
+
+  const twoStageProviderReachedRetry = structuredClone(twoStageSafeRetry);
+  twoStageProviderReachedRetry[4].provider_reached = true;
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageProviderReachedRetry)
+    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
+
+  for (const extra of [
+    { action: "tool", command: "true", exit_code: 0 },
+    { action: "tool", command: ":", exit_code: 0 },
+    { action: "tool", command: "sleep 1", exit_code: 0 },
+    { action: "tool", command: "echo waiting", exit_code: 0 },
+    { action: "tool", command: "pwd", exit_code: 0 },
+    { action: "tool", command: "larkin status", exit_code: 0 },
+    { action: "tool", command: "larkin goal get", exit_code: 0 },
+    { action: "tool", tool_name: "read", resource_path: "/tmp/evidence.json",
+      command: "read /tmp/evidence.json", exit_code: 0 },
+    { action: "tool",
+      command: "larkin im +chat-messages-list --chat-id oc_eval_two_stage --order desc --page-size 10 --no-reactions --json",
+      exit_code: 0, read_path: "data.messages" },
+    { action: "provider_write", command: "larkin im +messages-reply --message-id om_eval_stage_a --text 'early' --json",
+      message_id: "om_eval_stage_a", transported_text: "early", shell_interpolation: false, exit_code: 0 },
+  ]) {
+    const actedWhileSilent = structuredClone(twoStage.trace);
+    actedWhileSilent.splice(1, 0, extra);
+    const grade = gradeAgentExperienceV6Trace(twoStage, actedWhileSilent);
+    assert.equal(grade.passed, false, extra.command);
+    assert.equal(grade.failures.some((item) => item.rule === "two_stage_poll_silence"), true, extra.command);
+  }
+
+  const anticipatedNextPhase = structuredClone(twoStage.trace);
+  const [prematureRead] = anticipatedNextPhase.splice(3, 1);
+  anticipatedNextPhase.splice(1, 0, prematureRead);
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, anticipatedNextPhase)
+    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
+
+  for (const pollIndex of [0, 2]) {
+    const missingPoll = structuredClone(twoStage.trace);
+    missingPoll.splice(pollIndex, 1);
+    assert.equal(gradeAgentExperienceV6Trace(twoStage, missingPoll)
+      .failures.some((item) => item.rule === "two_stage_poll_silence"), true, `poll index ${pollIndex}`);
+  }
 
   const badThread = gradeAgentExperienceV6Trace(byId["target-scoped-thread-read"], [{
     action: "tool", command: "larkin im +chat-messages-list --chat-id oc_eval_thread 2>&1", exit_code: 0,

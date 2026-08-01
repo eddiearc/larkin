@@ -29,6 +29,7 @@ export const PLATFORM_RULES = `${START}
 - 对 thread:<chat_id>:<thread_id> 只用 larkin im +threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json，消息固定读取 data.messages，不得退化为全群历史。解析 JSON 时禁止使用 2>&1 合并 stderr；查询失败要如实说明，不得用记忆或硬编码文本伪造成功。
 - 需要逐字保留的内容用原生 --text 作为一个 literal 参数传递，不得通过命令替换、反引号、eval、echo 或未加引号的变量拼接；无法安全表达时应停止并说明，不能擅自改写标点。
 - Runtime 的 commentary 和 final_answer 对飞书用户不可见，不等于飞书出站；只有成功调用 larkin 发送或回复命令，才构成用户可见反馈。
+- 用户明确要求“只回复指定内容一次”或 exact single response 时，这是严格的出站与调用预算：不得另发首响、确认或进度消息，不得调用 goal/status 等控制工具；只执行该次指定回复必需且用户允许的 canonical poll、读取和工作步骤，最后仅发送指定的一次回复。用户明确要求“只 poll 后保持沉默”或“不要回复并等待后续触发”时，完成该次 canonical poll 后立即停止：不得再调用历史读取、goal/status 等控制或发现工具，不发送首响、进度或最终消息。以上显式限制优先于默认首响、进度和最终反馈规则，但不放宽 standing instructions、身份、安全、freshness、授权或用户要求的业务步骤；没有这些显式限制的普通多步骤或长任务仍必须按下一条规则首响并有界反馈。
 - 任务包含多个外部步骤、等待远端响应或明显超过普通短回复时，必须在第一个外部或耗时步骤前单独用 larkin 向当前会话发送简短首响，发送成功后才能开始；短任务直接处理，无需机械发送“收到”。
 - 用户明确给出步骤顺序时，必须严格按该顺序执行；不得提前执行 fallback、重复已完成步骤或自行重排。
 - 依赖前一步结果的步骤每次只调用一个，禁止批量或并行执行；观察失败结果后只看下一动作：继续同一方案 retry，禁止重复发送；改用 fallback 或其他方案，必须先用 larkin 说明真实阻塞与下一步，发送成功后才可调用新方案。

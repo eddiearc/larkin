@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "explicit-single-response",
+  "title": "显式单次回复覆盖默认首响和进度",
+  "task": "群里已经出现 FXR-EVAL-04-A。二蛋请先读取并确认该 A，再复核，只回复‘FXR-EVAL-04-B：同意/不同意；<一句话>’；找不到 A 时不要猜。家庭管家本阶段只 poll 后保持沉默，不要再回复。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "read-a", "slow": true, "outcome": "success", "output": "A loaded from canonical chat history" },
+    { "id": "verify-a", "slow": true, "outcome": "success", "output": "A independently verified" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": false,
+    "terminal_im_after_work": true,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 1,
+    "short_task_terminal_only": false,
+    "forbidden_sentinels": []
+  }
+}

@@ -26,6 +26,17 @@ const repetitions = Number.parseInt(process.env.LARKIN_LONG_RUNNING_IM_EVAL_REPE
 if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 10) {
   throw new Error("LARKIN_LONG_RUNNING_IM_EVAL_REPETITIONS must be an integer from 1 to 10");
 }
+const scenarioFilter = new Set((process.env.LARKIN_LONG_RUNNING_IM_EVAL_SCENARIOS || "")
+  .split(",").map((item) => item.trim()).filter(Boolean));
+const omitExplicitResponseRule = process.env.LARKIN_LONG_RUNNING_IM_EVAL_OMIT_EXPLICIT_RESPONSE_RULE === "1";
+const expectedRedScenarios = new Set((process.env.LARKIN_LONG_RUNNING_IM_EVAL_EXPECT_RED_SCENARIOS || "")
+  .split(",").map((item) => item.trim()).filter(Boolean));
+if (!omitExplicitResponseRule && expectedRedScenarios.size > 0) {
+  throw new Error("LARKIN_LONG_RUNNING_IM_EVAL_EXPECT_RED_SCENARIOS requires counterfactual mode");
+}
+if (omitExplicitResponseRule && expectedRedScenarios.size === 0) {
+  throw new Error("counterfactual mode requires LARKIN_LONG_RUNNING_IM_EVAL_EXPECT_RED_SCENARIOS");
+}
 
 function readTrace(file) {
   try {
@@ -78,9 +89,19 @@ async function runScenario(scenario, repetition) {
       lockDir: stateDir,
       agentId: "cli_evalRuntimeA1",
     });
+    if (omitExplicitResponseRule) {
+      for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+        const file = path.join(workspaceDir, name);
+        const current = fs.readFileSync(file, "utf8");
+        const mutated = current.replace(/\n- 用户明确要求“只回复指定内容一次”[^\n]*\n/, "\n");
+        assert.notEqual(mutated, current, `counterfactual must remove the explicit response/call budget rule from ${name}`);
+        fs.writeFileSync(file, mutated, { mode: 0o600 });
+      }
+    }
     const executable = resolveAgentCliExecutable(FAKE_CLI, process.execPath);
     const prompt = new ContextPromptBuilder().buildStandingPrompt({
-      agent: { id: "cli_evalRuntimeA1", name: "Long-running IM Eval" },
+      agent: { id: "cli_evalRuntimeA1",
+        name: ["explicit-single-response", "poll-then-stay-silent"].includes(scenario.id) ? "二蛋" : "Long-running IM Eval" },
       runtime,
       cli: {
         executable,
@@ -104,7 +125,9 @@ async function runScenario(scenario, repetition) {
         : {}),
       env: {
         ...isolatedMessagingEnv,
-        PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+        PATH: [runtime === "pi" && process.env.LARKIN_PI_COMMAND
+          ? path.dirname(process.env.LARKIN_PI_COMMAND) : null, path.dirname(process.execPath), "/usr/bin", "/bin"]
+          .filter(Boolean).join(":"),
         LARKIN_EVAL_SCENARIO_FILE: scenarioFile,
         LARKIN_EVAL_TRACE_FILE: traceFile,
         LARKIN_CONFIG_DIR: path.join(root, "no-feishu-config"),
@@ -112,8 +135,12 @@ async function runScenario(scenario, repetition) {
       },
     });
     const controlEvents = { items: [], waiters: [] };
+    const toolAttempts = [];
     session.subscribe((event) => {
-      if (event.type === "activity") return;
+      if (event.type === "activity") {
+        if (event.activity === "tool") toolAttempts.push({ name: String(event.name || "tool") });
+        return;
+      }
       const safe = event.type === "error" || event.type === "configuration-error" || event.type === "input-error"
         ? { type: event.type, message: event.message }
         : event.type === "session-init"
@@ -126,6 +153,7 @@ async function runScenario(scenario, repetition) {
     const stepInstruction = scenario.steps.length
       ? `Run these exact fake work steps in order: ${scenario.steps.map((step) => `${executable} work run --step ${step.id}`).join("; ")}.`
       : "This task has no work step.";
+    const toolAttemptStart = toolAttempts.length;
     const input = await session.prompt({
       inputId: `${scenario.id}-${repetition}`,
       kind: "initial",
@@ -141,7 +169,8 @@ async function runScenario(scenario, repetition) {
     const runtimeError = controlEvents.items.find((event) => ["error", "configuration-error", "input-error"].includes(event.type));
     assert.equal(runtimeError, undefined, runtimeError?.message);
     const trace = readTrace(traceFile);
-    const grade = gradeLongRunningImTrace(scenario, trace);
+    const scenarioToolAttempts = toolAttempts.slice(toolAttemptStart);
+    const grade = gradeLongRunningImTrace(scenario, trace, scenarioToolAttempts);
     return {
       case_id: scenario.id,
       repetition,
@@ -151,6 +180,7 @@ async function runScenario(scenario, repetition) {
       passed: grade.passed,
       failure_rules: grade.failures.map((failure) => failure.rule),
       im_messages: trace.filter((item) => item.type === "im").length,
+      tool_attempts: scenarioToolAttempts.map((attempt) => attempt.name),
       event_sequence: trace.filter((item) => item.type === "im" || item.type === "work")
         .map((item) => item.type === "im"
           ? { type: "im" }
@@ -166,14 +196,34 @@ async function runScenario(scenario, repetition) {
 
 describe.skipIf(!enabled)(`production native ${runtime} follows long-running IM trace contracts`, () => {
   const summaries = [];
-  for (const scenario of loadLongRunningImScenarios(CASE_DIR)) {
+  const scenarios = loadLongRunningImScenarios(CASE_DIR)
+    .filter((scenario) => scenarioFilter.size === 0 || scenarioFilter.has(scenario.id));
+  if (scenarioFilter.size > 0) {
+    assert.deepEqual(new Set(scenarios.map((scenario) => scenario.id)), scenarioFilter,
+      "LARKIN_LONG_RUNNING_IM_EVAL_SCENARIOS contains an unknown scenario id");
+  }
+  if ([...expectedRedScenarios].some((id) => !scenarios.some((scenario) => scenario.id === id))) {
+    throw new Error("every expected-red scenario must be selected");
+  }
+  for (const scenario of scenarios) {
     for (let repetition = 1; repetition <= repetitions; repetition += 1) {
       test(`${scenario.id} repetition ${repetition}`, { timeout: 15 * 60_000 }, async () => {
         const result = await runScenario(scenario, repetition);
         summaries.push(result);
-        assert.equal(result.passed, true, `${scenario.id} grade failed: ${result.failure_rules.join(", ")}`);
+        if (!expectedRedScenarios.has(scenario.id)) {
+          assert.equal(result.passed, true,
+            `${scenario.id} expected GREEN, got failures: ${result.failure_rules.join(", ")}`);
+        }
       });
     }
   }
-  afterAll(() => process.stderr.write(`# code grades: ${JSON.stringify(summaries)}\n`));
+  afterAll(() => {
+    process.stderr.write(`# code grades: ${JSON.stringify(summaries)}\n`);
+    for (const id of expectedRedScenarios) {
+      const results = summaries.filter((result) => result.case_id === id);
+      assert.equal(results.length, repetitions, `${id} did not complete every counterfactual repetition`);
+      assert.ok(results.some((result) => result.passed === false),
+        `${id} must produce at least one RED counterfactual repetition`);
+    }
+  });
 });

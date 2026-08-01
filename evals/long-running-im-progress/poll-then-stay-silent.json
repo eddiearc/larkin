@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "poll-then-stay-silent",
+  "title": "显式 poll 后沉默禁止额外调用",
+  "task": "家庭管家请判断根因，只回复‘FXR-EVAL-04-A：<一句话>’。二蛋本阶段只 poll 后保持沉默，不要读取群历史、不要回复；等下一条 B 触发。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "canonical-poll", "slow": false, "outcome": "success", "output": "inbox poll completed" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": false,
+    "terminal_im_after_work": false,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 0,
+    "short_task_terminal_only": false,
+    "forbidden_sentinels": []
+  }
+}

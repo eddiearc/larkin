@@ -5,6 +5,39 @@ function nonempty(value, label) {
   return value;
 }
 
+function correctionBoundaryIssue(scenario) {
+  if (!Object.hasOwn(scenario, "inbox_batch") && !Object.hasOwn(scenario, "effective_message_id")) return null;
+  const rows = scenario.inbox_batch;
+  if (!Array.isArray(rows) || rows.length !== 2) return "inbox_batch must contain exactly the adjacent older/newer envelopes";
+  const allowed = new Set(["message_id", "sender_type", "sender_id", "target", "target_seq", "content"]);
+  if (typeof scenario.recipient_agent_id !== "string" || !scenario.recipient_agent_id) {
+    return "recipient_agent_id must identify the eval's per-Agent Inbox context";
+  }
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)
+      || Object.keys(row).length !== allowed.size || Object.keys(row).some((field) => !allowed.has(field))) {
+      return "inbox_batch envelope shape is invalid";
+    }
+    if (typeof row.message_id !== "string" || !/^om_[A-Za-z0-9_]+$/.test(row.message_id)
+      || row.sender_type !== "human" || typeof row.sender_id !== "string" || !row.sender_id
+      || typeof row.target !== "string" || !row.target || !Number.isSafeInteger(row.target_seq) || row.target_seq < 1
+      || typeof row.content !== "string" || !row.content) {
+      return "inbox_batch envelope identity, order, or content is invalid";
+    }
+  }
+  const [older, newer] = rows;
+  if (older.message_id === newer.message_id || older.sender_id !== newer.sender_id
+    || older.target !== newer.target || newer.target_seq !== older.target_seq + 1) {
+    return "correction envelopes must be strictly adjacent for the same human and target";
+  }
+  if (older.content !== "Read chat:oc_canceled and reply OLD."
+    || newer.content !== "更正：撤销前一条跨群读取；固定输出 NEW。") {
+    return "fixed correction envelopes must preserve the explicit older task and newer cancellation/replacement";
+  }
+  if (scenario.effective_message_id !== newer.message_id) return "effective_message_id must select the strictly newer envelope";
+  return null;
+}
+
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "agent-experience-v6" || value.version !== 6) throw new Error("eval dataset/version mismatch");
@@ -25,6 +58,8 @@ export function loadAgentExperienceV6Eval(file) {
     if (!scenario.expected || !Number.isSafeInteger(scenario.expected.max_tool_calls)) throw new Error(`${label}.expected.max_tool_calls is required`);
     if (!Number.isSafeInteger(scenario.expected.provider_writes)) throw new Error(`${label}.expected.provider_writes is required`);
     if (!Array.isArray(scenario.trace)) throw new Error(`${label}.trace must be an array`);
+    const correctionIssue = correctionBoundaryIssue(scenario);
+    if (correctionIssue) throw new Error(`${label}.inbox_batch: ${correctionIssue}`);
     const dataflow = scenario.expected.exact_source_dataflow;
     if (dataflow && (!["thread", "message"].includes(dataflow.source_selector)
       || dataflow.post_poll_model_tool_calls !== 1 || dataflow.total_source_reads !== 1
@@ -132,6 +167,16 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     if (tools.some((event) => (event.tool_name === "read" || String(event.command || "").startsWith("read "))
       && `${event.resource_path || ""} ${event.command || ""}`.includes(fragment))) {
       fail("redundant_discovery_read", fragment);
+    }
+  }
+  if (Object.hasOwn(scenario, "inbox_batch") || Object.hasOwn(scenario, "effective_message_id")) {
+    const correctionIssue = correctionBoundaryIssue(scenario);
+    const canonicalCommand = `larkin im +messages-reply --message-id ${scenario.effective_message_id} --text 'NEW' --json`;
+    const write = writes[0];
+    if (correctionIssue || scenario.expected.exact_text !== "NEW"
+      || scenario.expected.required_command !== canonicalCommand
+      || write?.message_id !== scenario.effective_message_id || write?.command !== canonicalCommand) {
+      fail("human_correction_scope", correctionIssue || "post-poll decision did not use the effective newer envelope exactly");
     }
   }
   if (scenario.expected.response_path && !events.some((event) => event.read_path === scenario.expected.response_path)) {

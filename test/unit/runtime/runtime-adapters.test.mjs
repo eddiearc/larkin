@@ -129,7 +129,9 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content,
     /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content,
-    /current Inbox.*directly supplies.*exact literal.*reply.*topic.*required.*poll.*larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json/i);
+    /ordinary current Inbox.*exact reply.*does not explicitly request.*topic.*in-thread.*larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json.*omit.*--reply-in-thread.*original.*chat.*main timeline/i);
+  assert.match(prompt.content,
+    /only when.*user.*current Inbox event.*explicitly.*topic.*in-thread.*thread reply.*larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json.*must not infer.*thread metadata.*message id.*ordinary reply/i);
   assert.match(prompt.content,
     /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
   assert.match(prompt.content,

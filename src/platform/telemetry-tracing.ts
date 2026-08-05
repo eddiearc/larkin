@@ -119,7 +119,7 @@ function readActiveContext(stateDir: string, now: number, inspectOwner: (pid: nu
 
 interface TelemetryRuntimeOptions {
   stateDirFor?(agentId: string): string | undefined; stateDirs?: readonly string[]; serviceVersion?: string;
-  now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection;
+  now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection; maintenanceIntervalMs?: number;
 }
 export function createTelemetryRuntime(config: TelemetryConfig, options: TelemetryRuntimeOptions = {}): TelemetryRuntime {
   if (!config.enabled) return NOOP;
@@ -158,8 +158,6 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
   for (const stateDir of options.stateDirs ?? []) {
     initializeStateDir(stateDir);
   }
-  const ownershipTimer = setInterval(() => { for (const stateDir of initializedStateDirs) renewStateDir(stateDir); }, 6 * 60 * 60 * 1000);
-  ownershipTimer.unref?.();
   const provider = new NodeTracerProvider({
     resource: resourceFromAttributes({ "service.name": "larkin", "service.version": options.serviceVersion ?? "dev",
       "service.instance.id": startupId }),
@@ -170,6 +168,11 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
   const tracer = provider.getTracer("larkin.telemetry", "1.0.0");
   const messages = new Map<string, MessageTrace>();
   const activeByAgent = new Map<string, MessageTrace>();
+  const ownershipTimer = setInterval(() => {
+    for (const stateDir of initializedStateDirs) renewStateDir(stateDir);
+    for (const [agentId, current] of activeByAgent) writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
+  }, options.maintenanceIntervalMs ?? 10 * 60 * 1000);
+  ownershipTimer.unref?.();
   const uploader = startTelemetryUploader(spool, config);
   const closeActivity = (current: MessageTrace): void => {
     current.activitySpan?.end(); delete current.activitySpan; delete current.activityName;
@@ -284,7 +287,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
 let singleton: TelemetryRuntime | null = null;
 export function telemetrySingleton(config?: TelemetryConfig, options?: {
   stateDirFor?(agentId: string): string | undefined; stateDirs?: readonly string[]; serviceVersion?: string;
-  now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection;
+  now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection; maintenanceIntervalMs?: number;
 }): TelemetryRuntime {
   if (!singleton && config) singleton = createTelemetryRuntime(config, options);
   return singleton ?? NOOP;

@@ -128,7 +128,8 @@ test("OTLP partial success is dropped without retry while non-200 failures retai
     const root = temp(); const spool = new TelemetrySpool(config(root)); spool.enqueue(payload());
     const result = await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () =>
       new Response(JSON.stringify({ partialSuccess: { rejectedSpans: "0", errorMessage: "collector reported partial success" } }), { status: 200 }) });
-    assert.equal(result.status, "dropped"); assert.equal(spool.status().queuedFiles, 0, "a populated partialSuccess must not be retried");
+    assert.deepEqual(result, { uploadedFiles: 1, status: "uploaded" }); assert.equal(spool.status().queuedFiles, 0);
+    assert.equal(spool.status().droppedSpans, 0, "a zero-rejection warning is a successful upload, not a false drop");
   }
   for (const [expected, response] of [
     ["rate_limit", new Response("FORBIDDEN_RAW", { status: 429 })],
@@ -229,6 +230,25 @@ test("long-running runtime renews generation and active context using a fake clo
   assert.equal(spans.find((span) => span.name === "feishu.send").traceId, spans.find((span) => span.name === "larkin.message.process").traceId);
 });
 
+test("maintenance refresh preserves parentage through a silent turn longer than 30 minutes", async () => {
+  const root = temp(); const stateDir = path.join(root, "state"); let time = 10_000;
+  const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir, stateDirs: [stateDir], now: () => time,
+    processStartToken: "silent-owner", inspectOwner: () => ({ ok: true, startToken: "silent-owner" }), maintenanceIntervalMs: 5 });
+  runtime.beginMessage("cli_a", "om_silent"); runtime.delivery("cli_a", "om_silent", "accepted"); runtime.runtimeEvent("cli_a", { type: "turn-start" });
+  time += 31 * 60 * 1000;
+  const deadline = Date.now() + 500;
+  while (JSON.parse(fs.readFileSync(path.join(stateDir, "telemetry-active-context.json"), "utf8")).expiresAt <= time && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const refreshed = JSON.parse(fs.readFileSync(path.join(stateDir, "telemetry-active-context.json"), "utf8"));
+  assert.equal(refreshed.expiresAt, time + 30 * 60 * 1000);
+  await runtime.externalPhase("cli_a", stateDir, "feishu.send", SpanKind.CLIENT, async () => {});
+  runtime.runtimeEvent("cli_a", { type: "turn-end" }); await runtime.shutdown();
+  const spans = new TelemetrySpool(config(root)).list().flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+  assert.equal(spans.find((span) => span.name === "feishu.send").traceId, spans.find((span) => span.name === "larkin.message.process").traceId);
+});
+
 test("PID reuse with a different process-start identity rejects stale context", async () => {
   const root = temp(); const stateDir = path.join(root, "state"); fs.mkdirSync(stateDir, { recursive: true }); const now = 5_000;
   fs.writeFileSync(path.join(stateDir, "telemetry-runtime-generation.json"), JSON.stringify({ version: 1, generation: "old", pid: process.pid,
@@ -250,7 +270,20 @@ test("corrupt queue and diagnostics files are isolated from manual and backgroun
   assert.deepEqual(result, { uploadedFiles: 0, status: "empty" }); assert.equal(calls, 0);
   const uploader = startTelemetryUploader(spool, config(root, { endpoint: "http://collector.invalid/v1/traces", uploadIntervalMs: 5 }));
   await new Promise((resolve) => setTimeout(resolve, 20)); uploader.stop();
-  assert.equal(spool.status().queuedFiles, 0); assert.equal(spool.status().droppedFiles, 1); assert.equal(spool.status().lastErrorCategory, "corrupt_spool");
+  assert.equal(spool.status().queuedFiles, 0); assert.equal(spool.status().remnantFiles, 1);
+  assert.equal(spool.status().droppedFiles, 1); assert.equal(spool.status().lastErrorCategory, "corrupt_spool");
+});
+
+test("corrupt and crash remnants share bounded file, byte, and age retention", () => {
+  const root = temp(); const bounded = new TelemetrySpool(config(root, { maxFiles: 3, maxBytes: 900, maxAgeMs: 100 }));
+  bounded.enqueue(payload()); const spoolDir = config(root).spoolDir;
+  for (const [name, size] of [[".corrupt-a.json", 500], [".write-b.tmp", 500], [".ack-c.tmp", 500], [".delete-d.tmp", 500]]) {
+    fs.writeFileSync(path.join(spoolDir, name), "x".repeat(size));
+  }
+  bounded.prune(); let status = bounded.status();
+  assert.ok(status.queuedFiles + status.remnantFiles <= 3, JSON.stringify(status)); assert.ok(status.queuedBytes + status.remnantBytes <= 900, JSON.stringify(status));
+  const aged = path.join(spoolDir, ".write-aged.tmp"); fs.writeFileSync(aged, "old"); fs.utimesSync(aged, new Date(0), new Date(0));
+  bounded.prune(Date.now()); status = bounded.status(); assert.equal(fs.existsSync(aged), false); assert.ok(status.oldestRemnantAgeMs === null || status.oldestRemnantAgeMs <= 100);
 });
 
 test("configured background upload drains a restarted spool without blocking the producer", async () => {

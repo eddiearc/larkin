@@ -18,7 +18,7 @@ bun test --max-concurrency 1 \
   test/e2e/runtime-production-mock-e2e.test.mjs
 ```
 
-Result: PASS. The fixed scenarios create the standard OTLP tree `larkin.message.process`, `feishu.receive`, `runtime.deliver`, `agent.turn`, `model.activity`, `tool.execute`, `inbox.consume`, and `feishu.send`. They verify exact OTLP kinds and parent IDs, non-zero activity durations, busy fan-in links, long-runtime ownership renewal with a fake clock, activity context refresh, PID-reuse rejection, `0700`/`0600` permissions, bounded retention, queue single ownership, symlink-swap rejection, exact-200 and bounded-response handling, OTLP partial-success no-retry/drop diagnostics, corrupt-record quarantine, whole-bundle validation before mutation, checksum/idempotency, and embedded path/credential sentinel rejection. The Codex production Mock E2E now exercises all eight spans in one message, including the real separate-process Agent transport send path; Claude and Pi exercise the same normalized HostShell/RuntimeHost wiring. A separate-PID integration proves that a restarted background uploader drains a prior process's durable spool. The CLI integration runs the real internal dispatcher through `status`, `export`, `import`, and `flush`, including output redaction.
+Result: PASS. The fixed scenarios create the standard OTLP tree `larkin.message.process`, `feishu.receive`, `runtime.deliver`, `agent.turn`, `model.activity`, `tool.execute`, `inbox.consume`, and `feishu.send`. They verify exact OTLP kinds and parent IDs, non-zero activity durations, busy fan-in links, long-runtime ownership renewal with a fake clock, silent-turn context renewal beyond 30 minutes, activity context refresh, PID-reuse rejection, `0700`/`0600` permissions, queue/remnant file-byte-age retention, queue single ownership, symlink-swap rejection, exact-200 and bounded-response handling, positive-rejection OTLP partial-success no-retry/drop diagnostics, zero-rejection warning success semantics, corrupt-record quarantine, whole-bundle validation before mutation, checksum/idempotency, and embedded path/credential sentinel rejection. The Codex production Mock E2E now exercises all eight spans in one message, including the real separate-process Agent transport send path; Claude and Pi exercise the same normalized HostShell/RuntimeHost wiring. A separate-PID integration proves that a restarted background uploader drains a prior process's durable spool. The CLI integration runs the real internal dispatcher through `status`, `export`, `import`, and `flush`, including output redaction.
 
 ## Repository and standalone gates
 
@@ -53,7 +53,7 @@ Query summary:
 
 ```json
 {
-  "traceId": "a54518377eea36d4d566df2c6e9af77d",
+  "traceId": "3e9253491505898c7bc3c0689a60f887",
   "spanCount": 8,
   "kinds": {
     "larkin.message.process": "SPAN_KIND_CONSUMER",
@@ -70,4 +70,4 @@ Query summary:
 }
 ```
 
-The same result reported positive durations for all eight spans (including roughly 11.9 ms model and 25.6 ms tool fixture intervals). This is local Real API E2E evidence against the development/test LGTM stack. It does not prove a production public-network deployment, TLS/auth configuration, long-term retention, provider-internal first-token/queue timing, or preservation of an interval that is still open during an ungraceful kill. Those remain deployment-owned, bounded limitations, or intentionally outside scope.
+The same result reported positive durations for all eight spans (including roughly 12.1 ms model and 27.4 ms tool fixture intervals). This is local Real API E2E evidence against the development/test LGTM stack. It does not prove a production public-network deployment, TLS/auth configuration, long-term retention, provider-internal first-token/queue timing, or preservation of an interval that is still open during an ungraceful kill. Those remain deployment-owned, bounded limitations, or intentionally outside scope.

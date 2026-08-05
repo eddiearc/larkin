@@ -58,7 +58,7 @@ export async function flushTelemetry(spool: TelemetrySpool, options: {
     const partialValue = partial as { rejectedSpans?: unknown; errorMessage?: unknown } | undefined;
     const rejected = Number(partialValue?.rejectedSpans ?? 0); const errorMessage = partialValue?.errorMessage ?? "";
     if (!Number.isSafeInteger(rejected) || rejected < 0 || typeof errorMessage !== "string") throw new ProtocolResponseError("invalid OTLP partial success");
-    if (partialValue && (rejected > 0 || errorMessage.length > 0)) {
+    if (partialValue && rejected > 0) {
       const spanCount = payload.resourceSpans.flatMap((resource) => (resource as { scopeSpans?: Array<{ spans?: unknown[] }> }).scopeSpans ?? [])
         .reduce((sum, scope) => sum + (scope.spans?.length ?? 0), 0);
       const droppedSpans = Math.max(1, Math.min(spanCount, rejected || 1));

@@ -9,14 +9,17 @@ export interface OtlpPayload { resourceSpans: unknown[] }
 export interface QueueRecord { file: string; payload: OtlpPayload; device: number; inode: number }
 export interface QueueStatus {
   queuedFiles: number; queuedBytes: number; oldestAgeMs: number | null;
+  remnantFiles: number; remnantBytes: number; oldestRemnantAgeMs: number | null;
   droppedFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null;
 }
 interface Diagnostics { droppedFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null }
 interface BundleRecord { sha256: string; payload: OtlpPayload }
 interface TelemetryBundle { format: "larkin-otlp-bundle"; version: 1; createdAt: string; records: BundleRecord[] }
 interface ReadyFile { file: string; size: number; mtimeMs: number; device: number; inode: number }
+interface ManagedEntry extends ReadyFile { directory: boolean }
 
 const READY = /^(?:span-[0-9a-f-]+|import-[0-9a-f]{64})\.json$/;
+const REMNANT = /^\.(?:corrupt|write|ack|delete|stale-lock|purge)-[0-9A-Za-z-]+(?:\.(?:json|tmp|dir))?$/;
 const HEX_TRACE = /^[0-9a-f]{32}$/;
 const HEX_SPAN = /^[0-9a-f]{16}$/;
 const SPAN_NAMES = new Set(["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]);
@@ -167,6 +170,18 @@ export class TelemetrySpool {
     }).sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
   }
 
+  private remnantFiles(): ManagedEntry[] {
+    this.ensure();
+    return fs.readdirSync(this.config.spoolDir).filter((name) => REMNANT.test(name)).flatMap((name) => {
+      const file = path.join(this.config.spoolDir, name);
+      try {
+        const stat = fs.lstatSync(file); const directory = stat.isDirectory() && !stat.isSymbolicLink();
+        return (stat.isFile() || directory) && !stat.isSymbolicLink()
+          ? [{ file, size: stat.size, mtimeMs: stat.mtimeMs, device: stat.dev, inode: stat.ino, directory }] : [];
+      } catch { return []; }
+    }).sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
+  }
+
   private atomicWrite(file: string, bytes: Buffer): void {
     this.ensure(); const temporary = path.join(this.config.spoolDir, `.write-${process.pid}-${crypto.randomUUID()}.tmp`);
     let descriptor: number | undefined;
@@ -192,6 +207,18 @@ export class TelemetrySpool {
         return false;
       }
       fs.unlinkSync(quarantine); return true;
+    } catch { try { fs.renameSync(quarantine, entry.file); } catch { /* isolated */ } return false; }
+  }
+
+  private removeManaged(entry: ManagedEntry): boolean {
+    if (!entry.directory) return this.removeVerified(entry);
+    const quarantine = path.join(this.config.spoolDir, `.purge-${crypto.randomUUID()}.dir`);
+    try {
+      fs.renameSync(entry.file, quarantine); const stat = fs.lstatSync(quarantine);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== entry.device || stat.ino !== entry.inode) {
+        try { fs.renameSync(quarantine, entry.file); } catch { /* preserve */ } return false;
+      }
+      fs.rmSync(quarantine, { recursive: true }); return true;
     } catch { try { fs.renameSync(quarantine, entry.file); } catch { /* isolated */ } return false; }
   }
 
@@ -266,12 +293,16 @@ export class TelemetrySpool {
   prune(now = Date.now()): void {
     const release = this.acquireLease(); if (!release) return;
     try {
-      let files = this.readyFiles(); let dropped = 0;
-      for (const entry of files.filter((item) => now - item.mtimeMs > this.config.maxAgeMs)) if (this.removeVerified(entry)) dropped += 1;
-      files = this.readyFiles(); let bytes = files.reduce((sum, entry) => sum + entry.size, 0);
+      let files: ManagedEntry[] = [...this.readyFiles().map((entry) => ({ ...entry, directory: false })), ...this.remnantFiles()]
+        .sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
+      let dropped = 0;
+      for (const entry of files.filter((item) => now - item.mtimeMs > this.config.maxAgeMs)) if (this.removeManaged(entry)) dropped += 1;
+      files = [...this.readyFiles().map((entry) => ({ ...entry, directory: false })), ...this.remnantFiles()]
+        .sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
+      let bytes = files.reduce((sum, entry) => sum + entry.size, 0);
       while (files.length > this.config.maxFiles || bytes > this.config.maxBytes) {
         const oldest = files.shift(); if (!oldest) break;
-        if (this.removeVerified(oldest)) { bytes -= oldest.size; dropped += 1; }
+        if (this.removeManaged(oldest)) { bytes -= oldest.size; dropped += 1; }
       }
       if (dropped) try { this.updateDiagnostics({ droppedFiles: this.diagnostics().droppedFiles + dropped }); } catch { /* isolated */ }
     } finally { release(); }
@@ -279,10 +310,13 @@ export class TelemetrySpool {
 
   status(now = Date.now()): QueueStatus {
     try {
-      const files = this.readyFiles(); const diagnostic = this.diagnostics();
+      const files = this.readyFiles(); const remnants = this.remnantFiles(); const diagnostic = this.diagnostics();
       return { queuedFiles: files.length, queuedBytes: files.reduce((sum, item) => sum + item.size, 0),
-        oldestAgeMs: files[0] ? Math.max(0, now - files[0].mtimeMs) : null, ...diagnostic };
-    } catch { return { queuedFiles: 0, queuedBytes: 0, oldestAgeMs: null, ...emptyDiagnostics(), lastErrorCategory: "spool" }; }
+        oldestAgeMs: files[0] ? Math.max(0, now - files[0].mtimeMs) : null,
+        remnantFiles: remnants.length, remnantBytes: remnants.reduce((sum, item) => sum + item.size, 0),
+        oldestRemnantAgeMs: remnants[0] ? Math.max(0, now - remnants[0].mtimeMs) : null, ...diagnostic };
+    } catch { return { queuedFiles: 0, queuedBytes: 0, oldestAgeMs: null, remnantFiles: 0, remnantBytes: 0,
+      oldestRemnantAgeMs: null, ...emptyDiagnostics(), lastErrorCategory: "spool" }; }
   }
 
   exportBundle(destination: string): { records: number; sha256: string } {

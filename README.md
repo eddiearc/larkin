@@ -19,6 +19,13 @@ larkin status
 
 Run `larkin --help` or `larkin config --help` for the available commands and configuration options. Local configuration is stored under `~/.larkin` by default; set `LARKIN_CONFIG_DIR` to use another directory.
 
+During setup, a new Agent is offered Pi first, followed by Codex and Claude Code. Pi can use an existing
+official `pi` installation or the official Pi runtime bundled in Larkin. The bundled option supports
+DeepSeek, Kimi/Moonshot, MiniMax, Zhipu/BigModel, and a custom OpenAI-compatible Base URL. Provider keys
+are stored only in the selected Agent's private provider directory, not in the ordinary Agent config. Setup
+also discovers every API-key and OAuth/subscription login exposed by the pinned official Pi registry and
+delegates those flows to Pi. Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage them.
+
 ## Development
 
 ```bash

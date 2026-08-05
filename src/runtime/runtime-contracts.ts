@@ -79,7 +79,7 @@ export interface RuntimeSession {
 export interface RuntimeAdapter {
   readonly id: RuntimeId;
   readonly capabilities: RuntimeCapabilities;
-  probe?(input: Pick<RuntimeSessionCreate, "workspaceDir" | "env">): Promise<import("./runtime-readiness.js").RuntimeReadiness>;
+  probe?(input: Pick<RuntimeSessionCreate, "agentId" | "workspaceDir" | "stateDir" | "env">): Promise<import("./runtime-readiness.js").RuntimeReadiness>;
   createSession(input: RuntimeSessionCreate): Promise<RuntimeSession>;
   recoverConfigurationError?(message: string): Promise<{ recovered: boolean; reason: string }>;
 }

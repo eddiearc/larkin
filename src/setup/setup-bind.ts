@@ -10,6 +10,15 @@ import { fileURLToPath } from "node:url";
 import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
+import { configureBuiltinPiProviderModel, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
+import { terminalSetupQuestioner, type OfficialPiAuthSelection, type SetupAgentChoice } from "./setup-agent-choice.js";
+import {
+  beginBuiltinPiCredentialTransaction,
+  createOfficialPiAuthInteraction,
+  createOfficialPiModelRuntime,
+  runOfficialPiLogin,
+  verifyOfficialPiProviderTurn,
+} from "../runtime/pi-official-auth.js";
 import * as larkinConfigImport from "../platform/config.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 
@@ -29,6 +38,7 @@ interface HydratedAgent {
   feishuProfile: string;
   runtime: string;
   model: string;
+  piDistribution?: "external" | "builtin";
   [key: string]: unknown;
 }
 
@@ -82,6 +92,7 @@ const options = {
   agent: flag("--agent"),
   profile: flag("--profile"),
   runtime: flag("--runtime"),
+  selectionFile: flag("--selection-file"),
   yes: has("--yes"),
   list: has("--list"),
   help: has("--help") || has("-h"),
@@ -114,6 +125,13 @@ function larkJson(args: string[]): LarkJsonResult {
   } catch {
     return { ok: false, json: null, raw: stdout, err: stderr || stdout };
   }
+}
+
+function openAuthUrl(url: string): boolean {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "rundll32.exe" : "xdg-open";
+  const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
+  const result = spawnSync(command, args, { stdio: "ignore", timeout: 5_000 });
+  return result.status === 0;
 }
 
 function listProfiles(): Profile[] {
@@ -161,6 +179,23 @@ function loadConfig(): { revision: string; config: HydratedConfig } {
   return larkinConfig.loadConfig(process.env, { mint: () => crypto.randomUUID() });
 }
 
+function readSetupSelection(fileArg: string | undefined): SetupAgentChoice | null {
+  if (!fileArg) return null;
+  const file = path.resolve(fileArg);
+  if (path.dirname(file) !== path.resolve(CFG_DIR) || !/^\.setup-agent-choice-\d+-[A-Za-z0-9-]+\.json$/.test(path.basename(file))) {
+    die("setup Agent 选择文件路径无效");
+  }
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || (stat.mode & 0o777) !== 0o600) die("setup Agent 选择文件必须是当前用户拥有的 0600 普通文件");
+  const bytes = fs.readFileSync(file, "utf8");
+  fs.unlinkSync(file);
+  const raw = JSON.parse(bytes) as SetupAgentChoice;
+  if (!raw || !["pi", "codex", "claude"].includes(raw.runtime)) die("setup Agent 选择无效");
+  return raw;
+}
+
 function fabricateAttachment(root: string, serverId: string): void {
   const directory = path.join(root, "computer", "servers", serverId);
   fs.mkdirSync(directory, { recursive: true });
@@ -177,6 +212,17 @@ function fabricateAttachment(root: string, serverId: string): void {
     attachedAt: new Date().toISOString(),
   };
   fs.writeFileSync(file, JSON.stringify(attachment, null, 2), { mode: 0o600 });
+}
+
+function safeProviderFailure(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b(?:401|403)\b|unauth|invalid.*(?:key|token)|credential/i.test(message)) {
+    return new Error("内置 Pi provider 拒绝认证（401/403）；请重新登录或检查 credential");
+  }
+  if (/timeout|超时|ETIMEDOUT/i.test(message)) return new Error("内置 Pi provider readiness 超时；请检查网络和 endpoint");
+  if (/ENOTFOUND|ECONN|fetch failed|network|TLS/i.test(message)) return new Error("内置 Pi provider endpoint 不可达；请检查网络、TLS 和 Base URL");
+  if (/model|模型/i.test(message)) return new Error("内置 Pi provider 不接受所选模型；请检查 provider/model");
+  return new Error("内置 Pi provider readiness 失败；credential/config 已回滚，请检查 provider 状态后重试");
 }
 
 function printAgents(config: HydratedConfig): void {
@@ -216,6 +262,7 @@ export async function main(): Promise<void> {
   }
   const loaded = loadConfig();
   const config = loaded.config;
+  const selection = readSetupSelection(options.selectionFile);
   if (options.list) {
     printAgents(config);
     return;
@@ -230,12 +277,18 @@ export async function main(): Promise<void> {
 
   const requestedAgent = options.agent || profile.appId;
   const prior = config.agents[profile.appId];
-  const runtime = options.runtime || prior?.runtime || "pi";
+  const runtime = selection?.runtime || options.runtime || prior?.runtime || "pi";
+  const piDistribution = runtime === "pi"
+    ? (selection?.runtime === "pi" ? selection.distribution : prior?.piDistribution || "external")
+    : undefined;
   validateRuntime(runtime);
   const defaultModel = larkinConfig.defaultModelFor(runtime);
-  const targetModelId = prior?.runtime === runtime ? prior.model : defaultModel;
+  const selectedModel = selection?.runtime === "pi" && selection.distribution === "builtin" ? selection.model : undefined;
+  const targetModelId = selectedModel || (prior?.runtime === runtime ? prior.model : defaultModel);
   let runtimeModels = larkinConfig.loadRuntimeModels()[runtime];
-  if (runtime === "pi") {
+  if (runtime === "pi" && piDistribution === "builtin") {
+    runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: [] }];
+  } else if (runtime === "pi") {
     const piCatalog = await discoverPiModelCatalog({
       cwd: layout.workspaceDir(profile.appId),
       ...(process.env.PI_CODING_AGENT_DIR ? { agentDir: process.env.PI_CODING_AGENT_DIR } : {}),
@@ -249,7 +302,9 @@ export async function main(): Promise<void> {
     config: larkinConfig.toStored(config),
     profile,
     requestedAgent,
-    runtime: options.runtime,
+    runtime: selection?.runtime || options.runtime,
+    ...(selection?.runtime === "pi" ? { piDistribution: selection.distribution } : {}),
+    ...(selectedModel ? { model: selectedModel } : {}),
     defaultModel,
     supportedReasoningEfforts: targetModel!.supportedReasoningEfforts || [],
     now: new Date().toISOString(),
@@ -257,7 +312,68 @@ export async function main(): Promise<void> {
   const bound = stored.agents[profile.appId];
 
   fs.mkdirSync(CFG_DIR, { recursive: true });
-  larkinConfig.commitSetupConfig(process.env, loaded.revision, stored);
+  let providerTransaction: ReturnType<typeof beginBuiltinPiCredentialTransaction> | null = null;
+  let providerPublished = false;
+  const authAlreadyCompleted = selection?.runtime === "pi" && selection.distribution === "builtin"
+    && (selection as SetupAgentChoice & { authCompleted?: true }).authCompleted === true;
+  const readinessAlreadyCompleted = authAlreadyCompleted
+    && (selection as SetupAgentChoice & { readinessCompleted?: true }).readinessCompleted === true;
+  const authAbort = new AbortController();
+  const cancelProviderTransaction = (signal: NodeJS.Signals): void => {
+    authAbort.abort();
+    if (!providerPublished) providerTransaction?.rollback();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  const onSigint = (): void => cancelProviderTransaction("SIGINT");
+  const onSigterm = (): void => cancelProviderTransaction("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  let authQuestioner: ReturnType<typeof terminalSetupQuestioner> | null = null;
+  try {
+    providerTransaction = selection?.runtime === "pi" && selection.distribution === "builtin"
+      && !authAlreadyCompleted ? beginBuiltinPiCredentialTransaction(CFG_DIR, profile.appId)
+      : null;
+    if (selection?.runtime === "pi" && selection.distribution === "builtin") {
+      const official = selection.preset === "official" ? selection as OfficialPiAuthSelection : null;
+      const configured = official ? null : configureBuiltinPiProviderModel(CFG_DIR, profile.appId, selection as BuiltinPiProviderSetupSelection);
+      const providerId = official?.providerId || configured!.provider;
+      const authType = official?.authType || "api_key";
+      let piRuntime: Awaited<ReturnType<typeof createOfficialPiModelRuntime>> | null = null;
+      if (!authAlreadyCompleted) {
+        piRuntime = await createOfficialPiModelRuntime(CFG_DIR, profile.appId);
+        authQuestioner = terminalSetupQuestioner();
+        say(`正在通过捆绑官方 Pi 登录 ${providerId}（${authType}）…`);
+        try {
+          await runOfficialPiLogin(piRuntime, providerId, authType, createOfficialPiAuthInteraction({
+            questioner: authQuestioner,
+            report: (message) => say(message),
+            openUrl: openAuthUrl,
+            signal: authAbort.signal,
+          }));
+        } catch { throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`); }
+      }
+      if (!readinessAlreadyCompleted) {
+        piRuntime ??= await createOfficialPiModelRuntime(CFG_DIR, profile.appId);
+        say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
+        try {
+          if (!(process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN === "1" && process.env.LARKIN_TEST_BOT_REGISTER_MODULE)) {
+            await verifyOfficialPiProviderTurn(piRuntime, selection.model, authAbort.signal);
+          }
+        }
+        catch (error) { throw safeProviderFailure(error); }
+      }
+    }
+    larkinConfig.commitSetupConfig(process.env, loaded.revision, stored);
+    providerTransaction?.commit();
+    providerPublished = true;
+  } catch (error) {
+    providerTransaction?.rollback();
+    throw error;
+  } finally {
+    authQuestioner?.close?.();
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  }
   fabricateAttachment(layout.root, stored.serverId);
 
   say(`\n✓ 已写配置: ${CFG_FILE}`);

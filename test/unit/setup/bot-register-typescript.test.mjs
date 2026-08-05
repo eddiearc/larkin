@@ -23,17 +23,35 @@ test("bot-register is strict TypeScript compiled to its direct runtime entry", (
 test("registration publishes the credential before binding, then verifies the bound Bot workspace", () => {
   const source = fs.readFileSync(SOURCE, "utf8");
   const publish = source.indexOf("fs.writeFileSync(stagedBotFile");
-  const bind = source.indexOf("spawnSync(bindSpec.command, bindSpec.args");
+  const bind = source.indexOf("runBindProcess(bindSpec.command, bindSpec.args");
   const sync = source.indexOf("synchronizeAgentProfile(agent");
-  const verify = source.indexOf("spawnSync(official.command");
-  assert.equal([publish, bind, sync, verify].every((index) => index >= 0), true);
+  const verify = source.indexOf("runIdentityProcess(official.command");
+  const resultPublish = source.indexOf("fs.writeFileSync(resultFile");
+  const authCommit = source.indexOf("pendingPiAuthTransaction?.commit()");
+  const preResolve = source.indexOf("resolvedSetupOfficialCli = resolveOfficialCli({ env: process.env })");
+  const authBegin = source.indexOf("pendingPiAuthTransaction = beginBuiltinPiCredentialTransaction");
+  assert.equal([publish, bind, sync, verify, resultPublish, authCommit].every((index) => index >= 0), true);
   assert.equal(publish < bind && bind < sync && sync < verify, true);
+  assert.equal(verify < resultPublish && resultPublish < authCommit, true,
+    "credential transaction must commit only after identity and result publication");
+  assert.equal(preResolve >= 0 && preResolve < authBegin, true,
+    "the synchronous official CLI probe must complete before the credential transaction lock");
+  const transactionInterval = source.slice(authBegin, authCommit);
+  assert.doesNotMatch(transactionInterval, /resolveOfficialLarkCli\s*\(/,
+    "the active credential transaction must reuse the pre-resolved official CLI");
+  assert.doesNotMatch(transactionInterval, /spawnSync\s*\(/,
+    "production work while the credential transaction is active must remain asynchronous");
   assert.match(source, /synchronizeAgentProfile\([\s\S]*\{ forceRebind: true \}\)/,
     "new setup credentials must explicitly force one authoritative rebind");
   assert.doesNotMatch(source, /config["', ]+init/);
   assert.match(source, /mode: 0o700/);
   assert.match(source, /mode: 0o600, flag: "wx"/);
   assert.match(source, /callbacks:\s*\{ items: \["card\.action\.trigger"\] \}/);
+  assert.match(source, /systemSpawn\(command, args, \{ stdio: "ignore", shell: false \}\)/,
+    "browser launch must be non-blocking and shell-free");
+  assert.match(source, /child\.once\("error", \(\) => say\(`\[setup\].*\$\{url\}`\)\)/,
+    "browser spawn errors must retain a complete manual URL fallback");
+  assert.doesNotMatch(source.slice(source.indexOf("function openBrowser"), source.indexOf("async function runBindProcess")), /spawnSync/);
 });
 
 test("help does not create credentials or expose a browser-selection bypass", () => {

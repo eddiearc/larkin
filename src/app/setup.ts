@@ -112,7 +112,9 @@ export async function main(): Promise<void> {
   if (!configuredAgent) die(`setup 完成但 Agent ${selectedAgentId} 配置不可读`);
   if (!(["codex", "claude", "pi"] as const).includes(configuredAgent.runtime as "codex" | "claude" | "pi")) die(`Runtime ${configuredAgent.runtime} 不受支持`);
   const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
-    cwd: configuredAgent.workspaceDir, env: process.env });
+    agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
+    env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR,
+      ...(configuredAgent.piDistribution ? { LARKIN_PI_DISTRIBUTION: configuredAgent.piDistribution } : {}) } });
   if (runtimeReadiness.state !== "ready") {
     die(`Runtime ${configuredAgent.runtime} ${runtimeReadiness.state}：${runtimeReadiness.reason || "prerequisite unavailable"}；${runtimeReadiness.nextAction || "修复后重试"}`);
   }

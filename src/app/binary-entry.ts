@@ -26,6 +26,13 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
     case "setup-bind": await (await import("../setup/setup-bind.js")).main(); return;
     case "grant-scopes": await (await import("../setup/grant-scopes.js")).main(); return;
     case "lark-channel-secret": await (await import("./lark-channel-secret.js")).main(process.env); return;
+    case "pi-rpc": {
+      const { prepareBuiltinPiPackageAssets } = await import("../runtime/builtin-pi-assets.js");
+      prepareBuiltinPiPackageAssets();
+      await import("@earendil-works/pi-coding-agent/rpc-entry");
+      return;
+    }
+    case "pi-auth": await (await import("./pi-auth-cli.js")).main(rest, process.env); return;
   }
 }
 

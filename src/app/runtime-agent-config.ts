@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -34,6 +34,13 @@ export interface RuntimeAgentConfigDependencies {
   resolveOfficialCli?(env: NodeJS.ProcessEnv): OfficialLarkCliCommand;
   runOfficialCli?(command: OfficialLarkCliCommand, args: readonly string[], options: Parameters<typeof spawnSync>[2]): ReturnType<typeof spawnSync>;
   forceRebind?: boolean;
+}
+
+export interface AsyncRuntimeAgentConfigDependencies extends RuntimeAgentConfigDependencies {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  onChild?(child: ChildProcess | null): void;
 }
 
 function assertSecureProfileDirectory(directory: string): void {
@@ -185,6 +192,62 @@ function officialFailure(label: string, result: ReturnType<typeof spawnSync>, se
   return new Error(`${label} failed (exit=${result.status ?? "none"})${detail ? `: ${detail}` : ""}`);
 }
 
+interface BoundedOfficialResult { status: number | null; stdout: string; stderr: string }
+
+function runOfficialLarkCliAsync(command: OfficialLarkCliCommand, args: readonly string[], env: NodeJS.ProcessEnv,
+  dependencies: AsyncRuntimeAgentConfigDependencies): Promise<BoundedOfficialResult> {
+  const timeoutMs = dependencies.timeoutMs ?? 60_000;
+  const maxOutputBytes = dependencies.maxOutputBytes ?? 64 * 1024;
+  return new Promise((resolve, reject) => {
+    const child = spawn(command.command, [...command.argsPrefix, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    dependencies.onChild?.(child);
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let failure: Error | null = null;
+    let settled = false;
+    let killTimer: NodeJS.Timeout | null = null;
+    const terminate = (error: Error): void => {
+      if (failure) return;
+      failure = error;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 1_000);
+      killTimer.unref?.();
+    };
+    const collect = (target: Buffer[], chunk: Buffer): void => {
+      outputBytes += chunk.length;
+      if (outputBytes > maxOutputBytes) { terminate(new Error("official lark-cli output exceeded the bounded limit")); return; }
+      target.push(Buffer.from(chunk));
+    };
+    child.stdout?.on("data", (chunk: Buffer) => collect(stdout, chunk));
+    child.stderr?.on("data", (chunk: Buffer) => collect(stderr, chunk));
+    const timeout = setTimeout(() => terminate(new Error("official lark-cli config bind timed out")), timeoutMs);
+    timeout.unref?.();
+    const abort = (): void => terminate(new Error("official lark-cli config bind cancelled"));
+    if (dependencies.signal?.aborted) abort();
+    else dependencies.signal?.addEventListener("abort", abort, { once: true });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      dependencies.signal?.removeEventListener("abort", abort);
+      dependencies.onChild?.(null);
+      reject(error);
+    });
+    child.once("exit", (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      dependencies.signal?.removeEventListener("abort", abort);
+      dependencies.onChild?.(null);
+      if (failure) { reject(failure); return; }
+      resolve({ status, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+    });
+  });
+}
+
 export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">): string {
   const stateDir = path.resolve(agent.stateDir);
   const commandDir = path.join(stateDir, "runtime-bin");
@@ -290,6 +353,63 @@ export function syncAgentProfile(
         encoding: "utf8", env: profileEnv,
       }, dependencies);
       if (sync.status !== 0 || sync.error) throw officialFailure(`Agent ${agent.agentId} lark-channel bind`, sync, agent.feishuAppSecret);
+      const workspace = captureProfileSnapshot(workspaceFile);
+      if (!workspace) throw new Error(`Agent ${agent.agentId} lark-channel workspace config missing`);
+      validateExclusiveBotProfile(workspace, agent);
+      atomicPublishProfile(sourceFile, fs.readFileSync(stagedSource), 0o600);
+      assertAgentWorkspaceBound(agent);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Agent ${agent.agentId} lark-channel bind failed`;
+      throw new Error(`${message}；官方 bind/keychain 结果未被证明可回滚，当前 Agent 保持 fail-closed，请重跑 larkin setup`);
+    }
+  } finally {
+    try { fs.unlinkSync(stagedSource); } catch { /* renamed/absent */ }
+    lock.release();
+  }
+}
+
+/** Async setup-only profile sync. Existing runtime callers retain the synchronous contract above. */
+export async function syncAgentProfileAsync(
+  agent: RuntimeAgentConfig,
+  env: NodeJS.ProcessEnv,
+  dependencies: AsyncRuntimeAgentConfigDependencies = {},
+): Promise<void> {
+  const expected = path.join(path.resolve(env.LARKIN_CONFIG_DIR || ""), "state", "agents", agent.agentId, "lark-cli-config");
+  if (path.resolve(agent.larkConfigDir) !== expected) throw new Error("lark-cli profile 路径不是 canonical contained 路径");
+  fs.mkdirSync(expected, { recursive: true, mode: 0o700 });
+  assertSecureProfileDirectory(expected);
+  const sourceFile = larkChannelSourceConfigPath(agent);
+  const sourceDir = path.dirname(sourceFile);
+  fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 });
+  assertSecureProfileDirectory(sourceDir);
+  const lock = acquireProcessLock(path.join(expected, ".larkin-profile-sync.lock.json"), path.basename(process.argv[1] || "node"));
+  const workspaceFile = larkChannelWorkspaceConfigPath(agent);
+  const stagedSource = path.join(sourceDir, `.config.${process.pid}.${crypto.randomUUID()}.bind-source`);
+  try {
+    captureProfileSnapshot(sourceFile);
+    captureProfileSnapshot(workspaceFile);
+    fs.writeFileSync(stagedSource, `${JSON.stringify(sourceProjection(agent, env), null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    validateSourceProjection(stagedSource, agent);
+    installRuntimeCommandShims(agent);
+    if (!dependencies.forceRebind) {
+      try {
+        validateSourceProjection(sourceFile, agent);
+        const existingWorkspace = captureProfileSnapshot(workspaceFile);
+        if (!existingWorkspace) throw new Error("workspace missing");
+        validateExclusiveBotProfile(existingWorkspace, agent);
+        assertAgentWorkspaceBound(agent);
+        return;
+      } catch { /* stale, absent, or mismatched state requires exactly one bind */ }
+    }
+    const profileEnv = { ...managedLarkCliEnv(agent, env), LARK_CHANNEL_CONFIG: stagedSource };
+    try {
+      const official = dependencies.resolveOfficialCli?.(profileEnv) ?? resolveOfficialLarkCli({ env: profileEnv });
+      const result = await runOfficialLarkCliAsync(official,
+        ["config", "bind", "--source", "lark-channel", "--identity", "bot-only"], profileEnv, dependencies);
+      if (result.status !== 0) {
+        const stderr = result.stderr.replaceAll(agent.feishuAppSecret, "<redacted>").trim().slice(0, 400);
+        throw new Error(`Agent ${agent.agentId} lark-channel bind failed (exit=${result.status ?? "none"})${stderr ? `: ${stderr}` : ""}`);
+      }
       const workspace = captureProfileSnapshot(workspaceFile);
       if (!workspace) throw new Error(`Agent ${agent.agentId} lark-channel workspace config missing`);
       validateExclusiveBotProfile(workspace, agent);

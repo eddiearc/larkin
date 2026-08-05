@@ -65,24 +65,30 @@ test("document comment envelope is semantic, stable, wakeable, and carries an ex
   };
   const envelope = projectDocumentCommentEnvelope({
     agentId: "cli_docAgentA1", event: event(), context,
-    mentionPolicy: { effective: "require", source: "agent", mentionedBot: true },
+    subscription: { mode: "none", status: "safe-default", source: "legacy-default", dimension: null, mentionedBot: true },
   });
   assert.equal(envelope.kind, "document_comment");
   assert.equal(envelope.event_type, "drive.notice.comment_add_v1");
   assert.equal(envelope.wake, true);
   assert.equal(envelope.sender_type, "human");
-  assert.deepEqual([envelope.mention_policy, envelope.mention_policy_source, envelope.mentioned_bot], ["require", "agent", true]);
+  assert.deepEqual([
+    envelope.comment_subscription_mode, envelope.comment_subscription_status,
+    envelope.comment_subscription_source, envelope.comment_subscription_dimension, envelope.mentioned_bot,
+  ], ["none", "safe-default", "legacy-default", null, true]);
   assert.equal(envelope.target, "document-comment:docx:resolved_token:comment_A1:in-thread");
   assert.deepEqual(envelope.reply.argv, ["comment", "reply", "--message-id", envelope.message_id, "--text", "<reply_text>"]);
   assert.equal(documentCommentMessageId("cli_docAgentA1", event()), envelope.message_id);
   assert.notEqual(documentCommentMessageId("cli_otherAgentA1", event()), envelope.message_id);
   const fallback = projectDocumentCommentEnvelope({
     agentId: "cli_docAgentA1", event: event({ mentionedBot: false }), context: { ...context, isWhole: true },
-    mentionPolicy: { effective: "free", source: "global", mentionedBot: false },
+    subscription: { mode: "subscribed", status: "platform-verified", source: "platform-status", dimension: "application", mentionedBot: false },
   });
   assert.equal(fallback.target, "document-comment:docx:resolved_token:comment_A1:top-level");
   assert.equal(fallback.reply.mode, "top-level-fallback");
-  assert.deepEqual([fallback.mention_policy, fallback.mention_policy_source, fallback.mentioned_bot], ["free", "global", false]);
+  assert.deepEqual([
+    fallback.comment_subscription_mode, fallback.comment_subscription_status,
+    fallback.comment_subscription_source, fallback.comment_subscription_dimension, fallback.mentioned_bot,
+  ], ["subscribed", "platform-verified", "platform-status", "application", false]);
 });
 
 test("document comment target parser rejects unsupported types and locator injection", () => {

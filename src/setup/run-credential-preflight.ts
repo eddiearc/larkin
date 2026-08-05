@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { callbackCapability, type CardActionCallbackCapability } from "../platform/callback-capability.js";
+import {
+  callbackCapability,
+  documentCommentReplyCapability,
+  documentCommentSubscriptionCapability,
+  type CardActionCallbackCapability,
+  type DocumentCommentSubscriptionCapability,
+  type DocumentCommentReplyCapability,
+} from "../platform/callback-capability.js";
 
 const BOT_CREDENTIAL_FIELDS = new Set(["appId", "appSecret", "tenant", "ownerOpenId", "createdAt", "updatedAt", "capabilities"]);
 
@@ -20,6 +27,8 @@ export interface BotCredentialRecord {
       scope: "drive:drive";
       requestedAt: string;
     };
+    documentCommentSubscription?: DocumentCommentSubscriptionCapability;
+    documentCommentReply?: DocumentCommentReplyCapability;
   };
 }
 
@@ -49,9 +58,11 @@ export function validCredentialRecord(value: unknown, appId: string): value is B
   if (Object.hasOwn(record, "capabilities")) {
     if (!record.capabilities || typeof record.capabilities !== "object" || Array.isArray(record.capabilities)) return false;
     const capabilities = record.capabilities as Record<string, unknown>;
-    if (Object.keys(capabilities).some((key) => !["cardActionCallback", "documentCommentEvent"].includes(key))) return false;
+    if (Object.keys(capabilities).some((key) => !["cardActionCallback", "documentCommentEvent", "documentCommentReply", "documentCommentSubscription"].includes(key))) return false;
     if (Object.hasOwn(capabilities, "cardActionCallback") && !callbackCapability(record)) return false;
     if (Object.hasOwn(capabilities, "documentCommentEvent") && !validDocumentCommentCapability(capabilities.documentCommentEvent)) return false;
+    if (Object.hasOwn(capabilities, "documentCommentReply") && !documentCommentReplyCapability(record)) return false;
+    if (Object.hasOwn(capabilities, "documentCommentSubscription") && !documentCommentSubscriptionCapability(record)) return false;
     if (!Object.keys(capabilities).length) return false;
   }
   return true;

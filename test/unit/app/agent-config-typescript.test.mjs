@@ -36,13 +36,34 @@ test("document-comment diagnostics expose stable request, event, and read/access
     assert.deepEqual({ category: diagnostic().category, reason: diagnostic().reason }, {
       category: "not_requested", reason: "setup_required",
     });
+    assert.deepEqual(diagnostic().subscription, { mode: "none", status: "safe-default", source: "legacy-default", dimension: null });
     fs.mkdirSync(path.join(root, "bots"), { mode: 0o700 });
     fs.writeFileSync(path.join(root, "bots", `${app}.json`), JSON.stringify({ appId: app, appSecret: "fixture", tenant: "feishu", capabilities: {
       documentCommentEvent: { status: "requested-unverified", event: "drive.notice.comment_add_v1", scope: "drive:drive", requestedAt: "2026-08-05T00:00:00.000Z" },
+      documentCommentReply: { status: "requested-unverified", scope: "docs:document.comment:create", requestedAt: "2026-08-05T00:00:10.000Z" },
     } }), { mode: 0o600 });
     assert.deepEqual({ category: diagnostic().category, reason: diagnostic().reason }, {
       category: "publish_or_event_unverified", reason: "publication_and_real_event_unverified",
     });
+    const credentialFile = path.join(root, "bots", `${app}.json`);
+    const credential = JSON.parse(fs.readFileSync(credentialFile, "utf8"));
+    credential.capabilities.documentCommentSubscription = {
+      mode: "subscribed", status: "platform-verified", source: "platform-status", dimension: "application",
+      requestedAt: "2026-08-05T00:00:00.000Z", verifiedAt: "2026-08-05T00:00:30.000Z",
+    };
+    fs.writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
+    assert.deepEqual(diagnostic().subscription, {
+      mode: "subscribed", status: "platform-verified", source: "platform-status", dimension: "application",
+    });
+    assert.deepEqual({ scope: diagnostic().reply_scope, requestedAt: diagnostic().reply_requested_at }, {
+      scope: "docs:document.comment:create", requestedAt: "2026-08-05T00:00:10.000Z",
+    });
+    fs.chmodSync(credentialFile, 0o644);
+    assert.deepEqual(diagnostic().subscription, {
+      mode: "none", status: "safe-default", source: "legacy-default", dimension: null,
+    });
+    assert.equal(diagnostic().reply_requested_at, null);
+    fs.chmodSync(credentialFile, 0o600);
     const stateDir = path.join(root, "state", "agents", app);
     fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(stateDir, "status.json"), JSON.stringify({
@@ -192,7 +213,9 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
           name: first,
           runtime: "codex",
           model: "gpt-5.3-codex",
-          document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null },
+          document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null,
+            reply_scope: "docs:document.comment:create", reply_requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null,
+            subscription: { mode: "none", status: "safe-default", source: "legacy-default", dimension: null } },
           ready: false,
           readiness: {
             daemon_owned: false,
@@ -207,7 +230,9 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
           name: second,
           runtime: "claude",
           model: "claude-sonnet-4-5",
-          document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null },
+          document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null,
+            reply_scope: "docs:document.comment:create", reply_requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null,
+            subscription: { mode: "none", status: "safe-default", source: "legacy-default", dimension: null } },
           ready: false,
           readiness: {
             daemon_owned: false,

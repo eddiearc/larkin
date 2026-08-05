@@ -181,7 +181,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       timeout: 15_000,
     });
     const capabilities = JSON.parse(checked(runAgentCli(["--help"]), "Agent capabilities").stdout).capabilities;
-    assert.deepEqual(Object.keys(capabilities.commands), ["inbox", "reminder", "interaction", "profile", "config"]);
+    assert.deepEqual(Object.keys(capabilities.commands), ["inbox", "comment", "reminder", "interaction", "profile", "config"]);
+    assert.deepEqual(capabilities.commands.comment, ["reply"],
+      "standalone Agent capabilities expose only the locator-bound Bot comment reply surface");
     assert.equal(capabilities.commands.config.includes("apply"), true);
     assert.equal("removed" in capabilities, false);
     assert.equal(JSON.parse(checked(runAgentCli(["config", "--help"]), "Agent config help").stdout).usage.some((line) => line.includes("config apply")), true);

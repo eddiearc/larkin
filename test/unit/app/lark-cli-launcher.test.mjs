@@ -79,9 +79,12 @@ test("document comment reply is bound to a polled Inbox locator, Bot identity, e
     assert.equal(sent.code, 0, sent.stderr);
     assert.equal(f.calls.length, 1);
     const native = f.calls[0].args.slice(1);
-    assert.deepEqual(native.slice(0, 3), [
-      "api", "POST", "/open-apis/drive/v1/files/doc_tokenA1/comments/comment_A1/replies?file_type=docx",
+    assert.deepEqual(native.slice(0, 7), [
+      "drive", "file.comment.replys", "create",
+      "--file-token", "doc_tokenA1",
+      "--comment-id", "comment_A1",
     ]);
+    assert.equal(native[native.indexOf("--file-type") + 1], "docx");
     assert.equal(native[native.indexOf("--as") + 1], "bot");
     assert.deepEqual(JSON.parse(native[native.indexOf("--data") + 1]), {
       content: { elements: [{ type: "text_run", text_run: { text: "answer" } }] },
@@ -105,10 +108,14 @@ test("whole-document Inbox locators select the explicit top-level fallback and r
     f.setWriteResult({ status: 0, signal: null, output: [], pid: 1, stdout: "{}\n", stderr: "", error: undefined });
     assert.equal(f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]).code, 0);
     const native = f.calls[0].args.slice(1);
-    assert.equal(native.includes("/open-apis/drive/v1/files/sheet_tokenA1/comments?file_type=sheet"), true);
+    assert.deepEqual(native.slice(0, 5), [
+      "drive", "file.comments", "create_v2", "--file-token", "sheet_tokenA1",
+    ]);
     assert.deepEqual(JSON.parse(native[native.indexOf("--data") + 1]), {
-      reply_list: { replies: [{ content: { elements: [{ type: "text_run", text_run: { text: "answer" } }] } }] },
+      file_type: "sheet",
+      reply_elements: [{ type: "text", text: "answer" }],
     });
+    assert.equal(native[native.indexOf("--as") + 1], "bot");
     assert.equal(f.run(["comment", "reply", "--message-id", `doc_comment_${"c".repeat(32)}`, "--text", "answer"]).code, 2);
     assert.equal(f.calls.length, 1);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

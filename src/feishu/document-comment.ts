@@ -17,9 +17,11 @@ export interface DocumentCommentContext {
   noticeType: string;
 }
 
-export interface DocumentCommentMentionPolicy {
-  effective: "require" | "free";
-  source: "agent" | "global";
+export interface DocumentCommentSubscriptionDecision {
+  mode: "none" | "subscribed";
+  status: "safe-default" | "requested-unverified" | "platform-verified";
+  source: "legacy-default" | "setup-default" | "setup-opt-in" | "platform-status";
+  dimension: "application" | null;
   mentionedBot: boolean;
 }
 
@@ -100,9 +102,9 @@ export function projectDocumentCommentEnvelope(input: {
   agentId: string;
   event: CommentEvent;
   context: DocumentCommentContext;
-  mentionPolicy: DocumentCommentMentionPolicy;
+  subscription: DocumentCommentSubscriptionDecision;
 }): Record<string, unknown> {
-  const { agentId, event, context, mentionPolicy } = input;
+  const { agentId, event, context, subscription } = input;
   const messageId = documentCommentMessageId(agentId, event);
   const timestamp = Number.isFinite(event.timestamp) ? new Date(event.timestamp).toISOString() : new Date().toISOString();
   const target = documentCommentTarget(context.target, event.commentId, context.isWhole);
@@ -113,9 +115,11 @@ export function projectDocumentCommentEnvelope(input: {
     seq: Number.isSafeInteger(event.timestamp) && event.timestamp > 0 ? event.timestamp : 1,
     target,
     wake: true,
-    mention_policy: mentionPolicy.effective,
-    mention_policy_source: mentionPolicy.source,
-    mentioned_bot: mentionPolicy.mentionedBot,
+    comment_subscription_mode: subscription.mode,
+    comment_subscription_status: subscription.status,
+    comment_subscription_source: subscription.source,
+    comment_subscription_dimension: subscription.dimension,
+    mentioned_bot: subscription.mentionedBot,
     timestamp,
     sender_id: event.operator.openId,
     sender_name: event.operator.openId,

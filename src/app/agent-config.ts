@@ -6,7 +6,16 @@ import { daemonHasAgent, readProcessState } from "../platform/process-state.js";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type PiModelCatalog } from "../runtime/pi-model-catalog.js";
-import { callbackCapability, documentCommentCapability, type DocumentCommentEventCapability } from "../platform/callback-capability.js";
+import {
+  effectiveDocumentCommentSubscription,
+  readCallbackCapability,
+  readDocumentCommentCapability,
+  readDocumentCommentReplyCapability,
+  readDocumentCommentSubscription,
+  type DocumentCommentEventCapability,
+  type DocumentCommentReplyCapability,
+  type EffectiveDocumentCommentSubscription,
+} from "../platform/callback-capability.js";
 import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus } from "./agent-readiness.js";
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
@@ -79,11 +88,20 @@ interface StatusRecord extends AgentReadinessStatus {
   runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready"; executable?: string; version?: string; reason?: string; nextAction?: string };
 }
 
-function readDocumentCommentCapability(configDir: string, profile: string): DocumentCommentEventCapability | null {
+function safeDocumentCommentCapabilities(configDir: string, profile: string): {
+  event: DocumentCommentEventCapability | null;
+  reply: DocumentCommentReplyCapability | null;
+  subscription: EffectiveDocumentCommentSubscription;
+} {
   try {
-    const credential = JSON.parse(fs.readFileSync(path.join(configDir, "bots", `${profile}.json`), "utf8")) as unknown;
-    return documentCommentCapability(credential);
-  } catch { return null; }
+    return {
+      event: readDocumentCommentCapability(configDir, profile),
+      reply: readDocumentCommentReplyCapability(configDir, profile),
+      subscription: readDocumentCommentSubscription(configDir, profile),
+    };
+  } catch {
+    return { event: null, reply: null, subscription: effectiveDocumentCommentSubscription(null) };
+  }
 }
 
 function projectDocumentCommentDiagnostic(capability: DocumentCommentEventCapability | null, status: StatusRecord | null): {
@@ -230,7 +248,9 @@ if (kind === "agents") {
       let status: StatusRecord | null = null;
       try { status = JSON.parse(fs.readFileSync(path.join(agent.stateDir, "status.json"), "utf8")) as StatusRecord; } catch { /* absent */ }
       const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
-      const commentCapability = readDocumentCommentCapability(configDir, agent.feishuProfile);
+      const commentCapabilities = safeDocumentCommentCapabilities(configDir, agent.feishuProfile);
+      const commentCapability = commentCapabilities.event;
+      const commentSubscription = commentCapabilities.subscription;
       const commentDiagnostic = projectDocumentCommentDiagnostic(commentCapability, status);
       return {
         agent_id: agent.agentId,
@@ -242,10 +262,18 @@ if (kind === "agents") {
           category: commentDiagnostic.category,
           reason: commentDiagnostic.reason,
           requested_at: commentCapability?.requestedAt || null,
+          reply_scope: "docs:document.comment:create",
+          reply_requested_at: commentCapabilities.reply?.requestedAt || null,
           event_verified_at: status?.documentCommentEventAt || null,
           accepted_at: status?.documentCommentLastAcceptedAt || null,
           last_error: status?.documentCommentLastError || null,
           last_error_at: status?.documentCommentLastErrorAt || null,
+          subscription: {
+            mode: commentSubscription.mode,
+            status: commentSubscription.status,
+            source: commentSubscription.source,
+            dimension: commentSubscription.dimension,
+          },
         },
         ...projectAgentReadiness({ agentId: agent.agentId, daemon, status }),
       };
@@ -267,11 +295,15 @@ if (kind === "agents") {
     const cred = fs.existsSync(credentialFile);
     let callbackStatus = "missing";
     let commentCapability: DocumentCommentEventCapability | null = null;
+    let commentReplyCapability: DocumentCommentReplyCapability | null = null;
+    let commentSubscription = effectiveDocumentCommentSubscription(null);
     if (cred) {
       try {
-        const credential = JSON.parse(fs.readFileSync(credentialFile, "utf8")) as Record<string, unknown>;
-        callbackStatus = callbackCapability(credential)?.status || "missing";
-        commentCapability = documentCommentCapability(credential);
+        callbackStatus = readCallbackCapability(configDir, agent.feishuProfile)?.status || "missing";
+        const capabilities = safeDocumentCommentCapabilities(configDir, agent.feishuProfile);
+        commentCapability = capabilities.event;
+        commentReplyCapability = capabilities.reply;
+        commentSubscription = capabilities.subscription;
       }
       catch { callbackStatus = "invalid"; }
     }
@@ -303,6 +335,8 @@ if (kind === "agents") {
     say(`    文档评论=${commentDiagnostic.category} reason=${commentDiagnostic.reason}${status?.documentCommentEventAt
       ? `；真实 comment event 已到达（${status.documentCommentEventAt}）${status.documentCommentLastAcceptedAt ? `；最近入箱 ${status.documentCommentLastAcceptedAt}` : ""}`
       : commentCapability ? "；event/scope 已请求，但配置是否发布及事件是否生效均未验证" : "；重新运行 larkin setup 并发布"}${status?.documentCommentLastErrorAt ? `；最近失败时间=${status.documentCommentLastErrorAt}` : ""}`);
+    say(`    评论订阅=${commentSubscription.mode}/${commentSubscription.status} source=${commentSubscription.source} dimension=${commentSubscription.dimension || "none"}${commentSubscription.mode === "subscribed" ? "；所有实际送达的支持评论都会唤醒 Agent" : "；仅 @Bot 评论进入 Inbox"}`);
+    say(`    评论回复权限=${commentReplyCapability ? `${commentReplyCapability.scope} requested-unverified` : "missing（重跑 larkin setup；回复将由平台拒绝）"}`);
     const recent = Array.isArray(status?.recentErrors) ? status.recentErrors.at(-1) : null;
     if (recent) say(`    最近错误=${recent.message || recent.error || JSON.stringify(recent)}`);
   }

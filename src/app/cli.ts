@@ -52,7 +52,7 @@ if (runtimeAgentAuthority && command === "comment") routes.comment = ["lark-cli"
 const commandHelp: Record<string, string> = {
   start: `Usage: larkin start [--agent <App ID> | --agents <App ID,...>]
 Start one foreground supervisor for the daemon and local dashboard, or reuse it.`,
-  setup: `Usage: larkin setup [--runtime <runtime>] [--no-start]
+  setup: `Usage: larkin setup [--runtime <runtime>] [--comment-subscription <none|application>] [--no-start]
 Run the interactive setup to create or connect a bot and configure its Agent.`,
   status: `Usage: larkin status [--json]
 Show Agent configuration, bot identity, credentials, and connection status. Use --json for readiness automation.`,

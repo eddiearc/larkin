@@ -28,6 +28,12 @@ import {
   verifyOfficialPiProviderTurn,
 } from "../runtime/pi-official-auth.js";
 import type { OfficialPiAuthSelection, SetupAgentChoice } from "./setup-agent-choice.js";
+import {
+  documentCommentSubscriptionCapability,
+  markDocumentCommentSubscriptionVerified,
+  type DocumentCommentSubscriptionCapability,
+  type DocumentCommentSubscriptionDimension,
+} from "../platform/callback-capability.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -46,7 +52,11 @@ interface StoredCredential {
 
 type RegisterApp = (options: {
   source: string;
-  addons: { scopes: { tenant: string[] }; events: { items: { tenant: string[] } }; callbacks: { items: string[] } };
+  addons: {
+    scopes: { tenant: string[] };
+    events: { items: { tenant: string[] } };
+    callbacks: { items: string[] };
+  };
   onQRCodeReady(info: { url: string; expireIn: number }): void;
   onStatusChange(info: { status: string; interval?: number }): void;
 }) => Promise<RegistrationResult>;
@@ -134,6 +144,128 @@ function officialCliForProfile(env: NodeJS.ProcessEnv): OfficialLarkCliCommand {
   return resolvedSetupOfficialCli;
 }
 
+function subscriptionStatus(payload: unknown): boolean | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const root = payload as Record<string, unknown>;
+  const data = root.data && typeof root.data === "object" && !Array.isArray(root.data) ? root.data as Record<string, unknown> : null;
+  const nested = data?.data && typeof data.data === "object" && !Array.isArray(data.data) ? data.data as Record<string, unknown> : null;
+  if (root.ok !== true) return null;
+  const value = data?.is_subscribe ?? nested?.is_subscribe;
+  return typeof value === "boolean" ? value : null;
+}
+
+type AsyncCliProcess = (command: string, args: readonly string[], env: NodeJS.ProcessEnv) => Promise<{
+  status: number | null; stdout: string; stderr: string;
+}>;
+
+export async function reconcileDocumentCommentSubscription(input: {
+  mode: "preserve" | "none" | DocumentCommentSubscriptionDimension;
+  command: string;
+  argsPrefix: string[];
+  env: NodeJS.ProcessEnv;
+  runProcessImpl?: AsyncCliProcess;
+  isShutdownAborted?: () => boolean;
+}): Promise<{ changed: boolean; subscribed: boolean; dimension: DocumentCommentSubscriptionDimension | null }> {
+  if (input.mode === "preserve") return { changed: false, subscribed: false, dimension: null };
+  const run = input.runProcessImpl ?? ((command, args, env) => runBoundedCliProcess(
+    command, args, env, "Document comment subscription operation",
+  ));
+  const eventType = "drive.notice.comment_add_v1";
+  const dimension = "application";
+  const identity = "bot";
+  const isShutdownAborted = input.isShutdownAborted ?? (() => shutdownController.signal.aborted);
+  const readStatus = async (): Promise<boolean | null> => {
+    try {
+      const status = await run(input.command, [
+        ...input.argsPrefix,
+        "drive", "user", "subscription_status",
+        "--params", JSON.stringify({ event_type: eventType }),
+        "--as", identity,
+        "--json",
+      ], input.env);
+      let payload: unknown = null;
+      try { payload = JSON.parse(String(status.stdout || "null")) as unknown; } catch { /* fail closed */ }
+      return status.status === 0 ? subscriptionStatus(payload) : null;
+    } catch { return null; }
+  };
+  const expected = input.mode !== "none";
+  const before = await readStatus();
+  if (before === null) throw new Error(`document comment ${dimension} subscription preflight status was unreadable; no write attempted`);
+  if (before === expected) return { changed: false, subscribed: expected, dimension };
+  const subscribeArgs = ["drive", "user", "subscription", "--data", JSON.stringify({ event_type: eventType }), "--as", identity, "--json"];
+  const removeArgs = ["drive", "user", "remove_subscription", "--event-type", eventType, "--as", identity, "--json"];
+  const mutationArgs = expected ? subscribeArgs : removeArgs;
+  try { await run(input.command, [...input.argsPrefix, ...mutationArgs], input.env); }
+  catch {
+    if (isShutdownAborted()) {
+      throw new Error(`document comment ${dimension} subscription mutation was interrupted by shutdown; external state is uncertain`);
+    }
+  }
+  if (isShutdownAborted()) {
+    throw new Error(`document comment ${dimension} subscription mutation was interrupted by shutdown; external state is uncertain`);
+  }
+  const after = await readStatus();
+  if (after === expected) return { changed: true, subscribed: expected, dimension };
+  if (!expected) {
+    if (after === true) {
+      throw new Error(`document comment ${dimension} subscription removal failed; platform status verified unchanged`);
+    }
+    if (isShutdownAborted()) {
+      throw new Error(`document comment ${dimension} subscription post-mutation status was interrupted by shutdown; external state is uncertain`);
+    }
+    throw new Error(`document comment ${dimension} subscription removal external state is uncertain`);
+  }
+  if (after === false) {
+    throw new Error(`document comment ${dimension} subscription activation failed; platform status verified unchanged`);
+  }
+  if (isShutdownAborted()) {
+    throw new Error(`document comment ${dimension} subscription post-mutation status was interrupted by shutdown; external state is uncertain`);
+  }
+  try { await run(input.command, [...input.argsPrefix, ...removeArgs], input.env); }
+  catch { /* A rejected rollback is still ambiguous; final status remains authoritative. */ }
+  if (isShutdownAborted()) {
+    throw new Error(`document comment ${dimension} subscription rollback was interrupted by shutdown; external state is uncertain`);
+  }
+  const rolledBack = await readStatus();
+  if (rolledBack === false) {
+    throw new Error(`document comment ${dimension} subscription write was not verified; rollback was verified`);
+  }
+  if (rolledBack === true) {
+    throw new Error(`document comment ${dimension} subscription write was not verified; rollback failed and platform status verified the subscription remains active; run larkin setup --comment-subscription none to remove it`);
+  }
+  throw new Error(`document comment ${dimension} subscription write was not verified; rollback status is uncertain`);
+}
+
+export async function applyDocumentCommentSubscription(input: {
+  mode: "preserve" | "none" | "application";
+  command: string;
+  argsPrefix: string[];
+  env: NodeJS.ProcessEnv;
+  runProcessImpl?: AsyncCliProcess;
+  isShutdownAborted?: () => boolean;
+  markVerified(): void;
+}): Promise<{ changed: boolean; subscribed: boolean; dimension: DocumentCommentSubscriptionDimension | null }> {
+  const reconciled = await reconcileDocumentCommentSubscription(input);
+  if (!reconciled.subscribed) return reconciled;
+  try {
+    input.markVerified();
+    return reconciled;
+  } catch {
+    if (!reconciled.changed) {
+      throw new Error("document comment local verified-state persistence failed; pre-existing external subscription was left unchanged");
+    }
+    try {
+      await reconcileDocumentCommentSubscription({ ...input, mode: "none" });
+    } catch (error) {
+      if (errorMessage(error).includes("removal failed; platform status verified unchanged")) {
+        throw new Error("document comment local verified-state persistence failed; external subscription rollback failed and platform status verified the subscription remains active; run larkin setup --comment-subscription none to remove it");
+      }
+      throw new Error("document comment local verified-state persistence failed; external subscription rollback status is uncertain");
+    }
+    throw new Error("document comment local verified-state persistence failed; external subscription rollback was verified");
+  }
+}
+
 function botVerificationRetryable(result: { status: number | null; stdout?: unknown; stderr?: unknown }): boolean {
   const text = `${typeof result.stdout === "string" ? result.stdout : ""}\n${typeof result.stderr === "string" ? result.stderr : ""}`;
   return /\binvalid_client\b|specified app does not exist|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|temporary network|too many requests|\b(?:429|502|503|504)\b/i.test(text);
@@ -195,7 +327,7 @@ async function runBindProcess(command: string, args: readonly string[]): Promise
   }).finally(() => { trackPendingChild(null); });
 }
 
-async function runIdentityProcess(command: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<{
+async function runBoundedCliProcess(command: string, args: readonly string[], env: NodeJS.ProcessEnv, label: string): Promise<{
   status: number | null; stdout: string; stderr: string;
 }> {
   if (testFixture?.spawnSync && !pendingPiAuthTransaction && process.env.LARKIN_TEST_ASYNC_IDENTITY !== "1") {
@@ -220,14 +352,14 @@ async function runIdentityProcess(command: string, args: readonly string[], env:
     };
     const collect = (target: "stdout" | "stderr", chunk: Buffer): void => {
       outputBytes += chunk.length;
-      if (outputBytes > CHILD_MAX_OUTPUT_BYTES) { terminate(new Error("Bot identity output exceeded the bounded limit")); return; }
+      if (outputBytes > CHILD_MAX_OUTPUT_BYTES) { terminate(new Error(`${label} output exceeded the bounded limit`)); return; }
       if (target === "stdout") stdout += chunk.toString("utf8"); else stderr += chunk.toString("utf8");
     };
     child.stdout?.on("data", (chunk: Buffer) => collect("stdout", chunk));
     child.stderr?.on("data", (chunk: Buffer) => collect("stderr", chunk));
-    const timeout = setTimeout(() => terminate(new Error("Bot identity verification timed out")), CHILD_TIMEOUT_MS);
+    const timeout = setTimeout(() => terminate(new Error(`${label} timed out`)), CHILD_TIMEOUT_MS);
     timeout.unref?.();
-    const abort = (): void => terminate(new Error("Bot identity verification cancelled"));
+    const abort = (): void => terminate(new Error(`${label} cancelled`));
     if (shutdownController.signal.aborted) abort();
     else shutdownController.signal.addEventListener("abort", abort, { once: true });
     const cleanup = (): void => {
@@ -251,6 +383,12 @@ async function runIdentityProcess(command: string, args: readonly string[], env:
   }).finally(() => { trackPendingChild(null); });
 }
 
+async function runIdentityProcess(command: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<{
+  status: number | null; stdout: string; stderr: string;
+}> {
+  return runBoundedCliProcess(command, args, env, "Bot identity verification");
+}
+
 export async function main(): Promise<void> {
 if (has("--help") || has("-h")) {
   say(`setup 内部机器人注册阶段
@@ -264,6 +402,11 @@ if (has("--help") || has("-h")) {
 }
 
 const autoSelect = has("--auto");
+const commentSubscription = flag("--comment-subscription") || "preserve";
+if (has("--comment-subscription") && commentSubscription === "preserve") die("--comment-subscription 缺少参数值");
+if (!["preserve", "none", "application"].includes(commentSubscription)) {
+  die("--comment-subscription 只支持 none 或 application");
+}
 const resultFileArg = flag("--result-file") || null;
 const resultFile = resultFileArg ? path.resolve(resultFileArg) : null;
 if (resultFile && (path.dirname(resultFile) !== path.resolve(CFG_DIR) || !/^\.setup-result-\d+\.json$/.test(path.basename(resultFile)))) {
@@ -274,6 +417,12 @@ if (argv.some((arg) => arg === "--app-id" || arg.startsWith("--app-id="))) {
 }
 if (!autoSelect) die("setup 注册阶段必须由交互式选择流程启动");
 say("[setup 1/5] 在网页选择已有机器人或创建新机器人");
+if (commentSubscription === "application") {
+  say(`! 已显式选择 ${commentSubscription} 维度评论订阅：一旦平台状态验证为已订阅，Bot 可见文档中实际送达的每条支持评论都会进入 Inbox 并唤醒 Agent，不要求 @Bot。`);
+  say("! setup 将通过官方 lark-cli 的结构化 API 请求创建该订阅，并以只读 subscription_status 二次核验；不会从意图或事件配置推断订阅已生效。");
+} else if (commentSubscription === "none") {
+  say("! 已显式选择 none：setup 将取消 application/Bot 维度的评论订阅，并用 subscription_status 核验；之后仅 @Bot 评论进入 Inbox。");
+}
 
 const TENANT_SCOPES = [
   "im:message",
@@ -291,6 +440,8 @@ const TENANT_SCOPES = [
   // drive.notice.comment_add_v1 and the stable comment read/reply APIs are
   // currently delivered by Feishu under the aggregate drive tenant scope.
   "drive:drive",
+  "docs:document.comment:read",
+  "docs:document.comment:create",
 ];
 const TENANT_EVENTS = ["im.message.receive_v1", "im.message.message_read_v1", "drive.notice.comment_add_v1"];
 let pollingCount = 0;
@@ -328,6 +479,13 @@ const prior: StoredCredential = (() => {
   try { return JSON.parse(fs.readFileSync(botFile, "utf8")) as StoredCredential; }
   catch { return {}; }
 })();
+const requestedAt = new Date().toISOString();
+const priorSubscription = documentCommentSubscriptionCapability(prior);
+const documentCommentSubscription: DocumentCommentSubscriptionCapability = commentSubscription === "application"
+  ? { mode: "none", status: "requested-unverified", source: "setup-opt-in", dimension: commentSubscription, requestedAt }
+  : commentSubscription === "none" || !priorSubscription
+    ? { mode: "none", status: "safe-default", source: "setup-default", updatedAt: requestedAt }
+    : priorSubscription;
 
 if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_CHOICE === "1")) {
   const existing = larkinConfig.loadConfig(process.env).config.agents[id];
@@ -401,6 +559,12 @@ try {
         scope: "drive:drive",
         requestedAt: new Date().toISOString(),
       },
+      documentCommentReply: {
+        status: "requested-unverified",
+        scope: "docs:document.comment:create",
+        requestedAt: new Date().toISOString(),
+      },
+      documentCommentSubscription,
     },
   }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   fs.renameSync(stagedBotFile, botFile);
@@ -411,6 +575,10 @@ try {
 say(`✓ 凭证已写入 ${botFile}（0600，Secret 不回显）`);
 say("! card.action.trigger 已请求但尚未证明生效；启动后运行 Agent CLI 的 interaction callback-probe，发送并点击验证卡，状态变为 verified-effective 后才能创建业务交互卡片。");
 say("! drive.notice.comment_add_v1 + drive:drive 已请求但尚未真实验证；发布配置、授予 Bot 文档访问权并在测试文档评论中 @Bot 后，larkin agents 会显示事件是否到达及读取失败诊断。");
+say("! docs:document.comment:create 已请求但尚未真实验证；它覆盖 in-thread reply 与 whole-document create_v2 fallback，真实回复成功前不声明生效。");
+say(documentCommentSubscription.status === "platform-verified"
+  ? `✓ 文档评论订阅已保留：${documentCommentSubscription.dimension} / platform-verified`
+  : `! 文档评论订阅=${documentCommentSubscription.status}；未验证前仅 @Bot 评论进入 Inbox。`);
 
 const targetAgent = flag("--agent") || id;
 const bindArgs = ["--profile", id, "--yes", "--agent", targetAgent];
@@ -453,9 +621,25 @@ try {
     await wait(delay);
   }
   if (!verified) throw new Error("Bot identity verification failed");
+  if (commentSubscription !== "preserve") {
+    const reconciled = await applyDocumentCommentSubscription({
+      mode: commentSubscription as "none" | DocumentCommentSubscriptionDimension,
+      command: official.command,
+      argsPrefix: official.argsPrefix,
+      env: cliEnv,
+      markVerified: () => { markDocumentCommentSubscriptionVerified(CFG_DIR, id, "application"); },
+    });
+    if (reconciled.subscribed && reconciled.dimension) {
+      say(`✓ 文档评论订阅已由 subscription_status 验证：${reconciled.dimension}`);
+    } else {
+      say(`✓ ${reconciled.dimension} 维度文档评论订阅已取消并由 subscription_status 验证；仅 @Bot 评论进入 Inbox。`);
+    }
+  }
 } catch (error) {
-  void error;
-  die("Agent lark-channel binding/凭证校验失败；权威 bot 凭证已保留，请重跑 larkin setup");
+  const diagnostic = errorMessage(error);
+  if (diagnostic.startsWith("document comment application subscription")
+      || diagnostic.startsWith("document comment local verified-state persistence")) say(`! ${diagnostic}`);
+  die("Agent lark-channel binding/凭证校验失败或评论订阅核验失败；安全本地状态与权威 bot 凭证已保留，请检查身份授权后重跑 larkin setup");
 }
 say("✓ 官方 lark-channel workspace 已绑定（identity=bot-only），Bot 凭证校验通过");
 say(`\n[setup 4/5] ✓ Agent ${id} 已配置`);

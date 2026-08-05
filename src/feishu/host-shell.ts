@@ -23,8 +23,8 @@ import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
 import type { RuntimeHost, RuntimeHostEvent } from "../runtime/runtime-host.js";
 import { providerAuthenticationFailureReadiness, RuntimePrerequisiteError } from "../runtime/runtime-readiness.js";
-import { verifyCallbackProbe } from "../platform/callback-capability.js";
-import { loadConfig, resolveAgentGlobalMentionPolicy, resolveMentionPolicy } from "../platform/config.js";
+import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
+import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { isChannelReconnecting } from "../app/agent-readiness.js";
@@ -67,12 +67,14 @@ interface PendingDocumentComment {
   operatorOpenId: string;
   timestamp: number;
   noticeType: string;
-  mentionPolicy: "require" | "free";
-  mentionPolicySource: "agent" | "global";
+  subscriptionMode: "none" | "subscribed";
+  subscriptionStatus: "safe-default" | "requested-unverified" | "platform-verified";
+  subscriptionSource: "legacy-default" | "setup-default" | "setup-opt-in" | "platform-status";
+  subscriptionDimension: "application" | null;
   mentionedBot: boolean;
   queuedAt: string;
 }
-interface PendingDocumentCommentState { version: 2; items: Record<string, PendingDocumentComment> }
+interface PendingDocumentCommentState { version: 3; items: Record<string, PendingDocumentComment> }
 const PENDING_DOCUMENT_COMMENT_LIMIT = 256;
 interface AgentStateRecord { store: AgentStateStore; state: AgentState }
 interface HostFrame {
@@ -442,9 +444,19 @@ export function createHostShell({
     channelFor: (agent) => interactionChannels.get(agent.agentId),
     log,
   });
-  const emptyPendingDocumentComments = (): PendingDocumentCommentState => ({ version: 2, items: {} });
+  const emptyPendingDocumentComments = (): PendingDocumentCommentState => ({ version: 3, items: {} });
   const validPendingDocumentComment = (value: unknown): value is PendingDocumentComment => {
     if (!isRecord(value)) return false;
+    const validSubscription = (value.subscriptionMode === "subscribed"
+      && value.subscriptionStatus === "platform-verified"
+      && value.subscriptionSource === "platform-status"
+      && value.subscriptionDimension === "application")
+      || (value.subscriptionMode === "none" && value.subscriptionStatus === "safe-default"
+        && (value.subscriptionSource === "legacy-default" || value.subscriptionSource === "setup-default")
+        && value.subscriptionDimension === null)
+      || (value.subscriptionMode === "none" && value.subscriptionStatus === "requested-unverified"
+        && value.subscriptionSource === "setup-opt-in"
+        && value.subscriptionDimension === "application");
     return typeof value.messageId === "string" && /^doc_comment_[0-9a-f]{32}$/.test(value.messageId)
       && typeof value.fileToken === "string" && /^[A-Za-z0-9_-]+$/.test(value.fileToken)
       && typeof value.fileType === "string" && ["doc", "docx", "sheet", "file"].includes(value.fileType)
@@ -453,9 +465,9 @@ export function createHostShell({
       && typeof value.operatorOpenId === "string" && !!value.operatorOpenId
       && Number.isSafeInteger(value.timestamp) && Number(value.timestamp) > 0
       && typeof value.noticeType === "string" && !!value.noticeType
-      && (value.mentionPolicy === "require" || value.mentionPolicy === "free")
-      && (value.mentionPolicySource === "agent" || value.mentionPolicySource === "global")
+      && validSubscription
       && typeof value.mentionedBot === "boolean"
+      && (value.subscriptionMode !== "none" || value.mentionedBot === true)
       && typeof value.queuedAt === "string" && Number.isFinite(Date.parse(value.queuedAt));
   };
   const normalizePendingDocumentComments = (value: unknown): PendingDocumentCommentState => {
@@ -465,8 +477,8 @@ export function createHostShell({
     for (const [messageId, candidate] of Object.entries(raw)) {
       if (Object.keys(normalized.items).length >= PENDING_DOCUMENT_COMMENT_LIMIT) break;
       if (validPendingDocumentComment(candidate) && candidate.messageId === messageId) normalized.items[messageId] = candidate;
-      // Unreleased v1 rows without policy metadata cannot prove their original
-      // acceptance decision. Drop them during the bounded v2 upgrade instead
+      // Older rows whose acceptance depended on an IM mention policy cannot
+      // prove the new subscription boundary. Drop them during the bounded v3 upgrade
       // of guessing authorization or allowing stale rows to consume capacity.
     }
     return normalized;
@@ -487,7 +499,7 @@ export function createHostShell({
   const pendingRecord = (
     agent: ConfiguredAgent,
     event: CommentEvent,
-    policy: { effective: "require" | "free"; source: "agent" | "global" },
+    subscription: EffectiveDocumentCommentSubscription,
   ): PendingDocumentComment => ({
     messageId: documentCommentMessageId(agent.agentId, event),
     fileToken: event.fileToken,
@@ -497,8 +509,10 @@ export function createHostShell({
     operatorOpenId: event.operator.openId,
     timestamp: event.timestamp,
     noticeType: documentCommentNoticeType(event),
-    mentionPolicy: policy.effective,
-    mentionPolicySource: policy.source,
+    subscriptionMode: subscription.mode,
+    subscriptionStatus: subscription.status,
+    subscriptionSource: subscription.source,
+    subscriptionDimension: subscription.dimension,
     mentionedBot: event.mentionedBot,
     queuedAt: new Date().toISOString(),
   });
@@ -560,9 +574,11 @@ export function createHostShell({
       agentId: agent.agentId,
       event,
       context,
-      mentionPolicy: {
-        effective: record.mentionPolicy,
-        source: record.mentionPolicySource,
+      subscription: {
+        mode: record.subscriptionMode,
+        status: record.subscriptionStatus,
+        source: record.subscriptionSource,
+        dimension: record.subscriptionDimension,
         mentionedBot: record.mentionedBot,
       },
     });
@@ -620,15 +636,14 @@ export function createHostShell({
       await processPendingDocumentComment(agent, existing, channel);
       return;
     }
-    let policy: { effective: "require" | "free"; source: "agent" | "global" };
-    try { policy = resolveAgentGlobalMentionPolicy(loadConfig(env).config, agent.agentId); }
+    let subscription: EffectiveDocumentCommentSubscription;
+    try { subscription = readDocumentCommentSubscription(larkinHome, agent.feishuProfile); }
     catch {
-      recordDocumentCommentFailure(agent, "mention_policy_resolution_failure", "current_config_unavailable");
-      log(`document comment mention policy 解析失败，忽略 agent=${agent.name}`);
-      return;
+      subscription = { mode: "none", status: "safe-default", source: "legacy-default", dimension: null };
+      log(`document comment subscription 状态不可读，使用安全默认 agent=${agent.name}`);
     }
-    if (policy.effective === "require" && !event.mentionedBot) {
-      log(`document comment mention policy 未满足，忽略 agent=${agent.name} policy=require source=${policy.source}`);
+    if (subscription.mode !== "subscribed" && !event.mentionedBot) {
+      log(`document comment 未 @Bot 且无已验证订阅，忽略 agent=${agent.name} status=${subscription.status} source=${subscription.source}`);
       return;
     }
     if (!event.operator.openId || event.operator.openId === agent.botOpenId || event.operator.openId === channel.botIdentity?.openId) {
@@ -640,7 +655,7 @@ export function createHostShell({
       log(`document comment 文件类型不支持，忽略 agent=${agent.name}`);
       return;
     }
-    const record = pendingRecord(agent, event, policy);
+    const record = pendingRecord(agent, event, subscription);
     let durableRecord: PendingDocumentComment;
     try {
       durableRecord = persistPendingDocumentComment(agent, record);

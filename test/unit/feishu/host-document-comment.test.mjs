@@ -24,6 +24,19 @@ function writePolicyConfig(root, agentId, { globalPolicy = "require", agentPolic
   })}\n`, { mode: 0o600 });
 }
 
+function writeCommentSubscription(root, agentId) {
+  const bots = path.join(root, "bots");
+  fs.mkdirSync(bots, { recursive: true, mode: 0o700 });
+  const file = path.join(bots, `${agentId}.json`);
+  fs.writeFileSync(file, `${JSON.stringify({
+    appId: agentId, appSecret: "fixture-secret", tenant: "feishu",
+    capabilities: { documentCommentSubscription: {
+      mode: "subscribed", status: "platform-verified", source: "platform-status", dimension: "application",
+      requestedAt: "2026-08-05T00:00:00.000Z", verifiedAt: "2026-08-05T00:01:00.000Z",
+    } },
+  })}\n`, { mode: 0o600 });
+}
+
 test("production Host comment wiring persists one semantic Inbox wake and fails closed on non-mentions/self/duplicates", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-comment-host-"));
   fs.chmodSync(root, 0o700);
@@ -91,7 +104,10 @@ test("production Host comment wiring persists one semantic Inbox wake and fails 
     assert.equal(inbox.length, 1);
     assert.equal(inbox[0].kind, "document_comment");
     assert.equal(inbox[0].wake, true);
-    assert.deepEqual([inbox[0].mention_policy, inbox[0].mention_policy_source, inbox[0].mentioned_bot], ["require", "global", true]);
+    assert.deepEqual([
+      inbox[0].comment_subscription_mode, inbox[0].comment_subscription_status,
+      inbox[0].comment_subscription_source, inbox[0].comment_subscription_dimension, inbox[0].mentioned_bot,
+    ], ["none", "safe-default", "legacy-default", null, true]);
     assert.equal(inbox[0].target, "document-comment:docx:doc_token:comment_new:in-thread");
     assert.equal(inbox[0].content, "please review this");
     assert.equal(inbox[0].chat_id, undefined, "document comments must not masquerade as IM targets");
@@ -164,7 +180,7 @@ const recoveredComment = {
   }],
 };
 
-test("document comments resolve current Agent/global mention policy and never consult per-chat overrides", async () => {
+test("document comments use hot verified subscription state and never consult IM mention policies", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-mention-policy-"));
   fs.chmodSync(root, 0o700);
   const agentId = "cli_documentRecoveryA1";
@@ -185,9 +201,10 @@ test("document comments resolve current Agent/global mention policy and never co
     await waitFor(() => fixture.channel?.handlers);
 
     await fixture.channel.handlers.comment(unmentioned("global_require"));
-    assert.equal(fetches, 0, "global require must ignore an unmentioned comment even when a chat override is free");
+    assert.equal(fetches, 0, "safe default must ignore an unmentioned comment regardless of chat policy");
 
     writePolicyConfig(root, agentId, { globalPolicy: "free", chatMentionPolicies: { oc_document_fake: "require" } });
+    writeCommentSubscription(root, agentId);
     const globalFreeEvent = unmentioned("global_free");
     await fixture.channel.handlers.comment(globalFreeEvent);
     await fixture.channel.handlers.comment({
@@ -197,26 +214,25 @@ test("document comments resolve current Agent/global mention policy and never co
     assert.equal(fixture.store.readNdjson("inbox").filter((row) => row.comment_id === globalFreeEvent.commentId).length, 1,
       "free unmentioned redelivery must still produce exactly one canonical wake");
     assert.deepEqual([
-      fixture.deliveries[0].mention_policy,
-      fixture.deliveries[0].mention_policy_source,
+      fixture.deliveries[0].comment_subscription_mode,
+      fixture.deliveries[0].comment_subscription_status,
+      fixture.deliveries[0].comment_subscription_dimension,
       fixture.deliveries[0].mentioned_bot,
-    ], ["free", "global", false]);
+    ], ["subscribed", "platform-verified", "application", false]);
 
     writePolicyConfig(root, agentId, { globalPolicy: "require", agentPolicy: "free", chatMentionPolicies: { oc_document_fake: "require" } });
     await fixture.channel.handlers.comment(unmentioned("agent_free"));
     assert.equal(fixture.deliveries.length, 2);
     assert.deepEqual([
-      fixture.deliveries[1].mention_policy,
-      fixture.deliveries[1].mention_policy_source,
+      fixture.deliveries[1].comment_subscription_mode,
+      fixture.deliveries[1].comment_subscription_status,
       fixture.deliveries[1].mentioned_bot,
-    ], ["free", "agent", false]);
+    ], ["subscribed", "platform-verified", false]);
 
     writePolicyConfig(root, agentId, { globalPolicy: "free", agentPolicy: "require", chatMentionPolicies: { oc_document_fake: "free" } });
-    const fetchesBeforeAgentRequire = fetches;
     await fixture.channel.handlers.comment(unmentioned("agent_require"));
-    assert.equal(fetches, fetchesBeforeAgentRequire, "Agent require must override global/chat free without fetching");
-    assert.equal(fixture.deliveries.length, 2);
-    assert.equal(fixture.store.readNdjson("inbox").filter((row) => row.kind === "document_comment").length, 2);
+    assert.equal(fixture.deliveries.length, 3, "verified subscription must ignore global, Agent, and chat IM policies");
+    assert.equal(fixture.store.readNdjson("inbox").filter((row) => row.kind === "document_comment").length, 3);
   } finally {
     await fixture.shell.shutdown("test");
     fs.rmSync(root, { recursive: true, force: true });
@@ -227,6 +243,7 @@ test("comment fetch failure persists a private pending locator and reconnect rep
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-fetch-recovery-"));
   fs.chmodSync(root, 0o700);
   writePolicyConfig(root, "cli_documentRecoveryA1", { globalPolicy: "free" });
+  writeCommentSubscription(root, "cli_documentRecoveryA1");
   let failFetch = true;
   const logs = [];
   const fixture = recoveryFixture(root, { logs, fetchImpl: async () => {
@@ -250,10 +267,10 @@ test("comment fetch failure persists a private pending locator and reconnect rep
     await waitFor(() => fixture.deliveries.length === 1);
     assert.equal(fixture.store.readNdjson("inbox").length, 1);
     assert.deepEqual([
-      fixture.deliveries[0].mention_policy,
-      fixture.deliveries[0].mention_policy_source,
+      fixture.deliveries[0].comment_subscription_mode,
+      fixture.deliveries[0].comment_subscription_status,
       fixture.deliveries[0].mentioned_bot,
-    ], ["free", "global", false], "replay must preserve the original accepted policy decision");
+    ], ["subscribed", "platform-verified", false], "replay must preserve the original accepted subscription decision");
     assert.equal(Object.keys(fixture.store.readJson("documentComments", { items: {} }).items).length, 0);
     assert.doesNotMatch(logs.join("\n"), /doc_private_token|private comment body|selected private quote/);
   } finally {
@@ -280,10 +297,10 @@ test("same-process semantic redelivery uses the already-durable acceptance decis
     const pending = fixture.store.readJson("documentComments", { items: {} });
     const [durable] = Object.values(pending.items);
     assert.deepEqual([
-      durable.mentionPolicy,
-      durable.mentionPolicySource,
+      durable.subscriptionMode,
+      durable.subscriptionStatus,
       durable.mentionedBot,
-    ], ["require", "global", true]);
+    ], ["none", "safe-default", true]);
 
     writePolicyConfig(root, agentId, { globalPolicy: "free" });
     await fixture.channel.handlers.comment({
@@ -295,10 +312,10 @@ test("same-process semantic redelivery uses the already-durable acceptance decis
     assert.equal(fetches, 2);
     assert.equal(fixture.deliveries.length, 1);
     assert.deepEqual([
-      fixture.deliveries[0].mention_policy,
-      fixture.deliveries[0].mention_policy_source,
+      fixture.deliveries[0].comment_subscription_mode,
+      fixture.deliveries[0].comment_subscription_status,
       fixture.deliveries[0].mentioned_bot,
-    ], ["require", "global", true], "redelivery must process the durable record instead of a newly resolved policy");
+    ], ["none", "safe-default", true], "redelivery must process the durable record instead of newly resolved subscription state");
     assert.equal(Object.keys(fixture.store.readJson("documentComments", { items: {} }).items).length, 0);
     assert.equal(fixture.store.readNdjson("inbox").length, 1);
   } finally {
@@ -339,7 +356,7 @@ test("concurrent semantic redelivery joins one pending processor and cannot dupl
   }
 });
 
-test("v1 pending upgrade drops rows without acceptance metadata and retains bounded valid recovery", async () => {
+test("v3 pending upgrade drops rows with legacy IM-policy metadata and retains bounded valid recovery", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-pending-v1-upgrade-"));
   fs.chmodSync(root, 0o700);
   let fetches = 0;
@@ -357,8 +374,10 @@ test("v1 pending upgrade drops rows without acceptance metadata and retains boun
     operatorOpenId: recoveryEvent.operator.openId,
     timestamp: recoveryEvent.timestamp,
     noticeType: "add_reply",
-    mentionPolicy: "require",
-    mentionPolicySource: "global",
+    subscriptionMode: "none",
+    subscriptionStatus: "safe-default",
+    subscriptionSource: "legacy-default",
+    subscriptionDimension: null,
     mentionedBot: true,
     queuedAt: "2026-08-05T00:00:00.000Z",
   };
@@ -366,7 +385,11 @@ test("v1 pending upgrade drops rows without acceptance metadata and retains boun
   fixture.store.writeJson("documentComments", {
     version: 1,
     items: {
-      [staleId]: { ...valid, messageId: staleId, mentionPolicy: undefined, mentionPolicySource: undefined, mentionedBot: undefined },
+      [staleId]: {
+        ...valid, messageId: staleId,
+        subscriptionMode: undefined, subscriptionStatus: undefined, subscriptionSource: undefined, subscriptionDimension: undefined,
+        mentionPolicy: "free", mentionPolicySource: "global",
+      },
       [messageId]: valid,
     },
   });
@@ -374,15 +397,45 @@ test("v1 pending upgrade drops rows without acceptance metadata and retains boun
     await fixture.shell.start();
     await waitFor(() => fetches === 1);
     const upgraded = fixture.store.readJson("documentComments", { items: {} });
-    assert.equal(upgraded.version, 2);
+    assert.equal(upgraded.version, 3);
     assert.deepEqual(Object.keys(upgraded.items), [messageId]);
     assert.deepEqual([
-      upgraded.items[messageId].mentionPolicy,
-      upgraded.items[messageId].mentionPolicySource,
+      upgraded.items[messageId].subscriptionMode,
+      upgraded.items[messageId].subscriptionStatus,
       upgraded.items[messageId].mentionedBot,
-    ], ["require", "global", true]);
+    ], ["none", "safe-default", true]);
     assert.equal(Object.keys(upgraded.items).length <= 256, true);
     assert.equal(fs.statSync(fixture.store.paths.documentComments).mode & 0o777, 0o600);
+  } finally {
+    await fixture.shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart drops a forged v3 none-mode unmentioned row before fetch or Runtime delivery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-forged-pending-"));
+  fs.chmodSync(root, 0o700);
+  let fetches = 0;
+  const fixture = recoveryFixture(root, { fetchImpl: async () => { fetches += 1; return recoveredComment; } });
+  const forgedEvent = {
+    ...recoveryEvent, commentId: "comment_forged_unmentioned", mentionedBot: false,
+    raw: { event_id: "evt_forged_unmentioned", notice_type: "add_reply" },
+  };
+  const messageId = documentCommentMessageId("cli_documentRecoveryA1", forgedEvent);
+  fixture.store.writeJson("documentComments", { version: 3, items: { [messageId]: {
+    messageId, fileToken: forgedEvent.fileToken, fileType: forgedEvent.fileType, commentId: forgedEvent.commentId,
+    replyId: forgedEvent.replyId, operatorOpenId: forgedEvent.operator.openId, timestamp: forgedEvent.timestamp,
+    noticeType: "add_reply", subscriptionMode: "none", subscriptionStatus: "safe-default",
+    subscriptionSource: "legacy-default", subscriptionDimension: null, mentionedBot: false,
+    queuedAt: "2026-08-05T00:00:00.000Z",
+  } } });
+  try {
+    await fixture.shell.start();
+    await waitFor(() => fixture.channel?.handlers);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(fetches, 0);
+    assert.equal(fixture.deliveries.length, 0);
+    assert.deepEqual(fixture.store.readJson("documentComments", { items: {} }), { version: 3, items: {} });
   } finally {
     await fixture.shell.shutdown("test");
     fs.rmSync(root, { recursive: true, force: true });
@@ -439,14 +492,15 @@ test("pending saturation preserves all unresolved records and fails closed with 
     items[messageId] = {
       messageId, fileToken: `retained_${index}`, fileType: "docx", commentId: `comment_${index}`,
       replyId: `reply_${index}`, operatorOpenId: "ou_retained", timestamp: 1_786_001_000_000 + index,
-      noticeType: "add_reply", mentionPolicy: "require", mentionPolicySource: "global", mentionedBot: true,
+      noticeType: "add_reply", subscriptionMode: "none", subscriptionStatus: "safe-default",
+      subscriptionSource: "legacy-default", subscriptionDimension: null, mentionedBot: true,
       queuedAt: "2026-08-05T00:00:00.000Z",
     };
   }
   try {
     await fixture.shell.start();
     await waitFor(() => fixture.channel?.handlers);
-    fixture.store.writeJson("documentComments", { version: 2, items });
+    fixture.store.writeJson("documentComments", { version: 3, items });
     await fixture.channel.handlers.comment(recoveryEvent);
     const retained = fixture.store.readJson("documentComments", { items: {} });
     assert.equal(Object.keys(retained.items).length, 256);

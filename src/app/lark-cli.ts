@@ -311,12 +311,27 @@ function runCommentReply(
   }
   if (claim === "ambiguous") throw new Error("comment reply 上次调用结果不明确，已 fail-closed 以避免重复评论；请由用户检查原评论线程");
   if (claim === "conflict") throw new Error("comment reply 已为同一 Inbox 消息提交不同正文，拒绝覆盖或重复发送");
-  const url = target.topLevel
-    ? `/open-apis/drive/v1/files/${encodeURIComponent(target.fileToken)}/comments?file_type=${encodeURIComponent(target.fileType)}`
-    : `/open-apis/drive/v1/files/${encodeURIComponent(target.fileToken)}/comments/${encodeURIComponent(target.commentId)}/replies?file_type=${encodeURIComponent(target.fileType)}`;
-  const content = { elements: [{ type: "text_run", text_run: { text: input.text } }] };
-  const body = target.topLevel ? { reply_list: { replies: [{ content }] } } : { content };
-  const result = callNative(["api", "POST", url, "--data", JSON.stringify(body), "--as", "bot"], privateEnv, io, dependencies);
+  const nativeArgs = target.topLevel
+    ? [
+        "drive", "file.comments", "create_v2",
+        "--file-token", target.fileToken,
+        "--data", JSON.stringify({
+          file_type: target.fileType,
+          reply_elements: [{ type: "text", text: input.text }],
+        }),
+        "--as", "bot",
+      ]
+    : [
+        "drive", "file.comment.replys", "create",
+        "--file-token", target.fileToken,
+        "--comment-id", target.commentId,
+        "--file-type", target.fileType,
+        "--data", JSON.stringify({
+          content: { elements: [{ type: "text_run", text_run: { text: input.text } }] },
+        }),
+        "--as", "bot",
+      ];
+  const result = callNative(nativeArgs, privateEnv, io, dependencies);
   const terminalStatus = !result.error && result.status === 0 ? "sent"
     : definitiveProviderRejection(result) ? "failed" : null;
   if (terminalStatus) {

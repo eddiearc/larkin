@@ -75,6 +75,8 @@ const TENANT_SCOPES = [
   "im:chat.group_info:readonly",
   "im:chat.members:read",
   "drive:drive",
+  "docs:document.comment:read",
+  "docs:document.comment:create",
 ];
 const TENANT_EVENTS = ["drive.notice.comment_add_v1"];
 const log = (...args: unknown[]): void => { process.stderr.write(`${args.join(" ")}\n`); };
@@ -133,6 +135,7 @@ export async function main(): Promise<void> {
     markSetupCapabilitiesRequested(config.larkinHome, result?.client_id || APP_ID);
     log("  card.action.trigger 仍是 requested-unverified；请确认发布后执行 interaction callback-probe 并真实点击，验证前不会创建业务交互卡片。");
     log("  document comment capability=publish_or_event_unverified reason=publication_and_real_event_unverified；配置发布与真实事件到达均未验证，不声明生效。");
+    log("  document comment reply scope=docs:document.comment:create requested-unverified；同时覆盖 in-thread reply 与 whole-document create_v2 fallback。");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     log("  本机没有该 App 的 bot credential，无法记录 callback readiness；能力保持 missing，请先运行 larkin setup 后再执行 callback-probe。");

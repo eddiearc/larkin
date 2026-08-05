@@ -73,11 +73,17 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     let result = run([]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).appId, app);
-    const commentCapability = JSON.parse(fs.readFileSync(path.join(root, "bots", `${app}.json`), "utf8")).capabilities.documentCommentEvent;
+    const updatedCredential = JSON.parse(fs.readFileSync(path.join(root, "bots", `${app}.json`), "utf8"));
+    const commentCapability = updatedCredential.capabilities.documentCommentEvent;
     assert.deepEqual({ status: commentCapability.status, event: commentCapability.event, scope: commentCapability.scope }, {
       status: "requested-unverified", event: "drive.notice.comment_add_v1", scope: "drive:drive",
     });
     assert.equal(Number.isFinite(Date.parse(commentCapability.requestedAt)), true);
+    assert.deepEqual({
+      status: updatedCredential.capabilities.documentCommentReply.status,
+      scope: updatedCredential.capabilities.documentCommentReply.scope,
+    }, { status: "requested-unverified", scope: "docs:document.comment:create" });
+    assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).addons.scopes.tenant.includes("docs:document.comment:create"), true);
     assert.match(result.stderr, /capability=publish_or_event_unverified reason=publication_and_real_event_unverified/);
     assert.equal(fs.existsSync(spawnMarker), false, "QR callback without --send-to must not spawn lark-cli send");
     fs.rmSync(marker);

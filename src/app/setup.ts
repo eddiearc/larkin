@@ -31,7 +31,12 @@ if (argv.some((arg) => arg === "--no-dashboard" || arg.startsWith("--no-dashboar
 }
 if (has("--start") && has("--no-start")) die("--start 与 --no-start 不能同时使用");
 
-const OPT = { runtime: flag("--runtime") || null, start: !has("--no-start"), help: has("--help") || has("-h") };
+const commentSubscription = flag("--comment-subscription") || null;
+if (has("--comment-subscription") && !commentSubscription) die("--comment-subscription 缺少参数值");
+if (commentSubscription && !["none", "application"].includes(commentSubscription)) {
+  die("--comment-subscription 只支持 none 或 application");
+}
+const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: !has("--no-start"), help: has("--help") || has("-h") };
 if (OPT.help) {
   say(`larkin setup — Create or connect a Feishu bot, then configure and attach its Agent
 
@@ -40,6 +45,7 @@ Usage:
 
 Options:
   --runtime <runtime>                   Select the Agent runtime
+  --comment-subscription <mode>         none (safe default) or application
   --no-start                           Configure the Agent without starting or attaching it
 
 setup handles browser authorization, permission grants, credential storage, Agent configuration,
@@ -99,6 +105,7 @@ export async function main(): Promise<void> {
   const resultFile = path.join(CFG_DIR, `.setup-result-${process.pid}.json`);
   const registerArgs = ["--auto", "--result-file", resultFile];
   if (OPT.runtime) registerArgs.push("--runtime", OPT.runtime);
+  if (OPT.commentSubscription) registerArgs.push("--comment-subscription", OPT.commentSubscription);
   const result = await runForeground("bot-register", registerArgs);
   if (result.code !== 0) die("机器人授权或 Agent 配置未完成");
 

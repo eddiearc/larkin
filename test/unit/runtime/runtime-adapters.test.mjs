@@ -78,7 +78,7 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /larkin interaction resolve/);
   assert.match(prompt.content, /larkin comment reply --message-id/);
   assert.match(prompt.content, /kind=document_comment/);
-  assert.match(prompt.content, /mention_policy \(require\/free\).*mention_policy_source \(agent\/global\).*mentioned_bot/);
+  assert.match(prompt.content, /comment_subscription_mode\/status\/source\/dimension.*mentioned_bot.*IM require\/free settings do not apply/);
   assert.doesNotMatch(prompt.content, /document_comment is a verified explicit @/);
   assert.match(prompt.content, /not an IM target/);
   assert.match(prompt.content, /Only a successful interaction resolve/);

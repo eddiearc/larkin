@@ -286,6 +286,24 @@ test("corrupt and crash remnants share bounded file, byte, and age retention", (
   bounded.prune(Date.now()); status = bounded.status(); assert.equal(fs.existsSync(aged), false); assert.ok(status.oldestRemnantAgeMs === null || status.oldestRemnantAgeMs <= 100);
 });
 
+test("directory remnants recursively count contained bytes and cleanup does not double-count dropped records", async () => {
+  const root = temp(); const spool = new TelemetrySpool(config(root, { maxFiles: 100, maxBytes: 100, maxAgeMs: 60_000 }));
+  spool.status(); const spoolDir = config(root).spoolDir;
+  for (const name of [".stale-lock-large", ".purge-large.dir"]) {
+    const directory = path.join(spoolDir, name); fs.mkdirSync(directory); fs.writeFileSync(path.join(directory, "owner.json"), "x".repeat(12 * 1024));
+  }
+  const outside = path.join(root, "outside-large"); fs.writeFileSync(outside, "z".repeat(50 * 1024));
+  fs.symlinkSync(outside, path.join(spoolDir, ".stale-lock-large", "outside-link"));
+  let status = spool.status(); assert.ok(status.remnantBytes > 20 * 1024 && status.remnantBytes < 30 * 1024, JSON.stringify(status));
+  spool.prune(); status = spool.status(); assert.equal(status.remnantFiles, 0); assert.equal(status.cleanedRemnantFiles, 2); assert.equal(status.droppedFiles, 0);
+
+  const corrupt = path.join(spoolDir, `span-${crypto.randomUUID()}.json`); fs.writeFileSync(corrupt, `{broken${"x".repeat(12 * 1024)}`);
+  await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () => new Response("{}") });
+  assert.equal(spool.status().droppedFiles, 1); assert.equal(spool.status().remnantFiles, 1);
+  spool.prune(); status = spool.status(); assert.equal(status.droppedFiles, 1, "quarantine cleanup must not count the corrupt record twice");
+  assert.equal(status.cleanedRemnantFiles, 3); assert.equal(status.remnantFiles, 0);
+});
+
 test("configured background upload drains a restarted spool without blocking the producer", async () => {
   const root = temp(); const spool = new TelemetrySpool(config(root));
   spool.enqueue(payload());

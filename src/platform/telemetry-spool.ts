@@ -10,13 +10,13 @@ export interface QueueRecord { file: string; payload: OtlpPayload; device: numbe
 export interface QueueStatus {
   queuedFiles: number; queuedBytes: number; oldestAgeMs: number | null;
   remnantFiles: number; remnantBytes: number; oldestRemnantAgeMs: number | null;
-  droppedFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null;
+  droppedFiles: number; cleanedRemnantFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null;
 }
-interface Diagnostics { droppedFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null }
+interface Diagnostics { droppedFiles: number; cleanedRemnantFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null }
 interface BundleRecord { sha256: string; payload: OtlpPayload }
 interface TelemetryBundle { format: "larkin-otlp-bundle"; version: 1; createdAt: string; records: BundleRecord[] }
 interface ReadyFile { file: string; size: number; mtimeMs: number; device: number; inode: number }
-interface ManagedEntry extends ReadyFile { directory: boolean }
+interface ManagedEntry extends ReadyFile { directory: boolean; remnant: boolean }
 
 const READY = /^(?:span-[0-9a-f-]+|import-[0-9a-f]{64})\.json$/;
 const REMNANT = /^\.(?:corrupt|write|ack|delete|stale-lock|purge)-[0-9A-Za-z-]+(?:\.(?:json|tmp|dir))?$/;
@@ -26,7 +26,7 @@ const SPAN_NAMES = new Set(["larkin.message.process", "feishu.receive", "runtime
 const ATTRIBUTE_KEYS = new Set(["service.name", "service.version", "service.instance.id", "larkin.agent.id_hash", "messaging.message.id_hash", "larkin.message.relation", "larkin.observation.boundary", "larkin.activity.type"]);
 const SENSITIVE = /(?:bearer\s|(?:api[_-]?key|authorization|password|token|secret|cookie)\s*[=:]|(?:sk|ghp|github_pat)-?[a-z0-9_-]{8})/i;
 const ABSOLUTE_PATH = /(?:^|[\s"'=])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/;
-const emptyDiagnostics = (): Diagnostics => ({ droppedFiles: 0, droppedSpans: 0, lastUploadAt: null, lastErrorCategory: null });
+const emptyDiagnostics = (): Diagnostics => ({ droppedFiles: 0, cleanedRemnantFiles: 0, droppedSpans: 0, lastUploadAt: null, lastErrorCategory: null });
 const invalidPayload = (): never => { throw new Error("invalid telemetry payload"); };
 
 function validateValue(value: unknown, depth = 0): void {
@@ -177,9 +177,35 @@ export class TelemetrySpool {
       try {
         const stat = fs.lstatSync(file); const directory = stat.isDirectory() && !stat.isSymbolicLink();
         return (stat.isFile() || directory) && !stat.isSymbolicLink()
-          ? [{ file, size: stat.size, mtimeMs: stat.mtimeMs, device: stat.dev, inode: stat.ino, directory }] : [];
+          ? [{ file, size: directory ? this.directoryBytes(file, stat) : stat.size, mtimeMs: stat.mtimeMs,
+            device: stat.dev, inode: stat.ino, directory, remnant: true }] : [];
       } catch { return []; }
     }).sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
+  }
+
+  private directoryBytes(root: string, rootStat: fs.Stats): number {
+    const saturation = this.config.maxBytes + 1; const seen = new Set<string>(); let entries = 0;
+    const spoolRoot = fs.realpathSync(this.config.spoolDir); const prefix = `${spoolRoot}${path.sep}`;
+    const visit = (directory: string, stat: fs.Stats, depth: number): number => {
+      const identity = `${stat.dev}:${stat.ino}`; if (seen.has(identity)) return 0; seen.add(identity);
+      if (depth > 8 || entries > 1024) return saturation;
+      try { const real = fs.realpathSync(directory); if (real !== spoolRoot && !real.startsWith(prefix)) return saturation; }
+      catch { return saturation; }
+      let total = stat.size; let names: string[];
+      try { names = fs.readdirSync(directory); } catch { return saturation; }
+      for (const name of names) {
+        entries += 1; if (entries > 1024) return saturation;
+        const child = path.join(directory, name); let childStat: fs.Stats;
+        try { childStat = fs.lstatSync(child); } catch { continue; }
+        if (childStat.isSymbolicLink()) { total += childStat.size; continue; }
+        if (childStat.isFile()) total += childStat.size;
+        else if (childStat.isDirectory()) total += visit(child, childStat, depth + 1);
+      }
+      try { const after = fs.lstatSync(directory); if (after.isSymbolicLink() || after.dev !== stat.dev || after.ino !== stat.ino) return saturation; }
+      catch { return saturation; }
+      return total;
+    };
+    return visit(root, rootStat, 0);
   }
 
   private atomicWrite(file: string, bytes: Buffer): void {
@@ -280,6 +306,7 @@ export class TelemetrySpool {
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(this.config.spoolDir, "diagnostics.json"), "utf8")) as Partial<Diagnostics>;
       return { droppedFiles: Number.isSafeInteger(parsed.droppedFiles) && Number(parsed.droppedFiles) >= 0 ? Number(parsed.droppedFiles) : 0,
+        cleanedRemnantFiles: Number.isSafeInteger(parsed.cleanedRemnantFiles) && Number(parsed.cleanedRemnantFiles) >= 0 ? Number(parsed.cleanedRemnantFiles) : 0,
         droppedSpans: Number.isSafeInteger(parsed.droppedSpans) && Number(parsed.droppedSpans) >= 0 ? Number(parsed.droppedSpans) : 0,
         lastUploadAt: typeof parsed.lastUploadAt === "string" ? parsed.lastUploadAt : null,
         lastErrorCategory: typeof parsed.lastErrorCategory === "string" ? parsed.lastErrorCategory : null };
@@ -293,18 +320,22 @@ export class TelemetrySpool {
   prune(now = Date.now()): void {
     const release = this.acquireLease(); if (!release) return;
     try {
-      let files: ManagedEntry[] = [...this.readyFiles().map((entry) => ({ ...entry, directory: false })), ...this.remnantFiles()]
+      let files: ManagedEntry[] = [...this.readyFiles().map((entry) => ({ ...entry, directory: false, remnant: false })), ...this.remnantFiles()]
         .sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
-      let dropped = 0;
-      for (const entry of files.filter((item) => now - item.mtimeMs > this.config.maxAgeMs)) if (this.removeManaged(entry)) dropped += 1;
-      files = [...this.readyFiles().map((entry) => ({ ...entry, directory: false })), ...this.remnantFiles()]
+      let dropped = 0; let cleaned = 0;
+      const remove = (entry: ManagedEntry): void => { if (this.removeManaged(entry)) { if (entry.remnant) cleaned += 1; else dropped += 1; } };
+      for (const entry of files.filter((item) => now - item.mtimeMs > this.config.maxAgeMs)) remove(entry);
+      files = [...this.readyFiles().map((entry) => ({ ...entry, directory: false, remnant: false })), ...this.remnantFiles()]
         .sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
       let bytes = files.reduce((sum, entry) => sum + entry.size, 0);
       while (files.length > this.config.maxFiles || bytes > this.config.maxBytes) {
         const oldest = files.shift(); if (!oldest) break;
-        if (this.removeManaged(oldest)) { bytes -= oldest.size; dropped += 1; }
+        const before = dropped + cleaned; remove(oldest); if (dropped + cleaned > before) bytes -= oldest.size;
       }
-      if (dropped) try { this.updateDiagnostics({ droppedFiles: this.diagnostics().droppedFiles + dropped }); } catch { /* isolated */ }
+      if (dropped || cleaned) try {
+        const diagnostic = this.diagnostics(); this.updateDiagnostics({ droppedFiles: diagnostic.droppedFiles + dropped,
+          cleanedRemnantFiles: diagnostic.cleanedRemnantFiles + cleaned });
+      } catch { /* isolated */ }
     } finally { release(); }
   }
 

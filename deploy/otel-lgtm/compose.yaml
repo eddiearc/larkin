@@ -1,0 +1,14 @@
+services:
+  lgtm:
+    image: grafana/otel-lgtm:0.27.1
+    container_name: larkin-otel-lgtm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - larkin-otel-lgtm-data:/data
+
+volumes:
+  larkin-otel-lgtm-data:

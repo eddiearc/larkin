@@ -11,6 +11,9 @@ Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu. It provides
 
 ## Usage
 
+OpenTelemetry 耗时瀑布、本地耐久队列、离线搬运与 Grafana OTEL-LGTM 展示见
+[docs/opentelemetry.md](./docs/opentelemetry.md)。
+
 ```bash
 larkin setup
 larkin start

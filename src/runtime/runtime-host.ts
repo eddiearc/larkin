@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
+import { SpanKind } from "@opentelemetry/api";
 import type { ContextPromptBuilder } from "../agent/context-prompt.js";
 import type {
   NormalizedRuntimeEvent, RuntimeAdapter, RuntimeInput, RuntimeInputResult, RuntimeSession,
@@ -14,6 +15,7 @@ import {
 } from "./runtime-readiness.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
+import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
 
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
@@ -166,17 +168,22 @@ export function createRuntimeHost(options: {
   stateStoreFor?(agentId: string): DeliveryStateStore;
   assertOfficialCliReady?(config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): void | Promise<void>;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
+  telemetry?: TelemetryRuntime;
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
   const listeners = new Set<(event: RuntimeHostEvent) => void>();
   const log = options.log ?? (() => {});
+  const telemetry = options.telemetry;
   const retryPolicy = {
     baseDelayMs: options.retryPolicy?.baseDelayMs ?? 250,
     maxDelayMs: options.retryPolicy?.maxDelayMs ?? 10_000,
     maxAttempts: options.retryPolicy?.maxAttempts ?? 6,
     stableWindowMs: options.retryPolicy?.stableWindowMs ?? 30_000,
   };
-  const emit = (event: RuntimeHostEvent): void => { for (const listener of listeners) listener(event); };
+  const emit = (event: RuntimeHostEvent): void => {
+    if (event.type === "delivery") telemetry?.delivery(event.agentId, event.messageId, event.status);
+    for (const listener of listeners) listener(event);
+  };
   const runtimeEnv = (config: AgentRuntimeConfig, generation?: string): NodeJS.ProcessEnv => {
     const base: NodeJS.ProcessEnv = {
       LARKIN_AGENT_ID: config.agentId,
@@ -492,6 +499,7 @@ export function createRuntimeHost(options: {
 
   const observe = (agent: ManagedAgent, session: RuntimeSession, event: NormalizedRuntimeEvent): void => {
     if (agent.session !== session) return; // Ignore late output from a replaced child.
+    telemetry?.runtimeEvent(agent.config.agentId, event);
     emit({ type: "runtime", agentId: agent.config.agentId, event });
     if (event.type === "session-init") {
       agent.config.sessionId = event.sessionId;
@@ -827,9 +835,10 @@ export function createRuntimeHost(options: {
       }
     },
     async deliver(agentId, envelope): Promise<DeliveryReceipt> {
-      const agent = managed.get(agentId); if (!agent) throw new Error(`unknown runtime Agent: ${agentId}`);
-      reconcileExternalConsumption(agent);
       const messageId = String(envelope.message_id || envelope.seq || crypto.randomUUID());
+      const agent = managed.get(agentId);
+      if (!agent) { telemetry?.delivery(agentId, messageId, "error"); throw new Error(`unknown runtime Agent: ${agentId}`); }
+      reconcileExternalConsumption(agent);
       const existingId = agent.byMessage.get(messageId);
       if (existingId) {
         const existing = agent.records.get(existingId);
@@ -838,15 +847,19 @@ export function createRuntimeHost(options: {
           delete existing.reason;
           delete existing.retryable;
           setRecord(agent, existing, "pending");
-          const receipt = await submit(agent, existing, agent.busy || agent.submitting);
+          const receipt = await (telemetry?.phase(messageId, "runtime.deliver", SpanKind.PRODUCER,
+            () => submit(agent, existing, agent.busy || agent.submitting)) ?? submit(agent, existing, agent.busy || agent.submitting));
+          telemetry?.delivery(agentId, messageId, receipt.status);
           reconcileAbsentCanonical(agent, agent.records.get(existingId) ?? existing);
           return receipt;
         }
         if (existing) reconcileAbsentCanonical(agent, existing);
+        telemetry?.delivery(agentId, messageId, "duplicate");
         return { status: "duplicate", deliveryId: existingId };
       }
       if ([...agent.records.values()].filter((record) => isActiveDelivery(record.status)).length >= MAX_DELIVERIES) {
         const deliveryId = `overflow-${crypto.createHash("sha256").update(messageId).digest("hex").slice(0, 24)}`;
+        telemetry?.delivery(agentId, messageId, "deferred");
         return { status: "deferred", deliveryId, reason: `runtime delivery backlog limit ${MAX_DELIVERIES} reached` };
       }
       const deliveryId = crypto.randomUUID();
@@ -859,9 +872,12 @@ export function createRuntimeHost(options: {
       agent.records.set(deliveryId, record); agent.byMessage.set(messageId, deliveryId); persist(agent);
       if (agent.disabledReason) {
         reconcileAbsentCanonical(agent, record);
+        telemetry?.delivery(agentId, messageId, "deferred");
         return { status: "deferred", deliveryId, reason: agent.disabledReason };
       }
-      const receipt = await submit(agent, record, busy);
+      const receipt = await (telemetry?.phase(messageId, "runtime.deliver", SpanKind.PRODUCER,
+        () => submit(agent, record, busy)) ?? submit(agent, record, busy));
+      telemetry?.delivery(agentId, messageId, receipt.status);
       reconcileAbsentCanonical(agent, agent.records.get(deliveryId) ?? record);
       return receipt;
     },

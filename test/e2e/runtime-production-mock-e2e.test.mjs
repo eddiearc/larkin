@@ -10,6 +10,8 @@ import { ContextPromptBuilder } from "../../dist/agent/context-prompt.mjs";
 import { createHostShell, memberNamesFromPayloads } from "../../dist/feishu/host-shell.mjs";
 import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 import { InteractionStateMachine } from "../../dist/agent/interaction-state-machine.mjs";
+import { createTelemetryRuntime } from "../../dist/platform/telemetry-tracing.mjs";
+import { TelemetrySpool } from "../../dist/platform/telemetry-spool.mjs";
 
 const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
 
@@ -503,6 +505,9 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const workspaceDir = path.join(root, "agents", agentId);
     const stateDir = path.join(root, "state", "agents", agentId);
     const store = createAgentStateStore(root, agentId);
+    const telemetryConfig = { enabled: true, spoolDir: path.join(root, "telemetry", "spool"), headers: {}, maxBytes: 1024 * 1024,
+      maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 1_000 };
+    const telemetry = runtime === "codex" ? createTelemetryRuntime(telemetryConfig, { stateDirFor: () => stateDir }) : undefined;
     const session = new FakeNativeSession(runtime);
     const adapter = { id: runtime, capabilities: { busyInput: runtime === "claude" ? "gated" : "direct" }, async createSession() { return session; } };
     const runtimeHost = createRuntimeHost({
@@ -510,6 +515,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       promptBuilder: new ContextPromptBuilder(),
       stateStoreFor: () => store,
       assertOfficialCliReady: () => {},
+      telemetry,
     });
     const runtimeEvents = [];
     const memberCalls = [];
@@ -526,6 +532,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       env,
       runtimeHost,
       managedCliForAgent: testManagedCli,
+      telemetry,
       execFileImpl(command, args, _options, callback) {
         memberCalls.push([command, ...args]);
         const data = args.includes("bots")
@@ -682,6 +689,18 @@ for (const runtime of ["codex", "claude", "pi"]) {
         session.emit({ type: "turn-end", turnId: "pi-auth-recovered" });
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+      }
+      if (telemetry) {
+        await telemetry.shutdown();
+        const records = new TelemetrySpool(telemetryConfig).list();
+        const spans = records.flatMap(({ payload }) => payload.resourceSpans)
+          .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+        const names = new Set(spans.map((span) => span.name));
+        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "inbox.consume"]) assert.ok(names.has(name));
+        assert.ok(spans.some((span) => span.name === "larkin.message.process" && span.links?.length === 1),
+          `busy steer is linked, not assigned a false parent: ${JSON.stringify(spans.filter((span) => span.name === "larkin.message.process"))}`);
+        const serialized = JSON.stringify(records.map((record) => record.payload));
+        for (const forbidden of ["ou_sender", "om_codex_1", "first", root]) assert.equal(serialized.includes(forbidden), false, forbidden);
       }
     } finally {
       await hostShell.shutdown("mock e2e complete");

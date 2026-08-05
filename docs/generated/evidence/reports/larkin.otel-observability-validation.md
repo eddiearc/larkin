@@ -1,6 +1,7 @@
 # Larkin OpenTelemetry observability validation
 
 - Source base: `52e750907cedcc0550e323985fc8b4bfb28735d4`
+- Validated implementation commit: `adab0ff49d16b40a790d052549b0beee346f0fde`
 - Environment: Darwin arm64, Bun 1.3.14, Docker 28.0.4
 - Validation date: 2026-08-05 (Asia/Shanghai)
 

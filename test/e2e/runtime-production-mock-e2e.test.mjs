@@ -526,12 +526,25 @@ for (const runtime of ["codex", "claude", "pi"]) {
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify(storedConfig)}\n`, { mode: 0o600 });
     const agent = { agentId, name: agentId, runtime, model, feishuAppId: agentId, feishuProfile: agentId,
-      larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir, stateDir };
+      larkConfigDir: path.join(stateDir, "lark-cli-config"), workspaceDir, stateDir };
     const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-mock",
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: path.join(root, "events.ndjson") };
     if (telemetry) {
       env.LARKIN_TELEMETRY_ENABLED = "1"; env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
       const binDir = path.join(root, "bin"); fs.mkdirSync(binDir);
+      const sourceDir = path.join(stateDir, "lark-channel-source");
+      const channelConfigDir = path.join(agent.larkConfigDir, "lark-channel");
+      fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(channelConfigDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(sourceDir, "config.json"), JSON.stringify({ accounts: { app: { id: agentId,
+        secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } }, secrets: { providers: {
+        "larkin-bot-credential": { source: "exec", command: process.execPath, args: [], env: {
+          LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind",
+        } },
+      } } }), { mode: 0o600 });
+      fs.writeFileSync(path.join(channelConfigDir, "config.json"), JSON.stringify({ apps: [{ appId: agentId,
+        appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
+      }] }), { mode: 0o600 });
       fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/usr/bin/env bun
 const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message_id:"om_mock_sent"}}));
 `, { mode: 0o755 });
@@ -655,6 +668,13 @@ const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,da
       assert.equal(drained.pending_count, 0);
       assert.equal(drained.has_more, false);
       assert.deepEqual(drained.consumed_delivery_ids, [session.busyInputs[0].inputId]);
+      if (telemetry) {
+        const script = `const {transport}=require(${JSON.stringify(path.join(path.resolve(import.meta.dirname, "../.."), "dist/agent/agent-transport.cjs"))});transport.request({method:"GET",path:"/events"}).then(r=>{if(!r.ok)throw new Error(r.error);process.stdout.write(JSON.stringify(r.data))}).catch(e=>{console.error(e);process.exit(1)});`;
+        const polled = spawnSync(process.execPath, ["--eval", script], { cwd: path.resolve(import.meta.dirname, "../.."), encoding: "utf8",
+          env: { ...process.env, ...env, LARKIN_AGENT_ID: agentId } });
+        assert.equal(polled.status, 0, polled.stderr || polled.stdout);
+        assert.deepEqual(JSON.parse(polled.stdout).events, []);
+      }
       guardedStdout = ""; guardedStderr = "";
       assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
       assert.equal(sent.length, 1, "the provider is called once after the target is current");
@@ -715,12 +735,16 @@ const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,da
         const spans = records.flatMap(({ payload }) => payload.resourceSpans)
           .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
         const names = new Set(spans.map((span) => span.name));
-        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]) assert.ok(names.has(name));
+        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]) {
+          assert.ok(names.has(name), `missing ${name}; observed: ${[...names].sort().join(", ")}`);
+        }
         const turn = spans.find((span) => span.name === "agent.turn"); const trace = spans.filter((span) => span.traceId === turn.traceId);
-        assert.equal(trace.length, 8, JSON.stringify(trace)); const byName = Object.fromEntries(trace.map((span) => [span.name, span]));
+        assert.equal(trace.length, 7, JSON.stringify(trace)); const byName = Object.fromEntries(trace.map((span) => [span.name, span]));
         const rootSpan = byName["larkin.message.process"];
         for (const name of ["feishu.receive", "runtime.deliver", "agent.turn"]) assert.equal(byName[name].parentSpanId, rootSpan.spanId, name);
-        for (const name of ["model.activity", "tool.execute", "inbox.consume", "feishu.send"]) assert.equal(byName[name].parentSpanId, turn.spanId, name);
+        for (const name of ["model.activity", "tool.execute", "feishu.send"]) assert.equal(byName[name].parentSpanId, turn.spanId, name);
+        const consume = spans.find((span) => span.name === "inbox.consume");
+        assert.equal(consume.kind, 5, "the out-of-band transport probe is classified as an OTel consumer span");
         assert.ok(spans.some((span) => span.name === "larkin.message.process" && span.links?.length === 1),
           `busy steer is linked, not assigned a false parent: ${JSON.stringify(spans.filter((span) => span.name === "larkin.message.process"))}`);
         const serialized = JSON.stringify(records.map((record) => record.payload));

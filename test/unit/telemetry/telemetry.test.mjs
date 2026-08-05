@@ -36,6 +36,7 @@ test("official OTel spans form a privacy-safe end-to-end tree in the durable OTL
   runtime.runtimeEvent("cli_private-user", { type: "activity", activity: "tool", name: "FORBIDDEN_COMMAND", text: "token=FORBIDDEN_SECRET" });
   await new Promise((resolve) => setTimeout(resolve, 2));
   await runtime.externalPhase("cli_private-user", stateDir, "feishu.send", SpanKind.CLIENT, async () => {});
+  await runtime.externalPhase("cli_private-user", stateDir, "inbox.consume", SpanKind.CONSUMER, () => {});
   runtime.delivery("cli_private-user", messageId, "consumed");
   runtime.runtimeEvent("cli_private-user", { type: "turn-end", turnId: "forbidden-turn-id" });
   await runtime.shutdown();

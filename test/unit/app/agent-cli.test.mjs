@@ -284,7 +284,7 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("inbox check is repeatable and content-light while poll direct-acks a bounded target batch", () => {
+test("inbox check is repeatable and content-light while poll direct-acks a bounded target batch", async () => {
   const f = fixture();
   try {
     f.store.writeJson("runtimeDeliveries", {
@@ -312,8 +312,17 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
     assert.deepEqual(fs.readFileSync(f.store.paths.inbox), beforeInbox, "check must not mutate Inbox bytes");
     assert.deepEqual(fs.readFileSync(f.store.paths.runtimeDeliveries), beforeDeliveries, "check must not consume Runtime delivery state");
 
-    const firstPoll = f.run(["inbox", "poll", "--target", "chat:oc_1", "--limit", "1"]);
+    const telemetryCalls = [];
+    const telemetry = {
+      enabled: true,
+      async externalPhase(agentId, stateDir, name, kind, operation, boundary) {
+        telemetryCalls.push({ agentId, stateDir, name, kind, boundary });
+        return operation();
+      },
+    };
+    const firstPoll = await f.run(["inbox", "poll", "--target", "chat:oc_1", "--limit", "1"], { telemetry });
     assert.equal(firstPoll.code, 0, firstPoll.stderr);
+    assert.deepEqual(telemetryCalls, [{ agentId: f.agentId, stateDir: f.store.paths.root, name: "inbox.consume", kind: 4, boundary: "agent_cli" }]);
     const polled = JSON.parse(firstPoll.stdout);
     assert.equal(polled.delivery, "direct_ack");
     assert.equal(polled.at_most_once, true);
@@ -354,7 +363,7 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
 
     fs.writeFileSync(f.store.paths.inbox, '{"message_id":"om_bad"}\nnot-json\n');
     const deliveryBytes = fs.readFileSync(f.store.paths.runtimeDeliveries, "utf8");
-    const malformed = f.run(["inbox", "poll"]);
+    const malformed = await f.run(["inbox", "poll"], { telemetry });
     assert.equal(malformed.code, 2);
     assert.match(malformed.stderr, /invalid NDJSON/);
     assert.equal(fs.readFileSync(f.store.paths.inbox, "utf8"), '{"message_id":"om_bad"}\nnot-json\n');

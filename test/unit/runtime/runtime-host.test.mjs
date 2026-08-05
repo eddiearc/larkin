@@ -368,10 +368,16 @@ test("turn end re-wakes only accepted canonical rows left by a partial poll, inc
   const agentId = "cli_partialRewakeA1";
   const store = createAgentStateStore(root, agentId);
   const session = new FakeSession();
+  const telemetryOrder = [];
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(),
     stateStoreFor: () => store,
+    telemetry: {
+      async phase(_messageId, _name, _kind, operation) { return operation(); },
+      delivery(_agentId, _messageId, status) { if (status === "consumed") telemetryOrder.push("consumed"); },
+      runtimeEvent(_agentId, event) { if (event.type === "turn-end") telemetryOrder.push("turn-end"); },
+    },
   });
   const config = { agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
   try {
@@ -391,6 +397,8 @@ test("turn end re-wakes only accepted canonical rows left by a partial poll, inc
     receipts.push(await host.deliver(agentId, { message_id: "om_partial_4", target }));
     session.emit({ type: "turn-end", turnId: "turn-partial" });
     await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(telemetryOrder.slice(0, 2), ["consumed", "turn-end"],
+      "turn-end closes telemetry only after authoritative Inbox reconciliation observes direct consumption");
 
     assert.equal(session.prompts.length, 2, "remaining canonical rows schedule one replacement wake at the safe boundary");
     assert.equal(session.prompts[1].inputId, receipts[1].deliveryId, "retry preserves the oldest unconsumed delivery identity");

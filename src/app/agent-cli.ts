@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from "node:child_process";
+import { SpanKind } from "@opentelemetry/api";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
@@ -16,6 +17,8 @@ import { AGENT_CLI_CAPABILITIES } from "../agent/agent-cli-capabilities.js";
 import { CONFIG_CLI_USAGE, CONFIG_CLI_VALUES } from "../agent/config-cli-contract.js";
 import { internalCommandSpec } from "./internal-command.js";
 import { packageVersion } from "../platform/build-info.js";
+import { loadTelemetryConfig } from "../platform/telemetry-config.js";
+import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
 import {
   feishuImFreshnessAdapter, feishuImTarget, mergeFeishuImCursor, serializeFeishuImTarget,
   type FeishuImCursor, type FeishuImMessage,
@@ -36,6 +39,7 @@ export interface AgentCliDependencies {
   }>;
   spawn?: typeof spawnSync;
   stateStore?: AgentStateStore;
+  telemetry?: TelemetryRuntime;
   now?(): number;
   timeZone?(): string;
   requestAgentUpsert?(input: { larkinHome: string; agentId: string }): Promise<{ ok: boolean; error?: string }>;
@@ -466,35 +470,44 @@ export function runAgentCli(
         emitJson(io, projectInboxCheck(stateStore.readNdjson<InboxEnvelope>("inbox"), target));
         return 0;
       }
-      const rawLimit = options.values.get("--limit");
-      const limit = rawLimit === undefined ? undefined : Number(rawLimit);
-      const polled = stateStore.pollInbox<InboxEnvelope>({ ...(target ? { target } : {}), ...(limit !== undefined ? { limit } : {}) });
-      const providerMessages = new Map<string, FeishuImMessage[]>();
-      for (const envelope of polled.envelopes) {
-        if (typeof envelope.message_id !== "string" || typeof envelope.create_time !== "string") continue;
-        const localTarget = typeof envelope.target === "string" ? envelope.target
-          : (typeof envelope.chat_id === "string" && envelope.chat_id
-            ? (typeof envelope.thread_id === "string" && envelope.thread_id
-              ? `thread:${envelope.chat_id}:${envelope.thread_id}` : `chat:${envelope.chat_id}`)
-            : null);
-        if (!localTarget) continue;
-        const key = serializeFeishuImTarget(feishuImTarget(localTarget));
-        const rows = providerMessages.get(key) ?? [];
-        rows.push(envelope as FeishuImMessage);
-        providerMessages.set(key, rows);
-      }
-      for (const [key, messages] of providerMessages) {
-        const cursor = feishuImFreshnessAdapter.cursor({ messages });
-        if (cursor) stateStore.mergeFreshnessCursor<FeishuImCursor>(key, cursor, mergeFeishuImCursor,
-          env.LARKIN_RUNTIME_OBSERVATION_GENERATION || "external");
-      }
-      const projected = projectInboxEvents(polled.envelopes);
-      const hasMore = polled.pendingCount > 0;
-      emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
-        pending_count: polled.pendingCount, has_more: hasMore,
-        ...(hasMore ? { next_action: "Continue polling the same Inbox scope until has_more is false." } : {}),
-        seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });
-      return 0;
+      const poll = (): number => {
+        const rawLimit = options.values.get("--limit");
+        const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+        const polled = stateStore.pollInbox<InboxEnvelope>({ ...(target ? { target } : {}), ...(limit !== undefined ? { limit } : {}) });
+        const providerMessages = new Map<string, FeishuImMessage[]>();
+        for (const envelope of polled.envelopes) {
+          if (typeof envelope.message_id !== "string" || typeof envelope.create_time !== "string") continue;
+          const localTarget = typeof envelope.target === "string" ? envelope.target
+            : (typeof envelope.chat_id === "string" && envelope.chat_id
+              ? (typeof envelope.thread_id === "string" && envelope.thread_id
+                ? `thread:${envelope.chat_id}:${envelope.thread_id}` : `chat:${envelope.chat_id}`)
+              : null);
+          if (!localTarget) continue;
+          const key = serializeFeishuImTarget(feishuImTarget(localTarget));
+          const rows = providerMessages.get(key) ?? [];
+          rows.push(envelope as FeishuImMessage);
+          providerMessages.set(key, rows);
+        }
+        for (const [key, messages] of providerMessages) {
+          const cursor = feishuImFreshnessAdapter.cursor({ messages });
+          if (cursor) stateStore.mergeFreshnessCursor<FeishuImCursor>(key, cursor, mergeFeishuImCursor,
+            env.LARKIN_RUNTIME_OBSERVATION_GENERATION || "external");
+        }
+        const projected = projectInboxEvents(polled.envelopes);
+        const hasMore = polled.pendingCount > 0;
+        emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
+          pending_count: polled.pendingCount, has_more: hasMore,
+          ...(hasMore ? { next_action: "Continue polling the same Inbox scope until has_more is false." } : {}),
+          seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });
+        return 0;
+      };
+      let telemetry = dependencies.telemetry;
+      try { telemetry ??= telemetrySingleton(loadTelemetryConfig(env), {
+        serviceVersion: packageVersion(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")),
+      }); } catch { /* telemetry must not alter Inbox behavior */ }
+      if (!telemetry?.enabled) return poll();
+      return telemetry.externalPhase(agent.agentId, stateStore.paths.root, "inbox.consume", SpanKind.CONSUMER, poll, "agent_cli")
+        .catch((error) => { io.stderr(`larkin: ${(error as Error).message}\n`); return 2; });
     }
     if (group === "reminder") {
       const result = reminderRequest([subcommand || "", ...rest], stateStore, agent.agentId, dependencies);

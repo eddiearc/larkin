@@ -54,7 +54,7 @@ class DurableSpanExporter implements SpanExporter {
 
 interface MessageTrace {
   root: Span; context: Context; agentId: string; messageHash: string; turn?: Span; turnContext?: Context;
-  activitySpan?: Span; activityName?: "model.activity" | "tool.execute"; inboxConsumed?: boolean;
+  activitySpan?: Span; activityName?: "model.activity" | "tool.execute";
 }
 export interface TelemetryRuntime {
   readonly enabled: boolean;
@@ -62,7 +62,8 @@ export interface TelemetryRuntime {
   phase<T>(messageId: string, name: "feishu.receive" | "runtime.deliver", spanKind: SpanKind, operation: () => Promise<T>): Promise<T>;
   delivery(agentId: string, messageId: string, status: "accepted" | "consumed" | "deferred" | "duplicate" | "error"): void;
   runtimeEvent(agentId: string, event: NormalizedRuntimeEvent): void;
-  externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send", spanKind: SpanKind, operation: () => T | Promise<T>): Promise<T>;
+  externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send", spanKind: SpanKind,
+    operation: () => T | Promise<T>, boundary?: "agent_cli" | "agent_transport"): Promise<T>;
   shutdown(): Promise<void>;
 }
 
@@ -221,12 +222,6 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
           activeByAgent.set(agentId, current);
           writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
         }
-        if (status === "consumed") {
-          if (!current.inboxConsumed) {
-            const span = tracer.startSpan("inbox.consume", { kind: SpanKind.CONSUMER }, current.turnContext ?? current.context); span.end();
-            current.inboxConsumed = true;
-          }
-        }
         if (status === "error") endTrace(current, true);
         if (status === "deferred") endTrace(current, true);
         if (status === "duplicate") endTrace(current, false);
@@ -254,13 +249,13 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
         else if (event.type === "error" || event.type === "configuration-error" || event.type === "closed") endTrace(current, true);
       } catch { /* isolated */ }
     },
-    async externalPhase(agentId, stateDir, name, spanKind, operation) {
+    async externalPhase(agentId, stateDir, name, spanKind, operation, boundary = "agent_transport") {
       let span: Span; let parentContext: Context;
       try {
         const parent = readActiveContext(stateDir, now(), inspectOwner);
         parentContext = parent ? trace.setSpanContext(context.active(), parent) : context.active();
         span = tracer.startSpan(name, { kind: spanKind, attributes: { "larkin.agent.id_hash": safeHash(agentId),
-          "larkin.observation.boundary": "agent_transport" } }, parentContext);
+          "larkin.observation.boundary": boundary } }, parentContext);
       } catch { return operation(); }
       try { return await context.with(trace.setSpan(parentContext, span), operation); }
       catch (error) { span.setStatus({ code: SpanStatusCode.ERROR }); throw error; }

@@ -636,8 +636,8 @@ const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,da
       assert.equal(store.readNdjson("inbox").length, 2, "check must not consume the batch");
 
       stdout = ""; stderr = "";
-      const pollCode = runAgentCli(["inbox", "poll", "--target", target, "--limit", "1"], runtimeEnv, {
-        stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      const pollCode = await runAgentCli(["inbox", "poll", "--target", target, "--limit", "1"], runtimeEnv, {
+        stateStore: store, telemetry, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
       });
       assert.equal(pollCode, 0, stderr);
       const partial = JSON.parse(stdout);
@@ -659,8 +659,8 @@ const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,da
       session.emit({ type: "turn-start", turnId: `${runtime}-rewake` });
 
       stdout = ""; stderr = "";
-      const finalPollCode = runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
-        stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      const finalPollCode = await runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
+        stateStore: store, telemetry, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
       });
       assert.equal(finalPollCode, 0, stderr);
       const drained = JSON.parse(stdout);
@@ -668,13 +668,6 @@ const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,da
       assert.equal(drained.pending_count, 0);
       assert.equal(drained.has_more, false);
       assert.deepEqual(drained.consumed_delivery_ids, [session.busyInputs[0].inputId]);
-      if (telemetry) {
-        const script = `const {transport}=require(${JSON.stringify(path.join(path.resolve(import.meta.dirname, "../.."), "dist/agent/agent-transport.cjs"))});transport.request({method:"GET",path:"/events"}).then(r=>{if(!r.ok)throw new Error(r.error);process.stdout.write(JSON.stringify(r.data))}).catch(e=>{console.error(e);process.exit(1)});`;
-        const polled = spawnSync(process.execPath, ["--eval", script], { cwd: path.resolve(import.meta.dirname, "../.."), encoding: "utf8",
-          env: { ...process.env, ...env, LARKIN_AGENT_ID: agentId } });
-        assert.equal(polled.status, 0, polled.stderr || polled.stdout);
-        assert.deepEqual(JSON.parse(polled.stdout).events, []);
-      }
       guardedStdout = ""; guardedStderr = "";
       assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
       assert.equal(sent.length, 1, "the provider is called once after the target is current");
@@ -739,12 +732,12 @@ const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,da
           assert.ok(names.has(name), `missing ${name}; observed: ${[...names].sort().join(", ")}`);
         }
         const turn = spans.find((span) => span.name === "agent.turn"); const trace = spans.filter((span) => span.traceId === turn.traceId);
-        assert.equal(trace.length, 7, JSON.stringify(trace)); const byName = Object.fromEntries(trace.map((span) => [span.name, span]));
+        assert.equal(trace.length, 8, JSON.stringify(trace)); const byName = Object.fromEntries(trace.map((span) => [span.name, span]));
         const rootSpan = byName["larkin.message.process"];
         for (const name of ["feishu.receive", "runtime.deliver", "agent.turn"]) assert.equal(byName[name].parentSpanId, rootSpan.spanId, name);
-        for (const name of ["model.activity", "tool.execute", "feishu.send"]) assert.equal(byName[name].parentSpanId, turn.spanId, name);
-        const consume = spans.find((span) => span.name === "inbox.consume");
-        assert.equal(consume.kind, 5, "the out-of-band transport probe is classified as an OTel consumer span");
+        for (const name of ["model.activity", "tool.execute", "inbox.consume", "feishu.send"]) assert.equal(byName[name].parentSpanId, turn.spanId, name);
+        assert.equal(byName["inbox.consume"].attributes.find((attribute) => attribute.key === "larkin.observation.boundary")?.value?.stringValue,
+          "agent_cli", "the authoritative direct poll owns Inbox consumption telemetry");
         assert.ok(spans.some((span) => span.name === "larkin.message.process" && span.links?.length === 1),
           `busy steer is linked, not assigned a false parent: ${JSON.stringify(spans.filter((span) => span.name === "larkin.message.process"))}`);
         const serialized = JSON.stringify(records.map((record) => record.payload));

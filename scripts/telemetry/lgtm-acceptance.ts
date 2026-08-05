@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SpanKind } from "@opentelemetry/api";
+import { createAgentStateStore } from "../../dist/agent/agent-state-store.mjs";
+import { runAgentCli } from "../../dist/app/agent-cli.mjs";
 import { createTelemetryRuntime } from "../../dist/platform/telemetry-tracing.mjs";
 import { TelemetrySpool } from "../../dist/platform/telemetry-spool.mjs";
 import { flushTelemetry } from "../../dist/platform/telemetry-uploader.mjs";
@@ -10,8 +12,11 @@ import { flushTelemetry } from "../../dist/platform/telemetry-uploader.mjs";
 const collector = process.env.LARKIN_LGTM_OTLP_ENDPOINT || "http://127.0.0.1:4318/v1/traces";
 const tempo = process.env.LARKIN_LGTM_TEMPO_ENDPOINT || "http://127.0.0.1:3200";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-lgtm-acceptance-"));
-const stateDir = path.join(root, "state");
-const config = { enabled: true, spoolDir: path.join(root, "spool"), headers: {}, maxBytes: 1024 * 1024,
+const messageId = "acceptance-message"; const agentId = "cli_acceptanceA1";
+fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "acceptance-server", activeAgent: agentId,
+  agents: { [agentId]: { runtime: "codex", model: "acceptance-model" } } }), { mode: 0o600 });
+const stateStore = createAgentStateStore(root, agentId); const stateDir = stateStore.paths.root;
+const telemetryConfig = { enabled: true, spoolDir: path.join(root, "spool"), headers: {}, maxBytes: 1024 * 1024,
   maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 5_000 };
 const expectedKinds: Record<string, string> = {
   "larkin.message.process": "SPAN_KIND_CONSUMER", "feishu.receive": "SPAN_KIND_CONSUMER",
@@ -23,8 +28,7 @@ const hex = (base64: string | undefined): string | undefined => base64 ? Buffer.
 const sleep = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 try {
-  const runtime = createTelemetryRuntime(config, { stateDirFor: () => stateDir, stateDirs: [stateDir], serviceVersion: "lgtm-acceptance" });
-  const messageId = "acceptance-message"; const agentId = "acceptance-agent";
+  const runtime = createTelemetryRuntime(telemetryConfig, { stateDirFor: () => stateDir, stateDirs: [stateDir], serviceVersion: "lgtm-acceptance" });
   runtime.beginMessage(agentId, messageId);
   await runtime.phase(messageId, "feishu.receive", SpanKind.CONSUMER, async () => {});
   await runtime.phase(messageId, "runtime.deliver", SpanKind.PRODUCER, async () => {});
@@ -32,10 +36,15 @@ try {
   runtime.runtimeEvent(agentId, { type: "activity", activity: "thinking" }); await sleep(10);
   runtime.runtimeEvent(agentId, { type: "activity", activity: "tool" }); await sleep(10);
   await runtime.externalPhase(agentId, stateDir, "feishu.send", SpanKind.CLIENT, async () => {});
+  stateStore.appendNdjson("inbox", { message_id: messageId, chat_id: "oc_acceptance", create_time: "1785942000000", content: "fixture" });
+  const pollCode = await runAgentCli(["inbox", "poll", "--target", "chat:oc_acceptance"], {
+    LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId,
+  }, { stateStore, telemetry: runtime, io: { stdout() {}, stderr() {} } });
+  if (pollCode !== 0) throw new Error("authoritative Inbox poll failed");
   runtime.delivery(agentId, messageId, "consumed"); runtime.runtimeEvent(agentId, { type: "turn-end" });
   await runtime.shutdown();
 
-  const spool = new TelemetrySpool(config); const local = spool.list();
+  const spool = new TelemetrySpool(telemetryConfig); const local = spool.list();
   const localSpans = local.flatMap(({ payload }) => payload.resourceSpans as Array<{ scopeSpans: Array<{ spans: Array<Record<string, unknown>> }> }>)
     .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
   const rootSpan = localSpans.find((span) => span.name === "larkin.message.process");

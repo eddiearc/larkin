@@ -499,7 +499,9 @@ export function createRuntimeHost(options: {
 
   const observe = (agent: ManagedAgent, session: RuntimeSession, event: NormalizedRuntimeEvent): void => {
     if (agent.session !== session) return; // Ignore late output from a replaced child.
-    telemetry?.runtimeEvent(agent.config.agentId, event);
+    // Keep the trace parent published until authoritative Inbox reconciliation
+    // has observed any direct CLI poll completed by this turn.
+    if (event.type !== "turn-end") telemetry?.runtimeEvent(agent.config.agentId, event);
     emit({ type: "runtime", agentId: agent.config.agentId, event });
     if (event.type === "session-init") {
       agent.config.sessionId = event.sessionId;
@@ -520,6 +522,7 @@ export function createRuntimeHost(options: {
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
       reconcileAcceptedAtTurnEnd(agent);
+      telemetry?.runtimeEvent(agent.config.agentId, event);
       if (recoveredAuthentication) {
         agent.authFailureActive = false;
         const prior = agent.readiness;

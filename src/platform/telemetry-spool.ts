@@ -62,7 +62,7 @@ function validateAttributes(value: unknown): void {
       if (key === "service.instance.id" && !/^[0-9a-f-]{16,64}$/i.test(text)) invalidPayload();
       if (["larkin.agent.id_hash", "messaging.message.id_hash"].includes(key) && !/^[0-9a-f]{24}$/.test(text)) invalidPayload();
       if (key === "larkin.message.relation" && text !== "fan_in") invalidPayload();
-      if (key === "larkin.observation.boundary" && !["runtime_host", "runtime_event_interval", "agent_transport"].includes(text)) invalidPayload();
+      if (key === "larkin.observation.boundary" && !["runtime_host", "runtime_event_interval", "agent_cli", "agent_transport"].includes(text)) invalidPayload();
       if (key === "larkin.activity.type" && !["thinking", "text", "tool", "internal"].includes(text)) invalidPayload();
     }
   }

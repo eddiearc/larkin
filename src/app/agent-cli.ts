@@ -147,7 +147,7 @@ function migrationError(group: string, subcommand?: string): string | null {
 
 function help(): JsonObject {
   return {
-    usage: "larkin <inbox|reminder|interaction|profile|config> ...",
+    usage: "larkin <inbox|comment|reminder|interaction|profile|config> ...",
     capabilities: AGENT_CLI_CAPABILITIES,
   };
 }

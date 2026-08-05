@@ -55,6 +55,32 @@ test("cardAction is a separate callback path and returns the orchestrator respon
   assert.equal(base.messages.length, 0);
 });
 
+test("document comments are a separate async event path with real-event diagnostics", async () => {
+  const calls = [], statuses = [], errors = [];
+  const channel = { comments: { async resolveTarget() { return null; }, async fetch() { return null; } } };
+  const business = new HostChannelBusiness({
+    state: {
+      recordStatusError(_agent, text) { errors.push(text); }, recordReadReceipts() {}, updateStatus(_agent, patch) { statuses.push(patch); },
+    },
+    stateStore: () => ({ readJson: (_key, fallback) => fallback, writeJson() {} }),
+    onMessage() { throw new Error("comment must not enter IM policy"); },
+    async onComment(subject, event, source) { calls.push({ subject, event, source }); },
+    now: () => new Date("2026-08-05T05:00:00.000Z"),
+  });
+  const comment = {
+    fileToken: "token", fileType: "docx", commentId: "comment", replyId: "reply",
+    operator: { openId: "ou_user" }, mentionedBot: true, timestamp: 1,
+  };
+  await business.handlers(agent, channel).comment(comment);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].source, channel);
+  assert.deepEqual(statuses, [{
+    inboundVerifiedAt: "2026-08-05T05:00:00.000Z",
+    documentCommentEventAt: "2026-08-05T05:00:00.000Z",
+  }]);
+  assert.deepEqual(errors, []);
+});
+
 test("production card registration uses the real SDK dispatcher without its action-value TTL dedup", async () => {
   const calls = [];
   const business = new HostChannelBusiness({

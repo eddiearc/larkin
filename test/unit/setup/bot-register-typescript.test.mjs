@@ -52,6 +52,9 @@ test("registration publishes the credential before binding, then verifies the bo
   assert.match(source, /child\.once\("error", \(\) => say\(`\[setup\].*\$\{url\}`\)\)/,
     "browser spawn errors must retain a complete manual URL fallback");
   assert.doesNotMatch(source.slice(source.indexOf("function openBrowser"), source.indexOf("async function runBindProcess")), /spawnSync/);
+  assert.match(source, /"drive:drive"/);
+  assert.match(source, /"drive\.notice\.comment_add_v1"/);
+  assert.match(source, /documentCommentEvent/);
 });
 
 test("help does not create credentials or expose a browser-selection bypass", () => {
@@ -86,4 +89,6 @@ test("grant-scopes is strict TypeScript compiled to its direct runtime entry", (
   assert.match(authored, /resolveManagedOfficialCli\(selected, process\.env\)/);
   assert.doesNotMatch(authored, /defaultChatId|LARKIN_FEISHU_DEFAULT_CHAT_ID/);
   assert.match(authored, /callbacks:\s*\{ items: \["card\.action\.trigger"\] \}/);
+  assert.match(authored, /"drive:drive"/);
+  assert.match(authored, /"drive\.notice\.comment_add_v1"/);
 });

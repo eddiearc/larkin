@@ -6,11 +6,11 @@ import { acquireProcessLock, inspectProcess } from "../platform/process-state.js
 import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
-  "senderProfiles" | "readReceipts" | "pendingReact" | "runtimeDeliveries" | "inboxState" | "freshnessState" | "reminders" | "interactions";
+  "senderProfiles" | "readReceipts" | "pendingReact" | "runtimeDeliveries" | "inboxState" | "freshnessState" | "documentComments" | "reminders" | "interactions";
 export type NdjsonStateKey = "conversation" | "inbox";
 
 const JSON_KEYS: ReadonlySet<string> = new Set([
-  "agentState", "status", "map", "replyctx", "botIdentity", "senderProfiles", "readReceipts", "pendingReact", "runtimeDeliveries", "inboxState", "freshnessState", "reminders", "interactions",
+  "agentState", "status", "map", "replyctx", "botIdentity", "senderProfiles", "readReceipts", "pendingReact", "runtimeDeliveries", "inboxState", "freshnessState", "documentComments", "reminders", "interactions",
 ]);
 const NDJSON_KEYS: ReadonlySet<string> = new Set(["conversation", "inbox"]);
 const INBOX_LOCK_TIMEOUT_MS = 2_000;
@@ -602,6 +602,7 @@ export class AgentStateStore {
     if (typeof messageId !== "string" || !messageId) throw new Error("Inbox envelope requires message_id");
     const file = this.file("inbox");
     return this.withInboxLock(file, () => {
+      if (this.inboxState().messages[messageId]) return false;
       if (this.readNdjson<Record<string, unknown>>("inbox").some((row) => row.message_id === messageId)) return false;
       this.appendInboxUnlocked(value);
       return true;

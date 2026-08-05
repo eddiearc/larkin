@@ -31,6 +31,7 @@ test("Agent state layout owns every canonical persistence path", async () => {
       runtimeDeliveries: "runtime-deliveries.json",
       inboxState: "inbox-state.json",
       freshnessState: "freshness-state.json",
+      documentComments: "document-comments.json",
       interactions: "interactions.json",
       conversation: "conversation.ndjson",
       inbox: "feishu-inbox.ndjson",
@@ -147,6 +148,19 @@ test("Inbox delivery preparation treats consumed Runtime ownership as final acro
     store.drainInbox();
     assert.equal(store.prepareInboxDelivery(envelope), "consumed");
     assert.equal(store.readNdjson("inbox").length, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-stable-inbox-id-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateStableInboxA1");
+    const envelope = { message_id: "doc_comment_stable", target: "document-comment:docx:file:comment:in-thread" };
+    assert.equal(store.appendInboxOnce(envelope), true);
+    store.pollInbox({ target: envelope.target, limit: 1 });
+    assert.equal(store.readNdjson("inbox").length, 0);
+    assert.equal(store.appendInboxOnce(envelope), false, "consumption must not erase durable event dedup history");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

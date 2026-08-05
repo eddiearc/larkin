@@ -288,8 +288,11 @@ const TENANT_SCOPES = [
   "im:resource",
   "application:application:self_manage",
   "contact:user.employee_id:readonly",
+  // drive.notice.comment_add_v1 and the stable comment read/reply APIs are
+  // currently delivered by Feishu under the aggregate drive tenant scope.
+  "drive:drive",
 ];
-const TENANT_EVENTS = ["im.message.receive_v1", "im.message.message_read_v1"];
+const TENANT_EVENTS = ["im.message.receive_v1", "im.message.message_read_v1", "drive.notice.comment_add_v1"];
 let pollingCount = 0;
 
 const result = await registerApp({
@@ -390,7 +393,15 @@ try {
     ownerOpenId: userInfo?.open_id || prior.ownerOpenId || null,
     createdAt: prior.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    capabilities: { cardActionCallback: { status: "requested-unverified", requestedAt: new Date().toISOString() } },
+    capabilities: {
+      cardActionCallback: { status: "requested-unverified", requestedAt: new Date().toISOString() },
+      documentCommentEvent: {
+        status: "requested-unverified",
+        event: "drive.notice.comment_add_v1",
+        scope: "drive:drive",
+        requestedAt: new Date().toISOString(),
+      },
+    },
   }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   fs.renameSync(stagedBotFile, botFile);
 } catch (error) {
@@ -399,6 +410,7 @@ try {
 }
 say(`✓ 凭证已写入 ${botFile}（0600，Secret 不回显）`);
 say("! card.action.trigger 已请求但尚未证明生效；启动后运行 Agent CLI 的 interaction callback-probe，发送并点击验证卡，状态变为 verified-effective 后才能创建业务交互卡片。");
+say("! drive.notice.comment_add_v1 + drive:drive 已请求但尚未真实验证；发布配置、授予 Bot 文档访问权并在测试文档评论中 @Bot 后，larkin agents 会显示事件是否到达及读取失败诊断。");
 
 const targetAgent = flag("--agent") || id;
 const bindArgs = ["--profile", id, "--yes", "--agent", targetAgent];

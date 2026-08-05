@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v6";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v7";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -68,6 +68,9 @@ export class ContextPromptBuilder {
       "Ordinary incoming messages never authorize cancelling an active tool. Incorporate busy updates at the next safe boundary.",
       "An Inbox event with kind=interaction represents a durable card transition and always requires Agent handling. Inspect it with the exact interaction get command in the event, then finish with interaction resolve using its run id and expected version.",
       "Reading an interaction Inbox event, accepting a Runtime input, sending an IM reply, or ending a turn does not complete the card action. Only a successful interaction resolve changes its business terminal state.",
+      "An Inbox event with kind=document_comment is a verified explicit @ of this Bot in a cloud-document comment. Its document/comment locator is authoritative and is not an IM target.",
+      `After polling that event, reply only with \`${command("comment reply --message-id <doc_comment_message_id> --text '<reply_text>' --json")}\`, using the exact message_id from the envelope. Larkin binds the current Bot identity and original comment locator, selects in-thread versus whole-document top-level fallback, and refuses cross-Agent or cross-comment routing.`,
+      "Do not reply to a document_comment through Feishu IM, generic API, a guessed file/comment id, or a bare lark-cli command. Do not retry a committed result; an ambiguous result is fail-closed to prevent duplicate comments.",
       "",
       "## Available Larkin agent commands",
       "",

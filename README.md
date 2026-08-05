@@ -26,6 +26,8 @@ are stored only in the selected Agent's private provider directory, not in the o
 also discovers every API-key and OAuth/subscription login exposed by the pinned official Pi registry and
 delegates those flows to Pi. Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage them.
 
+For supported Feishu cloud-document comments (`doc`, `docx`, `sheet`, and `file`), explicitly @ the Bot in a comment or reply. Larkin receives `drive.notice.comment_add_v1` on the existing event connection, stores the fetched comment as a `kind=document_comment` canonical Inbox event, and wakes the Bot's persistent Agent. The Agent's reply is bound back to that exact comment; whole-document comments use Feishu's top-level fallback. Re-run `larkin setup` for an existing Bot to request the required event and `drive:drive` tenant scope, publish the updated app configuration, and ensure the Bot can access the document. `larkin agents` distinguishes requested-but-unverified configuration, a real event arrival, and comment-read failures.
+
 ## Development
 
 ```bash

@@ -54,6 +54,10 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
       version: 3, serverId: "server-grant", activeAgent: app,
       agents: { [app]: { runtime: "codex", model: "gpt" }, [other]: { runtime: "claude", model: "sonnet" } },
     }), { mode: 0o600 });
+    fs.mkdirSync(path.join(root, "bots"), { mode: 0o700 });
+    for (const appId of [app, other]) fs.writeFileSync(path.join(root, "bots", `${appId}.json`), JSON.stringify({
+      appId, appSecret: "fixture-secret", tenant: "feishu",
+    }), { mode: 0o600 });
     const marker = path.join(temp, "register.json");
     const spawnMarker = path.join(temp, "spawn.ndjson");
     const preload = path.join(temp, "preload.cjs");
@@ -69,6 +73,12 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     let result = run([]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).appId, app);
+    const commentCapability = JSON.parse(fs.readFileSync(path.join(root, "bots", `${app}.json`), "utf8")).capabilities.documentCommentEvent;
+    assert.deepEqual({ status: commentCapability.status, event: commentCapability.event, scope: commentCapability.scope }, {
+      status: "requested-unverified", event: "drive.notice.comment_add_v1", scope: "drive:drive",
+    });
+    assert.equal(Number.isFinite(Date.parse(commentCapability.requestedAt)), true);
+    assert.match(result.stderr, /capability=publish_or_event_unverified reason=publication_and_real_event_unverified/);
     assert.equal(fs.existsSync(spawnMarker), false, "QR callback without --send-to must not spawn lark-cli send");
     fs.rmSync(marker);
     result = run(["--agent", other]);

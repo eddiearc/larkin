@@ -13,6 +13,7 @@ import {
 import * as larkinConfig from "../platform/config.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "./agent-lark-cli-workspace.js";
+import { parseDocumentCommentTarget } from "../feishu/document-comment.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -39,6 +40,7 @@ function portableSignalCode(signal: NodeJS.Signals): number {
 export type LarkCliCommandDecision =
   | { kind: "passthrough" }
   | { kind: "guarded"; operation: "send" | "reply" | "card" }
+  | { kind: "comment-reply" }
   | { kind: "denied"; reason: string };
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
@@ -196,6 +198,9 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   const as = parsed.flags.get("--as");
   if (as && as !== "bot") return { kind: "denied", reason: "身份边界：Runtime 内 lark-cli 只允许 Bot identity" };
   const command = parsed.commandArgv[0] || "";
+  if (command === "comment") return exactPath(parsed.commandArgv, ["comment", "reply"])
+    ? { kind: "comment-reply" }
+    : { kind: "denied", reason: "comment 只支持绑定 canonical Inbox locator 的 `comment reply`" };
   if (MANAGEMENT_COMMANDS.has(command)) return { kind: "denied", reason: `身份边界：Runtime 不开放 lark-cli ${command} 管理命令` };
   if (command === "event") return { kind: "denied", reason: "Runtime 不允许另开 event 连接与 Host 争抢事件流" };
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
@@ -241,6 +246,106 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
     : noncanonicalProtectedDecision();
   if (protectedPaths.length > 0) return noncanonicalProtectedDecision();
   return { kind: "passthrough" };
+}
+
+function parseCommentReply(argv: readonly string[]): { messageId: string; text: string } {
+  const values = new Map<string, string>();
+  const positionals: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--json") continue;
+    const inline = ["--message-id", "--text"].find((flag) => argument.startsWith(`${flag}=`));
+    const flag = inline ?? (["--message-id", "--text"].includes(argument) ? argument : null);
+    if (!flag) {
+      if (argument.startsWith("-")) throw new Error(`comment reply 不支持参数 ${argument}`);
+      positionals.push(argument);
+      continue;
+    }
+    if (values.has(flag)) throw new Error(`${flag} 只能指定一次`);
+    const value = inline ? argument.slice(flag.length + 1) : argv[++index];
+    if (value === undefined) throw new Error(`${flag} 需要值`);
+    values.set(flag, value);
+  }
+  if (positionals.length !== 2 || positionals[0] !== "comment" || positionals[1] !== "reply") {
+    throw new Error("用法: larkin comment reply --message-id <doc_comment_id> --text '<reply>' --json");
+  }
+  const messageId = values.get("--message-id") || "";
+  const text = values.get("--text") || "";
+  if (!/^doc_comment_[0-9a-f]{32}$/.test(messageId)) throw new Error("comment reply 需要 Inbox 提供的 doc_comment message id");
+  if (!text.trim()) throw new Error("comment reply 的 --text 不能为空");
+  if (text.length > 20_000) throw new Error("comment reply 的 --text 超过 20000 字符");
+  return { messageId, text };
+}
+
+type CommentReplyLedger = {
+  version: 1;
+  cursors?: Record<string, unknown>;
+  document_comment_replies?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
+};
+
+function runCommentReply(
+  argv: readonly string[], privateEnv: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
+): number {
+  const input = parseCommentReply(argv);
+  const targetKey = store.resolveInboxMessageTarget(input.messageId);
+  const target = targetKey ? parseDocumentCommentTarget(targetKey) : null;
+  if (!target) throw new Error("comment reply 无法从当前 Agent Inbox 绑定文档评论 locator；先 poll 该消息且不得跨 Agent/评论回复");
+  if (!store.inboxTargetIsFresh(targetKey!)) throw new Error("comment reply 需要先 poll 当前 document-comment target 的最新 Inbox 消息");
+  const digest = createHash("sha256").update(input.text).digest("hex");
+  const claim = store.mutateJson<CommentReplyLedger, "ready" | "sent" | "ambiguous" | "conflict">(
+    "freshnessState", { version: 1, cursors: {} }, (state) => {
+      state.document_comment_replies ??= {};
+      const prior = state.document_comment_replies[input.messageId];
+      if (prior?.status === "sent" && prior.digest === digest) return "sent";
+      if (prior?.status === "sending" && prior.digest === digest) return "ambiguous";
+      if (prior && prior.status !== "failed" && prior.digest !== digest) return "conflict";
+      state.document_comment_replies[input.messageId] = { digest, status: "sending", updated_at: new Date().toISOString() };
+      const keys = Object.keys(state.document_comment_replies);
+      for (const stale of keys.slice(0, Math.max(0, keys.length - 512))) delete state.document_comment_replies[stale];
+      return "ready";
+    },
+  );
+  if (claim === "sent") {
+    io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target: targetKey })}\n`);
+    return 0;
+  }
+  if (claim === "ambiguous") throw new Error("comment reply 上次调用结果不明确，已 fail-closed 以避免重复评论；请由用户检查原评论线程");
+  if (claim === "conflict") throw new Error("comment reply 已为同一 Inbox 消息提交不同正文，拒绝覆盖或重复发送");
+  const url = target.topLevel
+    ? `/open-apis/drive/v1/files/${encodeURIComponent(target.fileToken)}/comments?file_type=${encodeURIComponent(target.fileType)}`
+    : `/open-apis/drive/v1/files/${encodeURIComponent(target.fileToken)}/comments/${encodeURIComponent(target.commentId)}/replies?file_type=${encodeURIComponent(target.fileType)}`;
+  const content = { elements: [{ type: "text_run", text_run: { text: input.text } }] };
+  const body = target.topLevel ? { reply_list: { replies: [{ content }] } } : { content };
+  const result = callNative(["api", "POST", url, "--data", JSON.stringify(body), "--as", "bot"], privateEnv, io, dependencies);
+  const terminalStatus = !result.error && result.status === 0 ? "sent"
+    : definitiveProviderRejection(result) ? "failed" : null;
+  if (terminalStatus) {
+    store.mutateJson<CommentReplyLedger, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
+      state.document_comment_replies ??= {};
+      state.document_comment_replies[input.messageId] = {
+        digest,
+        status: terminalStatus,
+        updated_at: new Date().toISOString(),
+      };
+    });
+  }
+  return emitNativeResult(result, io);
+}
+
+function definitiveProviderRejection(result: SpawnSyncReturns<string>): boolean {
+  if (result.error || result.signal || result.status === null || result.status === 0) return false;
+  for (const text of [result.stdout, result.stderr]) {
+    let value: unknown;
+    try { value = JSON.parse(text || ""); } catch { continue; }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const response = value as { ok?: unknown; code?: unknown; error?: unknown };
+    const error = response.error && typeof response.error === "object" && !Array.isArray(response.error)
+      ? response.error as { code?: unknown } : null;
+    if ((response.ok === false || (typeof response.code === "number" && response.code !== 0))
+        && ((typeof response.code === "number" && response.code !== 0)
+          || (typeof error?.code === "number" && error.code !== 0))) return true;
+  }
+  return false;
 }
 
 function callNative(
@@ -642,6 +747,13 @@ export function runLarkCli(
     return 2;
   }
   const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
+  if (decision.kind === "comment-reply") {
+    try { return runCommentReply(argv, privateEnv, io, nativeDependencies, store); }
+    catch (error) {
+      io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
   if (decision.kind === "passthrough") return passthroughWithObservation(argv, privateEnv, io, nativeDependencies, store);
   try {
     const target = guardedTarget(decision, argv, store);

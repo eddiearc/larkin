@@ -13,8 +13,19 @@ export interface CardActionCallbackCapability {
   verifiedEventId?: string;
 }
 
+export interface DocumentCommentEventCapability {
+  status: "requested-unverified";
+  event: "drive.notice.comment_add_v1";
+  scope: "drive:drive";
+  requestedAt: string;
+}
+
 interface CredentialRecord extends Record<string, unknown> {
-  capabilities?: { cardActionCallback?: CardActionCallbackCapability; [key: string]: unknown };
+  capabilities?: {
+    cardActionCallback?: CardActionCallbackCapability;
+    documentCommentEvent?: DocumentCommentEventCapability;
+    [key: string]: unknown;
+  };
 }
 
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
@@ -68,6 +79,20 @@ export function callbackCapability(value: unknown): CardActionCallbackCapability
   return capability;
 }
 
+export function documentCommentCapability(value: unknown): DocumentCommentEventCapability | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const capabilities = (value as CredentialRecord).capabilities;
+  const capability = capabilities?.documentCommentEvent;
+  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities) || Object.getPrototypeOf(capabilities) !== Object.prototype
+      || !capability || typeof capability !== "object" || Array.isArray(capability) || Object.getPrototypeOf(capability) !== Object.prototype
+      || Object.keys(capability).some((key) => !["status", "event", "scope", "requestedAt"].includes(key))
+      || capability.status !== "requested-unverified"
+      || capability.event !== "drive.notice.comment_add_v1"
+      || capability.scope !== "drive:drive"
+      || typeof capability.requestedAt !== "string" || !Number.isFinite(Date.parse(capability.requestedAt))) return null;
+  return capability;
+}
+
 export function readCallbackCapability(configDir: string, appId: string): CardActionCallbackCapability | null {
   return callbackCapability(readCredential(credentialFile(configDir, appId)));
 }
@@ -83,6 +108,30 @@ export function markCallbackRequested(configDir: string, appId: string, now = Da
   credential.capabilities = { ...(credential.capabilities || {}), cardActionCallback: capability };
   writeCredential(file, credential);
   return capability;
+}
+
+export function markSetupCapabilitiesRequested(configDir: string, appId: string, now = Date.now()): {
+  cardActionCallback: CardActionCallbackCapability;
+  documentCommentEvent: DocumentCommentEventCapability;
+} {
+  const file = credentialFile(configDir, appId);
+  const credential = readCredential(file);
+  const priorCallback = callbackCapability(credential);
+  const priorComment = documentCommentCapability(credential);
+  const requestedAt = new Date(now).toISOString();
+  const cardActionCallback: CardActionCallbackCapability = {
+    status: "requested-unverified",
+    requestedAt: priorCallback?.requestedAt || requestedAt,
+  };
+  const documentCommentEvent: DocumentCommentEventCapability = {
+    status: "requested-unverified",
+    event: "drive.notice.comment_add_v1",
+    scope: "drive:drive",
+    requestedAt: priorComment?.requestedAt || requestedAt,
+  };
+  credential.capabilities = { ...(credential.capabilities || {}), cardActionCallback, documentCommentEvent };
+  writeCredential(file, credential);
+  return { cardActionCallback, documentCommentEvent };
 }
 
 export function issueCallbackProbe(configDir: string, appId: string, now = Date.now(), random = randomUUID): { nonce: string; capability: CardActionCallbackCapability } {

@@ -41,6 +41,7 @@ function fixture() {
 
 test("Agent CLI manifest is the single machine-readable public command inventory", () => {
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.inbox, ["check", "poll"]);
+  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.comment, ["reply"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.reminder, ["schedule", "list", "snooze", "update", "cancel", "log"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.interaction, ["callback-status", "callback-probe", "create", "get", "resolve"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.profile, ["show"]);
@@ -48,8 +49,8 @@ test("Agent CLI manifest is the single machine-readable public command inventory
   const f = fixture();
   try {
     const help = JSON.parse(f.run(["--help"]).stdout);
-    assert.equal(help.usage, "larkin <inbox|reminder|interaction|profile|config> ...");
-    assert.deepEqual(Object.keys(help.capabilities.commands), ["inbox", "reminder", "interaction", "profile", "config"]);
+    assert.equal(help.usage, "larkin <inbox|comment|reminder|interaction|profile|config> ...");
+    assert.deepEqual(Object.keys(help.capabilities.commands), ["inbox", "comment", "reminder", "interaction", "profile", "config"]);
     assert.equal("removed" in help.capabilities, false, "help must not advertise removed command names");
     assert.equal("removed" in cliModule.AGENT_CLI_CAPABILITIES, false, "public manifest must contain only usable commands");
     for (const operation of cliModule.AGENT_CLI_CAPABILITIES.commands.config) {

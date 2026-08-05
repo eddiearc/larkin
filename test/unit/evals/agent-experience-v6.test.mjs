@@ -16,7 +16,7 @@ const DATASET = loadAgentExperienceV6Eval(path.join(ROOT, "evals/agent-experienc
 
 test("fixed Agent Experience v6 eval starts every selected scenario from an empty session", () => {
   assert.equal(DATASET.session.initial_turns, 0);
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v6");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v7");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",

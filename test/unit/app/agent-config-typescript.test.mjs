@@ -17,6 +17,57 @@ test("Pi default model label is concise and does not claim an official default",
   assert.doesNotMatch(source, /官方默认/);
 });
 
+test("document-comment diagnostics expose stable request, event, and read/access categories without provider content", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-comment-readiness-"));
+  const app = "cli_commentReadinessA1";
+  try {
+    fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-comment-readiness", mentionPolicy: "require", activeAgent: app,
+      agents: { [app]: { runtime: "codex", model: "default" } },
+    })}\n`, { mode: 0o600 });
+    const run = () => spawnSync(process.execPath, [ENTRY, "agents", "--json"], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: root },
+    });
+    const diagnostic = () => {
+      const result = run();
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout).agents[0].document_comment;
+    };
+    assert.deepEqual({ category: diagnostic().category, reason: diagnostic().reason }, {
+      category: "not_requested", reason: "setup_required",
+    });
+    fs.mkdirSync(path.join(root, "bots"), { mode: 0o700 });
+    fs.writeFileSync(path.join(root, "bots", `${app}.json`), JSON.stringify({ appId: app, appSecret: "fixture", tenant: "feishu", capabilities: {
+      documentCommentEvent: { status: "requested-unverified", event: "drive.notice.comment_add_v1", scope: "drive:drive", requestedAt: "2026-08-05T00:00:00.000Z" },
+    } }), { mode: 0o600 });
+    assert.deepEqual({ category: diagnostic().category, reason: diagnostic().reason }, {
+      category: "publish_or_event_unverified", reason: "publication_and_real_event_unverified",
+    });
+    const stateDir = path.join(root, "state", "agents", app);
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(stateDir, "status.json"), JSON.stringify({
+      documentCommentEventAt: "2026-08-05T00:01:00.000Z",
+    }), { mode: 0o600 });
+    assert.deepEqual({ category: diagnostic().category, reason: diagnostic().reason }, {
+      category: "event_arrived", reason: "real_event_observed",
+    });
+    for (const category of [
+      "permission_missing", "document_access_denied", "comment_unavailable_or_empty", "inbox_write_failure",
+      "pending_capacity_exhausted", "read_failure_unknown",
+    ]) {
+      fs.writeFileSync(path.join(stateDir, "status.json"), JSON.stringify({
+        documentCommentEventAt: "2026-08-05T00:01:00.000Z",
+        documentCommentLastErrorCategory: category,
+        documentCommentLastError: category,
+        documentCommentLastErrorAt: "2026-08-05T00:02:00.000Z",
+      }), { mode: 0o600 });
+      const failed = diagnostic();
+      assert.deepEqual({ category: failed.category, reason: failed.reason }, { category, reason: category });
+      assert.doesNotMatch(JSON.stringify(failed), /fixture|doc_token|comment body/);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("user model CLI accepts a dynamic Codex runtime model and effort across fresh processes", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-codex-catalog-cli-"));
   const bin = path.join(temp, "bin");
@@ -141,6 +192,7 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
           name: first,
           runtime: "codex",
           model: "gpt-5.3-codex",
+          document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null },
           ready: false,
           readiness: {
             daemon_owned: false,
@@ -155,6 +207,7 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
           name: second,
           runtime: "claude",
           model: "claude-sonnet-4-5",
+          document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null },
           ready: false,
           readiness: {
             daemon_owned: false,

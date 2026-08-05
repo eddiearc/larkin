@@ -531,7 +531,10 @@ for (const runtime of ["codex", "claude", "pi"]) {
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: path.join(root, "events.ndjson") };
     if (telemetry) {
       env.LARKIN_TELEMETRY_ENABLED = "1"; env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
-      const binDir = path.join(root, "bin"); fs.mkdirSync(binDir);
+      const fakeCliRoot = path.join(root, "fake-official-lark-cli"); const binDir = path.join(fakeCliRoot, "bin"); fs.mkdirSync(binDir, { recursive: true });
+      fs.writeFileSync(path.join(fakeCliRoot, "package.json"), JSON.stringify({
+        name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "bin/lark-cli" },
+      }));
       const sourceDir = path.join(stateDir, "lark-channel-source");
       const channelConfigDir = path.join(agent.larkConfigDir, "lark-channel");
       fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 });
@@ -546,7 +549,10 @@ for (const runtime of ["codex", "claude", "pi"]) {
         appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
       }] }), { mode: 0o600 });
       fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/usr/bin/env bun
-const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message_id:"om_mock_sent"}}));
+const args=process.argv.slice(2);
+if(args[0]==="--version")process.stdout.write("1.0.79");
+else if(args[0]==="config"&&args[1]==="bind"&&args[2]==="--help")process.stdout.write("--source lark-channel --identity bot");
+else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message_id:"om_mock_sent"}}));
 `, { mode: 0o755 });
       env.PATH = `${binDir}${path.delimiter}${process.env.PATH || ""}`;
     }

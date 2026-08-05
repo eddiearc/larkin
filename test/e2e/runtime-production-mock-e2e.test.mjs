@@ -548,6 +548,9 @@ for (const runtime of ["codex", "claude", "pi"]) {
         event_id: `evt_${runtime}_1`, content: "first", create_time: "1784160000000", thread_id: null,
         _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
       session.emit({ type: "turn-start", turnId: `${runtime}-turn` });
+      session.emit({ type: "activity", activity: "thinking" });
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      session.emit({ type: "activity", activity: "tool" });
       await hostShell.ingest(agentId, { chat_id: `oc_${runtime}`, chat_type: "p2p", sender_id: "ou_sender", message_id: `om_${runtime}_2`,
         event_id: `evt_${runtime}_2`, content: "second", create_time: "1784160001000", thread_id: null,
         _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
@@ -696,7 +699,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
         const spans = records.flatMap(({ payload }) => payload.resourceSpans)
           .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
         const names = new Set(spans.map((span) => span.name));
-        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "inbox.consume"]) assert.ok(names.has(name));
+        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume"]) assert.ok(names.has(name));
         assert.ok(spans.some((span) => span.name === "larkin.message.process" && span.links?.length === 1),
           `busy steer is linked, not assigned a false parent: ${JSON.stringify(spans.filter((span) => span.name === "larkin.message.process"))}`);
         const serialized = JSON.stringify(records.map((record) => record.payload));

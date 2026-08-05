@@ -17,7 +17,7 @@ larkin start
 
 The default spool is under `$LARKIN_HOME/telemetry/spool`, with a `0700` directory and `0600` files. Defaults are 64 MiB, 10,000 files, and 14 days. Override them with `LARKIN_TELEMETRY_MAX_BYTES`, `LARKIN_TELEMETRY_MAX_FILES`, and `LARKIN_TELEMETRY_MAX_AGE_MS`. Oldest/expired data is dropped first. Network errors, timeouts, 429, and 5xx responses leave files queued; only a successful OTLP response removes them. Automatic uploading is disabled unless an endpoint is configured.
 
-`larkin telemetry status` reports only queue counts/bytes, oldest age, drop count, the last error category, and endpoint scheme/host/path. It never prints headers, URL userinfo/query, message text, prompts, model output, commands, credentials, real user IDs, or raw errors. Trace attributes use hashes and low-cardinality enums. `model.activity` represents only the boundary observed by Larkin's Runtime Host; it is not provider queue or first-token timing.
+`larkin telemetry status` reports only queue counts/bytes, oldest age, drop count, the last error category, and endpoint scheme/host. It never prints headers, URL paths/userinfo/query, filesystem paths, message text, prompts, model output, commands, credentials, real user IDs, or raw errors. Trace attributes use hashes and low-cardinality enums. `model.activity` and `tool.execute` measure consecutive activity intervals observed by Larkin's Runtime Host; they are not provider queue, first-token, or provider-internal tool timing.
 
 ## Move traces offline
 
@@ -37,6 +37,8 @@ larkin telemetry flush --endpoint http://127.0.0.1:4318/v1/traces
 
 Bundles contain versioned OTLP payloads plus SHA-256 checksums. Import validates size, schema, and checksums, assigns local queue identities, and is idempotent. Original trace/span IDs, parentage, status, and timestamps are not rewritten.
 
+Ended spans survive process restarts. A clean shutdown also closes active spans and removes the cross-process parent context. An operating-system kill that gives the process no shutdown opportunity can lose the currently open intervals, but stale parent context is rejected on the next startup and previously ended spans remain queued.
+
 ## View with Grafana OTEL-LGTM
 
 The repository includes a development-only reference stack pinned to `grafana/otel-lgtm:0.27.1`:
@@ -44,6 +46,8 @@ The repository includes a development-only reference stack pinned to `grafana/ot
 ```bash
 docker compose -f deploy/otel-lgtm/compose.yaml up -d
 larkin telemetry flush --endpoint http://127.0.0.1:4318/v1/traces
+# Or run the content-free, end-to-end Collector + Tempo semantic check:
+bun run test:telemetry:lgtm
 ```
 
 Open <http://127.0.0.1:3000>, sign in with the image's development default (`admin` / `admin`), then use **Explore → Tempo** and search `service.name = larkin` or paste a trace ID. A complete trace contains:

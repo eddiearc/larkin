@@ -20,6 +20,8 @@ import { createTransportBusinessContext } from "./transport-business-context.js"
 import { SpanKind } from "@opentelemetry/api";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
 import { telemetrySingleton } from "../platform/telemetry-tracing.js";
+import path from "node:path";
+import { packageVersion } from "../platform/build-info.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -65,7 +67,10 @@ export function createAgentTransport(env: Record<string, string | undefined> = p
     log,
   } = business;
   let telemetry = telemetrySingleton();
-  try { telemetry = telemetrySingleton(loadTelemetryConfig(env)); } catch { /* telemetry is failure-isolated */ }
+  try {
+    const binaryEntry = env.LARKIN_BINARY_ENTRY_PATH || process.argv[1] || "";
+    telemetry = telemetrySingleton(loadTelemetryConfig(env), { serviceVersion: packageVersion(path.resolve(path.dirname(binaryEntry), "../..")) });
+  } catch { /* telemetry is failure-isolated */ }
   const telemetryObservedInputs = new WeakSet<object>();
 
   async function handle(input: AgentTransportInput): Promise<AgentTransportResponse> {

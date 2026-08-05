@@ -11,6 +11,7 @@ import { createAgentControlServer } from "./local-control.js";
 import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
 import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
+import { packageVersion } from "../platform/build-info.js";
 
 type HostShellOptions = Parameters<typeof createHostShell>[0];
 
@@ -52,7 +53,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
   try {
     const configured = JSON.parse(env.LARKIN_AGENTS_CONFIG || "[]") as Array<{ agentId?: string; stateDir?: string }>;
     const stateDirs = new Map(configured.flatMap((agent) => agent.agentId && agent.stateDir ? [[agent.agentId, agent.stateDir] as const] : []));
-    telemetry = telemetrySingleton(loadTelemetryConfig(env), { stateDirFor: (agentId) => stateDirs.get(agentId) });
+    const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+    telemetry = telemetrySingleton(loadTelemetryConfig(env), { stateDirFor: (agentId) => stateDirs.get(agentId),
+      stateDirs: [...stateDirs.values()], serviceVersion: packageVersion(sourceRoot) });
   } catch (error) {
     process.stderr.write(`[telemetry] disabled after initialization failure: ${error instanceof Error ? error.name : "unknown"}\n`);
   }

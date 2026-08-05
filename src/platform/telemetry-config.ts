@@ -63,5 +63,5 @@ export function loadTelemetryConfig(env: NodeJS.ProcessEnv = process.env): Telem
 export function safeEndpointLabel(endpoint?: string): string | null {
   if (!endpoint) return null;
   const url = new URL(endpoint);
-  return `${url.protocol}//${url.host}${url.pathname}`;
+  return `${url.protocol}//${url.host}`;
 }

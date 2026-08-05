@@ -24,7 +24,7 @@ function headers(argv: readonly string[]): Record<string, string> {
 }
 const print = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); };
 
-export async function main(argv: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<void> {
+async function run(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<void> {
   const [operation = "status"] = argv;
   const config = loadTelemetryConfig(env);
   const spool = new TelemetrySpool(config);
@@ -35,7 +35,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2), env:
   if (operation === "export") {
     const destination = path.resolve(option(argv, "--output") || `larkin-telemetry-${Date.now()}.json.gz`);
     const result = spool.exportBundle(destination);
-    print({ operation, output: destination, ...result, sourceQueueRetained: true }); return;
+    print({ operation, output: path.basename(destination), ...result, sourceQueueRetained: true }); return;
   }
   if (operation === "import") {
     const source = option(argv, "--input") || argv[1];
@@ -57,7 +57,16 @@ export async function main(argv: readonly string[] = process.argv.slice(2), env:
   larkin telemetry import --input <bundle.json.gz>
   larkin telemetry flush [--endpoint <http(s)://host:port/v1/traces>] [--header name=value]\n`); return;
   }
-  throw new Error(`unknown telemetry operation: ${operation}`);
+  throw new Error("unknown telemetry operation");
+}
+
+export async function main(argv: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  try { await run(argv, env); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "telemetry operation failed";
+    if (/^(?:unknown telemetry operation|telemetry (?:import|flush) requires|--(?:input|output|endpoint|header) |OTLP (?:endpoint|header))/.test(message)) throw new Error(message);
+    throw new Error("telemetry operation failed");
+  }
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(import.meta.filename)) {

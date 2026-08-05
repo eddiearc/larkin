@@ -49,6 +49,7 @@
     "test": "bun run typecheck && bun run build && bun run test:frontend && bun run test:unit && bun run test:integration && bun run test:e2e",
     "test:live:lark-passthrough": "bun test --max-concurrency 1 test/live/lark-passthrough-live.test.mjs",
     "test:live:document-comment": "bun run build && bun test --max-concurrency 1 test/live/document-comment-live.test.mjs",
+    "test:telemetry:lgtm": "bun run build && bun run scripts/telemetry/lgtm-acceptance.ts",
     "test:live:card-interaction": "bun test --max-concurrency 1 test/live/card-interaction-live.test.mjs",
     "test:live:card-interaction-evidence": "bun run test/live/card-interaction-evidence-driver.mjs",
     "test:live:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-live.test.mjs",

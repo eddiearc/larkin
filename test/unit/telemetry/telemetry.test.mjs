@@ -294,8 +294,12 @@ test("directory remnants recursively count contained bytes and cleanup does not 
     const directory = path.join(spoolDir, name); fs.mkdirSync(directory); fs.writeFileSync(path.join(directory, "owner.json"), "x".repeat(12 * 1024));
   }
   const outside = path.join(root, "outside-large"); fs.writeFileSync(outside, "z".repeat(50 * 1024));
-  fs.symlinkSync(outside, path.join(spoolDir, ".stale-lock-large", "outside-link"));
-  let status = spool.status(); assert.ok(status.remnantBytes > 20 * 1024 && status.remnantBytes < 30 * 1024, JSON.stringify(status));
+  const outsideLink = path.join(spoolDir, ".stale-lock-large", "outside-link"); fs.symlinkSync(outside, outsideLink);
+  const expectedRemnantBytes = [".stale-lock-large", ".purge-large.dir"].reduce((total, name) => {
+    const directory = path.join(spoolDir, name);
+    return total + fs.lstatSync(directory).size + fs.lstatSync(path.join(directory, "owner.json")).size;
+  }, fs.lstatSync(outsideLink).size);
+  let status = spool.status(); assert.equal(status.remnantBytes, expectedRemnantBytes, JSON.stringify(status));
   spool.prune(); status = spool.status(); assert.equal(status.remnantFiles, 0); assert.equal(status.cleanedRemnantFiles, 2); assert.equal(status.droppedFiles, 0);
 
   const corrupt = path.join(spoolDir, `span-${crypto.randomUUID()}.json`); fs.writeFileSync(corrupt, `{broken${"x".repeat(12 * 1024)}`);

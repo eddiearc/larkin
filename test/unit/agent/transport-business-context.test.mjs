@@ -102,7 +102,7 @@ const {transport}=require(${JSON.stringify(RUNTIME)}); transport.request({method
     const telemetrySpool = path.join(temp, "telemetry", "spool");
     const result = spawnSync(process.execPath, ["--eval", script], { cwd: ROOT, encoding: "utf8", env: { ...process.env,
       SHELL: loginShell, PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: agentId, CALL_SINK: sink,
-      LARKIN_TELEMETRY_ENABLED: "1", LARKIN_TELEMETRY_SPOOL_DIR: telemetrySpool } });
+      LARKIN_TELEMETRY_SPOOL_DIR: telemetrySpool } });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const observed = JSON.parse(result.stdout.slice(result.stdout.indexOf("RESULT=") + 7));
     assert.equal(observed.data.messageId, "om_sent");

@@ -78,7 +78,7 @@ export async function flushTelemetry(spool: TelemetrySpool, options: {
 }
 
 export function startTelemetryUploader(spool: TelemetrySpool, config: TelemetryConfig): { stop(): void; flush(): Promise<UploadResult> } | null {
-  if (!config.enabled || !config.endpoint) return null;
+  if (!config.endpoint) return null;
   let stopped = false; let timer: NodeJS.Timeout | null = null; let failures = 0; let active: Promise<UploadResult> | null = null;
   const flush = (): Promise<UploadResult> => {
     if (active) return active;

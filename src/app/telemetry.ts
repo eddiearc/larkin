@@ -29,7 +29,7 @@ async function run(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<voi
   const config = loadTelemetryConfig(env);
   const spool = new TelemetrySpool(config);
   if (operation === "status") {
-    print({ enabled: config.enabled, endpoint: safeEndpointLabel(config.endpoint), autoUpload: Boolean(config.enabled && config.endpoint), ...spool.status() });
+    print({ endpoint: safeEndpointLabel(config.endpoint), autoUpload: Boolean(config.endpoint), ...spool.status() });
     return;
   }
   if (operation === "export") {

@@ -3,7 +3,6 @@ import os from "node:os";
 import { resolveConfigDir } from "./root-layout.js";
 
 export interface TelemetryConfig {
-  enabled: boolean;
   spoolDir: string;
   endpoint?: string;
   headers: Record<string, string>;
@@ -48,7 +47,6 @@ export function loadTelemetryConfig(env: NodeJS.ProcessEnv = process.env): Telem
   const home = env.LARKIN_HOME || resolveConfigDir(env, os.homedir());
   const endpointValue = env.LARKIN_TELEMETRY_OTLP_ENDPOINT || env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
   return {
-    enabled: env.LARKIN_TELEMETRY_ENABLED === "1",
     spoolDir: path.resolve(env.LARKIN_TELEMETRY_SPOOL_DIR || path.join(home, "telemetry", "spool")),
     ...(endpointValue ? { endpoint: validateOtlpEndpoint(endpointValue) } : {}),
     headers: parseHeaders(env.LARKIN_TELEMETRY_OTLP_HEADERS || env.OTEL_EXPORTER_OTLP_HEADERS),

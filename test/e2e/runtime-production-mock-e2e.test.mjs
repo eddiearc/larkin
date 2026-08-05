@@ -506,7 +506,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const workspaceDir = path.join(root, "agents", agentId);
     const stateDir = path.join(root, "state", "agents", agentId);
     const store = createAgentStateStore(root, agentId);
-    const telemetryConfig = { enabled: true, spoolDir: path.join(root, "telemetry", "spool"), headers: {}, maxBytes: 1024 * 1024,
+    const telemetryConfig = { spoolDir: path.join(root, "telemetry", "spool"), headers: {}, maxBytes: 1024 * 1024,
       maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 1_000 };
     const telemetry = runtime === "codex" ? createTelemetryRuntime(telemetryConfig, { stateDirFor: () => stateDir }) : undefined;
     const session = new FakeNativeSession(runtime);
@@ -530,7 +530,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-mock",
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: path.join(root, "events.ndjson") };
     if (telemetry) {
-      env.LARKIN_TELEMETRY_ENABLED = "1"; env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
+      env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
       const fakeCliRoot = path.join(root, "fake-official-lark-cli"); const binDir = path.join(fakeCliRoot, "bin"); fs.mkdirSync(binDir, { recursive: true });
       fs.writeFileSync(path.join(fakeCliRoot, "package.json"), JSON.stringify({
         name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "bin/lark-cli" },

@@ -57,19 +57,18 @@ interface MessageTrace {
   activitySpan?: Span; activityName?: "model.activity" | "tool.execute";
 }
 export interface TelemetryRuntime {
-  readonly enabled: boolean;
   beginMessage(agentId: string, messageId: string): void;
   phase<T>(messageId: string, name: "feishu.receive" | "runtime.deliver", spanKind: SpanKind, operation: () => Promise<T>): Promise<T>;
   delivery(agentId: string, messageId: string, status: "accepted" | "consumed" | "deferred" | "duplicate" | "error"): void;
   runtimeEvent(agentId: string, event: NormalizedRuntimeEvent): void;
   externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send", spanKind: SpanKind,
-    operation: () => T | Promise<T>, boundary?: "agent_cli" | "agent_transport"): Promise<T>;
+    operation: () => T | Promise<T>, boundary?: "agent_cli" | "agent_transport"): T | Promise<T>;
   shutdown(): Promise<void>;
 }
 
 const NOOP: TelemetryRuntime = {
-  enabled: false, beginMessage() {}, async phase(_id, _name, _kind, operation) { return operation(); }, delivery() {}, runtimeEvent() {},
-  async externalPhase(_agent, _state, _name, _kind, operation) { return operation(); }, async shutdown() {},
+  beginMessage() {}, async phase(_id, _name, _kind, operation) { return operation(); }, delivery() {}, runtimeEvent() {},
+  externalPhase(_agent, _state, _name, _kind, operation) { return operation(); }, async shutdown() {},
 };
 
 const safeHash = (value: string): string => crypto.createHash("sha256").update(value).digest("hex").slice(0, 24);
@@ -123,7 +122,6 @@ interface TelemetryRuntimeOptions {
   now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection; maintenanceIntervalMs?: number;
 }
 export function createTelemetryRuntime(config: TelemetryConfig, options: TelemetryRuntimeOptions = {}): TelemetryRuntime {
-  if (!config.enabled) return NOOP;
   const spool = new TelemetrySpool(config);
   const exporter = new DurableSpanExporter(spool);
   const runtimeGeneration = crypto.randomUUID();
@@ -189,7 +187,6 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     }
   };
   return {
-    enabled: true,
     beginMessage(agentId, messageId) {
       try {
         const active = activeByAgent.get(agentId);
@@ -249,7 +246,8 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
         else if (event.type === "error" || event.type === "configuration-error" || event.type === "closed") endTrace(current, true);
       } catch { /* isolated */ }
     },
-    async externalPhase(agentId, stateDir, name, spanKind, operation, boundary = "agent_transport") {
+    externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send", spanKind: SpanKind,
+      operation: () => T | Promise<T>, boundary: "agent_cli" | "agent_transport" = "agent_transport") {
       let span: Span; let parentContext: Context;
       try {
         const parent = readActiveContext(stateDir, now(), inspectOwner);
@@ -257,9 +255,14 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
         span = tracer.startSpan(name, { kind: spanKind, attributes: { "larkin.agent.id_hash": safeHash(agentId),
           "larkin.observation.boundary": boundary } }, parentContext);
       } catch { return operation(); }
-      try { return await context.with(trace.setSpan(parentContext, span), operation); }
-      catch (error) { span.setStatus({ code: SpanStatusCode.ERROR }); throw error; }
-      finally { span.end(); }
+      let result: T | Promise<T>;
+      try { result = context.with(trace.setSpan(parentContext, span), operation); }
+      catch (error) { span.setStatus({ code: SpanStatusCode.ERROR }); span.end(); throw error; }
+      if (result && typeof (result as Promise<T>).then === "function") {
+        return Promise.resolve(result).catch((error) => { span.setStatus({ code: SpanStatusCode.ERROR }); throw error; })
+          .finally(() => span.end());
+      }
+      span.end(); return result;
     },
     async shutdown() {
       uploader?.stop();

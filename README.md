@@ -30,13 +30,12 @@ For supported Feishu cloud-document comments (`doc`, `docx`, `sheet`, and `file`
 
 ## OpenTelemetry traces
 
-Larkin can record a privacy-safe timing waterfall for each woken Feishu message. Tracing is opt-in, and ended spans first enter a durable local OTLP/HTTP JSON spool. Message processing therefore does not depend on an observability backend being reachable.
+Larkin records a privacy-safe timing waterfall for each woken Feishu message. Tracing is always enabled, and ended spans first enter a durable local OTLP/HTTP JSON spool. Message processing therefore does not depend on an observability backend being reachable.
 
-Enable local recording in the environment that starts Larkin:
+Local recording needs no enable flag. Configure an endpoint only when this computer should upload automatically:
 
 ```bash
-export LARKIN_TELEMETRY_ENABLED=1
-# Optional: without an endpoint, traces remain in the local spool.
+# Optional: without an endpoint, traces remain only in the local spool.
 export LARKIN_TELEMETRY_OTLP_ENDPOINT=https://collector.example/v1/traces
 # Optional comma-separated name=value fields; never persisted or printed.
 export LARKIN_TELEMETRY_OTLP_HEADERS='Authorization=Bearer%20REDACTED'

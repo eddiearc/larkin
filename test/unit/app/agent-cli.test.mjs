@@ -314,7 +314,6 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
 
     const telemetryCalls = [];
     const telemetry = {
-      enabled: true,
       async externalPhase(agentId, stateDir, name, kind, operation, boundary) {
         telemetryCalls.push({ agentId, stateDir, name, kind, boundary });
         return operation();

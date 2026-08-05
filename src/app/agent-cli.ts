@@ -505,9 +505,11 @@ export function runAgentCli(
       try { telemetry ??= telemetrySingleton(loadTelemetryConfig(env), {
         serviceVersion: packageVersion(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")),
       }); } catch { /* telemetry must not alter Inbox behavior */ }
-      if (!telemetry?.enabled) return poll();
-      return telemetry.externalPhase(agent.agentId, stateStore.paths.root, "inbox.consume", SpanKind.CONSUMER, poll, "agent_cli")
-        .catch((error) => { io.stderr(`larkin: ${(error as Error).message}\n`); return 2; });
+      if (!telemetry) return poll();
+      const observed = telemetry.externalPhase(agent.agentId, stateStore.paths.root, "inbox.consume", SpanKind.CONSUMER, poll, "agent_cli");
+      return observed && typeof (observed as Promise<number>).then === "function"
+        ? Promise.resolve(observed).catch((error) => { io.stderr(`larkin: ${(error as Error).message}\n`); return 2; })
+        : observed;
     }
     if (group === "reminder") {
       const result = reminderRequest([subcommand || "", ...rest], stateStore, agent.agentId, dependencies);

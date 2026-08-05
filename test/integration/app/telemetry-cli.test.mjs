@@ -30,6 +30,7 @@ test("telemetry status and export/import/flush work through the real CLI dispatc
   source.enqueue(payload);
   const status = await cli(sourceHome, ["status"]);
   assert.equal(status.status, 0, status.stderr); assert.equal(JSON.parse(status.stdout).queuedFiles, 1);
+  assert.equal("enabled" in JSON.parse(status.stdout), false, "telemetry has no enable/disable switch");
   const bundle = path.join(sourceHome, "bundle.json.gz");
   const exported = await cli(sourceHome, ["export", "--output", bundle]);
   assert.equal(exported.status, 0, exported.stderr); assert.equal(JSON.parse(exported.stdout).sourceQueueRetained, true);

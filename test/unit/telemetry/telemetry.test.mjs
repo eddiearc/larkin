@@ -12,7 +12,7 @@ import { flushTelemetry, startTelemetryUploader } from "../../../dist/platform/t
 import { createTelemetryRuntime } from "../../../dist/platform/telemetry-tracing.mjs";
 
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), "larkin-otel-"));
-const config = (root, overrides = {}) => ({ enabled: true, spoolDir: path.join(root, "spool"), headers: {},
+const config = (root, overrides = {}) => ({ spoolDir: path.join(root, "spool"), headers: {},
   maxBytes: 1024 * 1024, maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 2_000, ...overrides });
 const payload = (id = "1") => ({ resourceSpans: [{ resource: { attributes: [
   { key: "service.name", value: { stringValue: "larkin" } },

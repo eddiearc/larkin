@@ -5,12 +5,24 @@ import path from "node:path";
 import { test } from "bun:test";
 import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
+import { documentCommentMessageId } from "../../../dist/feishu/document-comment.mjs";
 
 const waitFor = async (predicate, timeout = 2_000) => {
   const deadline = Date.now() + timeout;
   while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(Boolean(predicate()), true, "condition was not reached before timeout");
 };
+
+function writePolicyConfig(root, agentId, { globalPolicy = "require", agentPolicy, chatMentionPolicies } = {}) {
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 4, serverId: "server-document-policy", mentionPolicy: globalPolicy, activeAgent: agentId,
+    agents: { [agentId]: {
+      runtime: "codex", model: "default",
+      ...(agentPolicy ? { mentionPolicy: agentPolicy } : {}),
+      ...(chatMentionPolicies ? { chatMentionPolicies } : {}),
+    } },
+  })}\n`, { mode: 0o600 });
+}
 
 test("production Host comment wiring persists one semantic Inbox wake and fails closed on non-mentions/self/duplicates", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-comment-host-"));
@@ -22,6 +34,7 @@ test("production Host comment wiring persists one semantic Inbox wake and fails 
     larkConfigDir: path.join(root, "lark-cli"), workspaceDir: path.join(root, "agents", agentId),
     stateDir: path.join(root, "state", "agents", agentId),
   };
+  writePolicyConfig(root, agentId, { globalPolicy: "require" });
   const deliveries = [];
   const store = createAgentStateStore(root, agentId);
   const runtimeHost = {
@@ -78,6 +91,7 @@ test("production Host comment wiring persists one semantic Inbox wake and fails 
     assert.equal(inbox.length, 1);
     assert.equal(inbox[0].kind, "document_comment");
     assert.equal(inbox[0].wake, true);
+    assert.deepEqual([inbox[0].mention_policy, inbox[0].mention_policy_source, inbox[0].mentioned_bot], ["require", "global", true]);
     assert.equal(inbox[0].target, "document-comment:docx:doc_token:comment_new:in-thread");
     assert.equal(inbox[0].content, "please review this");
     assert.equal(inbox[0].chat_id, undefined, "document comments must not masquerade as IM targets");
@@ -95,6 +109,7 @@ function recoveryFixture(root, { fetchImpl, failInbox = () => false, logs = [] }
     larkConfigDir: path.join(root, "lark-cli"), workspaceDir: path.join(root, "agents", agentId),
     stateDir: path.join(root, "state", "agents", agentId),
   };
+  if (!fs.existsSync(path.join(root, "config.json"))) writePolicyConfig(root, agentId);
   const realStore = createAgentStateStore(root, agentId);
   const wrappedStore = Object.create(realStore);
   wrappedStore.prepareInboxDelivery = (envelope) => {
@@ -149,9 +164,69 @@ const recoveredComment = {
   }],
 };
 
+test("document comments resolve current Agent/global mention policy and never consult per-chat overrides", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-mention-policy-"));
+  fs.chmodSync(root, 0o700);
+  const agentId = "cli_documentRecoveryA1";
+  writePolicyConfig(root, agentId, { globalPolicy: "require", chatMentionPolicies: { oc_document_fake: "free" } });
+  let fetches = 0;
+  const fixture = recoveryFixture(root, { fetchImpl: async (_target, commentId) => {
+    fetches += 1;
+    return { ...recoveredComment, commentId };
+  } });
+  const unmentioned = (suffix) => ({
+    ...recoveryEvent,
+    commentId: `comment_policy_${suffix}`,
+    mentionedBot: false,
+    raw: { event_id: `evt_policy_${suffix}`, notice_type: "add_reply" },
+  });
+  try {
+    await fixture.shell.start();
+    await waitFor(() => fixture.channel?.handlers);
+
+    await fixture.channel.handlers.comment(unmentioned("global_require"));
+    assert.equal(fetches, 0, "global require must ignore an unmentioned comment even when a chat override is free");
+
+    writePolicyConfig(root, agentId, { globalPolicy: "free", chatMentionPolicies: { oc_document_fake: "require" } });
+    const globalFreeEvent = unmentioned("global_free");
+    await fixture.channel.handlers.comment(globalFreeEvent);
+    await fixture.channel.handlers.comment({
+      ...globalFreeEvent, raw: { event_id: "evt_policy_global_free_redelivery", notice_type: "add_reply" },
+    });
+    assert.equal(fixture.deliveries.length, 1);
+    assert.equal(fixture.store.readNdjson("inbox").filter((row) => row.comment_id === globalFreeEvent.commentId).length, 1,
+      "free unmentioned redelivery must still produce exactly one canonical wake");
+    assert.deepEqual([
+      fixture.deliveries[0].mention_policy,
+      fixture.deliveries[0].mention_policy_source,
+      fixture.deliveries[0].mentioned_bot,
+    ], ["free", "global", false]);
+
+    writePolicyConfig(root, agentId, { globalPolicy: "require", agentPolicy: "free", chatMentionPolicies: { oc_document_fake: "require" } });
+    await fixture.channel.handlers.comment(unmentioned("agent_free"));
+    assert.equal(fixture.deliveries.length, 2);
+    assert.deepEqual([
+      fixture.deliveries[1].mention_policy,
+      fixture.deliveries[1].mention_policy_source,
+      fixture.deliveries[1].mentioned_bot,
+    ], ["free", "agent", false]);
+
+    writePolicyConfig(root, agentId, { globalPolicy: "free", agentPolicy: "require", chatMentionPolicies: { oc_document_fake: "free" } });
+    const fetchesBeforeAgentRequire = fetches;
+    await fixture.channel.handlers.comment(unmentioned("agent_require"));
+    assert.equal(fetches, fetchesBeforeAgentRequire, "Agent require must override global/chat free without fetching");
+    assert.equal(fixture.deliveries.length, 2);
+    assert.equal(fixture.store.readNdjson("inbox").filter((row) => row.kind === "document_comment").length, 2);
+  } finally {
+    await fixture.shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("comment fetch failure persists a private pending locator and reconnect replay wakes only after canonical Inbox append", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-fetch-recovery-"));
   fs.chmodSync(root, 0o700);
+  writePolicyConfig(root, "cli_documentRecoveryA1", { globalPolicy: "free" });
   let failFetch = true;
   const logs = [];
   const fixture = recoveryFixture(root, { logs, fetchImpl: async () => {
@@ -161,7 +236,7 @@ test("comment fetch failure persists a private pending locator and reconnect rep
   try {
     await fixture.shell.start();
     await waitFor(() => fixture.channel?.handlers);
-    await fixture.channel.handlers.comment(recoveryEvent);
+    await fixture.channel.handlers.comment({ ...recoveryEvent, mentionedBot: false });
     assert.equal(fixture.deliveries.length, 0);
     assert.equal(fixture.store.readNdjson("inbox").length, 0);
     const pending = fixture.store.readJson("documentComments", { items: {} });
@@ -169,12 +244,145 @@ test("comment fetch failure persists a private pending locator and reconnect rep
     assert.equal(JSON.stringify(pending).includes("private comment body"), false);
     assert.equal(fs.statSync(fixture.store.paths.documentComments).mode & 0o777, 0o600);
     assert.equal(fixture.store.readJson("status", {}).documentCommentLastErrorCategory, "read_failure_unknown");
+    writePolicyConfig(root, "cli_documentRecoveryA1", { globalPolicy: "require" });
     failFetch = false;
     fixture.channel.handlers.reconnected();
     await waitFor(() => fixture.deliveries.length === 1);
     assert.equal(fixture.store.readNdjson("inbox").length, 1);
+    assert.deepEqual([
+      fixture.deliveries[0].mention_policy,
+      fixture.deliveries[0].mention_policy_source,
+      fixture.deliveries[0].mentioned_bot,
+    ], ["free", "global", false], "replay must preserve the original accepted policy decision");
     assert.equal(Object.keys(fixture.store.readJson("documentComments", { items: {} }).items).length, 0);
     assert.doesNotMatch(logs.join("\n"), /doc_private_token|private comment body|selected private quote/);
+  } finally {
+    await fixture.shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("same-process semantic redelivery uses the already-durable acceptance decision after policy changes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-semantic-redelivery-"));
+  fs.chmodSync(root, 0o700);
+  const agentId = "cli_documentRecoveryA1";
+  writePolicyConfig(root, agentId, { globalPolicy: "require" });
+  let fetches = 0;
+  const fixture = recoveryFixture(root, { fetchImpl: async () => {
+    fetches += 1;
+    if (fetches === 1) throw new Error("temporary provider failure");
+    return recoveredComment;
+  } });
+  try {
+    await fixture.shell.start();
+    await waitFor(() => fixture.channel?.handlers);
+    await fixture.channel.handlers.comment(recoveryEvent);
+    const pending = fixture.store.readJson("documentComments", { items: {} });
+    const [durable] = Object.values(pending.items);
+    assert.deepEqual([
+      durable.mentionPolicy,
+      durable.mentionPolicySource,
+      durable.mentionedBot,
+    ], ["require", "global", true]);
+
+    writePolicyConfig(root, agentId, { globalPolicy: "free" });
+    await fixture.channel.handlers.comment({
+      ...recoveryEvent,
+      mentionedBot: false,
+      raw: { event_id: "evt_recovery_semantic_redelivery", notice_type: "add_reply" },
+    });
+
+    assert.equal(fetches, 2);
+    assert.equal(fixture.deliveries.length, 1);
+    assert.deepEqual([
+      fixture.deliveries[0].mention_policy,
+      fixture.deliveries[0].mention_policy_source,
+      fixture.deliveries[0].mentioned_bot,
+    ], ["require", "global", true], "redelivery must process the durable record instead of a newly resolved policy");
+    assert.equal(Object.keys(fixture.store.readJson("documentComments", { items: {} }).items).length, 0);
+    assert.equal(fixture.store.readNdjson("inbox").length, 1);
+  } finally {
+    await fixture.shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent semantic redelivery joins one pending processor and cannot duplicate Runtime delivery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-concurrent-redelivery-"));
+  fs.chmodSync(root, 0o700);
+  let fetches = 0;
+  let releaseFetch;
+  const fixture = recoveryFixture(root, { fetchImpl: async () => {
+    fetches += 1;
+    return new Promise((resolve) => { releaseFetch = () => resolve(recoveredComment); });
+  } });
+  try {
+    await fixture.shell.start();
+    await waitFor(() => fixture.channel?.handlers);
+    const first = fixture.channel.handlers.comment(recoveryEvent);
+    await waitFor(() => fetches === 1 && typeof releaseFetch === "function");
+    const second = fixture.channel.handlers.comment({
+      ...recoveryEvent,
+      raw: { event_id: "evt_recovery_concurrent_redelivery", notice_type: "add_reply" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(fetches, 1, "semantic redelivery must join the existing in-flight processor");
+    releaseFetch();
+    await Promise.all([first, second]);
+    assert.equal(fixture.deliveries.length, 1);
+    assert.equal(fixture.store.readNdjson("inbox").length, 1);
+    assert.equal(Object.keys(fixture.store.readJson("documentComments", { items: {} }).items).length, 0);
+  } finally {
+    releaseFetch?.();
+    await fixture.shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 pending upgrade drops rows without acceptance metadata and retains bounded valid recovery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-pending-v1-upgrade-"));
+  fs.chmodSync(root, 0o700);
+  let fetches = 0;
+  const fixture = recoveryFixture(root, { fetchImpl: async () => {
+    fetches += 1;
+    throw new Error("keep valid recovery pending");
+  } });
+  const messageId = documentCommentMessageId("cli_documentRecoveryA1", recoveryEvent);
+  const valid = {
+    messageId,
+    fileToken: recoveryEvent.fileToken,
+    fileType: recoveryEvent.fileType,
+    commentId: recoveryEvent.commentId,
+    replyId: recoveryEvent.replyId,
+    operatorOpenId: recoveryEvent.operator.openId,
+    timestamp: recoveryEvent.timestamp,
+    noticeType: "add_reply",
+    mentionPolicy: "require",
+    mentionPolicySource: "global",
+    mentionedBot: true,
+    queuedAt: "2026-08-05T00:00:00.000Z",
+  };
+  const staleId = `doc_comment_${"f".repeat(32)}`;
+  fixture.store.writeJson("documentComments", {
+    version: 1,
+    items: {
+      [staleId]: { ...valid, messageId: staleId, mentionPolicy: undefined, mentionPolicySource: undefined, mentionedBot: undefined },
+      [messageId]: valid,
+    },
+  });
+  try {
+    await fixture.shell.start();
+    await waitFor(() => fetches === 1);
+    const upgraded = fixture.store.readJson("documentComments", { items: {} });
+    assert.equal(upgraded.version, 2);
+    assert.deepEqual(Object.keys(upgraded.items), [messageId]);
+    assert.deepEqual([
+      upgraded.items[messageId].mentionPolicy,
+      upgraded.items[messageId].mentionPolicySource,
+      upgraded.items[messageId].mentionedBot,
+    ], ["require", "global", true]);
+    assert.equal(Object.keys(upgraded.items).length <= 256, true);
+    assert.equal(fs.statSync(fixture.store.paths.documentComments).mode & 0o777, 0o600);
   } finally {
     await fixture.shell.shutdown("test");
     fs.rmSync(root, { recursive: true, force: true });
@@ -231,13 +439,14 @@ test("pending saturation preserves all unresolved records and fails closed with 
     items[messageId] = {
       messageId, fileToken: `retained_${index}`, fileType: "docx", commentId: `comment_${index}`,
       replyId: `reply_${index}`, operatorOpenId: "ou_retained", timestamp: 1_786_001_000_000 + index,
-      noticeType: "add_reply", queuedAt: "2026-08-05T00:00:00.000Z",
+      noticeType: "add_reply", mentionPolicy: "require", mentionPolicySource: "global", mentionedBot: true,
+      queuedAt: "2026-08-05T00:00:00.000Z",
     };
   }
   try {
     await fixture.shell.start();
     await waitFor(() => fixture.channel?.handlers);
-    fixture.store.writeJson("documentComments", { version: 1, items });
+    fixture.store.writeJson("documentComments", { version: 2, items });
     await fixture.channel.handlers.comment(recoveryEvent);
     const retained = fixture.store.readJson("documentComments", { items: {} });
     assert.equal(Object.keys(retained.items).length, 256);

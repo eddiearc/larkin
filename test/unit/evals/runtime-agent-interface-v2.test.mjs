@@ -15,7 +15,7 @@ const DATASET = loadRuntimeAgentInterfaceEval(path.join(ROOT, "evals", "runtime-
 test("fixed runtime Agent interface eval registers dataset, rubric, grader, threshold, Runtime/model/version and six-plus scenarios", () => {
   assert.equal(DATASET.version, 1);
   assert.equal(DATASET.runtime.adapter, "codex");
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v7");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v8");
   assert.equal(DATASET.grader.version, 1);
   assert.equal(DATASET.grader.threshold, 1);
   assert.ok(DATASET.grader.rubric.length >= 5);

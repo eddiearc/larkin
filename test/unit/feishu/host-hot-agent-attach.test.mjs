@@ -88,6 +88,13 @@ test("hot-attached channel queues document comments until activation then persis
     channels.push(channel);
     return channel;
   } };
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 4, serverId: "server-hot-comment", mentionPolicy: "require", activeAgent: existing.agentId,
+    agents: {
+      [existing.agentId]: { runtime: "codex", model: "gpt-5.6" },
+      [added.agentId]: { runtime: "codex", model: "gpt-5.6" },
+    },
+  })}\n`, { mode: 0o600 });
   const shell = createHostShell({
     env: { ...process.env, LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-hot-comment",
       LARKIN_AGENTS_CONFIG: JSON.stringify([existing]), LARKIN_INBOUND_DROUGHT_SEC: "0" },

@@ -3,7 +3,7 @@
   "version": 6,
   "model": {
     "selection": "deterministic-trace",
-    "standing_prompt_version": "larkin-standing-v7"
+    "standing_prompt_version": "larkin-standing-v8"
   },
   "session": {
     "initial_turns": 0

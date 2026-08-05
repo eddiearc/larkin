@@ -24,7 +24,7 @@ import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
 import type { RuntimeHost, RuntimeHostEvent } from "../runtime/runtime-host.js";
 import { providerAuthenticationFailureReadiness, RuntimePrerequisiteError } from "../runtime/runtime-readiness.js";
 import { verifyCallbackProbe } from "../platform/callback-capability.js";
-import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
+import { loadConfig, resolveAgentGlobalMentionPolicy, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { isChannelReconnecting } from "../app/agent-readiness.js";
@@ -67,9 +67,12 @@ interface PendingDocumentComment {
   operatorOpenId: string;
   timestamp: number;
   noticeType: string;
+  mentionPolicy: "require" | "free";
+  mentionPolicySource: "agent" | "global";
+  mentionedBot: boolean;
   queuedAt: string;
 }
-interface PendingDocumentCommentState { version: 1; items: Record<string, PendingDocumentComment> }
+interface PendingDocumentCommentState { version: 2; items: Record<string, PendingDocumentComment> }
 const PENDING_DOCUMENT_COMMENT_LIMIT = 256;
 interface AgentStateRecord { store: AgentStateStore; state: AgentState }
 interface HostFrame {
@@ -439,7 +442,7 @@ export function createHostShell({
     channelFor: (agent) => interactionChannels.get(agent.agentId),
     log,
   });
-  const emptyPendingDocumentComments = (): PendingDocumentCommentState => ({ version: 1, items: {} });
+  const emptyPendingDocumentComments = (): PendingDocumentCommentState => ({ version: 2, items: {} });
   const validPendingDocumentComment = (value: unknown): value is PendingDocumentComment => {
     if (!isRecord(value)) return false;
     return typeof value.messageId === "string" && /^doc_comment_[0-9a-f]{32}$/.test(value.messageId)
@@ -450,9 +453,42 @@ export function createHostShell({
       && typeof value.operatorOpenId === "string" && !!value.operatorOpenId
       && Number.isSafeInteger(value.timestamp) && Number(value.timestamp) > 0
       && typeof value.noticeType === "string" && !!value.noticeType
+      && (value.mentionPolicy === "require" || value.mentionPolicy === "free")
+      && (value.mentionPolicySource === "agent" || value.mentionPolicySource === "global")
+      && typeof value.mentionedBot === "boolean"
       && typeof value.queuedAt === "string" && Number.isFinite(Date.parse(value.queuedAt));
   };
-  const pendingRecord = (agent: ConfiguredAgent, event: CommentEvent): PendingDocumentComment => ({
+  const normalizePendingDocumentComments = (value: unknown): PendingDocumentCommentState => {
+    const normalized = emptyPendingDocumentComments();
+    const raw = isRecord(value) && isRecord(value.items) ? value.items : null;
+    if (!raw) return normalized;
+    for (const [messageId, candidate] of Object.entries(raw)) {
+      if (Object.keys(normalized.items).length >= PENDING_DOCUMENT_COMMENT_LIMIT) break;
+      if (validPendingDocumentComment(candidate) && candidate.messageId === messageId) normalized.items[messageId] = candidate;
+      // Unreleased v1 rows without policy metadata cannot prove their original
+      // acceptance decision. Drop them during the bounded v2 upgrade instead
+      // of guessing authorization or allowing stale rows to consume capacity.
+    }
+    return normalized;
+  };
+  const withPendingDocumentComments = <R>(
+    agent: ConfiguredAgent,
+    operation: (state: PendingDocumentCommentState) => R,
+  ): R => stateStore(agent).mutateJson<Record<string, unknown>, R>(
+    "documentComments",
+    emptyPendingDocumentComments() as unknown as Record<string, unknown>,
+    (raw) => {
+      const normalized = normalizePendingDocumentComments(raw);
+      for (const key of Object.keys(raw)) delete raw[key];
+      Object.assign(raw, normalized);
+      return operation(raw as unknown as PendingDocumentCommentState);
+    },
+  );
+  const pendingRecord = (
+    agent: ConfiguredAgent,
+    event: CommentEvent,
+    policy: { effective: "require" | "free"; source: "agent" | "global" },
+  ): PendingDocumentComment => ({
     messageId: documentCommentMessageId(agent.agentId, event),
     fileToken: event.fileToken,
     fileType: event.fileType,
@@ -461,6 +497,9 @@ export function createHostShell({
     operatorOpenId: event.operator.openId,
     timestamp: event.timestamp,
     noticeType: documentCommentNoticeType(event),
+    mentionPolicy: policy.effective,
+    mentionPolicySource: policy.source,
+    mentionedBot: event.mentionedBot,
     queuedAt: new Date().toISOString(),
   });
   const pendingEvent = (record: PendingDocumentComment): CommentEvent => ({
@@ -469,31 +508,29 @@ export function createHostShell({
     commentId: record.commentId,
     ...(record.replyId ? { replyId: record.replyId } : {}),
     operator: { openId: record.operatorOpenId },
-    mentionedBot: true,
+    mentionedBot: record.mentionedBot,
     timestamp: record.timestamp,
     raw: { notice_type: record.noticeType },
   });
-  const persistPendingDocumentComment = (agent: ConfiguredAgent, record: PendingDocumentComment): void => {
-    stateStore(agent).mutateJson<PendingDocumentCommentState, void>("documentComments", emptyPendingDocumentComments(), (state) => {
-      if (state.version !== 1 || !isRecord(state.items)) Object.assign(state, emptyPendingDocumentComments());
-      if (state.items[record.messageId]) return;
+  const pendingDocumentComment = (agent: ConfiguredAgent, messageId: string): PendingDocumentComment | null =>
+    withPendingDocumentComments(agent, (state) => state.items[messageId] ?? null);
+  const persistPendingDocumentComment = (agent: ConfiguredAgent, record: PendingDocumentComment): PendingDocumentComment =>
+    withPendingDocumentComments(agent, (state) => {
+      const existing = state.items[record.messageId];
+      if (existing) return existing;
       if (Object.keys(state.items).length >= PENDING_DOCUMENT_COMMENT_LIMIT) {
         throw Object.assign(new Error("document comment pending capacity exhausted"), { code: "PENDING_DOCUMENT_COMMENT_CAPACITY" });
       }
       state.items[record.messageId] = record;
+      return record;
     });
-  };
   const removePendingDocumentComment = (agent: ConfiguredAgent, messageId: string): void => {
-    stateStore(agent).mutateJson<PendingDocumentCommentState, void>("documentComments", emptyPendingDocumentComments(), (state) => {
-      if (state.version !== 1 || !isRecord(state.items)) Object.assign(state, emptyPendingDocumentComments());
+    withPendingDocumentComments(agent, (state) => {
       delete state.items[messageId];
     });
   };
-  const readPendingDocumentComments = (agent: ConfiguredAgent): PendingDocumentComment[] => {
-    const state = stateStore(agent).readJson<PendingDocumentCommentState>("documentComments", emptyPendingDocumentComments());
-    if (state.version !== 1 || !isRecord(state.items)) return [];
-    return Object.values(state.items).filter(validPendingDocumentComment).slice(0, PENDING_DOCUMENT_COMMENT_LIMIT);
-  };
+  const readPendingDocumentComments = (agent: ConfiguredAgent): PendingDocumentComment[] =>
+    withPendingDocumentComments(agent, (state) => Object.values(state.items));
   const recordDocumentCommentFailure = (agent: ConfiguredAgent, category: string, reason: string): void => {
     hostState.updateStatus(agent, {
       documentCommentLastErrorAt: new Date().toISOString(),
@@ -501,7 +538,7 @@ export function createHostShell({
       documentCommentLastErrorCategory: category,
     });
   };
-  const processPendingDocumentComment = async (
+  const processPendingDocumentCommentOnce = async (
     agent: ConfiguredAgent, record: PendingDocumentComment, channel: LarkChannel,
   ): Promise<void> => {
     const event = pendingEvent(record);
@@ -519,7 +556,16 @@ export function createHostShell({
       log(`document comment 已终止处理 agent=${agent.name} reason=comment_unavailable_or_empty`);
       return;
     }
-    const envelope = projectDocumentCommentEnvelope({ agentId: agent.agentId, event, context });
+    const envelope = projectDocumentCommentEnvelope({
+      agentId: agent.agentId,
+      event,
+      context,
+      mentionPolicy: {
+        effective: record.mentionPolicy,
+        source: record.mentionPolicySource,
+        mentionedBot: record.mentionedBot,
+      },
+    });
     let preparation;
     try { preparation = stateStore(agent).prepareInboxDelivery(envelope); }
     catch {
@@ -543,6 +589,18 @@ export function createHostShell({
     });
     log(`document comment ${preparation === "appended" ? "已入箱" : "补投"} agent=${agent.name} mode=${context.isWhole ? "top-level" : "in-thread"} delivery=${receipt.status}`);
   };
+  const processingDocumentComments = new Map<string, Promise<void>>();
+  const processPendingDocumentComment = (
+    agent: ConfiguredAgent, record: PendingDocumentComment, channel: LarkChannel,
+  ): Promise<void> => {
+    const key = `${agent.agentId}:${record.messageId}`;
+    const active = processingDocumentComments.get(key);
+    if (active) return active;
+    const processing = processPendingDocumentCommentOnce(agent, record, channel)
+      .finally(() => processingDocumentComments.delete(key));
+    processingDocumentComments.set(key, processing);
+    return processing;
+  };
   const replayingDocumentComments = new Map<string, Promise<void>>();
   const replayPendingDocumentComments = (agent: ConfiguredAgent, channel: LarkChannel): Promise<void> => {
     const active = replayingDocumentComments.get(agent.agentId);
@@ -557,8 +615,20 @@ export function createHostShell({
     return replay;
   };
   const onDocumentComment = async (agent: ConfiguredAgent, event: CommentEvent, channel: LarkChannel): Promise<void> => {
-    if (!event.mentionedBot) {
-      log(`document comment 未@bot，忽略 agent=${agent.name}`);
+    const existing = pendingDocumentComment(agent, documentCommentMessageId(agent.agentId, event));
+    if (existing) {
+      await processPendingDocumentComment(agent, existing, channel);
+      return;
+    }
+    let policy: { effective: "require" | "free"; source: "agent" | "global" };
+    try { policy = resolveAgentGlobalMentionPolicy(loadConfig(env).config, agent.agentId); }
+    catch {
+      recordDocumentCommentFailure(agent, "mention_policy_resolution_failure", "current_config_unavailable");
+      log(`document comment mention policy 解析失败，忽略 agent=${agent.name}`);
+      return;
+    }
+    if (policy.effective === "require" && !event.mentionedBot) {
+      log(`document comment mention policy 未满足，忽略 agent=${agent.name} policy=require source=${policy.source}`);
       return;
     }
     if (!event.operator.openId || event.operator.openId === agent.botOpenId || event.operator.openId === channel.botIdentity?.openId) {
@@ -570,9 +640,10 @@ export function createHostShell({
       log(`document comment 文件类型不支持，忽略 agent=${agent.name}`);
       return;
     }
-    const record = pendingRecord(agent, event);
+    const record = pendingRecord(agent, event, policy);
+    let durableRecord: PendingDocumentComment;
     try {
-      persistPendingDocumentComment(agent, record);
+      durableRecord = persistPendingDocumentComment(agent, record);
     } catch (error) {
       if ((error as { code?: unknown }).code === "PENDING_DOCUMENT_COMMENT_CAPACITY") {
         recordDocumentCommentFailure(agent, "pending_capacity_exhausted", "pending_capacity_exhausted");
@@ -581,7 +652,7 @@ export function createHostShell({
       recordDocumentCommentFailure(agent, "pending_state_failure", "pending_record_write_failed");
       throw new Error("document comment pending recovery record 写入失败");
     }
-    await processPendingDocumentComment(agent, record, channel);
+    await processPendingDocumentComment(agent, durableRecord, channel);
   };
   const channelBusiness = new HostChannelBusiness({
     state: hostState,

@@ -37,6 +37,12 @@ test("v3 loads as a v4 view and legacy noMentionChats becomes an Agent x chat ov
     assert.deepEqual(config.agents[APP].chatMentionPolicies, { oc_free: "free" });
     assert.deepEqual(configApi.resolveMentionPolicy(config, APP, "oc_free"), { effective: "free", source: "chat" });
     assert.deepEqual(configApi.resolveMentionPolicy(config, APP, "oc_other"), { effective: "require", source: "global" });
+    assert.deepEqual(configApi.resolveAgentGlobalMentionPolicy(config, APP), { effective: "require", source: "global" });
+    config.mentionPolicy = "free";
+    config.agents[APP].mentionPolicy = "require";
+    assert.deepEqual(configApi.resolveAgentGlobalMentionPolicy(config, APP), { effective: "require", source: "agent" });
+    delete config.agents[APP].mentionPolicy;
+    assert.deepEqual(configApi.resolveAgentGlobalMentionPolicy(config, APP), { effective: "free", source: "global" });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

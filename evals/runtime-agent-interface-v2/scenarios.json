@@ -7,7 +7,7 @@
   },
   "model": {
     "selection": "runtime-default",
-    "standing_prompt_version": "larkin-standing-v7"
+    "standing_prompt_version": "larkin-standing-v8"
   },
   "grader": {
     "name": "runtime-agent-interface-v2-trace-grader",

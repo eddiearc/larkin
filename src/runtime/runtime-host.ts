@@ -18,6 +18,7 @@ import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
   runtime: string; model: string; effort?: string | null; workspaceDir: string;
+  piDistribution?: "external" | "builtin";
   stateDir?: string; sessionId?: string | null;
   larkConfigDir?: string;
   feishuAppId?: string;
@@ -182,6 +183,7 @@ export function createRuntimeHost(options: {
     ...(generation ? { LARKIN_RUNTIME_OBSERVATION_GENERATION: generation } : {}),
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
+    ...(config.piDistribution ? { LARKIN_PI_DISTRIBUTION: config.piDistribution } : {}),
     ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
     ...(process.env.SHELL ? { SHELL: process.env.SHELL } : {}),
     ...(process.env.ZDOTDIR ? { ZDOTDIR: process.env.ZDOTDIR } : {}),
@@ -569,7 +571,8 @@ export function createRuntimeHost(options: {
     if (agent.starting) return agent.starting;
     const probeEnv = runtimeEnv(agent.config);
     await assertOfficialCliReady(agent.config, probeEnv);
-    const readiness = agent.adapter.probe ? await agent.adapter.probe({ workspaceDir: agent.config.workspaceDir,
+    const readiness = agent.adapter.probe ? await agent.adapter.probe({ agentId: agent.config.agentId,
+      workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
       env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
         LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...probeEnv } })
       : { runtime: agent.adapter.id, state: "ready" as const };
@@ -619,7 +622,7 @@ export function createRuntimeHost(options: {
       const adapter = options.adapterFor(config.runtime);
       const env = runtimeEnv(config);
       await assertOfficialCliReady(config, env);
-      return adapter.probe ? adapter.probe({ workspaceDir: config.workspaceDir,
+      return adapter.probe ? adapter.probe({ agentId: config.agentId, workspaceDir: config.workspaceDir, stateDir: config.stateDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
           LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...env } })
         : { runtime: adapter.id, state: "ready" };
@@ -633,7 +636,7 @@ export function createRuntimeHost(options: {
       const adapter = options.adapterFor(config.runtime);
       const stageEnv = runtimeEnv(config, `${crypto.randomUUID()}:staged`);
       await assertOfficialCliReady(config, stageEnv);
-      const readiness = adapter.probe ? await adapter.probe({ workspaceDir: config.workspaceDir,
+      const readiness = adapter.probe ? await adapter.probe({ agentId: config.agentId, workspaceDir: config.workspaceDir, stateDir: config.stateDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
           LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...stageEnv } })
         : { runtime: adapter.id, state: "ready" as const };
@@ -713,7 +716,8 @@ export function createRuntimeHost(options: {
       const oldSessionId = oldSession.sessionId;
       const probeEnv = runtimeEnv(agent.config, `${agent.launchId}:reset`);
       await assertOfficialCliReady(agent.config, probeEnv);
-      const readiness = agent.adapter.probe ? await agent.adapter.probe({ workspaceDir: agent.config.workspaceDir,
+      const readiness = agent.adapter.probe ? await agent.adapter.probe({ agentId: agent.config.agentId,
+        workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
         env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
           LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...probeEnv } })
         : { runtime: agent.adapter.id, state: "ready" as const };

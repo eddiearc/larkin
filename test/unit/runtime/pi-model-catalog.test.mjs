@@ -81,17 +81,19 @@ test("Pi thinking levels follow official reasoning metadata without Codex ultra"
   assert.equal(supportedPiThinkingLevels(models[1]).includes("ultra"), false);
 });
 
-test("production graph uses only local Pi RPC and never embeds an SDK", () => {
+test("production graph pins official Pi and exposes it only through the shared RPC contract", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   const lock = fs.readFileSync(path.join(ROOT, "bun.lock"), "utf8");
   const adapter = fs.readFileSync(path.join(ROOT, "src/runtime/runtime-adapters.ts"), "utf8");
-  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], undefined);
+  const binaryEntry = fs.readFileSync(path.join(ROOT, "src/app/binary-entry.ts"), "utf8");
+  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "0.83.0");
   assert.equal(pkg.dependencies["@mariozechner/pi-coding-agent"], undefined);
   assert.equal(pkg.packageManager, "bun@1.3.14");
   assert.equal(pkg.engines, undefined);
   assert.equal(pkg.scripts.preinstall, undefined);
-  assert.doesNotMatch(lock, /pi-coding-agent/);
+  assert.match(lock, /@earendil-works\/pi-coding-agent/);
   assert.doesNotMatch(adapter, /from\s+["'][^"']*pi-coding-agent/);
+  assert.match(binaryEntry, /@earendil-works\/pi-coding-agent\/rpc-entry/);
   assert.match(adapter, /--mode["'],\s*["']rpc/);
   assert.doesNotMatch(adapter, /available\s*\[\s*0\s*\]/);
 });

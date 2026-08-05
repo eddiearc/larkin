@@ -49,6 +49,10 @@ test.skipIf(!enabled)("native standalone release embeds Dashboard assets, instal
     const manifestA = JSON.parse(fs.readFileSync(path.join(releaseDirA, "release-manifest.json"), "utf8"));
     assert.equal(manifestA.bytecode, false);
     assert.equal(manifestA.artifacts.length, 1);
+    const noticeA = fs.readFileSync(path.join(releaseDirA, "THIRD_PARTY_NOTICES.txt"), "utf8");
+    assert.match(noticeA, /Copyright \(c\) 2025 Mario Zechner/);
+    assert.match(noticeA, /MIT License/);
+    assert.match(fs.readFileSync(path.join(releaseDirA, "SHA256SUMS"), "utf8"), /THIRD_PARTY_NOTICES\.txt/);
     const artifactA = path.join(releaseDirA, manifestA.artifacts[0].file);
     const versionA = spawnSync(artifactA, ["--version"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
     assert.equal(versionA.status, 0, versionA.stderr);

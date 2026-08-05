@@ -17,6 +17,8 @@ import type {
 } from "./runtime-contracts.js";
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient } from "./pi-rpc-client.js";
+import { internalCommandSpec } from "../app/internal-command.js";
+import { piAgentDirectory } from "./pi-provider-config.js";
 import {
   classifyRuntimePrerequisite,
   probeNativeRuntimeReadiness,
@@ -764,10 +766,19 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ...(session.sessionFile ? ["--session", session.sessionFile] : []),
     ...(requestedModel ? ["--model", requestedModel] : []),
     ...(requestedEffort ? ["--thinking", requestedEffort] : [])];
-  const command = dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
-  const child = spawn(command, args, {
+  const mergedEnv: NodeJS.ProcessEnv = { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" };
+  const builtin = mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin";
+  const builtinSpec = builtin ? internalCommandSpec("pi-rpc", [], mergedEnv) : null;
+  const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
+  const commandArgs = [...(builtinSpec?.args ?? []), ...args];
+  if (builtin) {
+    if (!mergedEnv.LARKIN_CONFIG_DIR) throw new Error("内置 Pi 缺少 LARKIN_CONFIG_DIR");
+    mergedEnv.PI_CODING_AGENT_DIR = piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId);
+    mergedEnv.PI_TELEMETRY = "0";
+  }
+  const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
-    env: { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" },
+    env: mergedEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const client = new PiRpcClient(child);
@@ -874,7 +885,7 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
     id,
     capabilities: CAPABILITIES[id],
     async probe(input) {
-      const readiness = await probeNativeRuntimeReadiness({ runtime: id, cwd: input.workspaceDir,
+      const readiness = await probeNativeRuntimeReadiness({ runtime: id, agentId: input.agentId, cwd: input.workspaceDir,
         env: { ...dependencies.env, ...input.env }, command: configuredCommand });
       resolvedExecutable = readiness.state === "ready" ? readiness.executable ?? null : null;
       return readiness;

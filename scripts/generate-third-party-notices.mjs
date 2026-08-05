@@ -7,13 +7,40 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputIndex = process.argv.indexOf("--output");
 const OUTPUT = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1] ?? "") : "";
 const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+const compareText = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const licenseName = /^(?:licen[cs]e|notice|copying|copyright)(?:[._-].*)?$/i;
 const AUDITED_LICENSE_FALLBACKS = Object.freeze({
+  "@aws-sdk/credential-provider-http@3.972.69": { source: "@aws-sdk/core", version: "3.977.6", file: "LICENSE", sha256: "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d" },
+  "@aws-sdk/credential-provider-login@3.972.74": { source: "@aws-sdk/core", version: "3.977.6", file: "LICENSE", sha256: "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d" },
+  "@aws-sdk/nested-clients@3.997.41": { source: "@aws-sdk/core", version: "3.977.6", file: "LICENSE", sha256: "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d" },
   "agent-base@6.0.2": { source: "agent-base", version: "9.0.0", file: "LICENSE", sha256: "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a" },
   "https-proxy-agent@5.0.1": { source: "https-proxy-agent", version: "9.1.0", file: "LICENSE", sha256: "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a" },
   "proxy-agent-negotiate@1.1.0": { source: "agent-base", version: "9.0.0", file: "LICENSE", sha256: "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a" },
   "react-remove-scroll-bar@2.3.8": { source: "react-remove-scroll", version: "2.7.2", file: "LICENSE", sha256: "30f0cfddf483d1128e3610205020f2041a6c5e837aa999e0aa82e5576187d4a9" },
 });
+const MIT_TERMS = `MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`;
+const PI_MIT_LICENSE = `Copyright (c) 2025 Mario Zechner
+
+${MIT_TERMS}`;
 
 function packageRoot(name, fromRoot = ROOT) {
   const local = path.join(fromRoot, "node_modules", ...name.split("/"));
@@ -27,18 +54,29 @@ function bundledLicenseFiles(root) {
   return fs.readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isFile() && licenseName.test(entry.name))
     .map((entry) => ({ name: entry.name, bytes: fs.readFileSync(path.join(root, entry.name)) }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+    .sort((left, right) => compareText(left.name, right.name));
 }
 
-function auditedLicenseFallback(key) {
+function auditedLicenseFallback(key, declaredLicense) {
   const fallback = AUDITED_LICENSE_FALLBACKS[key];
-  if (!fallback) throw new Error(`${key} has no bundled license text or audited exact fallback`);
+  if (!fallback) {
+    if (key.startsWith("@earendil-works/pi-") && declaredLicense === "MIT") {
+      return [{ name: "AUDITED-pi-MIT-LICENSE", bytes: Buffer.from(PI_MIT_LICENSE) }];
+    }
+    if ((key.startsWith("@mariozechner/clipboard@") || key.startsWith("@mariozechner/clipboard-")) && declaredLicense === "MIT") {
+      return [{ name: "AUDITED-clipboard-package-declared-MIT", bytes: Buffer.from(MIT_TERMS) }];
+    }
+    if (key === "data-uri-to-buffer@4.0.1" && declaredLicense === "MIT") {
+      return [{ name: "AUDITED-package-declared-MIT", bytes: Buffer.from(MIT_TERMS) }];
+    }
+    throw new Error(`${key} has no bundled license text or audited exact fallback`);
+  }
   const sourceRoot = packageRoot(fallback.source);
   const sourceManifest = JSON.parse(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8"));
   if (sourceManifest.version !== fallback.version) throw new Error(`${key} audited license source version changed`);
   if (!lockedIntegrities().has(`${fallback.source}@${fallback.version}`)) throw new Error(`${key} audited license source is not lock-integrity pinned`);
   const bytes = fs.readFileSync(path.join(sourceRoot, fallback.file));
-  if (sha256(bytes) !== fallback.sha256 || !/Copyright \(c\) \d{4}/.test(bytes.toString("utf8"))) {
+  if (sha256(bytes) !== fallback.sha256 || !/(?:Copyright \(c\) \d{4}|Apache License\s+Version 2\.0)/.test(bytes.toString("utf8"))) {
     throw new Error(`${key} audited license text provenance mismatch`);
   }
   return [{ name: `AUDITED-${fallback.source}@${fallback.version}-${fallback.file}`, bytes }];
@@ -55,14 +93,15 @@ function lockedIntegrities() {
   return entries;
 }
 
-function runtimePackages() {
+function runtimePackages(options = {}) {
   const rootManifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-  const queue = Object.keys(rootManifest.dependencies ?? {}).map((name) => ({ name, fromRoot: ROOT, direct: true }));
+  const queue = Object.keys(rootManifest.dependencies ?? {}).map((name) => ({ name, fromRoot: ROOT, direct: true, optional: false }));
   const seen = new Set();
   const integrities = lockedIntegrities();
   const packages = [];
   while (queue.length > 0) {
     const candidate = queue.shift();
+    if (candidate.optional && options.installedOptionalPackageNames && !options.installedOptionalPackageNames.has(candidate.name)) continue;
     const root = packageRoot(candidate.name, candidate.fromRoot);
     const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
     const key = `${manifest.name}@${manifest.version}`;
@@ -73,8 +112,7 @@ function runtimePackages() {
     let files = bundledLicenseFiles(root);
     const license = manifest.license ?? manifest.licenses ?? null;
     if (files.length === 0) {
-      if (license !== "MIT") throw new Error(`${key} has no bundled license text and is not eligible for an MIT fallback`);
-      files = auditedLicenseFallback(key);
+      files = auditedLicenseFallback(key, license);
     }
     packages.push({ name: manifest.name, version: manifest.version, license, files, direct: candidate.direct, integrity });
 
@@ -85,16 +123,27 @@ function runtimePackages() {
     };
     for (const name of Object.keys(children).sort()) {
       if (name.startsWith("@types/")) continue;
+      const optional = Object.hasOwn(manifest.optionalDependencies ?? {}, name) || manifest.peerDependenciesMeta?.[name]?.optional === true;
       try {
         packageRoot(name, root);
-        queue.push({ name, fromRoot: root, direct: false });
+        queue.push({ name, fromRoot: root, direct: false, optional });
       } catch {
-        const optional = Object.hasOwn(manifest.optionalDependencies ?? {}, name) || manifest.peerDependenciesMeta?.[name]?.optional === true;
         if (!optional) throw new Error(`runtime dependency is not installed: ${key} -> ${name}`);
       }
     }
   }
-  return packages.sort((left, right) => left.name.localeCompare(right.name) || left.version.localeCompare(right.version));
+  // Bun installs only the current target's native clipboard packages. Append
+  // every integrity-pinned variant so all release targets generate one notice.
+  for (const [key, integrity] of integrities) {
+    if (key !== "@mariozechner/clipboard@0.3.9" && !key.startsWith("@mariozechner/clipboard-")) continue;
+    if (seen.has(key)) continue;
+    const separator = key.lastIndexOf("@");
+    const name = key.slice(0, separator);
+    const version = key.slice(separator + 1);
+    packages.push({ name, version, license: "MIT", files: auditedLicenseFallback(key, "MIT"), direct: false, integrity });
+    seen.add(key);
+  }
+  return packages.sort((left, right) => compareText(left.name, right.name) || compareText(left.version, right.version));
 }
 
 function expression(value) {
@@ -105,8 +154,8 @@ function expression(value) {
 
 const escapeCell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 
-export function generateRuntimeNotices() {
-  const packages = runtimePackages();
+export function generateRuntimeNotices(options = {}) {
+  const packages = runtimePackages(options);
   const texts = new Map();
   const lines = [
     "Third-party notices", "", "Generated at release time from Larkin's installed runtime dependency closure.",
@@ -131,7 +180,7 @@ export function generateRuntimeNotices() {
     throw new Error("qrcode-terminal bundled MIT attribution is missing from the runtime closure");
   }
   lines.push("", "Bundled license and notice texts", "");
-  for (const [hash, text] of [...texts.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [hash, text] of [...texts.entries()].sort(([left], [right]) => compareText(left, right))) {
     lines.push(`--- SHA-256 ${hash} ---`, text.replace(/\n$/, ""), "");
   }
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;

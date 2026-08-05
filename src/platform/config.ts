@@ -15,6 +15,7 @@ export type MentionPolicyOverride = MentionPolicy | "inherit";
 export interface StoredAgent {
   runtime: string;
   model: string;
+  piDistribution?: "external" | "builtin";
   effort?: string;
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
@@ -71,7 +72,7 @@ interface ConfigApplyFile { version: 1; persistedRevision: string; agents: Recor
 const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -158,6 +159,11 @@ function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asser
   if (!loadRuntimeModels()[agent.runtime]) throw new Error(`Agent ${key}.runtime 未知：${agent.runtime}`);
   if (typeof agent.model !== "string" || !agent.model) throw new Error(`Agent ${key}.model 必须是非空字符串`);
   assertModel(agent.runtime, agent.model);
+  if (Object.hasOwn(agent, "piDistribution")) {
+    if (agent.runtime !== "pi" || (agent.piDistribution !== "external" && agent.piDistribution !== "builtin")) {
+      throw new Error(`Agent ${key}.piDistribution 只允许 Pi runtime 使用 external/builtin`);
+    }
+  }
   if (Object.hasOwn(agent, "effort") && (typeof agent.effort !== "string" || !agent.effort)) throw new Error(`Agent ${key}.effort 必须是非空字符串`);
   if (agent.model === "default" && Object.hasOwn(agent, "effort")) throw new Error(`Agent ${key}.model=default 时不能保存 effort`);
   if (typeof agent.effort === "string") {
@@ -191,6 +197,7 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
   return {
     runtime: agent.runtime as string,
     model: agent.model as string,
+    ...(agent.piDistribution === "external" || agent.piDistribution === "builtin" ? { piDistribution: agent.piDistribution } : {}),
     ...(typeof agent.effort === "string" ? { effort: agent.effort } : {}),
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
@@ -203,6 +210,7 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
   return {
     name: key, agentId: key, feishuAppId: key, feishuProfile: key,
     runtime: agent.runtime, model: agent.model,
+    ...(agent.piDistribution ? { piDistribution: agent.piDistribution } : {}),
     workspaceDir: layout.workspaceDir(key), stateDir: layout.agentStateDir(key),
     larkConfigDir: path.join(layout.agentStateDir(key), "lark-cli-config"),
     ...(agent.effort ? { effort: agent.effort } : {}),
@@ -298,6 +306,7 @@ export function toStored(config: HydratedConfig): { version: 4; serverId: string
   const out = { version: 4 as const, serverId: config.serverId, mentionPolicy: config.mentionPolicy, activeAgent: config.activeAgent, agents: {} as Record<string, StoredAgent> };
   for (const [key, agent] of Object.entries(config.agents || {})) {
     const stored: StoredAgent = { runtime: agent.runtime, model: agent.model };
+    if (agent.piDistribution) stored.piDistribution = agent.piDistribution;
     if (typeof agent.effort === "string" && agent.effort) stored.effort = agent.effort;
     if (agent.mentionPolicy) stored.mentionPolicy = agent.mentionPolicy;
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
@@ -325,7 +334,7 @@ function agentSignature(config: HydratedConfig, agentId: string): string {
   if (!agent) throw new Error(`Agent 不存在：${agentId}`);
   const chats = Object.fromEntries(Object.entries(agent.chatMentionPolicies || {}).sort(([left], [right]) => left.localeCompare(right)));
   return revision(JSON.stringify({
-    runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
+    runtime: agent.runtime, model: agent.model, piDistribution: agent.piDistribution ?? null, effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
   }));
 }

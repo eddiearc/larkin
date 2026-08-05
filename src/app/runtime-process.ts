@@ -23,7 +23,7 @@ export function loadAndSyncRuntimeAgent(env: NodeJS.ProcessEnv, agentId: string,
 
 export async function markConfigAppliedAfterRuntimeReady(
   env: NodeJS.ProcessEnv,
-  runningAgents: ReadonlyArray<{ agentId: string; runtime: string; model: string; effort?: string | null }>,
+  runningAgents: ReadonlyArray<{ agentId: string; runtime: string; model: string; piDistribution?: "external" | "builtin"; effort?: string | null }>,
   runtimeReady: Promise<void>,
 ): Promise<void> {
   await runtimeReady;
@@ -31,7 +31,9 @@ export async function markConfigAppliedAfterRuntimeReady(
     const loaded = loadConfig(env);
     for (const running of runningAgents) {
       const current = loaded.config.agents[running.agentId];
-      if (!current || current.runtime !== running.runtime || current.model !== running.model || (current.effort || null) !== (running.effort || null)) continue;
+      if (!current || current.runtime !== running.runtime || current.model !== running.model
+          || (current.piDistribution || "external") !== (running.piDistribution || "external")
+          || (current.effort || null) !== (running.effort || null)) continue;
       markConfigApplied(env, running.agentId, runtimeConfigSignature(loaded.config, running.agentId));
     }
   } catch { /* Runtime is ready; apply projection stays pending on a concurrent config change. */ }

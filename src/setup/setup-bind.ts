@@ -10,6 +10,9 @@ import { fileURLToPath } from "node:url";
 import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
+import { stageBuiltinPiProvider, type BuiltinPiProviderSelection } from "../runtime/pi-provider-config.js";
+import { createNativeRuntimeAdapter } from "../runtime/runtime-adapters.js";
+import type { SetupAgentChoice } from "./setup-agent-choice.js";
 import * as larkinConfigImport from "../platform/config.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 
@@ -29,6 +32,7 @@ interface HydratedAgent {
   feishuProfile: string;
   runtime: string;
   model: string;
+  piDistribution?: "external" | "builtin";
   [key: string]: unknown;
 }
 
@@ -82,6 +86,7 @@ const options = {
   agent: flag("--agent"),
   profile: flag("--profile"),
   runtime: flag("--runtime"),
+  selectionFile: flag("--selection-file"),
   yes: has("--yes"),
   list: has("--list"),
   help: has("--help") || has("-h"),
@@ -161,6 +166,23 @@ function loadConfig(): { revision: string; config: HydratedConfig } {
   return larkinConfig.loadConfig(process.env, { mint: () => crypto.randomUUID() });
 }
 
+function readSetupSelection(fileArg: string | undefined): SetupAgentChoice | null {
+  if (!fileArg) return null;
+  const file = path.resolve(fileArg);
+  if (path.dirname(file) !== path.resolve(CFG_DIR) || !/^\.setup-agent-choice-\d+-[A-Za-z0-9-]+\.json$/.test(path.basename(file))) {
+    die("setup Agent 选择文件路径无效");
+  }
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || (stat.mode & 0o777) !== 0o600) die("setup Agent 选择文件必须是当前用户拥有的 0600 普通文件");
+  const bytes = fs.readFileSync(file, "utf8");
+  fs.unlinkSync(file);
+  const raw = JSON.parse(bytes) as SetupAgentChoice;
+  if (!raw || !["pi", "codex", "claude"].includes(raw.runtime)) die("setup Agent 选择无效");
+  return raw;
+}
+
 function fabricateAttachment(root: string, serverId: string): void {
   const directory = path.join(root, "computer", "servers", serverId);
   fs.mkdirSync(directory, { recursive: true });
@@ -177,6 +199,46 @@ function fabricateAttachment(root: string, serverId: string): void {
     attachedAt: new Date().toISOString(),
   };
   fs.writeFileSync(file, JSON.stringify(attachment, null, 2), { mode: 0o600 });
+}
+
+async function verifyBuiltinPiProviderTurn(agentId: string, model: string): Promise<void> {
+  if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN === "1" && process.env.LARKIN_TEST_BOT_REGISTER_MODULE) return;
+  const workspaceDir = layout.workspaceDir(agentId);
+  const stateDir = layout.agentStateDir(agentId);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const env = { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR, LARKIN_HOME: CFG_DIR, LARKIN_PI_DISTRIBUTION: "builtin" };
+  const adapter = createNativeRuntimeAdapter("pi", { env });
+  const readiness = await adapter.probe!({ agentId, workspaceDir, stateDir, env });
+  if (readiness.state !== "ready") throw new Error(readiness.reason || "内置 Pi provider 尚未 ready");
+  const session = await adapter.createSession({
+    agentId, workspaceDir, stateDir, model, env,
+    standingPrompt: { version: "setup-readiness-v1", content: "This is a setup readiness check. Do not use tools.", hash: "setup-readiness-v1" },
+  });
+  const events: string[] = [];
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    const terminal = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("provider readiness turn 60 秒超时")), 60_000);
+      session.subscribe((event) => {
+        if (event.type === "activity" && event.activity === "text" && event.text) events.push(event.text);
+        if (event.type === "input-error" || event.type === "configuration-error" || event.type === "error") {
+          if (timer) clearTimeout(timer);
+          reject(new Error(event.message));
+        } else if (event.type === "turn-end") {
+          if (timer) clearTimeout(timer);
+          if (!events.join("").trim()) reject(new Error("provider readiness turn 未返回可认证文本"));
+          else resolve();
+        }
+      });
+    });
+    const accepted = await session.prompt({ inputId: `setup-${agentId}`, kind: "user", text: "Reply exactly: LARKIN_READY", attempt: 1 });
+    if (accepted.status !== "accepted") throw new Error(accepted.reason || "provider readiness turn 未被接受");
+    await terminal;
+  } finally {
+    if (timer) clearTimeout(timer);
+    await session.close("setup readiness complete");
+  }
 }
 
 function printAgents(config: HydratedConfig): void {
@@ -216,6 +278,7 @@ export async function main(): Promise<void> {
   }
   const loaded = loadConfig();
   const config = loaded.config;
+  const selection = readSetupSelection(options.selectionFile);
   if (options.list) {
     printAgents(config);
     return;
@@ -230,12 +293,18 @@ export async function main(): Promise<void> {
 
   const requestedAgent = options.agent || profile.appId;
   const prior = config.agents[profile.appId];
-  const runtime = options.runtime || prior?.runtime || "pi";
+  const runtime = selection?.runtime || options.runtime || prior?.runtime || "pi";
+  const piDistribution = runtime === "pi"
+    ? (selection?.runtime === "pi" ? selection.distribution : prior?.piDistribution || "external")
+    : undefined;
   validateRuntime(runtime);
   const defaultModel = larkinConfig.defaultModelFor(runtime);
-  const targetModelId = prior?.runtime === runtime ? prior.model : defaultModel;
+  const selectedModel = selection?.runtime === "pi" && selection.distribution === "builtin" ? selection.model : undefined;
+  const targetModelId = selectedModel || (prior?.runtime === runtime ? prior.model : defaultModel);
   let runtimeModels = larkinConfig.loadRuntimeModels()[runtime];
-  if (runtime === "pi") {
+  if (runtime === "pi" && piDistribution === "builtin") {
+    runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: [] }];
+  } else if (runtime === "pi") {
     const piCatalog = await discoverPiModelCatalog({
       cwd: layout.workspaceDir(profile.appId),
       ...(process.env.PI_CODING_AGENT_DIR ? { agentDir: process.env.PI_CODING_AGENT_DIR } : {}),
@@ -249,7 +318,9 @@ export async function main(): Promise<void> {
     config: larkinConfig.toStored(config),
     profile,
     requestedAgent,
-    runtime: options.runtime,
+    runtime: selection?.runtime || options.runtime,
+    ...(selection?.runtime === "pi" ? { piDistribution: selection.distribution } : {}),
+    ...(selectedModel ? { model: selectedModel } : {}),
     defaultModel,
     supportedReasoningEfforts: targetModel!.supportedReasoningEfforts || [],
     now: new Date().toISOString(),
@@ -257,7 +328,34 @@ export async function main(): Promise<void> {
   const bound = stored.agents[profile.appId];
 
   fs.mkdirSync(CFG_DIR, { recursive: true });
-  larkinConfig.commitSetupConfig(process.env, loaded.revision, stored);
+  let providerTransaction: ReturnType<typeof stageBuiltinPiProvider> | null = null;
+  let providerPublished = false;
+  const cancelProviderTransaction = (signal: NodeJS.Signals): void => {
+    if (!providerPublished) providerTransaction?.rollback();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  const onSigint = (): void => cancelProviderTransaction("SIGINT");
+  const onSigterm = (): void => cancelProviderTransaction("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  try {
+    providerTransaction = selection?.runtime === "pi" && selection.distribution === "builtin"
+      ? stageBuiltinPiProvider(CFG_DIR, profile.appId, selection as BuiltinPiProviderSelection)
+      : null;
+    if (selection?.runtime === "pi" && selection.distribution === "builtin") {
+      say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
+      await verifyBuiltinPiProviderTurn(profile.appId, selection.model);
+    }
+    larkinConfig.commitSetupConfig(process.env, loaded.revision, stored);
+    providerTransaction?.commit();
+    providerPublished = true;
+  } catch (error) {
+    providerTransaction?.rollback();
+    throw error;
+  } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  }
   fabricateAttachment(layout.root, stored.serverId);
 
   say(`\n✓ 已写配置: ${CFG_FILE}`);

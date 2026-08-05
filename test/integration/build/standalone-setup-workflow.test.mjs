@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -81,6 +81,40 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   return executable;
 }
 
+function startProviderFixture(temp, mode = "success") {
+  const source = path.join(temp, `provider-fixture-${mode}.mjs`);
+  const portFile = path.join(temp, `provider-port-${mode}`);
+  const requestFile = path.join(temp, `provider-request-${mode}`);
+  fs.writeFileSync(source, `import fs from "node:fs";
+import http from "node:http";
+const server = http.createServer((request, response) => {
+  request.resume();
+  request.on("end", () => {
+    fs.writeFileSync(process.env.PROVIDER_REQUEST_FILE, "requested");
+    if (process.env.PROVIDER_MODE === "hang") return;
+    if (process.env.PROVIDER_MODE === "unauthorized") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end('{"error":{"message":"invalid fixture key"}}');
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    response.write('data: {"id":"fixture","object":"chat.completion.chunk","created":1,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"LARKIN_READY"},"finish_reason":null}]}\\n\\n');
+    response.write('data: {"id":"fixture","object":"chat.completion.chunk","created":1,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\\n\\n');
+    response.end("data: [DONE]\\n\\n");
+  });
+});
+server.listen(0, "127.0.0.1", () => fs.writeFileSync(process.env.PROVIDER_PORT_FILE, String(server.address().port)));
+`, { mode: 0o600 });
+  const child = spawn(process.execPath, [source], { cwd: temp, env: {
+    ...process.env, PROVIDER_PORT_FILE: portFile, PROVIDER_REQUEST_FILE: requestFile, PROVIDER_MODE: mode,
+  }, stdio: "ignore" });
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 10_000;
+  while (!fs.existsSync(portFile) && Date.now() < deadline) Atomics.wait(sleeper, 0, 0, 20);
+  assert.equal(fs.existsSync(portFile), true, "local provider fixture did not become ready");
+  return { child, requestFile, baseUrl: `http://127.0.0.1:${fs.readFileSync(portFile, "utf8").trim()}/v1` };
+}
+
 test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent config and propagate lark-channel verification failures", { timeout: 180_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-standalone-setup-"));
   const releaseDir = path.join(temp, "release");
@@ -88,6 +122,7 @@ test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent confi
   const binDir = path.join(temp, "bin");
   const firstAgent = "cli_setupExistingA1";
   const secondAgent = "cli_setupAddedB2";
+  let providerFixture;
   try {
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(binDir, { recursive: true, mode: 0o700 });
@@ -144,6 +179,78 @@ test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent confi
     assert.match(publicSetup.stderr + publicSetup.stdout, new RegExp(`Agent ${secondAgent} 已配置`));
 
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
+    const builtinBin = path.join(temp, "builtin-bin");
+    fs.mkdirSync(builtinBin, { mode: 0o700 });
+    writeLarkCli(builtinBin);
+    const builtinEnv = {
+      ...baseEnv,
+      PATH: `${builtinBin}${path.delimiter}/usr/bin:/bin`,
+      SETUP_LARK_CALLS: path.join(temp, "builtin-lark-calls"),
+      LARKIN_TEST_BOT_REGISTER_MODULE: writeRegisterFixture(temp),
+      LARKIN_PI_COMMAND: path.join(temp, "definitely-not-installed-pi"),
+      LARKIN_CODEX_COMMAND: path.join(temp, "definitely-not-installed-codex"),
+      LARKIN_CLAUDE_COMMAND: path.join(temp, "definitely-not-installed-claude"),
+      LARKIN_TEST_ENABLE_AGENT_CHOICE: "1",
+    };
+    providerFixture = startProviderFixture(temp);
+    const builtinSetup = spawnSync(artifact, ["setup", "--no-start"], {
+      cwd: temp, env: builtinEnv, input: `1\n2\n5\n${providerFixture.baseUrl}\nfixture-model\nstandalone-provider-secret\n`, encoding: "utf8", timeout: 60_000,
+    });
+    checked(builtinSetup, "compiled public setup with bundled official Pi and no external Agent CLI");
+    const builtinConfigured = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    assert.equal(builtinConfigured.agents[secondAgent].runtime, "pi");
+    assert.equal(builtinConfigured.agents[secondAgent].piDistribution, "builtin");
+    assert.equal(builtinConfigured.agents[secondAgent].model, "larkin-custom/fixture-model");
+    assert.doesNotMatch(fs.readFileSync(configFile, "utf8"), /standalone-provider-secret/);
+    assert.doesNotMatch(builtinSetup.stdout + builtinSetup.stderr, /standalone-provider-secret/);
+    const piAuth = path.join(configDir, "providers", "pi", secondAgent, "auth.json");
+    assert.equal(fs.statSync(path.dirname(piAuth)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(piAuth).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(fs.readFileSync(piAuth, "utf8"))["larkin-custom"].key, "standalone-provider-secret");
+
+    providerFixture.child.kill();
+    providerFixture = undefined;
+    fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
+    const oldAuth = `${JSON.stringify({ legacy: { type: "api_key", key: "old-provider-key" } }, null, 2)}\n`;
+    const piModels = path.join(path.dirname(piAuth), "models.json");
+    const oldModels = fs.readFileSync(piModels, "utf8");
+    fs.writeFileSync(piAuth, oldAuth, { mode: 0o600 });
+    providerFixture = startProviderFixture(temp, "unauthorized");
+    const rejectedSetup = spawnSync(artifact, ["setup", "--no-start"], {
+      cwd: temp, env: builtinEnv,
+      input: `1\n2\n5\n${providerFixture.baseUrl}\nfixture-model\nrejected-provider-secret\n`,
+      encoding: "utf8", timeout: 60_000,
+    });
+    assert.notEqual(rejectedSetup.status, 0, rejectedSetup.stdout + rejectedSetup.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), initial);
+    assert.equal(fs.readFileSync(piAuth, "utf8"), oldAuth, "401 must restore prior auth bytes");
+    assert.equal(fs.readFileSync(piModels, "utf8"), oldModels, "401 must restore prior model bytes");
+    assert.doesNotMatch(rejectedSetup.stdout + rejectedSetup.stderr, /rejected-provider-secret/);
+
+    providerFixture.child.kill();
+    providerFixture = startProviderFixture(temp, "hang");
+    const selectionFile = path.join(configDir, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
+    fs.writeFileSync(selectionFile, `${JSON.stringify({ runtime: "pi", distribution: "builtin", preset: "custom",
+      baseUrl: providerFixture.baseUrl, model: "larkin-custom/fixture-model", apiKey: "cancelled-provider-secret" })}\n`, { mode: 0o600 });
+    const cancelledSetup = spawn(artifact, ["__internal", "setup-bind", "--profile", secondAgent, "--agent", secondAgent,
+      "--selection-file", selectionFile, "--yes"], { cwd: temp, env: builtinEnv, stdio: "ignore" });
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    const requestDeadline = Date.now() + 20_000;
+    while (!fs.existsSync(providerFixture.requestFile) && Date.now() < requestDeadline) Atomics.wait(sleeper, 0, 0, 20);
+    assert.equal(fs.existsSync(providerFixture.requestFile), true, "cancel test did not reach provider verification");
+    assert.equal(JSON.parse(fs.readFileSync(piAuth, "utf8"))["larkin-custom"].key, "cancelled-provider-secret",
+      "cancel test must observe the staged credential before signalling");
+    cancelledSetup.kill("SIGTERM");
+    const rollbackDeadline = Date.now() + 10_000;
+    while (fs.readFileSync(piAuth, "utf8") !== oldAuth && Date.now() < rollbackDeadline) Atomics.wait(sleeper, 0, 0, 20);
+    assert.equal(fs.readFileSync(piAuth, "utf8"), oldAuth, "SIGTERM must restore prior auth bytes");
+    assert.equal(fs.readFileSync(piModels, "utf8"), oldModels, "SIGTERM must restore prior model bytes");
+    assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), initial);
+
+    providerFixture.child.kill();
+    providerFixture = undefined;
+
+    fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
     fs.rmSync(baseEnv.SETUP_LARK_CALLS, { force: true });
     const publicFailed = spawnSync(artifact, ["setup", "--runtime", "codex", "--no-start"], {
       cwd: temp, env: { ...publicEnv, SETUP_FAIL_BIND_VERIFY: "1" }, encoding: "utf8", timeout: 30_000,
@@ -158,6 +265,7 @@ test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent confi
     assert.equal(fs.existsSync(path.join(configDir, "state", "agents", secondAgent, "lark-cli-config", "lark-channel", "config.json")), true,
       "verification failure must preserve the successful official workspace binding");
   } finally {
+    providerFixture?.child.kill();
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });

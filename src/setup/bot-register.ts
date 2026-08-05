@@ -11,6 +11,8 @@ import * as larkinConfig from "../platform/config.js";
 import { hydrateRuntimeAgent, syncAgentProfile } from "../app/runtime-agent-config.js";
 import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
+import { collectSetupAgentChoice, recoverUnavailableExternalPi, terminalSetupQuestioner } from "./setup-agent-choice.js";
+import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -51,6 +53,11 @@ const synchronizeAgentProfile = testFixture?.syncAgentProfile ?? syncAgentProfil
 const resolveOfficialCli = testFixture?.resolveOfficialLarkCli ?? resolveOfficialLarkCli;
 const wait = testFixture?.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
 const CFG_DIR = larkinConfig.resolveConfigDir(process.env);
+let temporaryAgentChoiceFile: string | null = null;
+process.on("exit", () => {
+  if (!temporaryAgentChoiceFile) return;
+  try { fs.unlinkSync(temporaryAgentChoiceFile); } catch { /* consumed or best effort */ }
+});
 const argv = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
   const index = argv.indexOf(name);
@@ -166,6 +173,21 @@ const prior: StoredCredential = (() => {
   catch { return {}; }
 })();
 
+if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_CHOICE === "1")) {
+  const existing = larkinConfig.loadConfig(process.env).config.agents[id];
+  const questioner = terminalSetupQuestioner();
+  try {
+    const requested = await collectSetupAgentChoice(questioner, existing);
+    const choice = await recoverUnavailableExternalPi(requested, questioner, () => probeNativeRuntimeReadiness({
+      runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id), env: process.env,
+    }), (message) => say(`! ${message}`));
+    if (choice) {
+      temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
+      fs.writeFileSync(temporaryAgentChoiceFile, `${JSON.stringify(choice)}\n`, { mode: 0o600, flag: "wx" });
+    }
+  } finally { questioner.close?.(); }
+}
+
 const stagedBotFile = path.join(botsDir, `.${id}.${process.pid}.tmp`);
 try {
   fs.writeFileSync(stagedBotFile, `${JSON.stringify({
@@ -189,6 +211,7 @@ const targetAgent = flag("--agent") || id;
 const bindArgs = ["--profile", id, "--yes", "--agent", targetAgent];
 const runtime = flag("--runtime");
 if (runtime) bindArgs.push("--runtime", runtime);
+if (temporaryAgentChoiceFile) bindArgs.push("--selection-file", temporaryAgentChoiceFile);
 const bindSpec = internalCommandSpec("setup-bind", bindArgs, process.env);
 const bind = spawnSync(bindSpec.command, bindSpec.args, { env: process.env, stdio: "inherit" });
 if (bind.status !== 0) {

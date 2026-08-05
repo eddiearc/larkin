@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
 
@@ -82,6 +83,7 @@ export interface ProbeNativeRuntimeReadinessOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   command?: string;
+  agentId?: string;
 }
 
 function selectedCommand(options: ProbeNativeRuntimeReadinessOptions): string {
@@ -100,6 +102,16 @@ function executableVersion(executable: string, env: NodeJS.ProcessEnv): string |
 /** Resolve and handshake through each runtime's structured native control protocol. */
 export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeReadinessOptions): Promise<RuntimeReadiness> {
   const env = { ...process.env, ...options.env };
+  if (options.runtime === "pi" && env.LARKIN_PI_DISTRIBUTION === "builtin") {
+    try {
+      if (!options.agentId || !env.LARKIN_CONFIG_DIR) throw new Error("内置 Pi readiness 缺少 Agent/config identity");
+      assertBuiltinPiAgentDirectory(piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId));
+      return { runtime: "pi", state: "ready", executable: process.execPath, version: `official-pi ${BUNDLED_PI_VERSION} (bundled)` };
+    } catch (error) {
+      return { runtime: "pi", state: "unauthenticated", reason: error instanceof Error ? error.message : String(error),
+        nextAction: "重新运行 larkin setup，选择内置 Pi 并配置有效 API Key。" };
+    }
+  }
   const command = selectedCommand(options);
   const executable = resolveRuntimeExecutable(command, env);
   if (!executable) return {

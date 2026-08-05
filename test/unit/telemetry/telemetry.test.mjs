@@ -116,17 +116,37 @@ test("OTLP upload only acknowledges files after a successful standard /v1/traces
   assert.ok(Array.isArray(received.resourceSpans)); assert.equal(spool.status().queuedFiles, 0);
 });
 
-test("OTLP partial success, throttling, and server failures retain the durable batch", async () => {
+test("OTLP partial success is dropped without retry while non-200 failures retain the durable batch", async () => {
+  {
+    const root = temp(); const spool = new TelemetrySpool(config(root)); spool.enqueue(payload());
+    const result = await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () =>
+      new Response(JSON.stringify({ partialSuccess: { rejectedSpans: "1", errorMessage: "FORBIDDEN_RAW" } }), { status: 200 }) });
+    assert.deepEqual(result, { uploadedFiles: 0, status: "dropped", errorCategory: "partial_success", droppedSpans: 1 });
+    assert.equal(spool.status().queuedFiles, 0); assert.equal(spool.status().droppedSpans, 1);
+  }
+  {
+    const root = temp(); const spool = new TelemetrySpool(config(root)); spool.enqueue(payload());
+    const result = await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () =>
+      new Response(JSON.stringify({ partialSuccess: { rejectedSpans: "0", errorMessage: "collector reported partial success" } }), { status: 200 }) });
+    assert.equal(result.status, "dropped"); assert.equal(spool.status().queuedFiles, 0, "a populated partialSuccess must not be retried");
+  }
   for (const [expected, response] of [
-    ["partial_success", new Response(JSON.stringify({ partialSuccess: { rejectedSpans: "1", errorMessage: "FORBIDDEN_RAW" } }), { status: 200 })],
     ["rate_limit", new Response("FORBIDDEN_RAW", { status: 429 })],
     ["server", new Response("FORBIDDEN_RAW", { status: 503 })],
+    ["protocol", new Response("", { status: 202 })],
   ]) {
     const root = temp(); const spool = new TelemetrySpool(config(root)); spool.enqueue(payload());
     const result = await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () => response });
     assert.deepEqual(result, { uploadedFiles: 0, status: "retained", errorCategory: expected });
     assert.equal(spool.status().queuedFiles, 1); assert.equal(JSON.stringify(spool.status()).includes("FORBIDDEN_RAW"), false);
   }
+});
+
+test("OTLP success response parsing is bounded", async () => {
+  const root = temp(); const spool = new TelemetrySpool(config(root)); spool.enqueue(payload());
+  const result = await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () =>
+    new Response("x".repeat(64 * 1024 + 1), { status: 200 }) });
+  assert.deepEqual(result, { uploadedFiles: 0, status: "retained", errorCategory: "protocol" }); assert.equal(spool.status().queuedFiles, 1);
 });
 
 test("concurrent uploaders have single ownership of a batch", async () => {
@@ -137,6 +157,13 @@ test("concurrent uploaders have single ownership of a batch", async () => {
     flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl }),
   ]);
   assert.equal(calls, 1); assert.ok(results.some((result) => result.status === "uploaded")); assert.equal(spool.status().queuedFiles, 0);
+});
+
+test("queue lease rejects PID reuse by process-start identity", () => {
+  const root = temp(); const spool = new TelemetrySpool(config(root)); spool.enqueue(payload()); const lock = path.join(config(root).spoolDir, ".queue.lock");
+  fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ version: 1, pid: process.pid,
+    processStartToken: "definitely-not-this-process", token: "stale", createdAt: Date.now() }));
+  const release = spool.acquireLease(); assert.equal(typeof release, "function"); release(); assert.equal(fs.existsSync(lock), false);
 });
 
 test("acknowledgement does not follow a swapped symlink", () => {
@@ -162,6 +189,15 @@ test("bundle import validates every record before changing the queue", () => {
   assert.throws(() => destination.importBundle(poisoned), /invalid telemetry payload/); assert.equal(destination.status().queuedFiles, 0);
 });
 
+test("privacy validation rejects embedded paths and credential sentinels in allowed attributes", () => {
+  const spool = new TelemetrySpool(config(temp()));
+  const withPath = structuredClone(payload()); withPath.resourceSpans[0].resource.attributes[1].value.stringValue = "1.2.3 /Users/private/build";
+  assert.throws(() => spool.enqueue(withPath), /invalid telemetry payload/);
+  const withCredential = structuredClone(payload()); withCredential.resourceSpans[0].resource.attributes[1].value.stringValue = "token=FORBIDDEN";
+  assert.throws(() => spool.enqueue(withCredential), /invalid telemetry payload/);
+  assert.equal(spool.status().queuedFiles, 0);
+});
+
 test("runtime startup rejects stale cross-process parent state and clean shutdown removes ownership", async () => {
   const root = temp(); const stateDir = path.join(root, "state"); fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(path.join(stateDir, "telemetry-runtime-generation.json"), JSON.stringify({ version: 1, generation: "stale", pid: 99999999, expiresAt: Date.now() + 60_000 }));
@@ -173,14 +209,48 @@ test("runtime startup rejects stale cross-process parent state and clean shutdow
   assert.equal(fs.existsSync(path.join(stateDir, "telemetry-runtime-generation.json")), false);
 });
 
+test("long-running runtime renews generation and active context using a fake clock", async () => {
+  const root = temp(); const stateDir = path.join(root, "state"); let time = 1_000;
+  const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir, stateDirs: [stateDir], now: () => time,
+    processStartToken: "owner-start", inspectOwner: () => ({ ok: true, startToken: "owner-start" }) });
+  runtime.beginMessage("cli_a", "om_long"); runtime.delivery("cli_a", "om_long", "accepted"); runtime.runtimeEvent("cli_a", { type: "turn-start" });
+  runtime.runtimeEvent("cli_a", { type: "activity", activity: "thinking" });
+  time += 13 * 60 * 60 * 1000; runtime.runtimeEvent("cli_a", { type: "activity", activity: "thinking" });
+  let owner = JSON.parse(fs.readFileSync(path.join(stateDir, "telemetry-runtime-generation.json"), "utf8"));
+  let active = JSON.parse(fs.readFileSync(path.join(stateDir, "telemetry-active-context.json"), "utf8"));
+  assert.equal(owner.expiresAt, time + 24 * 60 * 60 * 1000); assert.equal(active.expiresAt, time + 30 * 60 * 1000);
+  time += 13 * 60 * 60 * 1000; runtime.runtimeEvent("cli_a", { type: "activity", activity: "tool" });
+  owner = JSON.parse(fs.readFileSync(path.join(stateDir, "telemetry-runtime-generation.json"), "utf8"));
+  assert.equal(owner.expiresAt, time + 24 * 60 * 60 * 1000, "ownership renews after a normal runtime exceeds 24 hours");
+  time += 20 * 60 * 1000; await runtime.externalPhase("cli_a", stateDir, "feishu.send", SpanKind.CLIENT, async () => {});
+  runtime.runtimeEvent("cli_a", { type: "turn-end" }); await runtime.shutdown();
+  const spans = new TelemetrySpool(config(root)).list().flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+  assert.equal(spans.find((span) => span.name === "feishu.send").traceId, spans.find((span) => span.name === "larkin.message.process").traceId);
+});
+
+test("PID reuse with a different process-start identity rejects stale context", async () => {
+  const root = temp(); const stateDir = path.join(root, "state"); fs.mkdirSync(stateDir, { recursive: true }); const now = 5_000;
+  fs.writeFileSync(path.join(stateDir, "telemetry-runtime-generation.json"), JSON.stringify({ version: 1, generation: "old", pid: process.pid,
+    processStartToken: "old-start", expiresAt: now + 60_000 }));
+  fs.writeFileSync(path.join(stateDir, "telemetry-active-context.json"), JSON.stringify({ version: 2, generation: "old", traceId: "a".repeat(32),
+    spanId: "b".repeat(16), traceFlags: 1, expiresAt: now + 60_000 }));
+  const runtime = createTelemetryRuntime(config(root), { now: () => now, processStartToken: "new-start",
+    inspectOwner: () => ({ ok: true, startToken: "new-start" }) });
+  await runtime.externalPhase("cli_a", stateDir, "feishu.send", SpanKind.CLIENT, async () => {}); await runtime.shutdown();
+  const sent = new TelemetrySpool(config(root)).list().flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans).find((span) => span.name === "feishu.send");
+  assert.notEqual(sent.traceId, "a".repeat(32)); assert.equal(sent.parentSpanId, undefined);
+});
+
 test("corrupt queue and diagnostics files are isolated from manual and background upload", async () => {
   const root = temp(); const spool = new TelemetrySpool(config(root)); const file = spool.enqueue(payload());
   fs.writeFileSync(file, "{broken"); fs.writeFileSync(path.join(config(root).spoolDir, "diagnostics.json"), "{broken");
   let calls = 0; const result = await flushTelemetry(spool, { endpoint: "http://collector.invalid/v1/traces", fetchImpl: async () => { calls += 1; return new Response("{}"); } });
-  assert.deepEqual(result, { uploadedFiles: 0, status: "retained", errorCategory: "spool" }); assert.equal(calls, 0);
+  assert.deepEqual(result, { uploadedFiles: 0, status: "empty" }); assert.equal(calls, 0);
   const uploader = startTelemetryUploader(spool, config(root, { endpoint: "http://collector.invalid/v1/traces", uploadIntervalMs: 5 }));
   await new Promise((resolve) => setTimeout(resolve, 20)); uploader.stop();
-  assert.equal(spool.status().queuedFiles, 1); assert.equal(spool.status().lastErrorCategory, "spool");
+  assert.equal(spool.status().queuedFiles, 0); assert.equal(spool.status().droppedFiles, 1); assert.equal(spool.status().lastErrorCategory, "corrupt_spool");
 });
 
 test("configured background upload drains a restarted spool without blocking the producer", async () => {
@@ -205,4 +275,13 @@ test("telemetry records business failures without retrying or replacing their re
   }), /FORBIDDEN_RAW_ERROR/);
   assert.equal(calls, 1); await runtime.shutdown();
   assert.equal(JSON.stringify(new TelemetrySpool(config(root)).list()).includes("FORBIDDEN_RAW_ERROR"), false);
+});
+
+test("transport tool spans are disambiguated from runtime tool intervals", async () => {
+  const root = temp(); const runtime = createTelemetryRuntime(config(root));
+  await runtime.externalPhase("cli_a", path.join(root, "state"), "tool.execute", SpanKind.CLIENT, async () => {}); await runtime.shutdown();
+  const tool = new TelemetrySpool(config(root)).list().flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans).find((span) => span.name === "tool.execute");
+  const boundary = tool.attributes.find((attribute) => attribute.key === "larkin.observation.boundary")?.value?.stringValue;
+  assert.equal(boundary, "agent_transport"); assert.equal(tool.kind, 3);
 });

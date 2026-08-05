@@ -1,7 +1,26 @@
 import type { TelemetryConfig } from "./telemetry-config.js";
 import { TelemetrySpool, type OtlpPayload } from "./telemetry-spool.js";
 
-export type UploadResult = { uploadedFiles: number; status: "empty" | "uploaded" | "retained"; errorCategory?: string };
+export type UploadResult = { uploadedFiles: number; status: "empty" | "uploaded" | "retained" | "dropped"; errorCategory?: string; droppedSpans?: number };
+
+class ProtocolResponseError extends Error {}
+async function boundedResponseJson(response: Response, maxBytes = 64 * 1024): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) throw new ProtocolResponseError("OTLP response too large");
+  if (!response.body) return null;
+  const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+  try {
+    while (true) {
+      const result = await reader.read(); if (result.done) break;
+      size += result.value.byteLength;
+      if (size > maxBytes) { await reader.cancel(); throw new ProtocolResponseError("OTLP response too large"); }
+      chunks.push(result.value);
+    }
+  } finally { reader.releaseLock(); }
+  if (!size) return null;
+  const text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+  try { return JSON.parse(text); } catch { throw new ProtocolResponseError("invalid OTLP response"); }
+}
 
 export async function flushTelemetry(spool: TelemetrySpool, options: {
   endpoint: string; headers?: Record<string, string>; timeoutMs?: number; batchFiles?: number;
@@ -15,7 +34,7 @@ export async function flushTelemetry(spool: TelemetrySpool, options: {
     try { spool.updateDiagnostics({ lastErrorCategory, ...(lastUploadAt ? { lastUploadAt } : {}) }); } catch { /* isolated */ }
   };
   let records;
-  try { records = spool.list(options.batchFiles ?? 128); }
+  try { records = spool.list(options.batchFiles ?? 128, true); }
   catch { safeDiagnostic("spool"); release(); return { uploadedFiles: 0, status: "retained", errorCategory: "spool" }; }
   if (!records.length) { release(); return { uploadedFiles: 0, status: "empty" }; }
   const payload: OtlpPayload = { resourceSpans: records.flatMap((record) => record.payload.resourceSpans) };
@@ -27,23 +46,32 @@ export async function flushTelemetry(spool: TelemetrySpool, options: {
       headers: { "content-type": "application/json", ...(options.headers ?? {}) },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) {
-      const category = response.status === 429 ? "rate_limit" : response.status >= 500 ? "server" : "configuration";
+    if (response.status !== 200) {
+      const category = response.status === 429 ? "rate_limit" : response.status >= 500 ? "server" : response.ok ? "protocol" : "configuration";
       safeDiagnostic(category);
       return { uploadedFiles: 0, status: "retained", errorCategory: category };
     }
-    let body: unknown = null;
-    try { body = await response.json(); } catch { /* an empty success body is valid */ }
-    const partial = body && typeof body === "object" ? (body as { partialSuccess?: { rejectedSpans?: unknown } }).partialSuccess : undefined;
-    if (Number(partial?.rejectedSpans ?? 0) > 0) {
-      safeDiagnostic("partial_success");
-      return { uploadedFiles: 0, status: "retained", errorCategory: "partial_success" };
+    const body = await boundedResponseJson(response);
+    if (body !== null && (typeof body !== "object" || Array.isArray(body))) throw new ProtocolResponseError("invalid OTLP response");
+    const partial = (body as { partialSuccess?: unknown } | null)?.partialSuccess;
+    if (partial !== undefined && (!partial || typeof partial !== "object" || Array.isArray(partial))) throw new ProtocolResponseError("invalid OTLP partial success");
+    const partialValue = partial as { rejectedSpans?: unknown; errorMessage?: unknown } | undefined;
+    const rejected = Number(partialValue?.rejectedSpans ?? 0); const errorMessage = partialValue?.errorMessage ?? "";
+    if (!Number.isSafeInteger(rejected) || rejected < 0 || typeof errorMessage !== "string") throw new ProtocolResponseError("invalid OTLP partial success");
+    if (partialValue && (rejected > 0 || errorMessage.length > 0)) {
+      const spanCount = payload.resourceSpans.flatMap((resource) => (resource as { scopeSpans?: Array<{ spans?: unknown[] }> }).scopeSpans ?? [])
+        .reduce((sum, scope) => sum + (scope.spans?.length ?? 0), 0);
+      const droppedSpans = Math.max(1, Math.min(spanCount, rejected || 1));
+      spool.acknowledge(records);
+      try { spool.updateDiagnostics({ droppedSpans: spool.status().droppedSpans + droppedSpans,
+        lastUploadAt: new Date().toISOString(), lastErrorCategory: "partial_success" }); } catch { /* isolated */ }
+      return { uploadedFiles: 0, status: "dropped", errorCategory: "partial_success", droppedSpans };
     }
     spool.acknowledge(records);
     safeDiagnostic(null, new Date().toISOString());
     return { uploadedFiles: records.length, status: "uploaded" };
   } catch (error) {
-    const category = (error as Error).name === "AbortError" ? "timeout" : error instanceof TypeError ? "network" : "spool";
+    const category = (error as Error).name === "AbortError" ? "timeout" : error instanceof ProtocolResponseError ? "protocol" : error instanceof TypeError ? "network" : "spool";
     safeDiagnostic(category);
     return { uploadedFiles: 0, status: "retained", errorCategory: category };
   } finally { clearTimeout(timer); release(); }

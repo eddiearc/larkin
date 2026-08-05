@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createAgentStateStore } from "../../dist/agent/agent-state-store.mjs";
 import { runAgentCli } from "../../dist/app/agent-cli.mjs";
 import { runLarkCli } from "../../dist/app/lark-cli.mjs";
@@ -528,6 +529,14 @@ for (const runtime of ["codex", "claude", "pi"]) {
       larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir, stateDir };
     const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-mock",
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: path.join(root, "events.ndjson") };
+    if (telemetry) {
+      env.LARKIN_TELEMETRY_ENABLED = "1"; env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
+      const binDir = path.join(root, "bin"); fs.mkdirSync(binDir);
+      fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/usr/bin/env bun
+const args=process.argv.slice(2);process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message_id:"om_mock_sent"}}));
+`, { mode: 0o755 });
+      env.PATH = `${binDir}${path.delimiter}${process.env.PATH || ""}`;
+    }
     const hostShell = createHostShell({
       env,
       runtimeHost,
@@ -551,6 +560,13 @@ for (const runtime of ["codex", "claude", "pi"]) {
       session.emit({ type: "activity", activity: "thinking" });
       await new Promise((resolve) => setTimeout(resolve, 2));
       session.emit({ type: "activity", activity: "tool" });
+      if (telemetry) {
+        const target = Object.keys(JSON.parse(fs.readFileSync(store.paths.map, "utf8")))[0];
+        const script = `const {transport}=require(${JSON.stringify(path.join(path.resolve(import.meta.dirname, "../.."), "dist/agent/agent-transport.cjs"))});transport.request({method:"POST",path:"/messages/send",body:{target:${JSON.stringify(target)},content:"mock reply"}}).then(r=>{if(!r.ok)throw new Error(r.error);process.stdout.write("sent")}).catch(e=>{console.error(e);process.exit(1)});`;
+        const sent = spawnSync(process.execPath, ["--eval", script], { cwd: path.resolve(import.meta.dirname, "../.."), encoding: "utf8",
+          env: { ...process.env, ...env, LARKIN_AGENT_ID: agentId } });
+        assert.equal(sent.status, 0, sent.stderr || sent.stdout); assert.equal(sent.stdout, "sent");
+      }
       await hostShell.ingest(agentId, { chat_id: `oc_${runtime}`, chat_type: "p2p", sender_id: "ou_sender", message_id: `om_${runtime}_2`,
         event_id: `evt_${runtime}_2`, content: "second", create_time: "1784160001000", thread_id: null,
         _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
@@ -699,7 +715,12 @@ for (const runtime of ["codex", "claude", "pi"]) {
         const spans = records.flatMap(({ payload }) => payload.resourceSpans)
           .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
         const names = new Set(spans.map((span) => span.name));
-        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume"]) assert.ok(names.has(name));
+        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]) assert.ok(names.has(name));
+        const turn = spans.find((span) => span.name === "agent.turn"); const trace = spans.filter((span) => span.traceId === turn.traceId);
+        assert.equal(trace.length, 8, JSON.stringify(trace)); const byName = Object.fromEntries(trace.map((span) => [span.name, span]));
+        const rootSpan = byName["larkin.message.process"];
+        for (const name of ["feishu.receive", "runtime.deliver", "agent.turn"]) assert.equal(byName[name].parentSpanId, rootSpan.spanId, name);
+        for (const name of ["model.activity", "tool.execute", "inbox.consume", "feishu.send"]) assert.equal(byName[name].parentSpanId, turn.spanId, name);
         assert.ok(spans.some((span) => span.name === "larkin.message.process" && span.links?.length === 1),
           `busy steer is linked, not assigned a false parent: ${JSON.stringify(spans.filter((span) => span.name === "larkin.message.process"))}`);
         const serialized = JSON.stringify(records.map((record) => record.payload));

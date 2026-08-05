@@ -9,6 +9,7 @@ import type { NormalizedRuntimeEvent } from "../runtime/runtime-contracts.js";
 import type { TelemetryConfig } from "./telemetry-config.js";
 import { TelemetrySpool, type OtlpPayload } from "./telemetry-spool.js";
 import { startTelemetryUploader } from "./telemetry-uploader.js";
+import { inspectProcess } from "./process-state.js";
 
 const nanos = ([seconds, nanoseconds]: readonly [number, number]): string => (BigInt(seconds) * 1_000_000_000n + BigInt(nanoseconds)).toString();
 // OTel JS uses zero-based SpanKind values while OTLP's enum starts at 1.
@@ -53,7 +54,7 @@ class DurableSpanExporter implements SpanExporter {
 
 interface MessageTrace {
   root: Span; context: Context; agentId: string; messageHash: string; turn?: Span; turnContext?: Context;
-  activitySpan?: Span; activityName?: "model.activity" | "tool.execute";
+  activitySpan?: Span; activityName?: "model.activity" | "tool.execute"; inboxConsumed?: boolean;
 }
 export interface TelemetryRuntime {
   readonly enabled: boolean;
@@ -78,6 +79,8 @@ function atomicStateWrite(file: string, value: unknown): void {
   try {
     fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: "wx" });
     fs.renameSync(temporary, file); fs.chmodSync(file, 0o600);
+    const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
+    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   } finally { try { fs.unlinkSync(temporary); } catch { /* isolated */ } }
 }
 function readStateJson(file: string): Record<string, unknown> {
@@ -85,17 +88,18 @@ function readStateJson(file: string): Record<string, unknown> {
   try { const stat = fs.fstatSync(descriptor); if (!stat.isFile()) throw new Error("invalid state"); return JSON.parse(fs.readFileSync(descriptor, "utf8")) as Record<string, unknown>; }
   finally { fs.closeSync(descriptor); }
 }
-function writeActiveContext(stateDir: string | undefined, value: SpanContext | null, generation: string): void {
+function writeActiveContext(stateDir: string | undefined, value: SpanContext | null, generation: string, now: number): void {
   if (!stateDir) return;
   const file = activeContextFile(stateDir);
   try {
     fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     if (!value) { try { fs.unlinkSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } return; }
     atomicStateWrite(file, { version: 2, generation, traceId: value.traceId, spanId: value.spanId, traceFlags: value.traceFlags,
-      expiresAt: Date.now() + 30 * 60 * 1000 });
+      expiresAt: now + 30 * 60 * 1000 });
   } catch { /* telemetry cannot alter business behavior */ }
 }
-function readActiveContext(stateDir: string): SpanContext | null {
+interface OwnerInspection { ok: boolean; startToken?: string }
+function readActiveContext(stateDir: string, now: number, inspectOwner: (pid: number) => OwnerInspection): SpanContext | null {
   try {
     const file = activeContextFile(stateDir); const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink()) return null;
@@ -104,22 +108,28 @@ function readActiveContext(stateDir: string): SpanContext | null {
     if (!generationStat.isFile() || generationStat.isSymbolicLink()) return null;
     const owner = readStateJson(generationFile(stateDir)); const ownerPid = Number(owner.pid);
     if (value.version !== 2 || owner.version !== 1 || value.generation !== owner.generation
-      || Number(value.expiresAt) < Date.now() || Number(owner.expiresAt) < Date.now()
+      || Number(value.expiresAt) <= now || Number(owner.expiresAt) <= now
       || !Number.isSafeInteger(ownerPid) || ownerPid <= 0
       || !/^[0-9a-f]{32}$/.test(String(value.traceId)) || !/^[0-9a-f]{16}$/.test(String(value.spanId))) return null;
-    try { process.kill(ownerPid, 0); } catch { return null; }
+    const inspected = inspectOwner(ownerPid);
+    if (!inspected.ok || !inspected.startToken || inspected.startToken !== owner.processStartToken) return null;
     return { traceId: String(value.traceId), spanId: String(value.spanId), traceFlags: Number(value.traceFlags) || 1, isRemote: true };
   } catch { return null; }
 }
 
-export function createTelemetryRuntime(config: TelemetryConfig, options: {
+interface TelemetryRuntimeOptions {
   stateDirFor?(agentId: string): string | undefined; stateDirs?: readonly string[]; serviceVersion?: string;
-} = {}): TelemetryRuntime {
+  now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection;
+}
+export function createTelemetryRuntime(config: TelemetryConfig, options: TelemetryRuntimeOptions = {}): TelemetryRuntime {
   if (!config.enabled) return NOOP;
   const spool = new TelemetrySpool(config);
   const exporter = new DurableSpanExporter(spool);
   const runtimeGeneration = crypto.randomUUID();
   const startupId = crypto.randomUUID();
+  const now = options.now ?? Date.now;
+  const inspectOwner = options.inspectOwner ?? ((pid: number) => inspectProcess(pid));
+  const processStartToken = options.processStartToken ?? inspectOwner(process.pid).startToken;
   const initializedStateDirs = new Set<string>();
   const initializeStateDir = (stateDir: string): void => {
     if (initializedStateDirs.has(stateDir)) return;
@@ -127,17 +137,29 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: {
       fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
       try { fs.unlinkSync(activeContextFile(stateDir)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       atomicStateWrite(generationFile(stateDir), { version: 1, generation: runtimeGeneration, pid: process.pid,
-        expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+        processStartToken, expiresAt: now() + 24 * 60 * 60 * 1000 });
       initializedStateDirs.add(stateDir);
+    } catch { /* isolated */ }
+  };
+  const renewStateDir = (stateDir: string): void => {
+    try {
+      const owner = readStateJson(generationFile(stateDir));
+      if (owner.generation === runtimeGeneration && Number(owner.expiresAt) - now() < 12 * 60 * 60 * 1000) {
+        atomicStateWrite(generationFile(stateDir), { version: 1, generation: runtimeGeneration, pid: process.pid,
+          processStartToken, expiresAt: now() + 24 * 60 * 60 * 1000 });
+      }
     } catch { /* isolated */ }
   };
   const writeContext = (agentId: string, value: SpanContext | null): void => {
     const stateDir = options.stateDirFor?.(agentId); if (!stateDir) return;
-    initializeStateDir(stateDir); writeActiveContext(stateDir, value, runtimeGeneration);
+    initializeStateDir(stateDir); renewStateDir(stateDir);
+    writeActiveContext(stateDir, value, runtimeGeneration, now());
   };
   for (const stateDir of options.stateDirs ?? []) {
     initializeStateDir(stateDir);
   }
+  const ownershipTimer = setInterval(() => { for (const stateDir of initializedStateDirs) renewStateDir(stateDir); }, 6 * 60 * 60 * 1000);
+  ownershipTimer.unref?.();
   const provider = new NodeTracerProvider({
     resource: resourceFromAttributes({ "service.name": "larkin", "service.version": options.serviceVersion ?? "dev",
       "service.instance.id": startupId }),
@@ -197,7 +219,10 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: {
           writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
         }
         if (status === "consumed") {
-          const span = tracer.startSpan("inbox.consume", { kind: SpanKind.CONSUMER }, current.turnContext ?? current.context); span.end();
+          if (!current.inboxConsumed) {
+            const span = tracer.startSpan("inbox.consume", { kind: SpanKind.CONSUMER }, current.turnContext ?? current.context); span.end();
+            current.inboxConsumed = true;
+          }
         }
         if (status === "error") endTrace(current, true);
         if (status === "deferred") endTrace(current, true);
@@ -214,6 +239,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: {
           writeContext(agentId, current.turn.spanContext());
         } else if (event.type === "activity") {
           const activityName = event.activity === "tool" ? "tool.execute" : "model.activity";
+          writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
           if (current.activityName === activityName) return;
           closeActivity(current);
           const activitySpan = tracer.startSpan(activityName, { kind: SpanKind.INTERNAL,
@@ -228,9 +254,10 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: {
     async externalPhase(agentId, stateDir, name, spanKind, operation) {
       let span: Span; let parentContext: Context;
       try {
-        const parent = readActiveContext(stateDir);
+        const parent = readActiveContext(stateDir, now(), inspectOwner);
         parentContext = parent ? trace.setSpanContext(context.active(), parent) : context.active();
-        span = tracer.startSpan(name, { kind: spanKind, attributes: { "larkin.agent.id_hash": safeHash(agentId) } }, parentContext);
+        span = tracer.startSpan(name, { kind: spanKind, attributes: { "larkin.agent.id_hash": safeHash(agentId),
+          "larkin.observation.boundary": "agent_transport" } }, parentContext);
       } catch { return operation(); }
       try { return await context.with(trace.setSpan(parentContext, span), operation); }
       catch (error) { span.setStatus({ code: SpanStatusCode.ERROR }); throw error; }
@@ -238,6 +265,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: {
     },
     async shutdown() {
       uploader?.stop();
+      clearInterval(ownershipTimer);
       for (const current of new Set(messages.values())) endTrace(current, true);
       for (const stateDir of initializedStateDirs) {
         try {
@@ -256,6 +284,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: {
 let singleton: TelemetryRuntime | null = null;
 export function telemetrySingleton(config?: TelemetryConfig, options?: {
   stateDirFor?(agentId: string): string | undefined; stateDirs?: readonly string[]; serviceVersion?: string;
+  now?(): number; processStartToken?: string; inspectOwner?(pid: number): OwnerInspection;
 }): TelemetryRuntime {
   if (!singleton && config) singleton = createTelemetryRuntime(config, options);
   return singleton ?? NOOP;

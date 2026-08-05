@@ -15,7 +15,7 @@ export LARKIN_TELEMETRY_OTLP_HEADERS='Authorization=Bearer%20REDACTED'
 larkin start
 ```
 
-The default spool is under `$LARKIN_HOME/telemetry/spool`, with a `0700` directory and `0600` files. Defaults are 64 MiB, 10,000 files, and 14 days. Override them with `LARKIN_TELEMETRY_MAX_BYTES`, `LARKIN_TELEMETRY_MAX_FILES`, and `LARKIN_TELEMETRY_MAX_AGE_MS`. Oldest/expired data is dropped first. Network errors, timeouts, 429, and 5xx responses leave files queued; only a successful OTLP response removes them. Automatic uploading is disabled unless an endpoint is configured.
+The default spool is under `$LARKIN_HOME/telemetry/spool`, with a `0700` directory and `0600` files. Defaults are 64 MiB, 10,000 files, and 14 days. Override them with `LARKIN_TELEMETRY_MAX_BYTES`, `LARKIN_TELEMETRY_MAX_FILES`, and `LARKIN_TELEMETRY_MAX_AGE_MS`. Oldest/expired data is dropped first, and malformed records are quarantined so later valid records can proceed. Network errors, timeouts, 429, 5xx, non-200 2xx, malformed responses, and responses over 64 KiB leave files queued. A normal upload is acknowledged only on HTTP 200. Per OTLP/HTTP 1.11, a populated `partialSuccess` response is recorded in the safe dropped-span diagnostics and acknowledged without retry, preventing duplicate delivery. Automatic uploading is disabled unless an endpoint is configured.
 
 `larkin telemetry status` reports only queue counts/bytes, oldest age, drop count, the last error category, and endpoint scheme/host. It never prints headers, URL paths/userinfo/query, filesystem paths, message text, prompts, model output, commands, credentials, real user IDs, or raw errors. Trace attributes use hashes and low-cardinality enums. `model.activity` and `tool.execute` measure consecutive activity intervals observed by Larkin's Runtime Host; they are not provider queue, first-token, or provider-internal tool timing.
 
@@ -37,7 +37,7 @@ larkin telemetry flush --endpoint http://127.0.0.1:4318/v1/traces
 
 Bundles contain versioned OTLP payloads plus SHA-256 checksums. Import validates size, schema, and checksums, assigns local queue identities, and is idempotent. Original trace/span IDs, parentage, status, and timestamps are not rewritten.
 
-Ended spans survive process restarts. A clean shutdown also closes active spans and removes the cross-process parent context. An operating-system kill that gives the process no shutdown opportunity can lose the currently open intervals, but stale parent context is rejected on the next startup and previously ended spans remain queued.
+Ended spans survive process restarts. A clean shutdown also closes active spans and removes the cross-process parent context. Ownership is renewed while the runtime stays alive, activity refreshes the active turn context, and both PID and operating-system process-start identity are checked to reject PID reuse. An operating-system kill that gives the process no shutdown opportunity can lose the currently open intervals, but stale parent context is rejected on the next startup and previously ended spans remain queued.
 
 ## View with Grafana OTEL-LGTM
 

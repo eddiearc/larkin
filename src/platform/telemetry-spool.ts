@@ -3,14 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import type { TelemetryConfig } from "./telemetry-config.js";
+import { inspectProcess } from "./process-state.js";
 
 export interface OtlpPayload { resourceSpans: unknown[] }
 export interface QueueRecord { file: string; payload: OtlpPayload; device: number; inode: number }
 export interface QueueStatus {
   queuedFiles: number; queuedBytes: number; oldestAgeMs: number | null;
-  droppedFiles: number; lastUploadAt: string | null; lastErrorCategory: string | null;
+  droppedFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null;
 }
-interface Diagnostics { droppedFiles: number; lastUploadAt: string | null; lastErrorCategory: string | null }
+interface Diagnostics { droppedFiles: number; droppedSpans: number; lastUploadAt: string | null; lastErrorCategory: string | null }
 interface BundleRecord { sha256: string; payload: OtlpPayload }
 interface TelemetryBundle { format: "larkin-otlp-bundle"; version: 1; createdAt: string; records: BundleRecord[] }
 interface ReadyFile { file: string; size: number; mtimeMs: number; device: number; inode: number }
@@ -20,9 +21,9 @@ const HEX_TRACE = /^[0-9a-f]{32}$/;
 const HEX_SPAN = /^[0-9a-f]{16}$/;
 const SPAN_NAMES = new Set(["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]);
 const ATTRIBUTE_KEYS = new Set(["service.name", "service.version", "service.instance.id", "larkin.agent.id_hash", "messaging.message.id_hash", "larkin.message.relation", "larkin.observation.boundary", "larkin.activity.type"]);
-const SENSITIVE = /(?:bearer\s|token\s*[=:]|secret\s*[=:]|cookie\s*[=:]|sk-[a-z0-9_-]{8})/i;
-const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/])/;
-const emptyDiagnostics = (): Diagnostics => ({ droppedFiles: 0, lastUploadAt: null, lastErrorCategory: null });
+const SENSITIVE = /(?:bearer\s|(?:api[_-]?key|authorization|password|token|secret|cookie)\s*[=:]|(?:sk|ghp|github_pat)-?[a-z0-9_-]{8})/i;
+const ABSOLUTE_PATH = /(?:^|[\s"'=])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/;
+const emptyDiagnostics = (): Diagnostics => ({ droppedFiles: 0, droppedSpans: 0, lastUploadAt: null, lastErrorCategory: null });
 const invalidPayload = (): never => { throw new Error("invalid telemetry payload"); };
 
 function validateValue(value: unknown, depth = 0): void {
@@ -49,6 +50,18 @@ function validateAttributes(value: unknown): void {
     const attribute = item as Record<string, unknown>;
     if (Object.keys(attribute).some((key) => key !== "key" && key !== "value") || !ATTRIBUTE_KEYS.has(String(attribute.key))) invalidPayload();
     validateValue(attribute.value);
+    const stringValue = (attribute.value as { stringValue?: unknown }).stringValue;
+    if (typeof stringValue !== "string") invalidPayload();
+    {
+      const key = String(attribute.key); const text = stringValue as string;
+      if (key === "service.name" && text !== "larkin") invalidPayload();
+      if (key === "service.version" && !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(text)) invalidPayload();
+      if (key === "service.instance.id" && !/^[0-9a-f-]{16,64}$/i.test(text)) invalidPayload();
+      if (["larkin.agent.id_hash", "messaging.message.id_hash"].includes(key) && !/^[0-9a-f]{24}$/.test(text)) invalidPayload();
+      if (key === "larkin.message.relation" && text !== "fan_in") invalidPayload();
+      if (key === "larkin.observation.boundary" && !["runtime_host", "runtime_event_interval", "agent_transport"].includes(text)) invalidPayload();
+      if (key === "larkin.activity.type" && !["thinking", "text", "tool", "internal"].includes(text)) invalidPayload();
+    }
   }
 }
 
@@ -108,21 +121,25 @@ export class TelemetrySpool {
 
   acquireLease(): (() => void) | null {
     this.ensure(); const lease = path.join(this.config.spoolDir, ".queue.lock"); const token = crypto.randomUUID();
+    const currentStartToken = inspectProcess(process.pid).startToken;
     const create = (): void => {
       fs.mkdirSync(lease, { mode: 0o700 });
-      fs.writeFileSync(path.join(lease, "owner.json"), JSON.stringify({ version: 1, pid: process.pid, token, createdAt: Date.now() }), { mode: 0o600, flag: "wx" });
+      fs.writeFileSync(path.join(lease, "owner.json"), JSON.stringify({ version: 1, pid: process.pid, processStartToken: currentStartToken,
+        token, createdAt: Date.now() }), { mode: 0o600, flag: "wx" });
     };
     try { create(); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
         const stat = fs.lstatSync(lease); if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
-        let owner: { pid?: unknown; createdAt?: unknown } | null = null;
-        try { owner = JSON.parse(fs.readFileSync(path.join(lease, "owner.json"), "utf8")) as { pid?: unknown; createdAt?: unknown }; } catch { /* reclaim only after timeout */ }
-        let alive = false;
-        if (owner && Number.isSafeInteger(Number(owner.pid)) && Number(owner.pid) > 0) try { process.kill(Number(owner.pid), 0); alive = true; } catch { /* dead */ }
+        let owner: { pid?: unknown; processStartToken?: unknown; createdAt?: unknown } | null = null;
+        try { owner = JSON.parse(fs.readFileSync(path.join(lease, "owner.json"), "utf8")) as { pid?: unknown; processStartToken?: unknown; createdAt?: unknown }; } catch { /* reclaim only after timeout */ }
+        const inspected = owner && Number.isSafeInteger(Number(owner.pid)) && Number(owner.pid) > 0 ? inspectProcess(Number(owner.pid)) : { ok: false };
+        const hasStartToken = typeof owner?.processStartToken === "string" && owner.processStartToken.length > 0;
+        const sameProcess = hasStartToken && inspected.ok && inspected.startToken === owner?.processStartToken;
+        const identityMismatch = hasStartToken && inspected.ok && inspected.startToken !== owner?.processStartToken;
         const age = Date.now() - (owner && Number.isFinite(Number(owner.createdAt)) ? Number(owner.createdAt) : stat.mtimeMs);
-        if (alive || age < 2 * 60_000) return null;
+        if (sameProcess || (!identityMismatch && !inspected.dead && age < 2 * 60_000)) return null;
         const stale = path.join(this.config.spoolDir, `.stale-lock-${crypto.randomUUID()}`);
         fs.renameSync(lease, stale); const moved = fs.lstatSync(stale);
         if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== stat.dev || moved.ino !== stat.ino) return null;
@@ -157,6 +174,8 @@ export class TelemetrySpool {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
       fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); fs.closeSync(descriptor); descriptor = undefined;
       fs.renameSync(temporary, file); fs.chmodSync(file, 0o600);
+      const directory = fs.openSync(this.config.spoolDir, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
     } finally {
       if (descriptor !== undefined) try { fs.closeSync(descriptor); } catch { /* isolated */ }
       try { fs.unlinkSync(temporary); } catch { /* isolated */ }
@@ -184,19 +203,29 @@ export class TelemetrySpool {
     return file;
   }
 
-  list(limit = Number.MAX_SAFE_INTEGER): QueueRecord[] {
-    const output: QueueRecord[] = [];
+  list(limit = Number.MAX_SAFE_INTEGER, quarantineCorrupt = false): QueueRecord[] {
+    const output: QueueRecord[] = []; let dropped = 0;
     for (const entry of this.readyFiles().slice(0, limit)) {
-      let descriptor: number | undefined;
+      let descriptor: number | undefined; let invalid = false;
       try {
         descriptor = fs.openSync(entry.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
         const stat = fs.fstatSync(descriptor);
         if (!stat.isFile() || stat.dev !== entry.device || stat.ino !== entry.inode) throw new Error("telemetry spool changed");
         const payload: unknown = JSON.parse(fs.readFileSync(descriptor, "utf8")); validateOtlpPayload(payload);
         output.push({ file: entry.file, payload, device: stat.dev, inode: stat.ino });
-      } catch { throw new Error("invalid telemetry spool record"); }
+      } catch { invalid = true; }
       finally { if (descriptor !== undefined) try { fs.closeSync(descriptor); } catch { /* isolated */ } }
+      if (invalid) {
+        if (!quarantineCorrupt) throw new Error("invalid telemetry spool record");
+        const quarantine = path.join(this.config.spoolDir, `.corrupt-${crypto.randomUUID()}.json`);
+        try {
+          fs.renameSync(entry.file, quarantine); const stat = fs.lstatSync(quarantine);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.dev !== entry.device || stat.ino !== entry.inode) throw new Error("record changed");
+          dropped += 1;
+        } catch { try { fs.renameSync(quarantine, entry.file); } catch { /* preserve */ } }
+      }
     }
+    if (dropped) try { this.updateDiagnostics({ droppedFiles: this.diagnostics().droppedFiles + dropped, lastErrorCategory: "corrupt_spool" }); } catch { /* isolated */ }
     return output;
   }
 
@@ -212,6 +241,8 @@ export class TelemetrySpool {
         if (!stat.isFile() || stat.isSymbolicLink() || stat.dev !== record.device || stat.ino !== record.inode) throw new Error("record changed");
       }
       for (const entry of moved) fs.unlinkSync(entry.quarantine);
+      const directory = fs.openSync(this.config.spoolDir, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
     } catch {
       for (const entry of moved.reverse()) try { fs.renameSync(entry.quarantine, entry.original); } catch { /* preserve without deleting */ }
       throw new Error("telemetry acknowledgement failed");
@@ -222,6 +253,7 @@ export class TelemetrySpool {
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(this.config.spoolDir, "diagnostics.json"), "utf8")) as Partial<Diagnostics>;
       return { droppedFiles: Number.isSafeInteger(parsed.droppedFiles) && Number(parsed.droppedFiles) >= 0 ? Number(parsed.droppedFiles) : 0,
+        droppedSpans: Number.isSafeInteger(parsed.droppedSpans) && Number(parsed.droppedSpans) >= 0 ? Number(parsed.droppedSpans) : 0,
         lastUploadAt: typeof parsed.lastUploadAt === "string" ? parsed.lastUploadAt : null,
         lastErrorCategory: typeof parsed.lastErrorCategory === "string" ? parsed.lastErrorCategory : null };
     } catch { return emptyDiagnostics(); }

@@ -10,9 +10,15 @@ import { fileURLToPath } from "node:url";
 import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
-import { stageBuiltinPiProvider, type BuiltinPiProviderSelection } from "../runtime/pi-provider-config.js";
-import { createNativeRuntimeAdapter } from "../runtime/runtime-adapters.js";
-import type { SetupAgentChoice } from "./setup-agent-choice.js";
+import { configureBuiltinPiProviderModel, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
+import { terminalSetupQuestioner, type OfficialPiAuthSelection, type SetupAgentChoice } from "./setup-agent-choice.js";
+import {
+  beginBuiltinPiCredentialTransaction,
+  createOfficialPiAuthInteraction,
+  createOfficialPiModelRuntime,
+  runOfficialPiLogin,
+  verifyOfficialPiProviderTurn,
+} from "../runtime/pi-official-auth.js";
 import * as larkinConfigImport from "../platform/config.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 
@@ -121,6 +127,13 @@ function larkJson(args: string[]): LarkJsonResult {
   }
 }
 
+function openAuthUrl(url: string): boolean {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "rundll32.exe" : "xdg-open";
+  const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
+  const result = spawnSync(command, args, { stdio: "ignore", timeout: 5_000 });
+  return result.status === 0;
+}
+
 function listProfiles(): Profile[] {
   const result = larkJson(["profile", "list"]);
   if (!result.ok || !Array.isArray(result.json)) {
@@ -201,44 +214,15 @@ function fabricateAttachment(root: string, serverId: string): void {
   fs.writeFileSync(file, JSON.stringify(attachment, null, 2), { mode: 0o600 });
 }
 
-async function verifyBuiltinPiProviderTurn(agentId: string, model: string): Promise<void> {
-  if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN === "1" && process.env.LARKIN_TEST_BOT_REGISTER_MODULE) return;
-  const workspaceDir = layout.workspaceDir(agentId);
-  const stateDir = layout.agentStateDir(agentId);
-  fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  const env = { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR, LARKIN_HOME: CFG_DIR, LARKIN_PI_DISTRIBUTION: "builtin" };
-  const adapter = createNativeRuntimeAdapter("pi", { env });
-  const readiness = await adapter.probe!({ agentId, workspaceDir, stateDir, env });
-  if (readiness.state !== "ready") throw new Error(readiness.reason || "内置 Pi provider 尚未 ready");
-  const session = await adapter.createSession({
-    agentId, workspaceDir, stateDir, model, env,
-    standingPrompt: { version: "setup-readiness-v1", content: "This is a setup readiness check. Do not use tools.", hash: "setup-readiness-v1" },
-  });
-  const events: string[] = [];
-  let timer: NodeJS.Timeout | null = null;
-  try {
-    const terminal = new Promise<void>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("provider readiness turn 60 秒超时")), 60_000);
-      session.subscribe((event) => {
-        if (event.type === "activity" && event.activity === "text" && event.text) events.push(event.text);
-        if (event.type === "input-error" || event.type === "configuration-error" || event.type === "error") {
-          if (timer) clearTimeout(timer);
-          reject(new Error(event.message));
-        } else if (event.type === "turn-end") {
-          if (timer) clearTimeout(timer);
-          if (!events.join("").trim()) reject(new Error("provider readiness turn 未返回可认证文本"));
-          else resolve();
-        }
-      });
-    });
-    const accepted = await session.prompt({ inputId: `setup-${agentId}`, kind: "user", text: "Reply exactly: LARKIN_READY", attempt: 1 });
-    if (accepted.status !== "accepted") throw new Error(accepted.reason || "provider readiness turn 未被接受");
-    await terminal;
-  } finally {
-    if (timer) clearTimeout(timer);
-    await session.close("setup readiness complete");
+function safeProviderFailure(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b(?:401|403)\b|unauth|invalid.*(?:key|token)|credential/i.test(message)) {
+    return new Error("内置 Pi provider 拒绝认证（401/403）；请重新登录或检查 credential");
   }
+  if (/timeout|超时|ETIMEDOUT/i.test(message)) return new Error("内置 Pi provider readiness 超时；请检查网络和 endpoint");
+  if (/ENOTFOUND|ECONN|fetch failed|network|TLS/i.test(message)) return new Error("内置 Pi provider endpoint 不可达；请检查网络、TLS 和 Base URL");
+  if (/model|模型/i.test(message)) return new Error("内置 Pi provider 不接受所选模型；请检查 provider/model");
+  return new Error("内置 Pi provider readiness 失败；credential/config 已回滚，请检查 provider 状态后重试");
 }
 
 function printAgents(config: HydratedConfig): void {
@@ -328,9 +312,15 @@ export async function main(): Promise<void> {
   const bound = stored.agents[profile.appId];
 
   fs.mkdirSync(CFG_DIR, { recursive: true });
-  let providerTransaction: ReturnType<typeof stageBuiltinPiProvider> | null = null;
+  let providerTransaction: ReturnType<typeof beginBuiltinPiCredentialTransaction> | null = null;
   let providerPublished = false;
+  const authAlreadyCompleted = selection?.runtime === "pi" && selection.distribution === "builtin"
+    && (selection as SetupAgentChoice & { authCompleted?: true }).authCompleted === true;
+  const readinessAlreadyCompleted = authAlreadyCompleted
+    && (selection as SetupAgentChoice & { readinessCompleted?: true }).readinessCompleted === true;
+  const authAbort = new AbortController();
   const cancelProviderTransaction = (signal: NodeJS.Signals): void => {
+    authAbort.abort();
     if (!providerPublished) providerTransaction?.rollback();
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
@@ -338,13 +328,40 @@ export async function main(): Promise<void> {
   const onSigterm = (): void => cancelProviderTransaction("SIGTERM");
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
+  let authQuestioner: ReturnType<typeof terminalSetupQuestioner> | null = null;
   try {
     providerTransaction = selection?.runtime === "pi" && selection.distribution === "builtin"
-      ? stageBuiltinPiProvider(CFG_DIR, profile.appId, selection as BuiltinPiProviderSelection)
+      && !authAlreadyCompleted ? beginBuiltinPiCredentialTransaction(CFG_DIR, profile.appId)
       : null;
     if (selection?.runtime === "pi" && selection.distribution === "builtin") {
-      say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
-      await verifyBuiltinPiProviderTurn(profile.appId, selection.model);
+      const official = selection.preset === "official" ? selection as OfficialPiAuthSelection : null;
+      const configured = official ? null : configureBuiltinPiProviderModel(CFG_DIR, profile.appId, selection as BuiltinPiProviderSetupSelection);
+      const providerId = official?.providerId || configured!.provider;
+      const authType = official?.authType || "api_key";
+      let piRuntime: Awaited<ReturnType<typeof createOfficialPiModelRuntime>> | null = null;
+      if (!authAlreadyCompleted) {
+        piRuntime = await createOfficialPiModelRuntime(CFG_DIR, profile.appId);
+        authQuestioner = terminalSetupQuestioner();
+        say(`正在通过捆绑官方 Pi 登录 ${providerId}（${authType}）…`);
+        try {
+          await runOfficialPiLogin(piRuntime, providerId, authType, createOfficialPiAuthInteraction({
+            questioner: authQuestioner,
+            report: (message) => say(message),
+            openUrl: openAuthUrl,
+            signal: authAbort.signal,
+          }));
+        } catch { throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`); }
+      }
+      if (!readinessAlreadyCompleted) {
+        piRuntime ??= await createOfficialPiModelRuntime(CFG_DIR, profile.appId);
+        say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
+        try {
+          if (!(process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN === "1" && process.env.LARKIN_TEST_BOT_REGISTER_MODULE)) {
+            await verifyOfficialPiProviderTurn(piRuntime, selection.model, authAbort.signal);
+          }
+        }
+        catch (error) { throw safeProviderFailure(error); }
+      }
     }
     larkinConfig.commitSetupConfig(process.env, loaded.revision, stored);
     providerTransaction?.commit();
@@ -353,6 +370,7 @@ export async function main(): Promise<void> {
     providerTransaction?.rollback();
     throw error;
   } finally {
+    authQuestioner?.close?.();
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
   }

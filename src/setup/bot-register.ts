@@ -1,18 +1,33 @@
 #!/usr/bin/env bun
 // Internal setup stage: browser-select a bot, verify credentials, publish them, then bind its App-ID Agent.
 
-import { spawnSync as systemSpawnSync } from "node:child_process";
+import { spawn as systemSpawn, spawnSync as systemSpawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerApp as channelRegisterApp } from "@larksuite/channel";
 import { internalCommandSpec } from "../app/internal-command.js";
 import * as larkinConfig from "../platform/config.js";
-import { hydrateRuntimeAgent, syncAgentProfile } from "../app/runtime-agent-config.js";
+import { hydrateRuntimeAgent, syncAgentProfile, syncAgentProfileAsync } from "../app/runtime-agent-config.js";
 import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
-import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
+import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "../app/official-lark-cli.js";
 import { collectSetupAgentChoice, recoverUnavailableExternalPi, terminalSetupQuestioner } from "./setup-agent-choice.js";
 import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
+import { configureBuiltinPiProviderModel, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
+import {
+  beginBuiltinPiCredentialTransaction,
+  createOfficialPiCredentialRuntime,
+  createOfficialPiAuthInteraction,
+  createOfficialPiModelRuntime,
+  createOfficialPiLogoutRuntime,
+  createOfficialPiRegistryRuntime,
+  listOfficialPiAuthProviders,
+  logoutOfficialPiProvider,
+  officialPiAuthStatus,
+  runOfficialPiLogin,
+  verifyOfficialPiProviderTurn,
+} from "../runtime/pi-official-auth.js";
+import type { OfficialPiAuthSelection, SetupAgentChoice } from "./setup-agent-choice.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -54,10 +69,44 @@ const resolveOfficialCli = testFixture?.resolveOfficialLarkCli ?? resolveOfficia
 const wait = testFixture?.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
 const CFG_DIR = larkinConfig.resolveConfigDir(process.env);
 let temporaryAgentChoiceFile: string | null = null;
+let pendingPiAuthTransaction: ReturnType<typeof beginBuiltinPiCredentialTransaction> | null = null;
+let pendingBindChild: ChildProcess | null = null;
+let pendingChildSettled: Promise<void> | null = null;
+let settlePendingChild: (() => void) | null = null;
+let requestedShutdown: "SIGINT" | "SIGTERM" | null = null;
+const shutdownController = new AbortController();
+let resolvedSetupOfficialCli: OfficialLarkCliCommand | null = null;
+
+function trackPendingChild(child: ChildProcess | null): void {
+  if (child) {
+    pendingBindChild = child;
+    pendingChildSettled = new Promise<void>((resolve) => { settlePendingChild = resolve; });
+    return;
+  }
+  pendingBindChild = null;
+  settlePendingChild?.();
+  settlePendingChild = null;
+  pendingChildSettled = null;
+}
+
 process.on("exit", () => {
+  pendingPiAuthTransaction?.rollback();
   if (!temporaryAgentChoiceFile) return;
   try { fs.unlinkSync(temporaryAgentChoiceFile); } catch { /* consumed or best effort */ }
 });
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    if (requestedShutdown) return;
+    requestedShutdown = signal;
+    const settling = pendingChildSettled;
+    shutdownController.abort(new Error(`setup interrupted by ${signal}`));
+    void (settling ?? Promise.resolve()).finally(() => {
+      pendingPiAuthTransaction?.rollback();
+      pendingPiAuthTransaction = null;
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    });
+  });
+}
 const argv = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
   const index = argv.indexOf(name);
@@ -66,12 +115,24 @@ const flag = (name: string): string | undefined => {
 const has = (name: string): boolean => argv.includes(name);
 const say = (...args: unknown[]): void => console.error(...args);
 const die = (message: string): never => {
+  if (requestedShutdown) throw new Error(`setup shutdown pending (${requestedShutdown})`);
   console.error(`✗ ${message}`);
   process.exit(1);
 };
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const BOT_VERIFY_BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000] as const;
+const testChildTimeout = process.env.LARKIN_TEST_BOT_REGISTER_MODULE ? Number(process.env.LARKIN_TEST_CHILD_TIMEOUT_MS) : NaN;
+const testChildMaxOutput = process.env.LARKIN_TEST_BOT_REGISTER_MODULE ? Number(process.env.LARKIN_TEST_CHILD_MAX_OUTPUT_BYTES) : NaN;
+const CHILD_TIMEOUT_MS = Number.isFinite(testChildTimeout) && testChildTimeout >= 50 ? testChildTimeout : 60_000;
+const CHILD_MAX_OUTPUT_BYTES = Number.isFinite(testChildMaxOutput) && testChildMaxOutput >= 256 ? testChildMaxOutput : 64 * 1024;
+
+function officialCliForProfile(env: NodeJS.ProcessEnv): OfficialLarkCliCommand {
+  if (resolvedSetupOfficialCli) return resolvedSetupOfficialCli;
+  if (pendingPiAuthTransaction) throw new Error("official lark-cli must be resolved before the Pi credential transaction starts");
+  resolvedSetupOfficialCli = resolveOfficialCli({ env });
+  return resolvedSetupOfficialCli;
+}
 
 function botVerificationRetryable(result: { status: number | null; stdout?: unknown; stderr?: unknown }): boolean {
   const text = `${typeof result.stdout === "string" ? result.stdout : ""}\n${typeof result.stderr === "string" ? result.stderr : ""}`;
@@ -93,9 +154,101 @@ function ensureSecureBotsDir(): string {
 }
 
 function openBrowser(url: string): boolean {
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  return spawnSync(command, args, { stdio: "ignore" }).status === 0;
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "rundll32.exe" : "xdg-open";
+  const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
+  try {
+    const child = systemSpawn(command, args, { stdio: "ignore", shell: false });
+    child.once("error", () => say(`[setup] 浏览器启动失败，请手动打开完整地址：${url}`));
+    child.unref?.();
+    return true;
+  } catch {
+    say(`[setup] 浏览器启动失败，请手动打开完整地址：${url}`);
+    return false;
+  }
+}
+
+async function runBindProcess(command: string, args: readonly string[]): Promise<number | null> {
+  if (testFixture?.spawnSync && !pendingPiAuthTransaction) {
+    return spawnSync(command, [...args], { env: process.env, stdio: "inherit" }).status;
+  }
+  return await new Promise<number | null>((resolve, reject) => {
+    const child = systemSpawn(command, [...args], { env: process.env, stdio: "inherit" });
+    trackPendingChild(child);
+    let killTimer: NodeJS.Timeout | null = null;
+    const abort = (): void => {
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 1_000);
+      killTimer.unref?.();
+    };
+    if (shutdownController.signal.aborted) abort();
+    else shutdownController.signal.addEventListener("abort", abort, { once: true });
+    child.once("error", (error) => {
+      if (killTimer) clearTimeout(killTimer);
+      shutdownController.signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      if (killTimer) clearTimeout(killTimer);
+      shutdownController.signal.removeEventListener("abort", abort);
+      resolve(code);
+    });
+  }).finally(() => { trackPendingChild(null); });
+}
+
+async function runIdentityProcess(command: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<{
+  status: number | null; stdout: string; stderr: string;
+}> {
+  if (testFixture?.spawnSync && !pendingPiAuthTransaction && process.env.LARKIN_TEST_ASYNC_IDENTITY !== "1") {
+    const result = spawnSync(command, [...args], { encoding: "utf8", env });
+    return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
+  }
+  return await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = systemSpawn(command, [...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    trackPendingChild(child);
+    let stdout = "";
+    let stderr = "";
+    let outputBytes = 0;
+    let failure: Error | null = null;
+    let settled = false;
+    let killTimer: NodeJS.Timeout | null = null;
+    const terminate = (error: Error): void => {
+      if (failure) return;
+      failure = error;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 1_000);
+      killTimer.unref?.();
+    };
+    const collect = (target: "stdout" | "stderr", chunk: Buffer): void => {
+      outputBytes += chunk.length;
+      if (outputBytes > CHILD_MAX_OUTPUT_BYTES) { terminate(new Error("Bot identity output exceeded the bounded limit")); return; }
+      if (target === "stdout") stdout += chunk.toString("utf8"); else stderr += chunk.toString("utf8");
+    };
+    child.stdout?.on("data", (chunk: Buffer) => collect("stdout", chunk));
+    child.stderr?.on("data", (chunk: Buffer) => collect("stderr", chunk));
+    const timeout = setTimeout(() => terminate(new Error("Bot identity verification timed out")), CHILD_TIMEOUT_MS);
+    timeout.unref?.();
+    const abort = (): void => terminate(new Error("Bot identity verification cancelled"));
+    if (shutdownController.signal.aborted) abort();
+    else shutdownController.signal.addEventListener("abort", abort, { once: true });
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      shutdownController.signal.removeEventListener("abort", abort);
+    };
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+    child.once("exit", (status) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (failure) { reject(failure); return; }
+      resolve({ status, stdout, stderr });
+    });
+  }).finally(() => { trackPendingChild(null); });
 }
 
 export async function main(): Promise<void> {
@@ -175,15 +328,55 @@ const prior: StoredCredential = (() => {
 
 if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_CHOICE === "1")) {
   const existing = larkinConfig.loadConfig(process.env).config.agents[id];
+  // The official resolver performs a synchronous login-shell probe. Resolve it
+  // exactly once before the credential heartbeat lock becomes active.
+  resolvedSetupOfficialCli = resolveOfficialCli({ env: process.env });
   const questioner = terminalSetupQuestioner();
+  // One setup-owned transaction starts before status/logout and remains active
+  // through selection, login, bind, readiness, and the final setup commit.
+  pendingPiAuthTransaction = beginBuiltinPiCredentialTransaction(CFG_DIR, id);
+  const authServices = {
+    providers: async () => listOfficialPiAuthProviders(await createOfficialPiRegistryRuntime()),
+    status: async () => officialPiAuthStatus(await createOfficialPiCredentialRuntime(CFG_DIR, id)),
+    logout: async (providerId: string) => logoutOfficialPiProvider(await createOfficialPiLogoutRuntime(CFG_DIR, id), providerId),
+    report: (message: string) => say(message),
+  };
   try {
-    const requested = await collectSetupAgentChoice(questioner, existing);
+    const requested = await collectSetupAgentChoice(questioner, existing, authServices);
     const choice = await recoverUnavailableExternalPi(requested, questioner, () => probeNativeRuntimeReadiness({
       runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id), env: process.env,
-    }), (message) => say(`! ${message}`));
+    }), (message) => say(`! ${message}`), authServices);
     if (choice) {
+      let serializedChoice: SetupAgentChoice & { authCompleted?: true; readinessCompleted?: true } = choice;
+      if (choice.runtime === "pi" && choice.distribution === "builtin") {
+        const official = choice.preset === "official" ? choice as OfficialPiAuthSelection : null;
+        const configured = official ? null : configureBuiltinPiProviderModel(CFG_DIR, id, choice as BuiltinPiProviderSetupSelection);
+        const providerId = official?.providerId || configured!.provider;
+        const authType = official?.authType || "api_key";
+        let piRuntime: Awaited<ReturnType<typeof createOfficialPiModelRuntime>>;
+        try {
+          say(`正在通过捆绑官方 Pi 登录 ${providerId}（${authType}）…`);
+          piRuntime = await createOfficialPiModelRuntime(CFG_DIR, id);
+          await runOfficialPiLogin(piRuntime, providerId, authType,
+            createOfficialPiAuthInteraction({ questioner, report: (message) => say(message), openUrl: openBrowser }));
+        } catch {
+          pendingPiAuthTransaction.rollback();
+          pendingPiAuthTransaction = null;
+          throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`);
+        }
+        if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN !== "1") {
+          say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
+          try { await verifyOfficialPiProviderTurn(piRuntime, choice.model); }
+          catch {
+            pendingPiAuthTransaction.rollback();
+            pendingPiAuthTransaction = null;
+            throw new Error(`官方 Pi ${providerId} readiness 失败；credential/config 未修改`);
+          }
+        }
+        serializedChoice = { ...choice, authCompleted: true, readinessCompleted: true };
+      }
       temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
-      fs.writeFileSync(temporaryAgentChoiceFile, `${JSON.stringify(choice)}\n`, { mode: 0o600, flag: "wx" });
+      fs.writeFileSync(temporaryAgentChoiceFile, `${JSON.stringify(serializedChoice)}\n`, { mode: 0o600, flag: "wx" });
     }
   } finally { questioner.close?.(); }
 }
@@ -213,8 +406,10 @@ const runtime = flag("--runtime");
 if (runtime) bindArgs.push("--runtime", runtime);
 if (temporaryAgentChoiceFile) bindArgs.push("--selection-file", temporaryAgentChoiceFile);
 const bindSpec = internalCommandSpec("setup-bind", bindArgs, process.env);
-const bind = spawnSync(bindSpec.command, bindSpec.args, { env: process.env, stdio: "inherit" });
-if (bind.status !== 0) {
+const bindStatus = await runBindProcess(bindSpec.command, bindSpec.args);
+if (bindStatus !== 0) {
+  pendingPiAuthTransaction?.rollback();
+  pendingPiAuthTransaction = null;
   die("新 bot 凭证已发布但 Agent 绑定失败；权威凭证状态已保留，请重跑 larkin setup 并在网页中重新选择机器人");
 }
 try {
@@ -222,12 +417,21 @@ try {
   const stored = loaded.config.agents[targetAgent];
   if (!stored) throw new Error(`Agent ${targetAgent} 不存在于 canonical config`);
   const agent = hydrateRuntimeAgent(loaded.configDir, stored);
-  synchronizeAgentProfile(agent, { ...process.env, LARKIN_CONFIG_DIR: loaded.configDir }, { forceRebind: true });
+  const profileEnv = { ...process.env, LARKIN_CONFIG_DIR: loaded.configDir };
+  const official = officialCliForProfile(profileEnv);
+  if (testFixture?.syncAgentProfile) synchronizeAgentProfile(agent, profileEnv, { forceRebind: true });
+  else await syncAgentProfileAsync(agent, profileEnv, {
+    forceRebind: true,
+    timeoutMs: CHILD_TIMEOUT_MS,
+    maxOutputBytes: CHILD_MAX_OUTPUT_BYTES,
+    signal: shutdownController.signal,
+    resolveOfficialCli: () => official,
+    onChild(child) { trackPendingChild(child); },
+  });
   const cliEnv = managedLarkCliEnv(agent, process.env);
-  const official = resolveOfficialCli({ env: cliEnv });
   let verified = false;
   for (let index = 0; index <= BOT_VERIFY_BACKOFF_MS.length; index += 1) {
-    const result = spawnSync(official.command, [...official.argsPrefix, "im", "+chat-list", "--as", "bot"], { encoding: "utf8", env: cliEnv });
+    const result = await runIdentityProcess(official.command, [...official.argsPrefix, "im", "+chat-list", "--as", "bot"], cliEnv);
     let envelope: { ok?: unknown; identity?: unknown } | undefined;
     try { envelope = JSON.parse(result.stdout || "") as { ok?: unknown; identity?: unknown }; } catch { /* fail closed below */ }
     if (result.status === 0 && envelope?.ok === true && envelope.identity === "bot") { verified = true; break; }
@@ -247,8 +451,10 @@ if (resultFile) {
   try { fs.writeFileSync(resultFile, `${JSON.stringify({ agentId: id })}\n`, { mode: 0o600, flag: "wx" }); }
   catch { die("Agent 绑定与新 bot 凭证已保留，但 setup 结果写入失败；请重跑 larkin setup 并在网页中重新选择机器人"); }
 }
+pendingPiAuthTransaction?.commit();
+pendingPiAuthTransaction = null;
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {
-  main().catch((error: unknown) => die(errorMessage(error)));
+  main().catch((error: unknown) => { if (!requestedShutdown) die(errorMessage(error)); });
 }

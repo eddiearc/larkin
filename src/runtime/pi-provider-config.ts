@@ -24,15 +24,24 @@ export const PI_PROVIDER_PRESETS: readonly PiProviderPreset[] = Object.freeze([
   { id: "zhipu", name: "智谱 / BigModel", provider: "zai-coding-cn", baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4", defaultModel: "glm-5.2", api: "openai-completions" },
 ]);
 
-export interface BuiltinPiProviderSelection {
+export interface BuiltinPiProviderSetupSelection {
   distribution: "builtin";
   preset: PiProviderPresetId;
-  apiKey: string;
   model: string;
   baseUrl?: string;
 }
 
+export interface BuiltinPiProviderSelection extends BuiltinPiProviderSetupSelection {
+  apiKey: string;
+}
+
 export interface ValidatedBuiltinPiProviderSelection extends BuiltinPiProviderSelection {
+  provider: string;
+  baseUrl: string;
+  api: "openai-completions" | "anthropic-messages";
+}
+
+export interface ResolvedBuiltinPiProviderSetupSelection extends BuiltinPiProviderSetupSelection {
   provider: string;
   baseUrl: string;
   api: "openai-completions" | "anthropic-messages";
@@ -59,17 +68,14 @@ export function validatePiBaseUrl(raw: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
-export function validateBuiltinPiProviderSelection(input: BuiltinPiProviderSelection): ValidatedBuiltinPiProviderSelection {
+export function resolveBuiltinPiProviderSetupSelection(input: BuiltinPiProviderSetupSelection): ResolvedBuiltinPiProviderSetupSelection {
   if (input.distribution !== "builtin") throw new Error("provider 凭证只能用于内置 Pi");
-  const key = input.apiKey.trim();
-  if (!key || key.length > 16_384 || /[\0\r\n]/.test(key)) throw new Error("API Key 不能为空或包含控制字符");
   const model = input.model.trim();
   if (!MODEL_ID.test(model)) throw new Error("模型 ID 格式不安全");
   if (input.preset === "custom") {
     const provider = "larkin-custom";
     return {
       ...input,
-      apiKey: key,
       model: model.startsWith(`${provider}/`) ? model : `${provider}/${model}`,
       provider,
       baseUrl: validatePiBaseUrl(input.baseUrl || ""),
@@ -78,8 +84,14 @@ export function validateBuiltinPiProviderSelection(input: BuiltinPiProviderSelec
   }
   const preset = PI_PROVIDER_PRESETS.find((candidate) => candidate.id === input.preset);
   if (!preset) throw new Error(`未知 Pi provider preset: ${String(input.preset)}`);
-  return { ...input, apiKey: key, model: model.startsWith(`${preset.provider}/`) ? model : `${preset.provider}/${model}`,
+  return { ...input, model: model.startsWith(`${preset.provider}/`) ? model : `${preset.provider}/${model}`,
     provider: preset.provider, baseUrl: preset.baseUrl, api: preset.api };
+}
+
+export function validateBuiltinPiProviderSelection(input: BuiltinPiProviderSelection): ValidatedBuiltinPiProviderSelection {
+  const key = input.apiKey.trim();
+  if (!key || key.length > 16_384 || /[\0\r\n]/.test(key)) throw new Error("API Key 不能为空或包含控制字符");
+  return { ...resolveBuiltinPiProviderSetupSelection(input), apiKey: key };
 }
 
 export function piAgentDirectory(configDir: string, agentId: string): string {
@@ -149,6 +161,36 @@ export interface PiProviderTransaction {
   directory: string;
   commit(): void;
   rollback(): void;
+}
+
+export function configureBuiltinPiProviderModel(configDir: string, agentId: string,
+  raw: BuiltinPiProviderSetupSelection): ResolvedBuiltinPiProviderSetupSelection {
+  const selection = resolveBuiltinPiProviderSetupSelection(raw);
+  const directory = piAgentDirectory(configDir, agentId);
+  ensurePrivateDirectory(directory);
+  if (selection.preset !== "custom") return selection;
+  const modelsFile = path.join(directory, "models.json");
+  const beforeModels = readSnapshot(modelsFile);
+  const currentModels = beforeModels ? JSON.parse(beforeModels.toString("utf8")) as Record<string, unknown> : {};
+  if (!currentModels || typeof currentModels !== "object" || Array.isArray(currentModels)) throw new Error("现有 Pi models.json 格式无效");
+  const currentProviders = currentModels.providers === undefined ? {} : currentModels.providers;
+  if (!currentProviders || typeof currentProviders !== "object" || Array.isArray(currentProviders)) throw new Error("现有 Pi models.json providers 格式无效");
+  const modelId = selection.model.slice(`${selection.provider}/`.length);
+  atomicPrivateWrite(modelsFile, `${JSON.stringify({
+    ...currentModels,
+    providers: {
+      ...currentProviders as Record<string, unknown>,
+      [selection.provider]: {
+        baseUrl: selection.baseUrl,
+        api: selection.api,
+        models: [{
+          id: modelId, name: modelId, reasoning: false, input: ["text"], contextWindow: 131_072, maxTokens: 16_384,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }],
+      },
+    },
+  }, null, 2)}\n`);
+  return selection;
 }
 
 export function stageBuiltinPiProvider(configDir: string, agentId: string,

@@ -18,6 +18,7 @@ export const INTERNAL_MODES = [
   "grant-scopes",
   "lark-channel-secret",
   "pi-rpc",
+  "pi-auth",
 ] as const;
 
 export type InternalMode = typeof INTERNAL_MODES[number];

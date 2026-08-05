@@ -21,10 +21,10 @@ function questioner(answers, secret = "test-secret") {
 test("new setup visibly offers Pi first, then external/built-in, before Codex and Claude", async () => {
   const q = questioner(["1", "2", "1", ""]);
   const choice = await collectSetupAgentChoice(q);
-  assert.deepEqual(choice, { runtime: "pi", distribution: "builtin", preset: "deepseek", apiKey: "test-secret", model: "deepseek/deepseek-v4-pro" });
+  assert.deepEqual(choice, { runtime: "pi", distribution: "builtin", preset: "deepseek", model: "deepseek/deepseek-v4-pro" });
   assert.match(q.prompts[0], /1\. Pi（推荐）[\s\S]*2\. Codex[\s\S]*3\. Claude Code/);
   assert.match(q.prompts[1], /1\. 外置 Pi[\s\S]*2\. 内置 Pi/);
-  assert.match(q.prompts[2], /DeepSeek（推荐）[\s\S]*Kimi[\s\S]*MiniMax[\s\S]*智谱[\s\S]*Custom/);
+  assert.match(q.prompts[2], /DeepSeek（推荐）[\s\S]*Kimi[\s\S]*MiniMax[\s\S]*智谱[\s\S]*Custom[\s\S]*官方 Pi provider 登录/);
 });
 
 test("existing Agent setup preserves runtime/model unless the user explicitly chooses change", async () => {
@@ -46,8 +46,38 @@ test("missing external Pi offers a bounded recovery and can switch to built-in P
   assert.equal(probes, 1);
   assert.match(reports[0], /missing.*pi not found.*install pi/);
   assert.deepEqual(choice, {
-    runtime: "pi", distribution: "builtin", preset: "deepseek", apiKey: "test-secret", model: "deepseek/deepseek-v4-pro",
+    runtime: "pi", distribution: "builtin", preset: "deepseek", model: "deepseek/deepseek-v4-pro",
   });
+});
+
+test("built-in Pi dynamically offers every official provider auth method", async () => {
+  const q = questioner(["1", "2", "6", "2", ""]);
+  const services = {
+    providers: async () => [{ id: "alpha", name: "Alpha", methods: [
+      { type: "api_key", name: "Alpha key" }, { type: "oauth", name: "Alpha subscription" },
+    ], models: ["alpha/a-1"], ambientOnly: false }],
+    status: async () => [], logout: async () => {}, report() {},
+  };
+  assert.deepEqual(await collectSetupAgentChoice(q, undefined, services), {
+    runtime: "pi", distribution: "builtin", preset: "official", providerId: "alpha", authType: "oauth", model: "alpha/a-1",
+  });
+  assert.match(q.prompts[3], /Alpha key \[api_key\][\s\S]*Alpha subscription \[oauth\]/);
+});
+
+test("built-in Pi status/logout returns to selection without exposing credential values", async () => {
+  const reports = [];
+  const loggedOut = [];
+  const q = questioner(["1", "2", "7", "1", "1", ""]);
+  const services = {
+    providers: async () => [],
+    status: async () => [{ providerId: "alpha", providerName: "Alpha", credentialType: "oauth", source: "OAuth", stored: true }],
+    logout: async (providerId) => loggedOut.push(providerId), report: (message) => reports.push(message),
+  };
+  assert.deepEqual(await collectSetupAgentChoice(q, undefined, services), {
+    runtime: "pi", distribution: "builtin", preset: "deepseek", model: "deepseek/deepseek-v4-pro",
+  });
+  assert.deepEqual(loggedOut, ["alpha"]);
+  assert.match(reports.join("\n"), /Alpha.*oauth\/OAuth[\s\S]*已退出 Alpha/);
 });
 
 test("external Pi recovery cancellation preserves config and the retry loop is bounded", async () => {

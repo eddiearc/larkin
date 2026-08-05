@@ -38,6 +38,7 @@ const routes: Record<string, Route> = {
   chats: ["agent-config", "chats"],
   config: ["agent-config", "config"],
   session: ["session-cli"],
+  "pi-auth": ["pi-auth"],
 };
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
   && process.env.LARKIN_AGENT_ID.trim().length > 0;
@@ -80,6 +81,9 @@ Examples:
 Credentials, internal paths, serverId, activeAgent, and raw config are never exposed here.`,
   session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>]
 Atomically replace one idle, zero-backlog Agent Runtime session through authenticated local control.`,
+  "pi-auth": `Usage: larkin pi-auth status [--agent <App ID>] [--json]
+       larkin pi-auth logout <provider> [--agent <App ID>]
+Show non-sensitive official Pi credential metadata or remove one target provider credential.`,
 };
 
 if (command === "--version" || command === "-V") {
@@ -125,6 +129,7 @@ Usage: larkin <command>
   chats            List known chats; use free/strict <oc_id> to configure mention requirements
   config           Inspect effective config/source, edit mention inheritance, or explicitly apply runtime changes
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
+  pi-auth          Show non-sensitive built-in Pi auth status or logout one provider
   <lark-cli 命令组>  im/docs/wiki/drive 等 lark-cli 命令原样转发，机器人身份已锁定（如 larkin im +chat-list）
 Getting started:
   First-time setup: larkin setup

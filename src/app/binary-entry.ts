@@ -32,6 +32,7 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
       await import("@earendil-works/pi-coding-agent/rpc-entry");
       return;
     }
+    case "pi-auth": await (await import("./pi-auth-cli.js")).main(rest, process.env); return;
   }
 }
 

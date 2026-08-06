@@ -522,14 +522,15 @@ class PiSession extends EventSession {
     this.ownedInputIds.add(input.inputId);
     this.inputEpochs.set(input.inputId, epoch);
     this.awaitingAcknowledgement.add(input.inputId);
-    if (!this.observedSubmitEpochs.has(epoch)) {
+    const ownsRpcObservation = !this.observedSubmitEpochs.has(epoch);
+    if (ownsRpcObservation) {
       this.observedSubmitEpochs.add(epoch);
       this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "rpc_submit" });
     }
     try {
       await operation();
       this.awaitingAcknowledgement.delete(input.inputId);
-      if (!this.observedAcceptedEpochs.has(epoch)) {
+      if (ownsRpcObservation && !this.observedAcceptedEpochs.has(epoch)) {
         this.observedAcceptedEpochs.add(epoch);
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "rpc_accepted" });
       }

@@ -425,6 +425,29 @@ test("bundled Pi emits content-free RPC timing phases while preserving normalize
   assert.doesNotMatch(JSON.stringify(observations), /reason|answer|read|out-of-order|FORBIDDEN|toolName|toolResult|message|text/);
 });
 
+test("bundled Pi closes an epoch RPC observation only from its original submit owner", async () => {
+  let acknowledgePrompt; let listener;
+  const sdk = {
+    sessionId: "pi-overlap", prompt() { return new Promise((resolve) => { acknowledgePrompt = resolve; }); },
+    steer() {}, abort() {}, subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk, env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = []; session.subscribe((event) => events.push(event));
+  const original = session.prompt({ inputId: "pi-overlap-original", kind: "user", text: "one", attempt: 0 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await session.busyInput({ inputId: "pi-overlap-steer", kind: "inbox_update", text: "two", attempt: 0 }),
+    { status: "accepted", inputId: "pi-overlap-steer" });
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation").map((event) => event.phase), ["rpc_submit"]);
+  acknowledgePrompt();
+  assert.deepEqual(await original, { status: "accepted", inputId: "pi-overlap-original" });
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation").map((event) => event.phase), ["rpc_submit", "rpc_accepted"]);
+  listener({ type: "turn_start" });
+  listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+  listener({ type: "agent_settled" });
+});
+
 test("Pi partial output followed by an aborted assistant remains an interrupted delivery", async () => {
   let listener;
   const sdk = {

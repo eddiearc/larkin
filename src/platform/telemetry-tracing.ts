@@ -177,7 +177,19 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
   const activeByAgent = new Map<string, MessageTrace>();
   // Runtime observations can precede the acceptance receipt. Correlate them
   // without publishing or changing the authoritative active delivery state.
-  const observingByAgent = new Map<string, MessageTrace>();
+  const observingByAgent = new Map<string, MessageTrace[]>();
+  const observingHead = (agentId: string): MessageTrace | undefined => observingByAgent.get(agentId)?.[0];
+  const enqueueObserving = (current: MessageTrace): void => {
+    const queue = observingByAgent.get(current.agentId) ?? [];
+    if (!queue.includes(current)) queue.push(current);
+    observingByAgent.set(current.agentId, queue);
+  };
+  const removeObserving = (current: MessageTrace): void => {
+    const queue = observingByAgent.get(current.agentId); if (!queue) return;
+    const next = queue.filter((candidate) => candidate !== current);
+    if (next.length > 0) observingByAgent.set(current.agentId, next);
+    else observingByAgent.delete(current.agentId);
+  };
   const ownershipTimer = setInterval(() => {
     for (const stateDir of initializedStateDirs) renewStateDir(stateDir);
     for (const [agentId, current] of activeByAgent) writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
@@ -206,13 +218,13 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
       activeByAgent.delete(current.agentId);
       writeContext(current.agentId, null);
     }
-    if (observingByAgent.get(current.agentId) === current) observingByAgent.delete(current.agentId);
+    removeObserving(current);
   };
   return {
     beginMessage(agentId, messageId, source = "im") {
       try {
         if (messages.has(messageId)) return;
-        const active = activeByAgent.get(agentId);
+        const active = activeByAgent.get(agentId) ?? observingHead(agentId);
         const linkedContext = active?.turn?.spanContext() ?? active?.root.spanContext();
         const root = tracer.startSpan("larkin.message.process", { kind: SpanKind.CONSUMER,
           attributes: { "larkin.agent.id_hash": safeHash(agentId), "messaging.message.id_hash": safeHash(messageId),
@@ -227,11 +239,11 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     async phase(messageId, name, spanKind, operation) {
       const current = messages.get(messageId);
       if (!current) return operation();
-      if (name === "runtime.deliver" && !activeByAgent.has(current.agentId)) observingByAgent.set(current.agentId, current);
+      if (name === "runtime.deliver" && !activeByAgent.has(current.agentId)) enqueueObserving(current);
       let span: Span;
       try { span = tracer.startSpan(name, { kind: spanKind }, current.context); }
       catch {
-        if (observingByAgent.get(current.agentId) === current) observingByAgent.delete(current.agentId);
+        removeObserving(current);
         return operation();
       }
       try { return await context.with(trace.setSpan(current.context, span), operation); }
@@ -242,7 +254,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
       }
       finally {
         span.end();
-        if (observingByAgent.get(current.agentId) === current) observingByAgent.delete(current.agentId);
+        removeObserving(current);
       }
     },
     filterMessage(messageId, reason) {
@@ -256,7 +268,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
       try {
         const current = messages.get(messageId) ?? activeByAgent.get(agentId); if (!current) return;
         if (status === "accepted") {
-          const active = activeByAgent.get(agentId);
+          const active = activeByAgent.get(agentId) ?? observingHead(agentId);
           if (active && active !== current) { endTrace(current, false); return; }
           activeByAgent.set(agentId, current);
           writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
@@ -268,7 +280,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     },
     runtimeEvent(agentId, event) {
       try {
-        const current = activeByAgent.get(agentId) ?? observingByAgent.get(agentId); if (!current) return;
+        const current = activeByAgent.get(agentId) ?? observingHead(agentId); if (!current) return;
         if (event.type === "runtime-observation" && event.runtime === "pi") {
           const state = current.pi ??= { distribution: event.distribution };
           state.distribution = event.distribution;

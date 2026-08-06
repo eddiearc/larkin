@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v8";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v9";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -109,7 +109,7 @@ export class ContextPromptBuilder {
       "This narrow direct-recipe rule does not waive required skill safety gates, authorization, identity, freshness, or other safety checks. Unknown commands or high-risk operations still require the applicable skill/reference guidance or help.",
       "The Larkin wrapper derives the stable per-intent idempotency key; do not pass `--idempotency-key` in an ordinary send or reply recipe.",
       "Both `freshness_unavailable` and `freshness_conflict` are pre-commit, provider-not-reached results. If a retry is warranted for an unchanged exact operation, rerun the identical safe ordinary command: `--text` for a direct literal or the same deterministic `--content` dataflow for a tool source. The wrapper reuses its derived key. If the target or body changes after reconsideration, run the revised ordinary command and let the wrapper derive a new key. A result with `committed=true` must not be repeated; ambiguous termination follows the existing wrapper same-key recovery contract.",
-      "For multiline `--markdown` or `--text` content, put real newline characters directly in the argument. Do not use the two literal characters `\\n` inside ordinary quotes to represent layout line breaks.",
+      "For multiline `--markdown` or `--text` content in zsh or bash, prefer shell ANSI-C quoting so the command passes one argument with real newline characters: `--markdown $'First line\\nSecond line'` or `--text $'First line\\nSecond line'`. Putting `\"First line\\nSecond line\"` in ordinary double quotes is wrong: ordinary quotes do not decode `\\n`, so lark-cli and Feishu receive a backslash followed by the letter `n`. A literal multiline argument containing real newline characters is also valid. If ANSI-C-quoted content contains an apostrophe, use a safe shell single-quote splice or the literal-newline form; never use `eval`, `echo`, a temporary file, or unsafe variable interpolation to construct the body.",
       ...FEISHU_IM_COMMAND_GROUPS.map(([label, suffixes]) => `- ${label}: ${suffixes.map((suffix) => `\`${executable} ${suffix}\``).join(", ")}.`),
       `- Attachments: for an attachment-only send/reply, use its native attachment flag without a text body flag; download with \`${executable} im +messages-resources-download\`.`,
       "",

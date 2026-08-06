@@ -494,6 +494,7 @@ class PiSession extends EventSession {
   private readonly inputEpochs = new Map<string, number>();
   private readonly observedSubmitEpochs = new Set<number>();
   private readonly observedAcceptedEpochs = new Set<number>();
+  private readonly observedCompletedEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
   constructor(private readonly sdk: PiSessionProcessLike, private readonly distribution: "builtin" | "external") {
@@ -553,11 +554,14 @@ class PiSession extends EventSession {
       this.inputEpochs.clear();
       this.observedSubmitEpochs.clear();
       this.observedAcceptedEpochs.clear();
+      this.observedCompletedEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       this.emit({ type: "error", message });
     } else if (event?.type === "turn_start") {
-      this.activeEpoch = this.oldestOwnedEpoch();
+      const epoch = this.oldestOwnedEpoch();
+      if (epoch === null || this.activeEpoch !== null) return;
+      this.activeEpoch = epoch;
       this.settleArmedEpoch = null;
       this.firstOutputObserved = false;
       this.toolCallOpen = false;
@@ -572,7 +576,8 @@ class PiSession extends EventSession {
         ? piAssistantProviderError(assistant)
         : null;
       this.settleArmedEpoch = this.activeEpoch;
-      if (event.willRetry !== true) {
+      if (event.willRetry !== true && this.activeEpoch !== null && !this.observedCompletedEpochs.has(this.activeEpoch)) {
+        this.observedCompletedEpochs.add(this.activeEpoch);
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "completed" });
       }
     } else if (event?.type === "agent_settled") {
@@ -609,6 +614,7 @@ class PiSession extends EventSession {
       for (const inputId of owned) { this.ownedInputIds.delete(inputId); this.inputEpochs.delete(inputId); }
       this.observedSubmitEpochs.delete(epoch);
       this.observedAcceptedEpochs.delete(epoch);
+      this.observedCompletedEpochs.delete(epoch);
     }
     else if (event?.type === "tool_execution_start") {
       if (!this.firstOutputObserved) {

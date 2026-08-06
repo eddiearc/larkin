@@ -403,21 +403,26 @@ test("bundled Pi emits content-free RPC timing phases while preserving normalize
   session.subscribe((event) => events.push(event));
   await session.prompt({ inputId: "pi-eye-input", kind: "user", text: "work", attempt: 0 });
   listener({ type: "turn_start" });
+  listener({ type: "turn_start" });
   listener({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "reason" } });
   listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "answer" } });
+  listener({ type: "tool_execution_end", toolName: "out-of-order", result: "FORBIDDEN_EARLY_RESULT" });
   listener({ type: "tool_execution_start", toolName: "read" });
-  listener({ type: "tool_execution_end", toolName: "read", result: "FORBIDDEN_TOOL_RESULT" });
   listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+  listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+  listener({ type: "agent_settled" });
   listener({ type: "agent_settled" });
   assert.deepEqual(events.filter((event) => ["turn-start", "activity", "turn-end"].includes(event.type))
     .map((event) => event.type === "activity" ? `${event.type}:${event.activity}` : event.type),
   ["turn-start", "activity:thinking", "activity:text", "activity:tool", "turn-end"]);
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), [
-    "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "tool_result", "completed", "settled",
+    "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "completed", "tool_result", "settled",
   ]);
   assert.ok(observations.every((event) => event.runtime === "pi" && event.distribution === "builtin"));
-  assert.doesNotMatch(JSON.stringify(observations), /reason|answer|read|FORBIDDEN|toolName|toolResult|message|text/);
+  assert.equal(events.filter((event) => event.type === "turn-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "turn-end").length, 1);
+  assert.doesNotMatch(JSON.stringify(observations), /reason|answer|read|out-of-order|FORBIDDEN|toolName|toolResult|message|text/);
 });
 
 test("Pi partial output followed by an aborted assistant remains an interrupted delivery", async () => {

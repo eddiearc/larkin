@@ -57,7 +57,7 @@ interface MessageTrace {
   activitySpan?: Span; activityName?: "model.activity" | "tool.execute";
   pi?: {
     distribution: "builtin" | "external";
-    submitAt?: number; acceptedAt?: number; turnStartAt?: number; firstOutputAt?: number; completedAt?: number;
+    submitAt?: number; acceptedAt?: number; turnStartAt?: number; firstOutputAt?: number; completedAt?: number; settledAt?: number;
     rpcSpan?: Span; lifecycleSpan?: Span; outputWaitSpan?: Span; generationSpan?: Span; toolSpan?: Span; settleSpan?: Span;
   };
 }
@@ -175,6 +175,9 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
   const tracer = provider.getTracer("larkin.telemetry", "1.0.0");
   const messages = new Map<string, MessageTrace>();
   const activeByAgent = new Map<string, MessageTrace>();
+  // Runtime observations can precede the acceptance receipt. Correlate them
+  // without publishing or changing the authoritative active delivery state.
+  const observingByAgent = new Map<string, MessageTrace>();
   const ownershipTimer = setInterval(() => {
     for (const stateDir of initializedStateDirs) renewStateDir(stateDir);
     for (const [agentId, current] of activeByAgent) writeContext(agentId, current.turn?.spanContext() ?? current.root.spanContext());
@@ -203,6 +206,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
       activeByAgent.delete(current.agentId);
       writeContext(current.agentId, null);
     }
+    if (observingByAgent.get(current.agentId) === current) observingByAgent.delete(current.agentId);
   };
   return {
     beginMessage(agentId, messageId, source = "im") {
@@ -223,16 +227,23 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     async phase(messageId, name, spanKind, operation) {
       const current = messages.get(messageId);
       if (!current) return operation();
+      if (name === "runtime.deliver" && !activeByAgent.has(current.agentId)) observingByAgent.set(current.agentId, current);
       let span: Span;
       try { span = tracer.startSpan(name, { kind: spanKind }, current.context); }
-      catch { return operation(); }
+      catch {
+        if (observingByAgent.get(current.agentId) === current) observingByAgent.delete(current.agentId);
+        return operation();
+      }
       try { return await context.with(trace.setSpan(current.context, span), operation); }
       catch (error) {
         span.setStatus({ code: SpanStatusCode.ERROR });
         if (!name.startsWith("document.comment.")) endTrace(current, true);
         throw error;
       }
-      finally { span.end(); }
+      finally {
+        span.end();
+        if (observingByAgent.get(current.agentId) === current) observingByAgent.delete(current.agentId);
+      }
     },
     filterMessage(messageId, reason) {
       try {
@@ -257,12 +268,12 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     },
     runtimeEvent(agentId, event) {
       try {
-        const current = activeByAgent.get(agentId); if (!current) return;
+        const current = activeByAgent.get(agentId) ?? observingByAgent.get(agentId); if (!current) return;
         if (event.type === "runtime-observation" && event.runtime === "pi") {
           const state = current.pi ??= { distribution: event.distribution };
           state.distribution = event.distribution;
           const observedAt = now();
-          if (event.distribution !== "builtin") return;
+          if (event.distribution !== "builtin" || state.settledAt !== undefined) return;
           const spanAttributes = { "larkin.observation.boundary": "pi_rpc", "larkin.runtime.id": "pi",
             "larkin.runtime.distribution": "builtin" };
           const start = (name: "pi.rpc.submit" | "pi.rpc.lifecycle" | "pi.output.wait" | "pi.generation"
@@ -270,17 +281,17 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
             if (!current.turnContext) return undefined;
             return tracer.startSpan(name, { kind: SpanKind.INTERNAL, startTime, attributes: spanAttributes }, current.turnContext);
           };
-          if (event.phase === "rpc_submit" && state.submitAt === undefined) state.submitAt = observedAt;
-          else if (event.phase === "rpc_accepted" && state.acceptedAt === undefined) {
+          if (event.phase === "rpc_submit" && state.submitAt === undefined && state.acceptedAt === undefined) state.submitAt = observedAt;
+          else if (event.phase === "rpc_accepted" && state.submitAt !== undefined && state.acceptedAt === undefined) {
             state.acceptedAt = observedAt;
             if (state.rpcSpan) { state.rpcSpan.end(observedAt); delete state.rpcSpan; }
             if (current.turnContext && !state.outputWaitSpan) state.outputWaitSpan = start("pi.output.wait", observedAt);
           } else if (event.phase === "turn_start" && state.turnStartAt === undefined) state.turnStartAt = observedAt;
-          else if (event.phase === "first_output" && state.firstOutputAt === undefined) {
+          else if (event.phase === "first_output" && state.firstOutputAt === undefined && state.completedAt === undefined) {
             state.firstOutputAt = observedAt;
             if (state.outputWaitSpan) { state.outputWaitSpan.end(observedAt); delete state.outputWaitSpan; }
             if (current.turnContext && !state.generationSpan) state.generationSpan = start("pi.generation", observedAt);
-          } else if (event.phase === "tool_call" && !state.toolSpan) {
+          } else if (event.phase === "tool_call" && state.completedAt === undefined && !state.toolSpan) {
             state.toolSpan = start("pi.tool.wait", observedAt);
           } else if (event.phase === "tool_result" && state.toolSpan) {
             state.toolSpan.end(observedAt); delete state.toolSpan;
@@ -289,12 +300,14 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
             if (state.generationSpan) { state.generationSpan.end(observedAt); delete state.generationSpan; }
             if (!state.settleSpan) state.settleSpan = start("pi.rpc.settle", observedAt);
           } else if (event.phase === "settled") {
+            state.settledAt = observedAt;
             if (state.toolSpan) { state.toolSpan.end(observedAt); delete state.toolSpan; }
             if (state.generationSpan) { state.generationSpan.end(observedAt); delete state.generationSpan; }
             if (state.settleSpan) { state.settleSpan.end(observedAt); delete state.settleSpan; }
             if (state.lifecycleSpan) { state.lifecycleSpan.end(observedAt); delete state.lifecycleSpan; }
           }
         } else if (event.type === "turn-start") {
+          if (current.turn) return;
           const pi = current.pi;
           current.turn = tracer.startSpan("agent.turn", { kind: SpanKind.INTERNAL,
             ...(pi?.submitAt !== undefined ? { startTime: pi.submitAt } : {}),
@@ -307,9 +320,11 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
             const submitAt = pi.submitAt ?? pi.turnStartAt ?? now();
             pi.lifecycleSpan = tracer.startSpan("pi.rpc.lifecycle", { kind: SpanKind.INTERNAL, startTime: submitAt,
               attributes: spanAttributes }, current.turnContext);
-            pi.rpcSpan = tracer.startSpan("pi.rpc.submit", { kind: SpanKind.INTERNAL, startTime: submitAt,
-              attributes: spanAttributes }, current.turnContext);
-            if (pi.acceptedAt !== undefined) { pi.rpcSpan.end(pi.acceptedAt); delete pi.rpcSpan; }
+            if (pi.submitAt !== undefined) {
+              pi.rpcSpan = tracer.startSpan("pi.rpc.submit", { kind: SpanKind.INTERNAL, startTime: pi.submitAt,
+                attributes: spanAttributes }, current.turnContext);
+              if (pi.acceptedAt !== undefined && pi.acceptedAt >= pi.submitAt) { pi.rpcSpan.end(pi.acceptedAt); delete pi.rpcSpan; }
+            }
             const waitAt = pi.acceptedAt ?? pi.turnStartAt ?? now();
             pi.outputWaitSpan = tracer.startSpan("pi.output.wait", { kind: SpanKind.INTERNAL, startTime: waitAt,
               attributes: spanAttributes }, current.turnContext);

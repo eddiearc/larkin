@@ -77,6 +77,9 @@ function scenarioInstruction(scenario, binDir) {
   if (scenario.id === "target-isolation") return `${scenario.task} Use only ${larkin}. Poll chat:oc_eval_a and send exactly one reply to oc_eval_a. Then attempt one reply to oc_eval_b without polling it; accept the held result and stop.`;
   if (scenario.id === "check-only") return `${scenario.task} Run exactly ${larkin} inbox check --target ${scenario.target} and stop.`;
   if (scenario.id === "poll-complete") return `${scenario.task} Run exactly ${exactPoll} and stop.`;
+  if (scenario.id === "multiline-markdown-shell-quoting") {
+    return `${scenario.task} Run ${exactPoll}, then use ${larkin} to send that exact two-line body once with --markdown; do not print it as assistant text.`;
+  }
   return `${scenario.task} Run ${exactPoll}, then run ${exactSend}.`;
 }
 
@@ -111,6 +114,7 @@ test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface e
       .filter((key) => /(?:LARK|FEISHU)/i.test(key)).map((key) => [key, undefined]));
     session = await adapter.createSession({
       agentId: "cli_runtimeInterfaceEvalA1", workspaceDir, stateDir, standingPrompt: prompt,
+      model: dataset.model.selection,
       env: {
         ...isolatedMessagingEnv,
         // The installed Codex entry resolves Node through its environment; keep
@@ -144,7 +148,12 @@ test.skipIf(!RUN)("native Codex Agent reaches the registered runtime-interface e
       traces[scenario.id] = readTrace(traceFile);
     }
     const summary = summarizeRuntimeAgentInterfaceEval(dataset, traces);
-    process.stderr.write(`# runtime-agent-interface-v2 eval: ${JSON.stringify({ runtime: "codex", model, ...summary })}\n`);
+    process.stderr.write(`# runtime-agent-interface-v2 eval: ${JSON.stringify({
+      runtime: "codex",
+      configured_model: dataset.model.selection,
+      observed_session_model: model,
+      ...summary,
+    })}\n`);
     assert.equal(summary.passed, true, JSON.stringify(summary.results.filter((result) => !result.passed)));
   } finally {
     await session?.close("runtime-interface eval complete");

@@ -15,12 +15,14 @@ const DATASET = loadRuntimeAgentInterfaceEval(path.join(ROOT, "evals", "runtime-
 test("fixed runtime Agent interface eval registers dataset, rubric, grader, threshold, Runtime/model/version and six-plus scenarios", () => {
   assert.equal(DATASET.version, 1);
   assert.equal(DATASET.runtime.adapter, "codex");
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v8");
+  assert.equal(DATASET.model.selection, "gpt-5.6-sol");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v9");
   assert.equal(DATASET.grader.version, 1);
   assert.equal(DATASET.grader.threshold, 1);
   assert.ok(DATASET.grader.rubric.length >= 5);
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
-    "new-message", "busy-update", "check-only", "poll-complete", "held-draft", "repeated-update", "target-isolation",
+    "new-message", "busy-update", "check-only", "poll-complete", "held-draft", "repeated-update",
+    "multiline-markdown-shell-quoting", "target-isolation",
   ]);
   for (const scenario of DATASET.scenarios) {
     assert.deepEqual(scenario.required_actions, scenario.trace.map((event) => event.action));
@@ -62,6 +64,22 @@ test("grader rejects empty traces even when a scenario expects no provider write
   }
   const empty = Object.fromEntries(DATASET.scenarios.map((scenario) => [scenario.id, []]));
   assert.equal(summarizeRuntimeAgentInterfaceEval(DATASET, empty).passed, false);
+});
+
+test("grader rejects literal backslash-n and the wrong content flag for the multiline scenario", () => {
+  const scenario = DATASET.scenarios.find((item) => item.id === "multiline-markdown-shell-quoting");
+  for (const providerWrite of [
+    { action: "provider_write", based_on_seq: 1, content_flag: "--markdown", body: "第一行\\n第二行" },
+    { action: "provider_write", based_on_seq: 1, content_flag: "--text", body: "第一行\n第二行" },
+  ]) {
+    const result = gradeRuntimeAgentInterfaceTrace(scenario, [
+      { action: "update", seq: 1 },
+      { action: "poll", seq: 1, direct_ack: true },
+      providerWrite,
+    ]);
+    assert.equal(result.passed, false);
+    assert.equal(result.failures.some((failure) => failure.rule === "multiline_body_transport"), true);
+  }
 });
 
 test("native eval binds controlled executables by absolute path so login shells cannot escape PATH isolation", () => {

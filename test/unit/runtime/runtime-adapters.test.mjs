@@ -72,7 +72,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v8");
+  assert.equal(prompt.version, "larkin-standing-v9");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
@@ -99,8 +99,11 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.doesNotMatch(prompt.content, /rejected|--literal-text/i);
   assert.doesNotMatch(prompt.content, /use `--text` for brief single-line replies/i);
   assert.match(prompt.content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
-  assert.match(prompt.content, /put real newline characters directly in the argument/);
-  assert.ok(prompt.content.includes("Do not use the two literal characters `\\n` inside ordinary quotes"));
+  assert.match(prompt.content, /passes one argument with real newline characters/);
+  assert.match(prompt.content, /ordinary (?:double )?quotes.*do not decode.*`\\n`.*backslash.*letter `n`/i);
+  assert.ok(prompt.content.includes("$'First line\\nSecond line'"));
+  assert.ok(prompt.content.includes('"First line\\nSecond line"'));
+  assert.match(prompt.content, /zsh.*bash.*ANSI-C quoting/i);
   assert.match(prompt.content, /authoritative self identity.*cli_test/i);
   assert.match(prompt.content, /do not call.*profile show.*learn.*identity/i);
   assert.match(prompt.content, /exclusively (?:assigns|addresses).*another named Agent.*stay silent/i);

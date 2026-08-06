@@ -69,7 +69,10 @@ if (surface === "larkin" && argv[0] === "im" && argv[1] === "+messages-send") {
       next: `larkin inbox poll --target ${target}` });
     process.exit(0);
   }
-  append({ action: "provider_write", target, based_on_seq: row.seen, intent: state.drafts_sent ? "revised" : "current" });
+  const contentFlag = argv.includes("--markdown") ? "--markdown" : argv.includes("--text") ? "--text" : null;
+  const body = contentFlag ? value(contentFlag) : null;
+  append({ action: "provider_write", target, based_on_seq: row.seen, intent: state.drafts_sent ? "revised" : "current",
+    ...(contentFlag ? { content_flag: contentFlag, body } : {}) });
   output({ ok: true, identity: "bot", provider_calls: 1 });
   process.exit(0);
 }

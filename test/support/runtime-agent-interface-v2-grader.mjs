@@ -10,7 +10,7 @@ export function loadRuntimeAgentInterfaceEval(file) {
   if (value.dataset !== "runtime-agent-interface-v2" || value.version !== 1) throw new Error("eval dataset/version mismatch");
   if (value.runtime?.adapter !== "codex") throw new Error("eval runtime.adapter must be codex");
   nonempty(value.runtime.minimum_cli_version, "runtime.minimum_cli_version");
-  if (value.model?.standing_prompt_version !== "larkin-standing-v8") throw new Error("eval standing prompt version mismatch");
+  if (value.model?.standing_prompt_version !== "larkin-standing-v9") throw new Error("eval standing prompt version mismatch");
   nonempty(value.model.selection, "model.selection");
   if (value.grader?.name !== "runtime-agent-interface-v2-trace-grader" || value.grader.version !== 1) {
     throw new Error("eval grader metadata mismatch");
@@ -33,6 +33,13 @@ export function loadRuntimeAgentInterfaceEval(file) {
     if (!Array.isArray(scenario.trace) || !scenario.trace.length) throw new Error(`${prefix}.trace must be non-empty`);
     if (!Number.isSafeInteger(scenario.expected_provider_writes) || scenario.expected_provider_writes < 0) {
       throw new Error(`${prefix}.expected_provider_writes must be a non-negative integer`);
+    }
+    if (scenario.expected_body !== undefined) {
+      nonempty(scenario.expected_body, `${prefix}.expected_body`);
+      if (!scenario.expected_body.includes("\n")) throw new Error(`${prefix}.expected_body must contain a real newline`);
+      if (!["--markdown", "--text"].includes(scenario.expected_content_flag)) {
+        throw new Error(`${prefix}.expected_content_flag must be --markdown or --text`);
+      }
     }
   }
   return value;
@@ -65,6 +72,10 @@ export function gradeRuntimeAgentInterfaceTrace(scenario, trace) {
     } else if (event.action === "provider_write") {
       providerWrites += 1;
       if (state.latest > state.seen || event.based_on_seq !== state.seen) fail("freshness_before_provider", `event ${index}`);
+      if (scenario.expected_body !== undefined
+          && (event.content_flag !== scenario.expected_content_flag || event.body !== scenario.expected_body)) {
+        fail("multiline_body_transport", `event ${index}`);
+      }
     } else if (event.action === "busy_start") busy = true;
     else if (event.action === "safe_boundary") busy = false;
     else if (event.action === "cancel") {

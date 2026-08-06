@@ -6,8 +6,8 @@
     "minimum_cli_version": "0.144.6"
   },
   "model": {
-    "selection": "runtime-default",
-    "standing_prompt_version": "larkin-standing-v8"
+    "selection": "gpt-5.6-sol",
+    "standing_prompt_version": "larkin-standing-v9"
   },
   "grader": {
     "name": "runtime-agent-interface-v2-trace-grader",
@@ -18,7 +18,8 @@
       "target-local side effects occur only after a poll newer than the latest update",
       "a held write never reaches the provider and is reconsidered after polling",
       "busy updates do not cancel active work",
-      "provider writes are bounded by the scenario contract"
+      "provider writes are bounded by the scenario contract",
+      "multiline message bodies reach the provider with real LF characters rather than a literal backslash-n sequence"
     ]
   },
   "scenarios": [
@@ -97,6 +98,20 @@
         { "action": "provider_write", "based_on_seq": 2, "intent": "revised" }
       ],
       "expected_provider_writes": 1
+    },
+    {
+      "id": "multiline-markdown-shell-quoting",
+      "task": "Read the pending message, then send one Markdown message whose exact body has 第一行 on line one and 第二行 on line two.",
+      "target": "chat:oc_eval_multiline",
+      "required_actions": ["update", "poll", "provider_write"],
+      "trace": [
+        { "action": "update", "seq": 1 },
+        { "action": "poll", "seq": 1, "direct_ack": true },
+        { "action": "provider_write", "based_on_seq": 1, "content_flag": "--markdown", "body": "第一行\n第二行" }
+      ],
+      "expected_provider_writes": 1,
+      "expected_content_flag": "--markdown",
+      "expected_body": "第一行\n第二行"
     },
     {
       "id": "target-isolation",

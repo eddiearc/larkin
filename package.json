@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "private": true,
   "larkinPackageRole": "development-source-checkout",
   "packageManager": "bun@1.3.14",
@@ -28,6 +28,7 @@
     "licenses:check": "bun run scripts/generate-third-party-notices.mjs --check",
     "test:standalone-acceptance": "LARKIN_RUN_STANDALONE_BINARY_ACCEPTANCE=1 bun test --max-concurrency 1 test/integration/build/standalone-binary-acceptance.test.mjs",
     "test:standalone-setup-workflow": "LARKIN_RUN_STANDALONE_SETUP_WORKFLOW=1 bun test --max-concurrency 1 test/integration/build/standalone-setup-workflow.test.mjs",
+    "test:pi-preflight-standalone": "LARKIN_RUN_PI_PREFLIGHT_STANDALONE=1 bun test --max-concurrency 1 test/integration/build/pi-prompt-preflight-standalone.test.mjs",
     "test:unit": "bun test --max-concurrency 1 test/unit",
     "test:frontend": "bun run vitest run --config src/dashboard/web/vitest.config.mjs",
     "test:integration": "bun test --max-concurrency 1 test/integration",

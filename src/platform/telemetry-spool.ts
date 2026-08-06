@@ -24,9 +24,10 @@ const HEX_TRACE = /^[0-9a-f]{32}$/;
 const HEX_SPAN = /^[0-9a-f]{16}$/;
 const SPAN_NAMES = new Set(["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send",
   "document.comment.receive", "document.comment.gate", "document.comment.pending", "document.comment.replay", "document.comment.resolve", "document.comment.inbox", "document.comment.reply",
-  "pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]);
+  "pi.prompt.wait", "pi.compaction", "pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]);
 const ATTRIBUTE_KEYS = new Set(["service.name", "service.version", "service.instance.id", "larkin.agent.id_hash", "messaging.message.id_hash", "larkin.message.relation", "larkin.message.source",
-  "larkin.observation.boundary", "larkin.activity.type", "larkin.filter.reason", "larkin.runtime.id", "larkin.runtime.distribution", "larkin.operation.outcome"]);
+  "larkin.observation.boundary", "larkin.activity.type", "larkin.filter.reason", "larkin.runtime.id", "larkin.runtime.distribution", "larkin.operation.outcome",
+  "larkin.pi.preflight.outcome", "larkin.pi.preflight.progress"]);
 const SENSITIVE = /(?:bearer\s|(?:api[_-]?key|authorization|password|token|secret|cookie)\s*[=:]|(?:sk|ghp|github_pat)-?[a-z0-9_-]{8})/i;
 const ABSOLUTE_PATH = /(?:^|[\s"'=])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/;
 const emptyDiagnostics = (): Diagnostics => ({ droppedFiles: 0, cleanedRemnantFiles: 0, droppedSpans: 0, lastUploadAt: null, lastErrorCategory: null });
@@ -72,6 +73,8 @@ function validateAttributes(value: unknown): void {
       if (key === "larkin.runtime.id" && text !== "pi") invalidPayload();
       if (key === "larkin.runtime.distribution" && !["builtin", "external"].includes(text)) invalidPayload();
       if (key === "larkin.operation.outcome" && !["success", "error"].includes(text)) invalidPayload();
+      if (key === "larkin.pi.preflight.outcome" && !["accepted", "timeout", "error"].includes(text)) invalidPayload();
+      if (key === "larkin.pi.preflight.progress" && !["compaction", "retry"].includes(text)) invalidPayload();
     }
   }
 }

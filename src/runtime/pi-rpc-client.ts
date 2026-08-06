@@ -17,13 +17,18 @@ export interface PiRpcProcess {
 
 interface PendingRequest {
   command: string;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
+  startedAt: number;
+  absoluteDeadlineAt?: number;
   resolve(value: unknown): void;
   reject(error: Error): void;
 }
 
 export interface PiRpcClientOptions {
   requestTimeoutMs?: number;
+  inputTimeoutMs?: number;
+  inputProgressTimeoutMs?: number;
+  inputMaxTimeoutMs?: number;
   maxFrameBytes?: number;
   maxStderrBytes?: number;
   shutdownGraceMs?: number;
@@ -37,6 +42,9 @@ export class PiRpcClient {
   private readonly eventListeners = new Set<(event: RpcObject) => void>();
   private readonly failureListeners = new Set<(error: Error) => void>();
   private readonly requestTimeoutMs: number;
+  private readonly inputTimeoutMs: number;
+  private readonly inputProgressTimeoutMs: number;
+  private readonly inputMaxTimeoutMs: number;
   private readonly maxFrameBytes: number;
   private readonly maxStderrBytes: number;
   private readonly shutdownGraceMs: number;
@@ -49,6 +57,11 @@ export class PiRpcClient {
 
   constructor(private readonly process: PiRpcProcess, options: PiRpcClientOptions = {}) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+    this.inputTimeoutMs = options.inputTimeoutMs ?? 120_000;
+    this.inputProgressTimeoutMs = options.inputProgressTimeoutMs ?? 300_000;
+    this.inputMaxTimeoutMs = options.inputMaxTimeoutMs ?? 600_000;
+    if (this.requestTimeoutMs <= 0 || this.inputTimeoutMs <= 0 || this.inputProgressTimeoutMs <= 0
+      || this.inputMaxTimeoutMs < this.inputTimeoutMs) throw new Error("Pi RPC timeout options are invalid");
     this.maxFrameBytes = options.maxFrameBytes ?? 1024 * 1024;
     this.maxStderrBytes = options.maxStderrBytes ?? 64 * 1024;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
@@ -84,9 +97,15 @@ export class PiRpcClient {
     if (this.failed) return Promise.reject(this.failed);
     const id = `larkin-${++this.nextId}`;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(new Error(`Pi RPC ${command} timed out after ${this.requestTimeoutMs}ms`), true), this.requestTimeoutMs);
-      timer.unref?.();
-      this.pending.set(id, { command, timer, resolve: resolve as (value: unknown) => void, reject });
+      const startedAt = Date.now();
+      const input = isInputCommand(command);
+      const pending: PendingRequest = {
+        command, startedAt,
+        ...(input ? { absoluteDeadlineAt: startedAt + this.inputMaxTimeoutMs } : {}),
+        resolve: resolve as (value: unknown) => void, reject,
+      };
+      this.pending.set(id, pending);
+      this.armTimeout(id, pending, input ? this.inputTimeoutMs : this.requestTimeoutMs);
       try {
         if (!this.process.stdin || this.process.stdin.destroyed) throw new Error("stdin is unavailable");
         this.process.stdin.write(`${JSON.stringify({ id, type: command, ...fields })}\n`, (error) => {
@@ -144,7 +163,7 @@ export class PiRpcClient {
       const pending = this.pending.get(message.id);
       if (!pending) { this.protocolFailure(`unexpected response id ${message.id}`); return; }
       this.pending.delete(message.id);
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       if (message.command !== pending.command) {
         pending.reject(new Error(`Pi RPC protocol error: response command ${String(message.command)} does not match ${pending.command}`));
         this.fail(new Error("Pi RPC protocol error: mismatched response command"), true);
@@ -152,7 +171,36 @@ export class PiRpcClient {
       else pending.reject(new Error(`Pi RPC ${pending.command} failed: ${String(message.error || "unknown error")}`));
       return;
     }
+    if (isInputProgress(message)) this.refreshInputDeadlines(message.type);
     for (const listener of this.eventListeners) listener(message);
+  }
+
+  private refreshInputDeadlines(eventType: string): void {
+    const graceMs = eventType === "compaction_start" || eventType.startsWith("summarization_retry_")
+      || eventType === "auto_retry_start" ? this.inputProgressTimeoutMs : this.inputTimeoutMs;
+    for (const [id, pending] of this.pending) {
+      if (!isInputCommand(pending.command)) continue;
+      this.armTimeout(id, pending, graceMs);
+    }
+  }
+
+  private armTimeout(id: string, pending: PendingRequest, requestedMs: number): void {
+    if (pending.timer) clearTimeout(pending.timer);
+    const now = Date.now();
+    const absoluteRemaining = pending.absoluteDeadlineAt === undefined ? requestedMs : pending.absoluteDeadlineAt - now;
+    const delay = Math.max(0, Math.min(requestedMs, absoluteRemaining));
+    pending.timer = setTimeout(() => {
+      if (!this.pending.has(id)) return;
+      const elapsed = Date.now() - pending.startedAt;
+      const absolute = pending.absoluteDeadlineAt !== undefined && Date.now() >= pending.absoluteDeadlineAt;
+      const error = isInputCommand(pending.command)
+        ? new Error(absolute
+          ? `Pi RPC ${pending.command} preflight timed out at absolute ${this.inputMaxTimeoutMs}ms limit`
+          : `Pi RPC ${pending.command} preflight timed out after ${elapsed}ms without progress`)
+        : new Error(`Pi RPC ${pending.command} timed out after ${this.requestTimeoutMs}ms`);
+      this.fail(error, true);
+    }, delay);
+    pending.timer.unref?.();
   }
 
   private protocolFailure(detail: string): void {
@@ -163,7 +211,7 @@ export class PiRpcClient {
     if (this.failed) return;
     this.failed = error;
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
@@ -200,3 +248,11 @@ export class PiRpcClient {
     return this.shutdownPromise;
   }
 }
+
+const INPUT_COMMANDS = new Set(["prompt", "steer", "follow_up"]);
+const INPUT_PROGRESS_EVENTS = new Set([
+  "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
+  "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
+]);
+const isInputCommand = (command: string): boolean => INPUT_COMMANDS.has(command);
+const isInputProgress = (message: RpcObject): boolean => typeof message.type === "string" && INPUT_PROGRESS_EVENTS.has(message.type);

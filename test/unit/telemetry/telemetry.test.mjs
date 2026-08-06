@@ -93,28 +93,75 @@ test("bundled Pi RPC spans expose queue, observed TTFT, generation, tool wait, a
   const spans = records.flatMap(({ payload }) => payload.resourceSpans)
     .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
   const byName = Object.fromEntries(spans.map((span) => [span.name, span]));
+  const durationMs = (name) => Number((BigInt(byName[name].endTimeUnixNano) - BigInt(byName[name].startTimeUnixNano)) / 1_000_000n);
+  assert.equal(byName["pi.prompt.wait"].parentSpanId, byName["larkin.message.process"].spanId);
+  assert.equal(durationMs("pi.prompt.wait"), 11);
   for (const name of ["pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]) {
     assert.ok(byName[name], `missing ${name}`);
     assert.equal(byName[name].parentSpanId, byName["agent.turn"].spanId, name);
   }
-  const durationMs = (name) => Number((BigInt(byName[name].endTimeUnixNano) - BigInt(byName[name].startTimeUnixNano)) / 1_000_000n);
   assert.deepEqual(Object.fromEntries(["pi.rpc.submit", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]
     .map((name) => [name, durationMs(name)])), {
     "pi.rpc.submit": 11, "pi.output.wait": 30, "pi.generation": 77, "pi.tool.wait": 31, "pi.rpc.settle": 13,
   });
   const serialized = JSON.stringify(records);
-  for (const forbidden of ["cli_pi_private", "doc_comment_private", "FORBIDDEN_TURN", "toolName", "prompt", "result", stateDir]) {
+  for (const forbidden of ["cli_pi_private", "doc_comment_private", "FORBIDDEN_TURN", "toolName", "PRIVATE_PROMPT_PAYLOAD", "result", stateDir]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
 });
 
-test("external Pi records its distribution without claiming bundled RPC visibility", async () => {
+test("bundled Pi preflight timeout records prompt wait and compaction without inventing an agent turn or leaking details", async () => {
+  const root = temp(); const stateDir = path.join(root, "agent-state"); let time = Date.now();
+  const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir, now: () => time });
+  const agentId = "cli_FORBIDDEN_AGENT"; const messageId = "om_FORBIDDEN_MESSAGE";
+  const observation = (phase) => runtime.runtimeEvent(agentId, {
+    type: "runtime-observation", runtime: "pi", distribution: "builtin", phase,
+  });
+  runtime.beginMessage(agentId, messageId);
+  await runtime.phase(messageId, "runtime.deliver", SpanKind.PRODUCER, async () => {
+    observation("rpc_submit");
+    time += 12; observation("compaction_start");
+    time += 17; observation("retry_progress");
+    time += 23; observation("rpc_timeout");
+  });
+  runtime.delivery(agentId, messageId, "error");
+  await runtime.shutdown();
+
+  const records = new TelemetrySpool(config(root)).list();
+  const spans = records.flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+  const byName = Object.fromEntries(spans.map((span) => [span.name, span]));
+  assert.ok(byName["pi.prompt.wait"]);
+  assert.ok(byName["pi.compaction"]);
+  assert.equal(byName["agent.turn"], undefined);
+  assert.equal(byName["pi.prompt.wait"].parentSpanId, byName["larkin.message.process"].spanId);
+  assert.equal(byName["pi.compaction"].parentSpanId, byName["larkin.message.process"].spanId);
+  assert.equal(byName["pi.prompt.wait"].status.code, 2);
+  assert.equal(byName["pi.compaction"].status.code, 2);
+  assert.equal(byName["pi.prompt.wait"].attributes.find((attribute) => attribute.key === "larkin.pi.preflight.outcome")?.value?.stringValue, "timeout");
+  assert.equal(byName["pi.prompt.wait"].attributes.find((attribute) => attribute.key === "larkin.pi.preflight.progress")?.value?.stringValue, "retry");
+  const serialized = JSON.stringify(records);
+  for (const forbidden of [agentId, messageId, "FORBIDDEN", stateDir, "PRIVATE_PROVIDER_DETAIL", "PRIVATE_CREDENTIAL"]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+});
+
+test("external Pi records privacy-safe preflight spans without claiming bundled turn internals", async () => {
   const root = temp(); const stateDir = path.join(root, "agent-state");
   const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir });
   runtime.beginMessage("cli_external_pi", "om_external_pi");
   runtime.delivery("cli_external_pi", "om_external_pi", "accepted");
   runtime.runtimeEvent("cli_external_pi", {
     type: "runtime-observation", runtime: "pi", distribution: "external", phase: "rpc_submit",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "compaction_start",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "compaction_end",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "rpc_accepted",
   });
   runtime.runtimeEvent("cli_external_pi", {
     type: "runtime-observation", runtime: "pi", distribution: "external", phase: "turn_start",
@@ -128,7 +175,15 @@ test("external Pi records its distribution without claiming bundled RPC visibili
   const turn = spans.find((span) => span.name === "agent.turn");
   assert.ok(turn);
   assert.equal(turn.attributes.find((attribute) => attribute.key === "larkin.runtime.distribution")?.value?.stringValue, "external");
-  assert.equal(spans.some((span) => span.name.startsWith("pi.")), false);
+  for (const name of ["pi.prompt.wait", "pi.compaction"]) {
+    const span = spans.find((candidate) => candidate.name === name);
+    assert.ok(span, name);
+    assert.equal(span.parentSpanId, spans.find((candidate) => candidate.name === "larkin.message.process").spanId);
+    assert.equal(span.attributes.find((attribute) => attribute.key === "larkin.runtime.distribution")?.value?.stringValue, "external");
+  }
+  for (const name of ["pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]) {
+    assert.equal(spans.some((span) => span.name === name), false, name);
+  }
 });
 
 test("spool survives failures, bounds retention, and export/import remains idempotent", () => {

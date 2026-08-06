@@ -389,6 +389,33 @@ test("Pi prompt reports acceptance only after the RPC command acknowledgement", 
   assert.deepEqual(result, { status: "accepted", inputId: "pi-input" });
 });
 
+test("bundled Pi normalizes preflight compaction, retry, and terminal timeout without payload fields or a false turn", async () => {
+  let listener; let rejectPrompt;
+  const sdk = {
+    sessionId: "pi-preflight", prompt() { return new Promise((_resolve, reject) => { rejectPrompt = reject; }); },
+    steer() {}, abort() {}, subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk, env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = []; session.subscribe((event) => events.push(event));
+  const pending = session.prompt({ inputId: "PRIVATE_INPUT", kind: "user", text: "PRIVATE_PROMPT", attempt: 0 });
+  listener({ type: "compaction_start", reason: "threshold", privateSummary: "PRIVATE_SUMMARY" });
+  listener({ type: "summarization_retry_scheduled", attempt: 1, maxAttempts: 3, delayMs: 5,
+    errorMessage: "PRIVATE_PROVIDER_ERROR" });
+  listener({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false,
+    result: { summary: "PRIVATE_SUMMARY" } });
+  listener({ type: "larkin_rpc_failure", message: "Pi RPC prompt preflight timed out at absolute 600000ms limit" });
+  rejectPrompt(new Error("Pi RPC prompt preflight timed out at absolute 600000ms limit"));
+  assert.equal((await pending).status, "rejected");
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), [
+    "rpc_submit", "compaction_start", "retry_progress", "compaction_end", "rpc_timeout",
+  ]);
+  assert.equal(events.some((event) => event.type === "turn-start"), false);
+  assert.doesNotMatch(JSON.stringify(observations), /PRIVATE|summary|provider|message|input/i);
+});
+
 test("bundled Pi emits content-free RPC timing phases while preserving normalized activity", async () => {
   let listener;
   const sdk = {

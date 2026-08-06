@@ -16,7 +16,7 @@ import type {
   UpstreamProviderError,
 } from "./runtime-contracts.js";
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
-import { PiRpcClient } from "./pi-rpc-client.js";
+import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
 import { piAgentDirectory } from "./pi-provider-config.js";
 import {
@@ -57,6 +57,7 @@ export interface PiSessionProcessLike {
 export interface NativeRuntimeAdapterDependencies {
   spawn?: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike;
   createPiSession?: (input: RuntimeSessionCreate) => Promise<PiSessionProcessLike>;
+  piRpcClientOptions?: PiRpcClientOptions;
   piCommand?: string;
   codexCommand?: string;
   codexModelOverride?: string;
@@ -536,6 +537,11 @@ class PiSession extends EventSession {
       }
       return { status: "accepted", inputId: input.inputId };
     } catch (error) {
+      const wasAwaiting = this.awaitingAcknowledgement.has(input.inputId);
+      if (ownsRpcObservation && wasAwaiting) this.emit({
+        type: "runtime-observation", runtime: "pi", distribution: this.distribution,
+        phase: /preflight timed out/i.test((error as Error).message) ? "rpc_timeout" : "rpc_error",
+      });
       this.awaitingAcknowledgement.delete(input.inputId);
       this.ownedInputIds.delete(input.inputId);
       this.inputEpochs.delete(input.inputId);
@@ -547,6 +553,10 @@ class PiSession extends EventSession {
     const event = raw as Record<string, any>;
     if (event?.type === "larkin_rpc_failure") {
       const message = String(event.message || "Pi RPC process failed");
+      if (this.awaitingAcknowledgement.size > 0) this.emit({
+        type: "runtime-observation", runtime: "pi", distribution: this.distribution,
+        phase: /preflight timed out/i.test(message) ? "rpc_timeout" : "rpc_error",
+      });
       for (const inputId of this.ownedInputIds) {
         if (!this.awaitingAcknowledgement.has(inputId)) this.emit({ type: "input-error", inputId, retryable: true, willRetry: true, message });
       }
@@ -559,6 +569,13 @@ class PiSession extends EventSession {
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       this.emit({ type: "error", message });
+    } else if (event?.type === "compaction_start" && this.awaitingAcknowledgement.size > 0) {
+      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "compaction_start" });
+    } else if (event?.type === "compaction_end" && this.awaitingAcknowledgement.size > 0) {
+      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "compaction_end" });
+    } else if ((event?.type === "auto_retry_start" || event?.type === "auto_retry_end"
+      || String(event?.type || "").startsWith("summarization_retry_")) && this.awaitingAcknowledgement.size > 0) {
+      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "retry_progress" });
     } else if (event?.type === "turn_start") {
       const epoch = this.oldestOwnedEpoch();
       if (epoch === null || this.activeEpoch !== null) return;
@@ -836,7 +853,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     env: mergedEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const client = new PiRpcClient(child);
+  const client = new PiRpcClient(child, dependencies.piRpcClientOptions);
   try {
     const [state, available] = await Promise.all([
       client.request<PiRpcState>("get_state"),

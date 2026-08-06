@@ -58,6 +58,7 @@ interface MessageTrace {
   pi?: {
     distribution: "builtin" | "external";
     submitAt?: number; acceptedAt?: number; turnStartAt?: number; firstOutputAt?: number; completedAt?: number; settledAt?: number;
+    promptWaitSpan?: Span; compactionSpan?: Span;
     rpcSpan?: Span; lifecycleSpan?: Span; outputWaitSpan?: Span; generationSpan?: Span; toolSpan?: Span; settleSpan?: Span;
   };
 }
@@ -201,7 +202,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
   };
   const closePi = (current: MessageTrace, failed = false): void => {
     const state = current.pi; if (!state) return;
-    for (const key of ["rpcSpan", "lifecycleSpan", "outputWaitSpan", "generationSpan", "toolSpan", "settleSpan"] as const) {
+    for (const key of ["promptWaitSpan", "compactionSpan", "rpcSpan", "lifecycleSpan", "outputWaitSpan", "generationSpan", "toolSpan", "settleSpan"] as const) {
       const span = state[key];
       if (!span) continue;
       if (failed) span.setStatus({ code: SpanStatusCode.ERROR });
@@ -288,16 +289,38 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
           if (event.distribution !== "builtin" || state.settledAt !== undefined) return;
           const spanAttributes = { "larkin.observation.boundary": "pi_rpc", "larkin.runtime.id": "pi",
             "larkin.runtime.distribution": "builtin" };
+          const startPreflight = (name: "pi.prompt.wait" | "pi.compaction", startTime: number): Span =>
+            tracer.startSpan(name, { kind: SpanKind.INTERNAL, startTime, attributes: spanAttributes }, current.context);
           const start = (name: "pi.rpc.submit" | "pi.rpc.lifecycle" | "pi.output.wait" | "pi.generation"
             | "pi.tool.wait" | "pi.rpc.settle", startTime: number): Span | undefined => {
             if (!current.turnContext) return undefined;
             return tracer.startSpan(name, { kind: SpanKind.INTERNAL, startTime, attributes: spanAttributes }, current.turnContext);
           };
-          if (event.phase === "rpc_submit" && state.submitAt === undefined && state.acceptedAt === undefined) state.submitAt = observedAt;
+          if (event.phase === "rpc_submit" && state.submitAt === undefined && state.acceptedAt === undefined) {
+            state.submitAt = observedAt;
+            state.promptWaitSpan = startPreflight("pi.prompt.wait", observedAt);
+          }
           else if (event.phase === "rpc_accepted" && state.submitAt !== undefined && state.acceptedAt === undefined) {
             state.acceptedAt = observedAt;
+            state.promptWaitSpan?.setAttribute("larkin.pi.preflight.outcome", "accepted");
+            state.promptWaitSpan?.end(observedAt); delete state.promptWaitSpan;
+            state.compactionSpan?.end(observedAt); delete state.compactionSpan;
             if (state.rpcSpan) { state.rpcSpan.end(observedAt); delete state.rpcSpan; }
             if (current.turnContext && !state.outputWaitSpan) state.outputWaitSpan = start("pi.output.wait", observedAt);
+          } else if (event.phase === "compaction_start" && state.submitAt !== undefined && !state.compactionSpan) {
+            state.promptWaitSpan?.setAttribute("larkin.pi.preflight.progress", "compaction");
+            state.compactionSpan = startPreflight("pi.compaction", observedAt);
+          } else if (event.phase === "compaction_end") {
+            state.compactionSpan?.end(observedAt); delete state.compactionSpan;
+          } else if (event.phase === "retry_progress") {
+            state.promptWaitSpan?.setAttribute("larkin.pi.preflight.progress", "retry");
+          } else if (event.phase === "rpc_timeout" || event.phase === "rpc_error") {
+            const outcome = event.phase === "rpc_timeout" ? "timeout" : "error";
+            state.promptWaitSpan?.setAttribute("larkin.pi.preflight.outcome", outcome);
+            state.promptWaitSpan?.setStatus({ code: SpanStatusCode.ERROR });
+            state.promptWaitSpan?.end(observedAt); delete state.promptWaitSpan;
+            state.compactionSpan?.setStatus({ code: SpanStatusCode.ERROR });
+            state.compactionSpan?.end(observedAt); delete state.compactionSpan;
           } else if (event.phase === "turn_start" && state.turnStartAt === undefined) state.turnStartAt = observedAt;
           else if (event.phase === "first_output" && state.firstOutputAt === undefined && state.completedAt === undefined) {
             state.firstOutputAt = observedAt;

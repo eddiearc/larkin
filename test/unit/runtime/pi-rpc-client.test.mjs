@@ -61,6 +61,49 @@ test("Pi RPC request timeout is bounded and tears down the unhealthy process", a
   assert.deepEqual(child.killed, ["SIGTERM"]);
 });
 
+test("Pi RPC prompt preflight outlives the short control deadline while compaction and retry make progress", async () => {
+  const child = new FakeProcess();
+  const client = new PiRpcClient(child, {
+    requestTimeoutMs: 8,
+    inputTimeoutMs: 24,
+    inputProgressTimeoutMs: 36,
+    inputMaxTimeoutMs: 100,
+  });
+  const events = [];
+  client.subscribe((event) => events.push(event.type));
+  const pending = client.request("prompt", { message: "private body" });
+  const id = child.writes[0].id;
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  child.stdout.write(`${JSON.stringify({ type: "compaction_start", reason: "threshold" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 28));
+  child.stdout.write(`${JSON.stringify({ type: "summarization_retry_scheduled", attempt: 1, maxAttempts: 3, delayMs: 1_000, errorMessage: "private provider detail" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 28));
+  child.stdout.write(`${JSON.stringify({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false })}\n`);
+  child.stdout.write(`${JSON.stringify({ id, type: "response", command: "prompt", success: true })}\n`);
+  await pending;
+  assert.deepEqual(events, ["compaction_start", "summarization_retry_scheduled", "compaction_end"]);
+  assert.deepEqual(child.killed, []);
+  await client.close();
+});
+
+test("Pi RPC prompt progress cannot evade its absolute preflight deadline", async () => {
+  const child = new FakeProcess();
+  const client = new PiRpcClient(child, {
+    requestTimeoutMs: 5,
+    inputTimeoutMs: 12,
+    inputProgressTimeoutMs: 24,
+    inputMaxTimeoutMs: 45,
+  });
+  const interval = setInterval(() => child.stdout.write(`${JSON.stringify({ type: "compaction_start", reason: "threshold" })}\n`), 8);
+  try {
+    await assert.rejects(client.request("prompt", { message: "private body" }), /prompt preflight timed out.*absolute 45ms/i);
+    await client.close();
+    assert.deepEqual(child.killed, ["SIGTERM"]);
+  } finally {
+    clearInterval(interval);
+  }
+});
+
 test("Pi RPC failure and close share one shutdown promise that escalates a stubborn child", async () => {
   const child = new StubbornProcess();
   const client = new PiRpcClient(child, { requestTimeoutMs: 5, shutdownGraceMs: 5 });

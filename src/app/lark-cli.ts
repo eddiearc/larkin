@@ -14,6 +14,10 @@ import * as larkinConfig from "../platform/config.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "./agent-lark-cli-workspace.js";
 import { parseDocumentCommentTarget } from "../feishu/document-comment.js";
+import { SpanKind } from "@opentelemetry/api";
+import { loadTelemetryConfig } from "../platform/telemetry-config.js";
+import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
+import { packageVersion } from "../platform/build-info.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -28,6 +32,7 @@ export interface LarkCliLauncherDependencies {
   nativeCommand?: OfficialLarkCliCommand;
   stateStore?: AgentStateStore;
   now?(): number;
+  telemetry?: TelemetryRuntime;
 }
 
 function portableSignalCode(signal: NodeJS.Signals): number {
@@ -763,7 +768,17 @@ export function runLarkCli(
   }
   const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
   if (decision.kind === "comment-reply") {
-    try { return runCommentReply(argv, privateEnv, io, nativeDependencies, store); }
+    try {
+      let telemetry = dependencies.telemetry ?? telemetrySingleton();
+      if (!dependencies.telemetry) {
+        try {
+          const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+          telemetry = telemetrySingleton(loadTelemetryConfig(env), { serviceVersion: packageVersion(sourceRoot) });
+        } catch { /* telemetry is failure-isolated */ }
+      }
+      return telemetry.externalPhase(agent.agentId, store.paths.root, "document.comment.reply", SpanKind.CLIENT,
+        () => runCommentReply(argv, privateEnv, io, nativeDependencies, store), "comment_cli") as number;
+    }
     catch (error) {
       io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
       return 2;

@@ -9,6 +9,9 @@ import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../platform/config.js";
 import { createAgentControlServer } from "./local-control.js";
 import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
+import { loadTelemetryConfig } from "../platform/telemetry-config.js";
+import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
+import { packageVersion } from "../platform/build-info.js";
 
 type HostShellOptions = Parameters<typeof createHostShell>[0];
 
@@ -46,6 +49,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
   channelDisconnectTimeoutMs?: number;
   exitProcess?: (exitCode: number) => void;
 } = {}): Promise<void> {
+  let telemetry: TelemetryRuntime = telemetrySingleton();
+  try {
+    const configured = JSON.parse(env.LARKIN_AGENTS_CONFIG || "[]") as Array<{ agentId?: string; stateDir?: string }>;
+    const stateDirs = new Map(configured.flatMap((agent) => agent.agentId && agent.stateDir ? [[agent.agentId, agent.stateDir] as const] : []));
+    const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+    telemetry = telemetrySingleton(loadTelemetryConfig(env), { stateDirFor: (agentId) => stateDirs.get(agentId),
+      stateDirs: [...stateDirs.values()], serviceVersion: packageVersion(sourceRoot) });
+  } catch (error) {
+    process.stderr.write(`[telemetry] disabled after initialization failure: ${error instanceof Error ? error.name : "unknown"}\n`);
+  }
   let channelPackage = overrides.channelPackage;
   if (!channelPackage && env.LARKIN_FEISHU_DRYRUN === "1" && env.LARKIN_TEST_CHANNEL_MODULE) {
     channelPackage = await import(pathToFileURL(path.resolve(env.LARKIN_TEST_CHANNEL_MODULE)).href) as HostShellOptions["channelPackage"];
@@ -68,6 +81,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
       return adapter;
     },
     log: (...parts) => process.stderr.write(`[runtime] ${parts.join(" ")}\n`),
+    telemetry,
   });
   let controlServer: ReturnType<typeof createAgentControlServer> | null = null;
   const hostShell = createHostShell({
@@ -77,10 +91,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
     ...(overrides.eventSourceStartDelayMs !== undefined ? { eventSourceStartDelayMs: overrides.eventSourceStartDelayMs } : {}),
     ...(overrides.channelDisconnectTimeoutMs !== undefined ? { channelDisconnectTimeoutMs: overrides.channelDisconnectTimeoutMs } : {}),
     onOrderedShutdownComplete: (exitCode) => {
-      void controlServer?.close().catch(() => {}).finally(() => {
+      void Promise.allSettled([controlServer?.close(), telemetry.shutdown()]).finally(() => {
         (overrides.exitProcess ?? ((code) => process.exit(code)))(exitCode);
       });
     },
+    telemetry,
   });
   if (!env.LARKIN_HOME || !env.LARKIN_CONFIG_DIR) throw new Error("LARKIN_HOME/LARKIN_CONFIG_DIR required");
   if (!env.LARKIN_CONTROL_AUTHORIZATION) throw new Error("LARKIN_CONTROL_AUTHORIZATION required");

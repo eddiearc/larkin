@@ -492,7 +492,12 @@ class PiSession extends EventSession {
   private activeEpoch: number | null = null;
   private settleArmedEpoch: number | null = null;
   private readonly inputEpochs = new Map<string, number>();
-  constructor(private readonly sdk: PiSessionProcessLike) {
+  private readonly observedSubmitEpochs = new Set<number>();
+  private readonly observedAcceptedEpochs = new Set<number>();
+  private readonly observedCompletedEpochs = new Set<number>();
+  private firstOutputObserved = false;
+  private toolCallOpen = false;
+  constructor(private readonly sdk: PiSessionProcessLike, private readonly distribution: "builtin" | "external") {
     super();
     const result = sdk.subscribe?.((event) => this.onEvent(event));
     if (typeof result === "function") this.unsubscribe = result;
@@ -513,12 +518,22 @@ class PiSession extends EventSession {
 
   private async enqueue(input: RuntimeInput, operation: () => Promise<unknown> | unknown): Promise<RuntimeInputResult> {
     if (this.ownedInputIds.size === 0) this.requestEpoch += 1;
+    const epoch = this.requestEpoch;
     this.ownedInputIds.add(input.inputId);
-    this.inputEpochs.set(input.inputId, this.requestEpoch);
+    this.inputEpochs.set(input.inputId, epoch);
     this.awaitingAcknowledgement.add(input.inputId);
+    const ownsRpcObservation = !this.observedSubmitEpochs.has(epoch);
+    if (ownsRpcObservation) {
+      this.observedSubmitEpochs.add(epoch);
+      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "rpc_submit" });
+    }
     try {
       await operation();
       this.awaitingAcknowledgement.delete(input.inputId);
+      if (ownsRpcObservation && !this.observedAcceptedEpochs.has(epoch)) {
+        this.observedAcceptedEpochs.add(epoch);
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "rpc_accepted" });
+      }
       return { status: "accepted", inputId: input.inputId };
     } catch (error) {
       this.awaitingAcknowledgement.delete(input.inputId);
@@ -538,12 +553,20 @@ class PiSession extends EventSession {
       this.awaitingAcknowledgement.clear();
       this.ownedInputIds.clear();
       this.inputEpochs.clear();
+      this.observedSubmitEpochs.clear();
+      this.observedAcceptedEpochs.clear();
+      this.observedCompletedEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       this.emit({ type: "error", message });
     } else if (event?.type === "turn_start") {
-      this.activeEpoch = this.oldestOwnedEpoch();
+      const epoch = this.oldestOwnedEpoch();
+      if (epoch === null || this.activeEpoch !== null) return;
+      this.activeEpoch = epoch;
       this.settleArmedEpoch = null;
+      this.firstOutputObserved = false;
+      this.toolCallOpen = false;
+      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "turn_start" });
       this.emit({ type: "turn-start", ...(Number.isInteger(event.turnIndex) ? { turnId: `pi-${event.turnIndex}` } : {}) });
     }
     else if (event?.type === "agent_end") {
@@ -554,6 +577,10 @@ class PiSession extends EventSession {
         ? piAssistantProviderError(assistant)
         : null;
       this.settleArmedEpoch = this.activeEpoch;
+      if (event.willRetry !== true && this.activeEpoch !== null && !this.observedCompletedEpochs.has(this.activeEpoch)) {
+        this.observedCompletedEpochs.add(this.activeEpoch);
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "completed" });
+      }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
       if (epoch === null || this.settleArmedEpoch !== epoch) return;
@@ -563,6 +590,11 @@ class PiSession extends EventSession {
       const stopReason = this.finalAssistantStopReason;
       this.finalAssistantError = null;
       this.finalAssistantStopReason = null;
+      if (this.toolCallOpen) {
+        this.toolCallOpen = false;
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_result" });
+      }
+      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "settled" });
       const owned = [...this.ownedInputIds].filter((inputId) => this.inputEpochs.get(inputId) === epoch);
       if (error) {
         const classified = classifyPiProviderError(error);
@@ -581,9 +613,32 @@ class PiSession extends EventSession {
         this.emit({ type: "turn-end", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
       }
       for (const inputId of owned) { this.ownedInputIds.delete(inputId); this.inputEpochs.delete(inputId); }
+      this.observedSubmitEpochs.delete(epoch);
+      this.observedAcceptedEpochs.delete(epoch);
+      this.observedCompletedEpochs.delete(epoch);
     }
-    else if (event?.type === "tool_execution_start") this.emit({ type: "activity", activity: "tool", name: String(event.toolName || "tool") });
+    else if (event?.type === "tool_execution_start") {
+      if (!this.firstOutputObserved) {
+        this.firstOutputObserved = true;
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "first_output" });
+      }
+      if (!this.toolCallOpen) {
+        this.toolCallOpen = true;
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_call" });
+      }
+      this.emit({ type: "activity", activity: "tool", name: String(event.toolName || "tool") });
+    }
+    else if (event?.type === "tool_execution_end") {
+      if (this.toolCallOpen) {
+        this.toolCallOpen = false;
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_result" });
+      }
+    }
     else if (event?.type === "message_update" && event.assistantMessageEvent?.delta) {
+      if (!this.firstOutputObserved) {
+        this.firstOutputObserved = true;
+        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "first_output" });
+      }
       const kind = event.assistantMessageEvent.type?.startsWith("thinking") ? "thinking" : "text";
       this.emit({ type: "activity", activity: kind, text: String(event.assistantMessageEvent.delta) });
     }
@@ -896,9 +951,13 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
         const readiness = await adapter.probe!(input);
         if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
       }
-      if (id === "pi") return new PiSession(await (dependencies.createPiSession
+      if (id === "pi") {
+        const distribution = ({ ...globalThis.process.env, ...dependencies.env, ...input.env }).LARKIN_PI_DISTRIBUTION === "builtin"
+          ? "builtin" : "external";
+        return new PiSession(await (dependencies.createPiSession
         ? dependencies.createPiSession(input)
-        : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn)));
+        : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn)), distribution);
+      }
       if (id === "codex") {
         const codexInput = dependencies.codexModelOverride?.trim()
           ? { ...input, model: dependencies.codexModelOverride.trim() }

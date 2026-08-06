@@ -17,6 +17,11 @@
 import type { FeishuHistoryMessage } from "./history-projection.js";
 import type { InboxEnvelope } from "./inbox-projection.js";
 import { createTransportBusinessContext } from "./transport-business-context.js";
+import { SpanKind } from "@opentelemetry/api";
+import { loadTelemetryConfig } from "../platform/telemetry-config.js";
+import { telemetrySingleton } from "../platform/telemetry-tracing.js";
+import path from "node:path";
+import { packageVersion } from "../platform/build-info.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -61,8 +66,23 @@ export function createAgentTransport(env: Record<string, string | undefined> = p
     logRequest,
     log,
   } = business;
+  let telemetry = telemetrySingleton();
+  try {
+    const binaryEntry = env.LARKIN_BINARY_ENTRY_PATH || process.argv[1] || "";
+    telemetry = telemetrySingleton(loadTelemetryConfig(env), { serviceVersion: packageVersion(path.resolve(path.dirname(binaryEntry), "../..")) });
+  } catch { /* telemetry is failure-isolated */ }
+  const telemetryObservedInputs = new WeakSet<object>();
 
   async function handle(input: AgentTransportInput): Promise<AgentTransportResponse> {
+    if (!telemetryObservedInputs.has(input)) {
+      telemetryObservedInputs.add(input);
+      const requestPath = String(input.path || "");
+      const name = requestPath.includes("/send") ? "feishu.send"
+        : /\/(?:events|inbox)(?:\/|$)/.test(requestPath.split("?")[0]) ? "inbox.consume" : "tool.execute";
+      const spanKind = name === "inbox.consume" ? SpanKind.CONSUMER : SpanKind.CLIENT;
+      try { return await telemetry.externalPhase(agentId, stateStore.paths.root, name, spanKind, () => handle(input)); }
+      finally { telemetryObservedInputs.delete(input); }
+    }
     const p = String(input.path || "");
     const pathNoQ = p.split("?")[0];
     const method = String(input.method || "GET").toUpperCase();

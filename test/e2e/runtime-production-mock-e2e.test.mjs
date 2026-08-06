@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createAgentStateStore } from "../../dist/agent/agent-state-store.mjs";
 import { runAgentCli } from "../../dist/app/agent-cli.mjs";
 import { runLarkCli } from "../../dist/app/lark-cli.mjs";
@@ -10,6 +11,8 @@ import { ContextPromptBuilder } from "../../dist/agent/context-prompt.mjs";
 import { createHostShell, memberNamesFromPayloads } from "../../dist/feishu/host-shell.mjs";
 import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 import { InteractionStateMachine } from "../../dist/agent/interaction-state-machine.mjs";
+import { createTelemetryRuntime } from "../../dist/platform/telemetry-tracing.mjs";
+import { TelemetrySpool } from "../../dist/platform/telemetry-spool.mjs";
 
 const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
 
@@ -503,6 +506,9 @@ for (const runtime of ["codex", "claude", "pi"]) {
     const workspaceDir = path.join(root, "agents", agentId);
     const stateDir = path.join(root, "state", "agents", agentId);
     const store = createAgentStateStore(root, agentId);
+    const telemetryConfig = { spoolDir: path.join(root, "telemetry", "spool"), headers: {}, maxBytes: 1024 * 1024,
+      maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 1_000 };
+    const telemetry = runtime === "codex" ? createTelemetryRuntime(telemetryConfig, { stateDirFor: () => stateDir }) : undefined;
     const session = new FakeNativeSession(runtime);
     const adapter = { id: runtime, capabilities: { busyInput: runtime === "claude" ? "gated" : "direct" }, async createSession() { return session; } };
     const runtimeHost = createRuntimeHost({
@@ -510,6 +516,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       promptBuilder: new ContextPromptBuilder(),
       stateStoreFor: () => store,
       assertOfficialCliReady: () => {},
+      telemetry,
     });
     const runtimeEvents = [];
     const memberCalls = [];
@@ -519,13 +526,41 @@ for (const runtime of ["codex", "claude", "pi"]) {
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify(storedConfig)}\n`, { mode: 0o600 });
     const agent = { agentId, name: agentId, runtime, model, feishuAppId: agentId, feishuProfile: agentId,
-      larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir, stateDir };
+      larkConfigDir: path.join(stateDir, "lark-cli-config"), workspaceDir, stateDir };
     const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-mock",
       LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_FEISHU_DRYRUN: "1", LARKIN_FEISHU_EVENT_FILE: path.join(root, "events.ndjson") };
+    if (telemetry) {
+      env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
+      const fakeCliRoot = path.join(root, "fake-official-lark-cli"); const binDir = path.join(fakeCliRoot, "bin"); fs.mkdirSync(binDir, { recursive: true });
+      fs.writeFileSync(path.join(fakeCliRoot, "package.json"), JSON.stringify({
+        name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "bin/lark-cli" },
+      }));
+      const sourceDir = path.join(stateDir, "lark-channel-source");
+      const channelConfigDir = path.join(agent.larkConfigDir, "lark-channel");
+      fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(channelConfigDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(sourceDir, "config.json"), JSON.stringify({ accounts: { app: { id: agentId,
+        secret: { source: "exec", provider: "larkin-bot-credential", id: agentId } } }, secrets: { providers: {
+        "larkin-bot-credential": { source: "exec", command: process.execPath, args: [], env: {
+          LARKIN_AGENT_ID: agentId, LARKIN_SECRET_PROVIDER_CONTEXT: "bind",
+        } },
+      } } }), { mode: 0o600 });
+      fs.writeFileSync(path.join(channelConfigDir, "config.json"), JSON.stringify({ apps: [{ appId: agentId,
+        appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
+      }] }), { mode: 0o600 });
+      fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/usr/bin/env bun
+const args=process.argv.slice(2);
+if(args[0]==="--version")process.stdout.write("1.0.79");
+else if(args[0]==="config"&&args[1]==="bind"&&args[2]==="--help")process.stdout.write("--source lark-channel --identity bot");
+else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message_id:"om_mock_sent"}}));
+`, { mode: 0o755 });
+      env.PATH = `${binDir}${path.delimiter}${process.env.PATH || ""}`;
+    }
     const hostShell = createHostShell({
       env,
       runtimeHost,
       managedCliForAgent: testManagedCli,
+      telemetry,
       execFileImpl(command, args, _options, callback) {
         memberCalls.push([command, ...args]);
         const data = args.includes("bots")
@@ -541,6 +576,16 @@ for (const runtime of ["codex", "claude", "pi"]) {
         event_id: `evt_${runtime}_1`, content: "first", create_time: "1784160000000", thread_id: null,
         _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
       session.emit({ type: "turn-start", turnId: `${runtime}-turn` });
+      session.emit({ type: "activity", activity: "thinking" });
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      session.emit({ type: "activity", activity: "tool" });
+      if (telemetry) {
+        const target = Object.keys(JSON.parse(fs.readFileSync(store.paths.map, "utf8")))[0];
+        const script = `const {transport}=require(${JSON.stringify(path.join(path.resolve(import.meta.dirname, "../.."), "dist/agent/agent-transport.cjs"))});transport.request({method:"POST",path:"/messages/send",body:{target:${JSON.stringify(target)},content:"mock reply"}}).then(r=>{if(!r.ok)throw new Error(r.error);process.stdout.write("sent")}).catch(e=>{console.error(e);process.exit(1)});`;
+        const sent = spawnSync(process.execPath, ["--eval", script], { cwd: path.resolve(import.meta.dirname, "../.."), encoding: "utf8",
+          env: { ...process.env, ...env, LARKIN_AGENT_ID: agentId } });
+        assert.equal(sent.status, 0, sent.stderr || sent.stdout); assert.equal(sent.stdout, "sent");
+      }
       await hostShell.ingest(agentId, { chat_id: `oc_${runtime}`, chat_type: "p2p", sender_id: "ou_sender", message_id: `om_${runtime}_2`,
         event_id: `evt_${runtime}_2`, content: "second", create_time: "1784160001000", thread_id: null,
         _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
@@ -597,8 +642,8 @@ for (const runtime of ["codex", "claude", "pi"]) {
       assert.equal(store.readNdjson("inbox").length, 2, "check must not consume the batch");
 
       stdout = ""; stderr = "";
-      const pollCode = runAgentCli(["inbox", "poll", "--target", target, "--limit", "1"], runtimeEnv, {
-        stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      const pollCode = await runAgentCli(["inbox", "poll", "--target", target, "--limit", "1"], runtimeEnv, {
+        stateStore: store, telemetry, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
       });
       assert.equal(pollCode, 0, stderr);
       const partial = JSON.parse(stdout);
@@ -620,8 +665,8 @@ for (const runtime of ["codex", "claude", "pi"]) {
       session.emit({ type: "turn-start", turnId: `${runtime}-rewake` });
 
       stdout = ""; stderr = "";
-      const finalPollCode = runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
-        stateStore: store, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      const finalPollCode = await runAgentCli(["inbox", "poll", "--target", target], runtimeEnv, {
+        stateStore: store, telemetry, io: { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
       });
       assert.equal(finalPollCode, 0, stderr);
       const drained = JSON.parse(stdout);
@@ -682,6 +727,27 @@ for (const runtime of ["codex", "claude", "pi"]) {
         session.emit({ type: "turn-end", turnId: "pi-auth-recovered" });
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+      }
+      if (telemetry) {
+        await telemetry.shutdown();
+        const records = new TelemetrySpool(telemetryConfig).list();
+        const spans = records.flatMap(({ payload }) => payload.resourceSpans)
+          .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+        const names = new Set(spans.map((span) => span.name));
+        for (const name of ["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]) {
+          assert.ok(names.has(name), `missing ${name}; observed: ${[...names].sort().join(", ")}`);
+        }
+        const turn = spans.find((span) => span.name === "agent.turn"); const trace = spans.filter((span) => span.traceId === turn.traceId);
+        assert.equal(trace.length, 8, JSON.stringify(trace)); const byName = Object.fromEntries(trace.map((span) => [span.name, span]));
+        const rootSpan = byName["larkin.message.process"];
+        for (const name of ["feishu.receive", "runtime.deliver", "agent.turn"]) assert.equal(byName[name].parentSpanId, rootSpan.spanId, name);
+        for (const name of ["model.activity", "tool.execute", "inbox.consume", "feishu.send"]) assert.equal(byName[name].parentSpanId, turn.spanId, name);
+        assert.equal(byName["inbox.consume"].attributes.find((attribute) => attribute.key === "larkin.observation.boundary")?.value?.stringValue,
+          "agent_cli", "the authoritative direct poll owns Inbox consumption telemetry");
+        assert.ok(spans.some((span) => span.name === "larkin.message.process" && span.links?.length === 1),
+          `busy steer is linked, not assigned a false parent: ${JSON.stringify(spans.filter((span) => span.name === "larkin.message.process"))}`);
+        const serialized = JSON.stringify(records.map((record) => record.payload));
+        for (const forbidden of ["ou_sender", "om_codex_1", "first", root]) assert.equal(serialized.includes(forbidden), false, forbidden);
       }
     } finally {
       await hostShell.shutdown("mock e2e complete");

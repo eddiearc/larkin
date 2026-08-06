@@ -389,25 +389,63 @@ test("Pi prompt reports acceptance only after the RPC command acknowledgement", 
   assert.deepEqual(result, { status: "accepted", inputId: "pi-input" });
 });
 
-test("Pi official RPC events normalize start, text/tool output, and settled boundary", async () => {
+test("bundled Pi emits content-free RPC timing phases while preserving normalized activity", async () => {
   let listener;
   const sdk = {
     sessionId: "pi-eye", prompt() {}, steer() {}, abort() {},
     subscribe(next) { listener = next; return () => {}; },
   };
-  const session = await createNativeRuntimeAdapter("pi", { createPiSession: async () => sdk }).createSession(create());
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
   const events = [];
   session.subscribe((event) => events.push(event));
   await session.prompt({ inputId: "pi-eye-input", kind: "user", text: "work", attempt: 0 });
   listener({ type: "turn_start" });
+  listener({ type: "turn_start" });
   listener({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "reason" } });
   listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "answer" } });
+  listener({ type: "tool_execution_end", toolName: "out-of-order", result: "FORBIDDEN_EARLY_RESULT" });
   listener({ type: "tool_execution_start", toolName: "read" });
   listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+  listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+  listener({ type: "agent_settled" });
   listener({ type: "agent_settled" });
   assert.deepEqual(events.filter((event) => ["turn-start", "activity", "turn-end"].includes(event.type))
     .map((event) => event.type === "activity" ? `${event.type}:${event.activity}` : event.type),
   ["turn-start", "activity:thinking", "activity:text", "activity:tool", "turn-end"]);
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), [
+    "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "completed", "tool_result", "settled",
+  ]);
+  assert.ok(observations.every((event) => event.runtime === "pi" && event.distribution === "builtin"));
+  assert.equal(events.filter((event) => event.type === "turn-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "turn-end").length, 1);
+  assert.doesNotMatch(JSON.stringify(observations), /reason|answer|read|out-of-order|FORBIDDEN|toolName|toolResult|message|text/);
+});
+
+test("bundled Pi closes an epoch RPC observation only from its original submit owner", async () => {
+  let acknowledgePrompt; let listener;
+  const sdk = {
+    sessionId: "pi-overlap", prompt() { return new Promise((resolve) => { acknowledgePrompt = resolve; }); },
+    steer() {}, abort() {}, subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk, env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = []; session.subscribe((event) => events.push(event));
+  const original = session.prompt({ inputId: "pi-overlap-original", kind: "user", text: "one", attempt: 0 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await session.busyInput({ inputId: "pi-overlap-steer", kind: "inbox_update", text: "two", attempt: 0 }),
+    { status: "accepted", inputId: "pi-overlap-steer" });
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation").map((event) => event.phase), ["rpc_submit"]);
+  acknowledgePrompt();
+  assert.deepEqual(await original, { status: "accepted", inputId: "pi-overlap-original" });
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation").map((event) => event.phase), ["rpc_submit", "rpc_accepted"]);
+  listener({ type: "turn_start" });
+  listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+  listener({ type: "agent_settled" });
 });
 
 test("Pi partial output followed by an aborted assistant remains an interrupted delivery", async () => {

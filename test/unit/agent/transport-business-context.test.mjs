@@ -6,6 +6,7 @@ import { test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { formatFeishuError } from "../../../dist/agent/transport-business-context.mjs";
+import { TelemetrySpool } from "../../../dist/platform/telemetry-spool.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SOURCE = path.join(ROOT, "src/agent/transport-business-context.ts");
@@ -92,10 +93,16 @@ else process.stdout.write(JSON.stringify({data:{message_id:"om_sent"}}));
 `, { mode: 0o755 });
     fs.symlinkSync(official, path.join(binDir, "lark-cli"));
     fs.writeFileSync(loginShell, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(official)}\n`, { mode: 0o755 });
-    const script = `const {transport}=require(${JSON.stringify(RUNTIME)}); transport.request({method:"POST",path:"/messages/send",body:{target:"#room",content:"@林一丹 你好",idempotencyKey:"fixed"}}).then(r=>process.stdout.write("RESULT="+JSON.stringify(r))).catch(e=>{console.error(e);process.exit(1)});`;
+    const generation = "fixture-generation"; const traceId = "a".repeat(32); const parentSpanId = "b".repeat(16);
+    const script = `const fs=require("node:fs");const path=require("node:path");const state=${JSON.stringify(stateDir)};const expiresAt=Date.now()+60000;
+const {inspectProcess}=require(${JSON.stringify(path.join(ROOT, "dist/platform/process-state.mjs"))});const processStartToken=inspectProcess(process.pid).startToken;
+fs.writeFileSync(path.join(state,"telemetry-runtime-generation.json"),JSON.stringify({version:1,generation:${JSON.stringify(generation)},pid:process.pid,processStartToken,expiresAt}));
+fs.writeFileSync(path.join(state,"telemetry-active-context.json"),JSON.stringify({version:2,generation:${JSON.stringify(generation)},traceId:${JSON.stringify(traceId)},spanId:${JSON.stringify(parentSpanId)},traceFlags:1,expiresAt}));
+const {transport}=require(${JSON.stringify(RUNTIME)}); transport.request({method:"POST",path:"/messages/send",body:{target:"#room",content:"@林一丹 你好",idempotencyKey:"fixed"}}).then(r=>process.stdout.write("RESULT="+JSON.stringify(r))).catch(e=>{console.error(e);process.exit(1)});`;
+    const telemetrySpool = path.join(temp, "telemetry", "spool");
     const result = spawnSync(process.execPath, ["--eval", script], { cwd: ROOT, encoding: "utf8", env: { ...process.env,
-      SHELL: loginShell, PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp,
-      LARKIN_AGENT_ID: agentId, CALL_SINK: sink } });
+      SHELL: loginShell, PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`, LARKIN_CONFIG_DIR: temp, LARKIN_AGENT_ID: agentId, CALL_SINK: sink,
+      LARKIN_TELEMETRY_SPOOL_DIR: telemetrySpool } });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const observed = JSON.parse(result.stdout.slice(result.stdout.indexOf("RESULT=") + 7));
     assert.equal(observed.data.messageId, "om_sent");
@@ -103,5 +110,9 @@ else process.stdout.write(JSON.stringify({data:{message_id:"om_sent"}}));
     assert.deepEqual(calls[0], ["im", "+chat-members-list", "--chat-id", "oc_room", "--json"]);
     assert.deepEqual(calls[1], ["im", "+chat-members-list", "--chat-id", "oc_room", "--member-id-type", "user_id", "--json"]);
     assert.deepEqual(calls[2], ["im", "+messages-send", "--chat-id", "oc_room", "--markdown", '<at id="ou_lin"></at> 你好', "--json", "--idempotency-key", "fixed"]);
+    const spans = new TelemetrySpool({ spoolDir: telemetrySpool, maxBytes: 1024 * 1024, maxFiles: 100, maxAgeMs: 60_000 }).list()
+      .flatMap(({ payload }) => payload.resourceSpans).flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+    const sent = spans.find((span) => span.name === "feishu.send");
+    assert.equal(sent.traceId, traceId); assert.equal(sent.parentSpanId, parentSpanId); assert.equal(sent.kind, 3);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

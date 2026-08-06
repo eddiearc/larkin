@@ -33,6 +33,7 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
       return;
     }
     case "pi-auth": await (await import("./pi-auth-cli.js")).main(rest, process.env); return;
+    case "telemetry": await (await import("./telemetry.js")).main(rest, process.env); return;
   }
 }
 

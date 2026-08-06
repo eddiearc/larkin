@@ -6,6 +6,9 @@ import { test } from "bun:test";
 import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
 import { documentCommentMessageId } from "../../../dist/feishu/document-comment.mjs";
+import { createTelemetryRuntime } from "../../../dist/platform/telemetry-tracing.mjs";
+import { TelemetrySpool } from "../../../dist/platform/telemetry-spool.mjs";
+import { runLarkCli } from "../../../dist/app/lark-cli.mjs";
 
 const waitFor = async (predicate, timeout = 2_000) => {
   const deadline = Date.now() + timeout;
@@ -117,7 +120,7 @@ test("production Host comment wiring persists one semantic Inbox wake and fails 
   }
 });
 
-function recoveryFixture(root, { fetchImpl, failInbox = () => false, logs = [] } = {}) {
+function recoveryFixture(root, { fetchImpl, failInbox = () => false, logs = [], telemetry } = {}) {
   const agentId = "cli_documentRecoveryA1";
   const agent = {
     agentId, name: agentId, runtime: "codex", model: "default", feishuAppId: agentId,
@@ -136,11 +139,17 @@ function recoveryFixture(root, { fetchImpl, failInbox = () => false, logs = [] }
   const runtimeHost = {
     subscribe() { return () => {}; }, async start() {}, async stop() {}, async shutdown() {},
     async deliver(_agentId, envelope) {
-      deliveries.push(envelope);
-      realStore.writeJson("runtimeDeliveries", {
-        version: 1, records: [{ deliveryId: `delivery-${envelope.message_id}`, messageId: envelope.message_id, status: "accepted" }],
-      });
-      return { status: "accepted", deliveryId: `delivery-${envelope.message_id}` };
+      const operation = async () => {
+        deliveries.push(envelope);
+        realStore.writeJson("runtimeDeliveries", {
+          version: 1, records: [{ deliveryId: `delivery-${envelope.message_id}`, messageId: envelope.message_id, status: "accepted" }],
+        });
+        return { status: "accepted", deliveryId: `delivery-${envelope.message_id}` };
+      };
+      const receipt = telemetry ? await telemetry.phase(envelope.message_id, "runtime.deliver", 3, operation) : await operation();
+      telemetry?.delivery(agentId, envelope.message_id, "accepted");
+      telemetry?.runtimeEvent(agentId, { type: "turn-start" });
+      return receipt;
     },
   };
   let channel;
@@ -165,9 +174,94 @@ function recoveryFixture(root, { fetchImpl, failInbox = () => false, logs = [] }
     env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0,
     stateStoreForImpl: () => wrappedStore,
     logImpl: (...parts) => logs.push(parts.join(" ")),
+    ...(telemetry ? { telemetry } : {}),
   });
   return { shell, get channel() { return channel; }, store: realStore, deliveries };
 }
+
+test("document comment Mock workflow traces safe rejection, pending replay, Inbox wake, Runtime turn, and same-thread reply", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-document-telemetry-"));
+  fs.chmodSync(root, 0o700);
+  const agentId = "cli_documentRecoveryA1";
+  const telemetryConfig = { spoolDir: path.join(root, "telemetry", "spool"), headers: {},
+    maxBytes: 1024 * 1024, maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 2_000 };
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const telemetry = createTelemetryRuntime(telemetryConfig, { stateDirFor: () => stateDir });
+  let failFetch = true;
+  const fixture = recoveryFixture(root, { telemetry, fetchImpl: async () => {
+    if (failFetch) throw new Error("FORBIDDEN_PROVIDER_ERROR doc_private_token");
+    return recoveredComment;
+  } });
+  try {
+    await fixture.shell.start();
+    await waitFor(() => fixture.channel?.handlers);
+
+    await fixture.channel.handlers.comment({
+      ...recoveryEvent, commentId: "comment_rejected_private", replyId: "reply_rejected_private", mentionedBot: false,
+      raw: { event_id: "evt_rejected_private", notice_type: "add_reply" },
+    });
+    assert.equal(fixture.deliveries.length, 0, "none + unmentioned must not wake Runtime");
+
+    writeCommentSubscription(root, agentId);
+    await fixture.channel.handlers.comment({ ...recoveryEvent, mentionedBot: false });
+    assert.equal(fixture.deliveries.length, 0);
+    assert.equal(Object.keys(fixture.store.readJson("documentComments", { items: {} }).items).length, 1);
+    failFetch = false;
+    fixture.channel.handlers.reconnected();
+    await waitFor(() => fixture.deliveries.length === 1);
+    const [envelope] = fixture.deliveries;
+    const target = envelope.target;
+    fixture.store.pollInbox({ target, limit: 1 });
+
+    const output = { stdout: "", stderr: "" }; const nativeCalls = [];
+    const cliDependencies = {
+        telemetry, stateStore: fixture.store,
+        io: { stdout: (text) => { output.stdout += text; }, stderr: (text) => { output.stderr += text; } },
+        nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.79" },
+        spawn: (command, args, options) => {
+          nativeCalls.push({ command, args, options });
+          return { status: 0, signal: null, output: [], pid: 1, stdout: "{\"ok\":true}\n", stderr: "", error: undefined };
+        },
+      };
+    const code = runLarkCli(["comment", "reply", "--message-id", envelope.message_id, "--text", "FORBIDDEN_REPLY_BODY", "--json"],
+      { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, cliDependencies);
+    assert.equal(code, 0, output.stderr);
+    assert.equal(nativeCalls.length, 1, "fixture must exercise the real locator-bound reply path once without Feishu I/O");
+    const rejectedReply = runLarkCli(["comment", "reply", "--message-id", envelope.message_id, "--text", "FORBIDDEN_CHANGED_BODY", "--json"],
+      { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, cliDependencies);
+    assert.equal(rejectedReply, 2);
+    assert.equal(nativeCalls.length, 1, "local reply rejection must not perform another Feishu write");
+    telemetry.runtimeEvent(agentId, { type: "turn-end" });
+    await telemetry.shutdown();
+
+    const records = new TelemetrySpool(telemetryConfig).list();
+    const spans = records.flatMap(({ payload }) => payload.resourceSpans)
+      .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+    const rejectedRoot = spans.find((span) => span.name === "larkin.message.process"
+      && span.attributes.some((attribute) => attribute.key === "larkin.filter.reason"));
+    assert.ok(rejectedRoot);
+    assert.equal(spans.some((span) => span.traceId === rejectedRoot.traceId && span.name === "agent.turn"), false);
+    const turn = spans.find((span) => span.name === "agent.turn");
+    assert.ok(turn);
+    const acceptedNames = new Set(spans.filter((span) => span.traceId === turn.traceId).map((span) => span.name));
+    for (const name of ["document.comment.receive", "document.comment.gate", "document.comment.pending", "document.comment.replay",
+      "document.comment.resolve", "document.comment.inbox", "runtime.deliver", "agent.turn", "document.comment.reply"]) {
+      assert.ok(acceptedNames.has(name), `missing ${name}`);
+    }
+    const replies = spans.filter((span) => span.name === "document.comment.reply");
+    assert.equal(replies.length, 2);
+    assert.ok(replies.every((reply) => reply.parentSpanId === turn.spanId));
+    assert.deepEqual(replies.map((reply) => reply.attributes.find((attribute) => attribute.key === "larkin.operation.outcome")?.value?.stringValue).sort(), ["error", "success"]);
+    assert.equal(replies.filter((reply) => reply.status.code === 2).length, 1);
+    const serialized = JSON.stringify(records);
+    for (const forbidden of ["doc_private_token", "comment_private", "reply_private", "ou_recovery_human", "FORBIDDEN_PROVIDER_ERROR",
+      "FORBIDDEN_REPLY_BODY", "FORBIDDEN_CHANGED_BODY", "/fixed/", stateDir]) assert.equal(serialized.includes(forbidden), false, forbidden);
+  } finally {
+    await telemetry.shutdown().catch(() => {});
+    await fixture.shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const recoveryEvent = {
   fileToken: "doc_private_token", fileType: "docx", commentId: "comment_private", replyId: "reply_private",

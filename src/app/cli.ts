@@ -39,6 +39,7 @@ const routes: Record<string, Route> = {
   config: ["agent-config", "config"],
   session: ["session-cli"],
   "pi-auth": ["pi-auth"],
+  telemetry: ["telemetry"],
 };
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
   && process.env.LARKIN_AGENT_ID.trim().length > 0;
@@ -87,6 +88,8 @@ Atomically replace one idle, zero-backlog Agent Runtime session through authenti
 Show non-sensitive official Pi credential metadata or remove one target provider credential.`,
   comment: `Usage: larkin comment reply --message-id <doc_comment_message_id> --text '<reply>' --json
 Reply once, as the Runtime-bound Bot, to the exact cloud-document comment locator supplied by canonical Inbox.`,
+  telemetry: `Usage: larkin telemetry <status|export|import|flush>
+Inspect the durable local trace queue, move an offline bundle, or upload queued OTLP traces.`,
 };
 
 if (command === "--version" || command === "-V") {
@@ -134,6 +137,7 @@ Usage: larkin <command>
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
   pi-auth          Show non-sensitive built-in Pi auth status or logout one provider
   comment reply    Reply to the exact cloud-document comment bound by a polled Inbox message
+  telemetry        Inspect, export, import, or flush the durable OpenTelemetry trace queue
   <lark-cli 命令组>  im/docs/wiki/drive 等 lark-cli 命令原样转发，机器人身份已锁定（如 larkin im +chat-list）
 Getting started:
   First-time setup: larkin setup

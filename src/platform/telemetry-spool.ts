@@ -22,8 +22,11 @@ const READY = /^(?:span-[0-9a-f-]+|import-[0-9a-f]{64})\.json$/;
 const REMNANT = /^\.(?:corrupt|write|ack|delete|stale-lock|purge)-[0-9A-Za-z-]+(?:\.(?:json|tmp|dir))?$/;
 const HEX_TRACE = /^[0-9a-f]{32}$/;
 const HEX_SPAN = /^[0-9a-f]{16}$/;
-const SPAN_NAMES = new Set(["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send"]);
-const ATTRIBUTE_KEYS = new Set(["service.name", "service.version", "service.instance.id", "larkin.agent.id_hash", "messaging.message.id_hash", "larkin.message.relation", "larkin.observation.boundary", "larkin.activity.type"]);
+const SPAN_NAMES = new Set(["larkin.message.process", "feishu.receive", "runtime.deliver", "agent.turn", "model.activity", "tool.execute", "inbox.consume", "feishu.send",
+  "document.comment.receive", "document.comment.gate", "document.comment.pending", "document.comment.replay", "document.comment.resolve", "document.comment.inbox", "document.comment.reply",
+  "pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]);
+const ATTRIBUTE_KEYS = new Set(["service.name", "service.version", "service.instance.id", "larkin.agent.id_hash", "messaging.message.id_hash", "larkin.message.relation", "larkin.message.source",
+  "larkin.observation.boundary", "larkin.activity.type", "larkin.filter.reason", "larkin.runtime.id", "larkin.runtime.distribution", "larkin.operation.outcome"]);
 const SENSITIVE = /(?:bearer\s|(?:api[_-]?key|authorization|password|token|secret|cookie)\s*[=:]|(?:sk|ghp|github_pat)-?[a-z0-9_-]{8})/i;
 const ABSOLUTE_PATH = /(?:^|[\s"'=])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/;
 const emptyDiagnostics = (): Diagnostics => ({ droppedFiles: 0, cleanedRemnantFiles: 0, droppedSpans: 0, lastUploadAt: null, lastErrorCategory: null });
@@ -62,8 +65,13 @@ function validateAttributes(value: unknown): void {
       if (key === "service.instance.id" && !/^[0-9a-f-]{16,64}$/i.test(text)) invalidPayload();
       if (["larkin.agent.id_hash", "messaging.message.id_hash"].includes(key) && !/^[0-9a-f]{24}$/.test(text)) invalidPayload();
       if (key === "larkin.message.relation" && text !== "fan_in") invalidPayload();
-      if (key === "larkin.observation.boundary" && !["runtime_host", "runtime_event_interval", "agent_cli", "agent_transport"].includes(text)) invalidPayload();
+      if (key === "larkin.observation.boundary" && !["runtime_host", "runtime_event_interval", "agent_cli", "agent_transport", "pi_rpc", "comment_cli"].includes(text)) invalidPayload();
       if (key === "larkin.activity.type" && !["thinking", "text", "tool", "internal"].includes(text)) invalidPayload();
+      if (key === "larkin.message.source" && !["im", "document_comment"].includes(text)) invalidPayload();
+      if (key === "larkin.filter.reason" && !["subscription_unverified", "self_or_missing_operator", "unsupported_file_type", "duplicate"].includes(text)) invalidPayload();
+      if (key === "larkin.runtime.id" && text !== "pi") invalidPayload();
+      if (key === "larkin.runtime.distribution" && !["builtin", "external"].includes(text)) invalidPayload();
+      if (key === "larkin.operation.outcome" && !["success", "error"].includes(text)) invalidPayload();
     }
   }
 }

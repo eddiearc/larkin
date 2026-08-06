@@ -55,19 +55,27 @@ class DurableSpanExporter implements SpanExporter {
 interface MessageTrace {
   root: Span; context: Context; agentId: string; messageHash: string; turn?: Span; turnContext?: Context;
   activitySpan?: Span; activityName?: "model.activity" | "tool.execute";
+  pi?: {
+    distribution: "builtin" | "external";
+    submitAt?: number; acceptedAt?: number; turnStartAt?: number; firstOutputAt?: number; completedAt?: number;
+    rpcSpan?: Span; lifecycleSpan?: Span; outputWaitSpan?: Span; generationSpan?: Span; toolSpan?: Span; settleSpan?: Span;
+  };
 }
 export interface TelemetryRuntime {
-  beginMessage(agentId: string, messageId: string): void;
-  phase<T>(messageId: string, name: "feishu.receive" | "runtime.deliver", spanKind: SpanKind, operation: () => Promise<T>): Promise<T>;
+  beginMessage(agentId: string, messageId: string, source?: "im" | "document_comment"): void;
+  phase<T>(messageId: string, name: "feishu.receive" | "runtime.deliver" | "document.comment.receive" | "document.comment.gate"
+    | "document.comment.pending" | "document.comment.replay" | "document.comment.resolve" | "document.comment.inbox",
+    spanKind: SpanKind, operation: () => Promise<T>): Promise<T>;
+  filterMessage(messageId: string, reason: "subscription_unverified" | "self_or_missing_operator" | "unsupported_file_type" | "duplicate"): void;
   delivery(agentId: string, messageId: string, status: "accepted" | "consumed" | "deferred" | "duplicate" | "error"): void;
   runtimeEvent(agentId: string, event: NormalizedRuntimeEvent): void;
-  externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send", spanKind: SpanKind,
-    operation: () => T | Promise<T>, boundary?: "agent_cli" | "agent_transport"): T | Promise<T>;
+  externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send" | "document.comment.reply", spanKind: SpanKind,
+    operation: () => T | Promise<T>, boundary?: "agent_cli" | "agent_transport" | "comment_cli"): T | Promise<T>;
   shutdown(): Promise<void>;
 }
 
 const NOOP: TelemetryRuntime = {
-  beginMessage() {}, async phase(_id, _name, _kind, operation) { return operation(); }, delivery() {}, runtimeEvent() {},
+  beginMessage() {}, async phase(_id, _name, _kind, operation) { return operation(); }, filterMessage() {}, delivery() {}, runtimeEvent() {},
   externalPhase(_agent, _state, _name, _kind, operation) { return operation(); }, async shutdown() {},
 };
 
@@ -176,8 +184,18 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
   const closeActivity = (current: MessageTrace): void => {
     current.activitySpan?.end(); delete current.activitySpan; delete current.activityName;
   };
+  const closePi = (current: MessageTrace, failed = false): void => {
+    const state = current.pi; if (!state) return;
+    for (const key of ["rpcSpan", "lifecycleSpan", "outputWaitSpan", "generationSpan", "toolSpan", "settleSpan"] as const) {
+      const span = state[key];
+      if (!span) continue;
+      if (failed) span.setStatus({ code: SpanStatusCode.ERROR });
+      span.end(); delete state[key];
+    }
+  };
   const endTrace = (current: MessageTrace, failed = false): void => {
     closeActivity(current);
+    closePi(current, failed);
     if (current.turn) { if (failed) current.turn.setStatus({ code: SpanStatusCode.ERROR }); current.turn.end(); }
     if (failed) current.root.setStatus({ code: SpanStatusCode.ERROR }); current.root.end();
     for (const [messageId, candidate] of messages) if (candidate === current) messages.delete(messageId);
@@ -187,12 +205,14 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     }
   };
   return {
-    beginMessage(agentId, messageId) {
+    beginMessage(agentId, messageId, source = "im") {
       try {
+        if (messages.has(messageId)) return;
         const active = activeByAgent.get(agentId);
         const linkedContext = active?.turn?.spanContext() ?? active?.root.spanContext();
         const root = tracer.startSpan("larkin.message.process", { kind: SpanKind.CONSUMER,
           attributes: { "larkin.agent.id_hash": safeHash(agentId), "messaging.message.id_hash": safeHash(messageId),
+            "larkin.message.source": source,
             ...(linkedContext ? { "larkin.message.relation": "fan_in" } : {}) },
           ...(linkedContext ? { links: [{ context: linkedContext }] } : {}),
         });
@@ -207,8 +227,19 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
       try { span = tracer.startSpan(name, { kind: spanKind }, current.context); }
       catch { return operation(); }
       try { return await context.with(trace.setSpan(current.context, span), operation); }
-      catch (error) { span.setStatus({ code: SpanStatusCode.ERROR }); endTrace(current, true); throw error; }
+      catch (error) {
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        if (!name.startsWith("document.comment.")) endTrace(current, true);
+        throw error;
+      }
       finally { span.end(); }
+    },
+    filterMessage(messageId, reason) {
+      try {
+        const current = messages.get(messageId); if (!current) return;
+        current.root.setAttribute("larkin.filter.reason", reason);
+        endTrace(current, false);
+      } catch { /* isolated */ }
     },
     delivery(agentId, messageId, status) {
       try {
@@ -227,10 +258,63 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
     runtimeEvent(agentId, event) {
       try {
         const current = activeByAgent.get(agentId); if (!current) return;
-        if (event.type === "turn-start") {
+        if (event.type === "runtime-observation" && event.runtime === "pi") {
+          const state = current.pi ??= { distribution: event.distribution };
+          state.distribution = event.distribution;
+          const observedAt = now();
+          if (event.distribution !== "builtin") return;
+          const spanAttributes = { "larkin.observation.boundary": "pi_rpc", "larkin.runtime.id": "pi",
+            "larkin.runtime.distribution": "builtin" };
+          const start = (name: "pi.rpc.submit" | "pi.rpc.lifecycle" | "pi.output.wait" | "pi.generation"
+            | "pi.tool.wait" | "pi.rpc.settle", startTime: number): Span | undefined => {
+            if (!current.turnContext) return undefined;
+            return tracer.startSpan(name, { kind: SpanKind.INTERNAL, startTime, attributes: spanAttributes }, current.turnContext);
+          };
+          if (event.phase === "rpc_submit" && state.submitAt === undefined) state.submitAt = observedAt;
+          else if (event.phase === "rpc_accepted" && state.acceptedAt === undefined) {
+            state.acceptedAt = observedAt;
+            if (state.rpcSpan) { state.rpcSpan.end(observedAt); delete state.rpcSpan; }
+            if (current.turnContext && !state.outputWaitSpan) state.outputWaitSpan = start("pi.output.wait", observedAt);
+          } else if (event.phase === "turn_start" && state.turnStartAt === undefined) state.turnStartAt = observedAt;
+          else if (event.phase === "first_output" && state.firstOutputAt === undefined) {
+            state.firstOutputAt = observedAt;
+            if (state.outputWaitSpan) { state.outputWaitSpan.end(observedAt); delete state.outputWaitSpan; }
+            if (current.turnContext && !state.generationSpan) state.generationSpan = start("pi.generation", observedAt);
+          } else if (event.phase === "tool_call" && !state.toolSpan) {
+            state.toolSpan = start("pi.tool.wait", observedAt);
+          } else if (event.phase === "tool_result" && state.toolSpan) {
+            state.toolSpan.end(observedAt); delete state.toolSpan;
+          } else if (event.phase === "completed" && state.completedAt === undefined) {
+            state.completedAt = observedAt;
+            if (state.generationSpan) { state.generationSpan.end(observedAt); delete state.generationSpan; }
+            if (!state.settleSpan) state.settleSpan = start("pi.rpc.settle", observedAt);
+          } else if (event.phase === "settled") {
+            if (state.toolSpan) { state.toolSpan.end(observedAt); delete state.toolSpan; }
+            if (state.generationSpan) { state.generationSpan.end(observedAt); delete state.generationSpan; }
+            if (state.settleSpan) { state.settleSpan.end(observedAt); delete state.settleSpan; }
+            if (state.lifecycleSpan) { state.lifecycleSpan.end(observedAt); delete state.lifecycleSpan; }
+          }
+        } else if (event.type === "turn-start") {
+          const pi = current.pi;
           current.turn = tracer.startSpan("agent.turn", { kind: SpanKind.INTERNAL,
-            attributes: { "larkin.observation.boundary": "runtime_host" } }, current.context);
+            ...(pi?.submitAt !== undefined ? { startTime: pi.submitAt } : {}),
+            attributes: { "larkin.observation.boundary": "runtime_host",
+              ...(pi ? { "larkin.runtime.id": "pi", "larkin.runtime.distribution": pi.distribution } : {}) } }, current.context);
           current.turnContext = trace.setSpan(current.context, current.turn);
+          if (pi?.distribution === "builtin") {
+            const spanAttributes = { "larkin.observation.boundary": "pi_rpc", "larkin.runtime.id": "pi",
+              "larkin.runtime.distribution": "builtin" };
+            const submitAt = pi.submitAt ?? pi.turnStartAt ?? now();
+            pi.lifecycleSpan = tracer.startSpan("pi.rpc.lifecycle", { kind: SpanKind.INTERNAL, startTime: submitAt,
+              attributes: spanAttributes }, current.turnContext);
+            pi.rpcSpan = tracer.startSpan("pi.rpc.submit", { kind: SpanKind.INTERNAL, startTime: submitAt,
+              attributes: spanAttributes }, current.turnContext);
+            if (pi.acceptedAt !== undefined) { pi.rpcSpan.end(pi.acceptedAt); delete pi.rpcSpan; }
+            const waitAt = pi.acceptedAt ?? pi.turnStartAt ?? now();
+            pi.outputWaitSpan = tracer.startSpan("pi.output.wait", { kind: SpanKind.INTERNAL, startTime: waitAt,
+              attributes: spanAttributes }, current.turnContext);
+            if (pi.firstOutputAt !== undefined) { pi.outputWaitSpan.end(pi.firstOutputAt); delete pi.outputWaitSpan; }
+          }
           writeContext(agentId, current.turn.spanContext());
         } else if (event.type === "activity") {
           const activityName = event.activity === "tool" ? "tool.execute" : "model.activity";
@@ -246,8 +330,8 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
         else if (event.type === "error" || event.type === "configuration-error" || event.type === "closed") endTrace(current, true);
       } catch { /* isolated */ }
     },
-    externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send", spanKind: SpanKind,
-      operation: () => T | Promise<T>, boundary: "agent_cli" | "agent_transport" = "agent_transport") {
+    externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send" | "document.comment.reply", spanKind: SpanKind,
+      operation: () => T | Promise<T>, boundary: "agent_cli" | "agent_transport" | "comment_cli" = "agent_transport") {
       let span: Span; let parentContext: Context;
       try {
         const parent = readActiveContext(stateDir, now(), inspectOwner);
@@ -257,12 +341,26 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
       } catch { return operation(); }
       let result: T | Promise<T>;
       try { result = context.with(trace.setSpan(parentContext, span), operation); }
-      catch (error) { span.setStatus({ code: SpanStatusCode.ERROR }); span.end(); throw error; }
+      catch (error) {
+        if (name === "document.comment.reply") span.setAttribute("larkin.operation.outcome", "error");
+        span.setStatus({ code: SpanStatusCode.ERROR }); span.end(); throw error;
+      }
+      const recordOutcome = (value: T): T => {
+        if (name === "document.comment.reply") {
+          const success = typeof value !== "number" || value === 0;
+          span.setAttribute("larkin.operation.outcome", success ? "success" : "error");
+          if (!success) span.setStatus({ code: SpanStatusCode.ERROR });
+        }
+        return value;
+      };
       if (result && typeof (result as Promise<T>).then === "function") {
-        return Promise.resolve(result).catch((error) => { span.setStatus({ code: SpanStatusCode.ERROR }); throw error; })
+        return Promise.resolve(result).then(recordOutcome).catch((error) => {
+          if (name === "document.comment.reply") span.setAttribute("larkin.operation.outcome", "error");
+          span.setStatus({ code: SpanStatusCode.ERROR }); throw error;
+        })
           .finally(() => span.end());
       }
-      span.end(); return result;
+      recordOutcome(result as T); span.end(); return result;
     },
     async shutdown() {
       uploader?.stop();

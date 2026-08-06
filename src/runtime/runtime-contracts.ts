@@ -38,6 +38,8 @@ export interface UpstreamProviderError {
 
 export type NormalizedRuntimeEvent =
   | { type: "session-init"; sessionId: string; model?: string; reasoningEffort?: string }
+  | { type: "runtime-observation"; runtime: "pi"; distribution: "builtin" | "external";
+      phase: "rpc_submit" | "rpc_accepted" | "turn_start" | "first_output" | "tool_call" | "tool_result" | "completed" | "settled" }
   | { type: "turn-start"; turnId?: string }
   | { type: "activity"; activity: "thinking" | "text" | "tool" | "internal"; text?: string; name?: string }
   | { type: "turn-end"; sessionId?: string; turnId?: string }

@@ -571,7 +571,8 @@ export function createHostShell({
     const event = pendingEvent(record);
     let context;
     try {
-      context = await resolveDocumentCommentContext(channel.comments, event);
+      const resolve = () => resolveDocumentCommentContext(channel.comments, event);
+      context = await (telemetry?.phase(record.messageId, "document.comment.resolve", SpanKind.CLIENT, resolve) ?? resolve());
     } catch (error) {
       const diagnostic = classifyDocumentCommentReadFailure(error);
       recordDocumentCommentFailure(agent, diagnostic.category, diagnostic.reason);
@@ -596,13 +597,17 @@ export function createHostShell({
       },
     });
     let preparation;
-    try { preparation = stateStore(agent).prepareInboxDelivery(envelope); }
+    try {
+      const persistInbox = async () => stateStore(agent).prepareInboxDelivery(envelope);
+      preparation = await (telemetry?.phase(record.messageId, "document.comment.inbox", SpanKind.PRODUCER, persistInbox) ?? persistInbox());
+    }
     catch {
       recordDocumentCommentFailure(agent, "inbox_write_failure", "canonical_inbox_write_failed");
       throw new Error("document comment canonical Inbox 写入失败");
     }
     if (!["appended", "present"].includes(preparation)) {
       removePendingDocumentComment(agent, record.messageId);
+      telemetry?.filterMessage(record.messageId, "duplicate");
       log(`document comment 重复已去重 agent=${agent.name} state=${preparation}`);
       return;
     }
@@ -636,7 +641,11 @@ export function createHostShell({
     if (active) return active;
     const replay = (async () => {
       for (const record of readPendingDocumentComments(agent)) {
-        try { await processPendingDocumentComment(agent, record, channel); }
+        try {
+          telemetry?.beginMessage(agent.agentId, record.messageId, "document_comment");
+          const replayOne = () => processPendingDocumentComment(agent, record, channel);
+          await (telemetry?.phase(record.messageId, "document.comment.replay", SpanKind.CONSUMER, replayOne) ?? replayOne());
+        }
         catch { log(`document comment 待处理记录仍需恢复 agent=${agent.name} reason=processing_failed`); }
       }
     })().finally(() => replayingDocumentComments.delete(agent.agentId));
@@ -644,26 +653,44 @@ export function createHostShell({
     return replay;
   };
   const onDocumentComment = async (agent: ConfiguredAgent, event: CommentEvent, channel: LarkChannel): Promise<void> => {
-    const existing = pendingDocumentComment(agent, documentCommentMessageId(agent.agentId, event));
+    const messageId = documentCommentMessageId(agent.agentId, event);
+    telemetry?.beginMessage(agent.agentId, messageId, "document_comment");
+    const receive = async () => undefined;
+    await (telemetry?.phase(messageId, "document.comment.receive", SpanKind.CONSUMER, receive) ?? receive());
+    const existing = pendingDocumentComment(agent, messageId);
     if (existing) {
-      await processPendingDocumentComment(agent, existing, channel);
+      const replayOne = () => processPendingDocumentComment(agent, existing, channel);
+      await (telemetry?.phase(messageId, "document.comment.replay", SpanKind.CONSUMER, replayOne) ?? replayOne());
       return;
     }
-    let subscription: EffectiveDocumentCommentSubscription;
-    try { subscription = readDocumentCommentSubscription(larkinHome, agent.feishuProfile); }
-    catch {
-      subscription = { mode: "none", status: "safe-default", source: "legacy-default", dimension: null };
-      log(`document comment subscription 状态不可读，使用安全默认 agent=${agent.name}`);
-    }
-    if (subscription.mode !== "subscribed" && !event.mentionedBot) {
+    const gate = async (): Promise<{ subscription: EffectiveDocumentCommentSubscription; rejected?: "subscription_unverified" | "self_or_missing_operator" | "unsupported_file_type" }> => {
+      let subscription: EffectiveDocumentCommentSubscription;
+      try { subscription = readDocumentCommentSubscription(larkinHome, agent.feishuProfile); }
+      catch {
+        subscription = { mode: "none", status: "safe-default", source: "legacy-default", dimension: null };
+        log(`document comment subscription 状态不可读，使用安全默认 agent=${agent.name}`);
+      }
+      if (subscription.mode !== "subscribed" && !event.mentionedBot) return { subscription, rejected: "subscription_unverified" };
+      if (!event.operator.openId || event.operator.openId === agent.botOpenId || event.operator.openId === channel.botIdentity?.openId) {
+        return { subscription, rejected: "self_or_missing_operator" };
+      }
+      if (!["doc", "docx", "sheet", "file"].includes(event.fileType)) return { subscription, rejected: "unsupported_file_type" };
+      return { subscription };
+    };
+    const gated = await (telemetry?.phase(messageId, "document.comment.gate", SpanKind.INTERNAL, gate) ?? gate());
+    const subscription = gated.subscription;
+    if (gated.rejected === "subscription_unverified") {
+      telemetry?.filterMessage(messageId, gated.rejected);
       log(`document comment 未 @Bot 且无已验证订阅，忽略 agent=${agent.name} status=${subscription.status} source=${subscription.source}`);
       return;
     }
-    if (!event.operator.openId || event.operator.openId === agent.botOpenId || event.operator.openId === channel.botIdentity?.openId) {
+    if (gated.rejected === "self_or_missing_operator") {
+      telemetry?.filterMessage(messageId, gated.rejected);
       log(`document comment 自身或缺少操作者，忽略 agent=${agent.name}`);
       return;
     }
-    if (!["doc", "docx", "sheet", "file"].includes(event.fileType)) {
+    if (gated.rejected === "unsupported_file_type") {
+      telemetry?.filterMessage(messageId, gated.rejected);
       recordDocumentCommentFailure(agent, "comment_unavailable_or_empty", "unsupported_file_type");
       log(`document comment 文件类型不支持，忽略 agent=${agent.name}`);
       return;
@@ -671,7 +698,8 @@ export function createHostShell({
     const record = pendingRecord(agent, event, subscription);
     let durableRecord: PendingDocumentComment;
     try {
-      durableRecord = persistPendingDocumentComment(agent, record);
+      const persistPending = async () => persistPendingDocumentComment(agent, record);
+      durableRecord = await (telemetry?.phase(messageId, "document.comment.pending", SpanKind.PRODUCER, persistPending) ?? persistPending());
     } catch (error) {
       if ((error as { code?: unknown }).code === "PENDING_DOCUMENT_COMMENT_CAPACITY") {
         recordDocumentCommentFailure(agent, "pending_capacity_exhausted", "pending_capacity_exhausted");

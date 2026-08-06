@@ -69,6 +69,68 @@ test("official OTel spans form a privacy-safe end-to-end tree in the durable OTL
   for (const record of records) assert.equal(fs.statSync(record.file).mode & 0o777, 0o600);
 });
 
+test("bundled Pi RPC spans expose queue, observed TTFT, generation, tool wait, and settle durations without payload content", async () => {
+  const root = temp(); const stateDir = path.join(root, "agent-state"); let time = Date.now();
+  const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir, now: () => time });
+  const observation = (phase) => runtime.runtimeEvent("cli_pi_private", {
+    type: "runtime-observation", runtime: "pi", distribution: "builtin", phase,
+  });
+  runtime.beginMessage("cli_pi_private", "doc_comment_private", "document_comment");
+  runtime.delivery("cli_pi_private", "doc_comment_private", "accepted");
+  observation("rpc_submit");
+  time += 11; observation("rpc_accepted");
+  time += 7; observation("turn_start");
+  runtime.runtimeEvent("cli_pi_private", { type: "turn-start", turnId: "FORBIDDEN_TURN" });
+  time += 23; observation("first_output");
+  time += 5; observation("tool_call");
+  time += 31; observation("tool_result");
+  time += 41; observation("completed");
+  time += 13; observation("settled");
+  runtime.runtimeEvent("cli_pi_private", { type: "turn-end" });
+  await runtime.shutdown();
+
+  const records = new TelemetrySpool(config(root)).list();
+  const spans = records.flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+  const byName = Object.fromEntries(spans.map((span) => [span.name, span]));
+  for (const name of ["pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]) {
+    assert.ok(byName[name], `missing ${name}`);
+    assert.equal(byName[name].parentSpanId, byName["agent.turn"].spanId, name);
+  }
+  const durationMs = (name) => Number((BigInt(byName[name].endTimeUnixNano) - BigInt(byName[name].startTimeUnixNano)) / 1_000_000n);
+  assert.deepEqual(Object.fromEntries(["pi.rpc.submit", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]
+    .map((name) => [name, durationMs(name)])), {
+    "pi.rpc.submit": 11, "pi.output.wait": 30, "pi.generation": 77, "pi.tool.wait": 31, "pi.rpc.settle": 13,
+  });
+  const serialized = JSON.stringify(records);
+  for (const forbidden of ["cli_pi_private", "doc_comment_private", "FORBIDDEN_TURN", "toolName", "prompt", "result", stateDir]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+});
+
+test("external Pi records its distribution without claiming bundled RPC visibility", async () => {
+  const root = temp(); const stateDir = path.join(root, "agent-state");
+  const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir });
+  runtime.beginMessage("cli_external_pi", "om_external_pi");
+  runtime.delivery("cli_external_pi", "om_external_pi", "accepted");
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "rpc_submit",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "turn_start",
+  });
+  runtime.runtimeEvent("cli_external_pi", { type: "turn-start" });
+  runtime.runtimeEvent("cli_external_pi", { type: "turn-end" });
+  await runtime.shutdown();
+
+  const spans = new TelemetrySpool(config(root)).list().flatMap(({ payload }) => payload.resourceSpans)
+    .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+  const turn = spans.find((span) => span.name === "agent.turn");
+  assert.ok(turn);
+  assert.equal(turn.attributes.find((attribute) => attribute.key === "larkin.runtime.distribution")?.value?.stringValue, "external");
+  assert.equal(spans.some((span) => span.name.startsWith("pi.")), false);
+});
+
 test("spool survives failures, bounds retention, and export/import remains idempotent", () => {
   const root = temp(); const source = new TelemetrySpool(config(root, { maxFiles: 2 }));
   source.enqueue(payload("1")); source.enqueue(payload("2")); source.enqueue(payload("3"));

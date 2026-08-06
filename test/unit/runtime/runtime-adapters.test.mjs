@@ -389,13 +389,16 @@ test("Pi prompt reports acceptance only after the RPC command acknowledgement", 
   assert.deepEqual(result, { status: "accepted", inputId: "pi-input" });
 });
 
-test("Pi official RPC events normalize start, text/tool output, and settled boundary", async () => {
+test("bundled Pi emits content-free RPC timing phases while preserving normalized activity", async () => {
   let listener;
   const sdk = {
     sessionId: "pi-eye", prompt() {}, steer() {}, abort() {},
     subscribe(next) { listener = next; return () => {}; },
   };
-  const session = await createNativeRuntimeAdapter("pi", { createPiSession: async () => sdk }).createSession(create());
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
   const events = [];
   session.subscribe((event) => events.push(event));
   await session.prompt({ inputId: "pi-eye-input", kind: "user", text: "work", attempt: 0 });
@@ -403,11 +406,18 @@ test("Pi official RPC events normalize start, text/tool output, and settled boun
   listener({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "reason" } });
   listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "answer" } });
   listener({ type: "tool_execution_start", toolName: "read" });
+  listener({ type: "tool_execution_end", toolName: "read", result: "FORBIDDEN_TOOL_RESULT" });
   listener({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
   listener({ type: "agent_settled" });
   assert.deepEqual(events.filter((event) => ["turn-start", "activity", "turn-end"].includes(event.type))
     .map((event) => event.type === "activity" ? `${event.type}:${event.activity}` : event.type),
   ["turn-start", "activity:thinking", "activity:text", "activity:tool", "turn-end"]);
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), [
+    "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "tool_result", "completed", "settled",
+  ]);
+  assert.ok(observations.every((event) => event.runtime === "pi" && event.distribution === "builtin"));
+  assert.doesNotMatch(JSON.stringify(observations), /reason|answer|read|FORBIDDEN|toolName|toolResult|message|text/);
 });
 
 test("Pi partial output followed by an aborted assistant remains an interrupted delivery", async () => {

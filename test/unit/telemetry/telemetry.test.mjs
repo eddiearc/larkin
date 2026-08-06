@@ -146,13 +146,22 @@ test("bundled Pi preflight timeout records prompt wait and compaction without in
   }
 });
 
-test("external Pi records its distribution without claiming bundled RPC visibility", async () => {
+test("external Pi records privacy-safe preflight spans without claiming bundled turn internals", async () => {
   const root = temp(); const stateDir = path.join(root, "agent-state");
   const runtime = createTelemetryRuntime(config(root), { stateDirFor: () => stateDir });
   runtime.beginMessage("cli_external_pi", "om_external_pi");
   runtime.delivery("cli_external_pi", "om_external_pi", "accepted");
   runtime.runtimeEvent("cli_external_pi", {
     type: "runtime-observation", runtime: "pi", distribution: "external", phase: "rpc_submit",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "compaction_start",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "compaction_end",
+  });
+  runtime.runtimeEvent("cli_external_pi", {
+    type: "runtime-observation", runtime: "pi", distribution: "external", phase: "rpc_accepted",
   });
   runtime.runtimeEvent("cli_external_pi", {
     type: "runtime-observation", runtime: "pi", distribution: "external", phase: "turn_start",
@@ -166,7 +175,15 @@ test("external Pi records its distribution without claiming bundled RPC visibili
   const turn = spans.find((span) => span.name === "agent.turn");
   assert.ok(turn);
   assert.equal(turn.attributes.find((attribute) => attribute.key === "larkin.runtime.distribution")?.value?.stringValue, "external");
-  assert.equal(spans.some((span) => span.name.startsWith("pi.")), false);
+  for (const name of ["pi.prompt.wait", "pi.compaction"]) {
+    const span = spans.find((candidate) => candidate.name === name);
+    assert.ok(span, name);
+    assert.equal(span.parentSpanId, spans.find((candidate) => candidate.name === "larkin.message.process").spanId);
+    assert.equal(span.attributes.find((attribute) => attribute.key === "larkin.runtime.distribution")?.value?.stringValue, "external");
+  }
+  for (const name of ["pi.rpc.submit", "pi.rpc.lifecycle", "pi.output.wait", "pi.generation", "pi.tool.wait", "pi.rpc.settle"]) {
+    assert.equal(spans.some((span) => span.name === name), false, name);
+  }
 });
 
 test("spool survives failures, bounds retention, and export/import remains idempotent", () => {

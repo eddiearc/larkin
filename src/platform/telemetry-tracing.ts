@@ -286,9 +286,9 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
           const state = current.pi ??= { distribution: event.distribution };
           state.distribution = event.distribution;
           const observedAt = now();
-          if (event.distribution !== "builtin" || state.settledAt !== undefined) return;
+          if (state.settledAt !== undefined) return;
           const spanAttributes = { "larkin.observation.boundary": "pi_rpc", "larkin.runtime.id": "pi",
-            "larkin.runtime.distribution": "builtin" };
+            "larkin.runtime.distribution": event.distribution };
           const startPreflight = (name: "pi.prompt.wait" | "pi.compaction", startTime: number): Span =>
             tracer.startSpan(name, { kind: SpanKind.INTERNAL, startTime, attributes: spanAttributes }, current.context);
           const start = (name: "pi.rpc.submit" | "pi.rpc.lifecycle" | "pi.output.wait" | "pi.generation"
@@ -305,8 +305,10 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
             state.promptWaitSpan?.setAttribute("larkin.pi.preflight.outcome", "accepted");
             state.promptWaitSpan?.end(observedAt); delete state.promptWaitSpan;
             state.compactionSpan?.end(observedAt); delete state.compactionSpan;
-            if (state.rpcSpan) { state.rpcSpan.end(observedAt); delete state.rpcSpan; }
-            if (current.turnContext && !state.outputWaitSpan) state.outputWaitSpan = start("pi.output.wait", observedAt);
+            if (event.distribution === "builtin") {
+              if (state.rpcSpan) { state.rpcSpan.end(observedAt); delete state.rpcSpan; }
+              if (current.turnContext && !state.outputWaitSpan) state.outputWaitSpan = start("pi.output.wait", observedAt);
+            }
           } else if (event.phase === "compaction_start" && state.submitAt !== undefined && !state.compactionSpan) {
             state.promptWaitSpan?.setAttribute("larkin.pi.preflight.progress", "compaction");
             state.compactionSpan = startPreflight("pi.compaction", observedAt);
@@ -321,7 +323,9 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
             state.promptWaitSpan?.end(observedAt); delete state.promptWaitSpan;
             state.compactionSpan?.setStatus({ code: SpanStatusCode.ERROR });
             state.compactionSpan?.end(observedAt); delete state.compactionSpan;
-          } else if (event.phase === "turn_start" && state.turnStartAt === undefined) state.turnStartAt = observedAt;
+          }
+          if (event.distribution !== "builtin") return;
+          if (event.phase === "turn_start" && state.turnStartAt === undefined) state.turnStartAt = observedAt;
           else if (event.phase === "first_output" && state.firstOutputAt === undefined && state.completedAt === undefined) {
             state.firstOutputAt = observedAt;
             if (state.outputWaitSpan) { state.outputWaitSpan.end(observedAt); delete state.outputWaitSpan; }

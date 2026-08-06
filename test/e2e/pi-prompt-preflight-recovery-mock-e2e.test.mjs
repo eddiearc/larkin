@@ -18,6 +18,7 @@ class PreflightPiProcess extends EventEmitter {
   stderr = new PassThrough();
   promptCount = 0;
   killed = [];
+  constructor(options = {}) { super(); this.acceptPrompt = options.acceptPrompt !== false; }
   stdin = {
     destroyed: false,
     write: (line, callback) => {
@@ -29,12 +30,14 @@ class PreflightPiProcess extends EventEmitter {
         { models: [{ provider: "fixture", id: "fixture-model" }] });
       else if (request.type === "prompt") {
         this.promptCount += 1;
-        setTimeout(() => this.event({ type: "compaction_start", reason: "threshold" }), 10);
+        setTimeout(() => this.event({ type: "compaction_start", reason: "threshold" }), this.acceptPrompt ? 10 : 8);
         setTimeout(() => this.event({ type: "summarization_retry_scheduled", attempt: 1, maxAttempts: 3,
-          delayMs: 10, errorMessage: "PRIVATE_PROVIDER_DETAIL" }), 35);
-        setTimeout(() => this.event({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false,
-          result: { summary: "PRIVATE_SUMMARY" } }), 60);
-        setTimeout(() => this.respond(request), 65);
+          delayMs: 10, errorMessage: "PRIVATE_PROVIDER_DETAIL" }), this.acceptPrompt ? 35 : 22);
+        if (this.acceptPrompt) {
+          setTimeout(() => this.event({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false,
+            result: { summary: "PRIVATE_SUMMARY" } }), 60);
+          setTimeout(() => this.respond(request), 65);
+        }
       }
       return true;
     },
@@ -106,6 +109,57 @@ test("production-order Pi preflight progress preserves one durable Inbox deliver
     await host.shutdown("test cleanup").catch(() => {}); await telemetry.shutdown().catch(() => {});
     if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
     else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("external Pi production-order preflight timeout stays bounded, pending, observable, and turn-free", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-timeout-e2e-"));
+  const agentId = "cli_externalTimeoutA1"; const messageId = "om_PRIVATE_TIMEOUT";
+  const stateDir = path.join(root, "state", "agents", agentId); const workspaceDir = path.join(root, "workspace");
+  const store = createAgentStateStore(root, agentId); const child = new PreflightPiProcess({ acceptPrompt: false }); let spawnCount = 0;
+  const telemetryConfig = { spoolDir: path.join(root, "telemetry", "spool"), headers: {}, maxBytes: 1024 * 1024,
+    maxFiles: 100, maxAgeMs: 60_000, uploadIntervalMs: 60_000, requestTimeoutMs: 2_000 };
+  const telemetry = createTelemetryRuntime(telemetryConfig, { stateDirFor: () => stateDir });
+  const native = createNativeRuntimeAdapter("pi", {
+    spawn: () => { spawnCount += 1; return child; },
+    piRpcClientOptions: { requestTimeoutMs: 5, inputTimeoutMs: 15, inputProgressTimeoutMs: 25, inputMaxTimeoutMs: 50 },
+  });
+  const adapter = { id: native.id, capabilities: native.capabilities,
+    probe: async () => ({ runtime: "pi", state: "ready" }), createSession: (input) => native.createSession(input) };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store, telemetry, retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 0 },
+    assertOfficialCliReady: () => {} });
+  const target = "chat:PRIVATE_TIMEOUT_TARGET";
+  const envelope = { message_id: messageId, target, content: "PRIVATE_TIMEOUT_BODY", wake: true };
+  try {
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    await host.start([{ agentId, name: agentId, runtime: "pi", model: "default", piDistribution: "external",
+      workspaceDir, stateDir }]);
+    store.prepareInboxDelivery(envelope); telemetry.beginMessage(agentId, messageId);
+    const receipt = await telemetry.phase(messageId, "runtime.deliver", SpanKind.PRODUCER, () => host.deliver(agentId, envelope));
+    assert.equal(receipt.status, "deferred");
+    assert.match(receipt.reason, /runtime session replaced before input result/);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "pending");
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), [messageId]);
+    assert.equal(child.promptCount, 1); assert.equal(spawnCount, 1);
+    await host.shutdown("mock timeout complete"); await telemetry.shutdown();
+    const records = new TelemetrySpool(telemetryConfig).list();
+    const spans = records.flatMap(({ payload }) => payload.resourceSpans)
+      .flatMap((resource) => resource.scopeSpans).flatMap((scope) => scope.spans);
+    const wait = spans.find((span) => span.name === "pi.prompt.wait");
+    const compaction = spans.find((span) => span.name === "pi.compaction");
+    assert.ok(wait); assert.ok(compaction);
+    assert.equal(spans.some((span) => span.name === "agent.turn"), false);
+    assert.equal(wait.status.code, 2); assert.equal(compaction.status.code, 2);
+    assert.equal(wait.attributes.find((attribute) => attribute.key === "larkin.runtime.distribution")?.value?.stringValue, "external");
+    assert.equal(wait.attributes.find((attribute) => attribute.key === "larkin.pi.preflight.outcome")?.value?.stringValue, "timeout");
+    const serialized = JSON.stringify(records.map(({ payload }) => payload));
+    for (const forbidden of [agentId, messageId, target, "PRIVATE_TIMEOUT_BODY", "PRIVATE_PROVIDER_DETAIL", root]) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  } finally {
+    await host.shutdown("test cleanup").catch(() => {}); await telemetry.shutdown().catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

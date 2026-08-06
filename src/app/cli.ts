@@ -45,13 +45,14 @@ const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
 const runtimeAgentCommand = runtimeAgentAuthority
   && ["inbox", "reminder", "interaction", "profile", "config"].includes(command);
 if (runtimeAgentCommand) routes[command] = ["agent-cli", command];
+if (runtimeAgentAuthority && command === "comment") routes.comment = ["lark-cli", "comment"];
 
 // Help stays in the outer CLI so it never loads configuration, inspects a process,
 // or starts a foreground service merely to print usage.
 const commandHelp: Record<string, string> = {
   start: `Usage: larkin start [--agent <App ID> | --agents <App ID,...>]
 Start one foreground supervisor for the daemon and local dashboard, or reuse it.`,
-  setup: `Usage: larkin setup [--runtime <runtime>] [--no-start]
+  setup: `Usage: larkin setup [--runtime <runtime>] [--comment-subscription <none|application>] [--no-start]
 Run the interactive setup to create or connect a bot and configure its Agent.`,
   status: `Usage: larkin status [--json]
 Show Agent configuration, bot identity, credentials, and connection status. Use --json for readiness automation.`,
@@ -84,6 +85,8 @@ Atomically replace one idle, zero-backlog Agent Runtime session through authenti
   "pi-auth": `Usage: larkin pi-auth status [--agent <App ID>] [--json]
        larkin pi-auth logout <provider> [--agent <App ID>]
 Show non-sensitive official Pi credential metadata or remove one target provider credential.`,
+  comment: `Usage: larkin comment reply --message-id <doc_comment_message_id> --text '<reply>' --json
+Reply once, as the Runtime-bound Bot, to the exact cloud-document comment locator supplied by canonical Inbox.`,
 };
 
 if (command === "--version" || command === "-V") {
@@ -130,6 +133,7 @@ Usage: larkin <command>
   config           Inspect effective config/source, edit mention inheritance, or explicitly apply runtime changes
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
   pi-auth          Show non-sensitive built-in Pi auth status or logout one provider
+  comment reply    Reply to the exact cloud-document comment bound by a polled Inbox message
   <lark-cli 命令组>  im/docs/wiki/drive 等 lark-cli 命令原样转发，机器人身份已锁定（如 larkin im +chat-list）
 Getting started:
   First-time setup: larkin setup

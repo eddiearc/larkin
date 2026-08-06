@@ -235,11 +235,19 @@ assert.match(setupHelp.stdout, /Each Agent is identified by its bot App ID/);
 assert.match(setupHelp.stdout, /selecting\s+the same bot reuses\s+its existing Agent, memory, and state/);
 assert.doesNotMatch(setupHelp.stdout, /--no-dashboard/);
 assert.match(setupHelp.stdout, /target-only hot attach|only the selected Agent/i);
+assert.match(setupHelp.stdout, /--comment-subscription <mode>/);
 assert.doesNotMatch(setupHelp.stdout, /--app-id/);
 
 const publicSetupHelp = run("dist/app/cli.mjs", "setup", "--help");
 assert.equal(publicSetupHelp.status, 0);
 assert.doesNotMatch(publicSetupHelp.stdout, /--app-id/);
+assert.match(publicSetupHelp.stdout, /--comment-subscription <none\|application>/);
+
+for (const args of [["--comment-subscription"], ["--comment-subscription", "broad"], ["--comment-subscription", "user"]]) {
+  const invalidSubscription = run("dist/app/setup.mjs", ...args);
+  assert.equal(invalidSubscription.status, 1);
+  assert.match(invalidSubscription.stderr, /comment-subscription/);
+}
 
 for (const removedAppIdArg of [["--app-id", "cli_removed"], ["--app-id=cli_removed"]]) {
   const removedAppId = run("dist/app/setup.mjs", ...removedAppIdArg);

@@ -325,6 +325,17 @@ export function resolveMentionPolicy(config: HydratedConfig, agentId: string, ch
   return { effective: config.mentionPolicy, source: "global" };
 }
 
+/** Resolve non-chat event policy. Deliberately has no chat-id input and never reads per-chat overrides. */
+export function resolveAgentGlobalMentionPolicy(config: HydratedConfig, agentId: string): {
+  effective: MentionPolicy;
+  source: "agent" | "global";
+} {
+  const agent = config.agents[agentId];
+  if (!agent) throw new Error(`Agent 不存在：${agentId}`);
+  if (agent.mentionPolicy) return { effective: agent.mentionPolicy, source: "agent" };
+  return { effective: config.mentionPolicy, source: "global" };
+}
+
 function revision(bytes: Buffer | string): string {
   return `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
 }

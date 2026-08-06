@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { callbackCapability, type CardActionCallbackCapability } from "../platform/callback-capability.js";
+import {
+  callbackCapability,
+  documentCommentReplyCapability,
+  documentCommentSubscriptionCapability,
+  type CardActionCallbackCapability,
+  type DocumentCommentSubscriptionCapability,
+  type DocumentCommentReplyCapability,
+} from "../platform/callback-capability.js";
 
 const BOT_CREDENTIAL_FIELDS = new Set(["appId", "appSecret", "tenant", "ownerOpenId", "createdAt", "updatedAt", "capabilities"]);
 
@@ -12,7 +19,29 @@ export interface BotCredentialRecord {
   ownerOpenId?: string | null;
   createdAt?: string;
   updatedAt?: string;
-  capabilities?: { cardActionCallback?: CardActionCallbackCapability };
+  capabilities?: {
+    cardActionCallback?: CardActionCallbackCapability;
+    documentCommentEvent?: {
+      status: "requested-unverified";
+      event: "drive.notice.comment_add_v1";
+      scope: "drive:drive";
+      requestedAt: string;
+    };
+    documentCommentSubscription?: DocumentCommentSubscriptionCapability;
+    documentCommentReply?: DocumentCommentReplyCapability;
+  };
+}
+
+function validDocumentCommentCapability(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const capability = value as Record<string, unknown>;
+  return Object.keys(capability).every((key) => ["status", "event", "scope", "requestedAt"].includes(key))
+    && Object.keys(capability).length === 4
+    && capability.status === "requested-unverified"
+    && capability.event === "drive.notice.comment_add_v1"
+    && capability.scope === "drive:drive"
+    && typeof capability.requestedAt === "string"
+    && Number.isFinite(Date.parse(capability.requestedAt));
 }
 
 export function validCredentialRecord(value: unknown, appId: string): value is BotCredentialRecord {
@@ -27,9 +56,14 @@ export function validCredentialRecord(value: unknown, appId: string): value is B
         && (typeof record[field] !== "string" || !record[field] || !Number.isFinite(Date.parse(record[field])))) return false;
   }
   if (Object.hasOwn(record, "capabilities")) {
-    if (!record.capabilities || typeof record.capabilities !== "object" || Array.isArray(record.capabilities)
-        || Object.keys(record.capabilities as object).some((key) => key !== "cardActionCallback")
-        || !callbackCapability(record)) return false;
+    if (!record.capabilities || typeof record.capabilities !== "object" || Array.isArray(record.capabilities)) return false;
+    const capabilities = record.capabilities as Record<string, unknown>;
+    if (Object.keys(capabilities).some((key) => !["cardActionCallback", "documentCommentEvent", "documentCommentReply", "documentCommentSubscription"].includes(key))) return false;
+    if (Object.hasOwn(capabilities, "cardActionCallback") && !callbackCapability(record)) return false;
+    if (Object.hasOwn(capabilities, "documentCommentEvent") && !validDocumentCommentCapability(capabilities.documentCommentEvent)) return false;
+    if (Object.hasOwn(capabilities, "documentCommentReply") && !documentCommentReplyCapability(record)) return false;
+    if (Object.hasOwn(capabilities, "documentCommentSubscription") && !documentCommentSubscriptionCapability(record)) return false;
+    if (!Object.keys(capabilities).length) return false;
   }
   return true;
 }

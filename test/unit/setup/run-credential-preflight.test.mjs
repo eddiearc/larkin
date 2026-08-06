@@ -22,6 +22,44 @@ test("run credential preflight accepts only the strict record schema", () => {
     status: "verified-effective", requestedAt: "2026-07-23T00:00:00.000Z", verifiedAt: "2026-07-23T00:01:00.000Z",
   } } };
   assert.equal(preflight.validCredentialRecord(callback, valid.appId), true);
+  const documentCommentEvent = {
+    status: "requested-unverified",
+    event: "drive.notice.comment_add_v1",
+    scope: "drive:drive",
+    requestedAt: "2026-08-05T00:00:00.000Z",
+  };
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: { documentCommentEvent } }, valid.appId), true);
+  const documentCommentSubscription = {
+    mode: "subscribed", status: "platform-verified", source: "platform-status", dimension: "application",
+    requestedAt: "2026-08-05T00:00:00.000Z", verifiedAt: "2026-08-05T00:01:00.000Z",
+  };
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: { documentCommentSubscription } }, valid.appId), true);
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: {
+    documentCommentSubscription: { ...documentCommentSubscription, dimension: "user" },
+  } }, valid.appId), false);
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: {
+    documentCommentSubscription: { ...documentCommentSubscription, status: "requested-unverified" },
+  } }, valid.appId), false);
+  const documentCommentReply = {
+    status: "requested-unverified", scope: "docs:document.comment:create", requestedAt: "2026-08-05T00:00:00.000Z",
+  };
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: { documentCommentReply } }, valid.appId), true);
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: {
+    documentCommentReply: { ...documentCommentReply, scope: "drive:drive" },
+  } }, valid.appId), false);
+  assert.equal(preflight.validCredentialRecord({
+    ...valid,
+    capabilities: { ...callback.capabilities, documentCommentEvent },
+  }, valid.appId), true);
+  for (const invalid of [
+    { ...documentCommentEvent, event: "drive.notice.comment_update_v1" },
+    { ...documentCommentEvent, scope: "drive:readonly" },
+    { ...documentCommentEvent, requestedAt: "not-a-date" },
+    { ...documentCommentEvent, extra: true },
+  ]) {
+    assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: { documentCommentEvent: invalid } }, valid.appId), false);
+  }
+  assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: {} }, valid.appId), false);
   assert.equal(preflight.validCredentialRecord({ ...valid, capabilities: { cardActionCallback: "requested-long-connection" } }, valid.appId), false);
 });
 

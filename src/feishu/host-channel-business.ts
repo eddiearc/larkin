@@ -1,6 +1,6 @@
 import { decideWake, normalizeChannelMessage, type ChannelMessage, type FeishuInboundEvent } from "./message-policy.js";
 import type { HostAgent, HostStateProjection } from "./host-business-state.js";
-import { normalizeCardAction } from "@larksuite/channel";
+import { normalizeCardAction, type CommentEvent, type CommentTarget, type FetchedComment } from "@larksuite/channel";
 
 interface ChannelAgent extends HostAgent {
   botOpenId?: string | null;
@@ -16,6 +16,10 @@ interface Dispatcher { register(map: Record<string, (raw: unknown) => Promise<un
 interface ConnectedChannel {
   botIdentity?: { openId?: string; name?: string | null } | null;
   rawClient?: { request(input: { url: string; method: string }): Promise<unknown> } | null;
+  comments?: {
+    resolveTarget(fileToken: string, fileType: string): Promise<CommentTarget | null>;
+    fetch(target: CommentTarget, commentId: string): Promise<FetchedComment | null>;
+  };
 }
 interface CardActionEvent {
   messageId: string;
@@ -29,6 +33,8 @@ export interface ChannelBusinessOptions {
   state: HostStateProjection;
   stateStore(agent: ChannelAgent): BotStateStore;
   onMessage(agent: ChannelAgent, event: FeishuInboundEvent, options: { wake: boolean }): void | Promise<void>;
+  onComment?(agent: ChannelAgent, event: CommentEvent, channel: ConnectedChannel): void | Promise<void>;
+  onReconnected?(agent: ChannelAgent, channel: ConnectedChannel): void | Promise<void>;
   onCardAction?(agent: ChannelAgent, event: CardActionEvent): Promise<Record<string, unknown>> | Record<string, unknown>;
   log?: (...parts: unknown[]) => void;
   now?: () => Date;
@@ -46,8 +52,9 @@ export class HostChannelBusiness {
     this.now = options.now ?? (() => new Date());
   }
 
-  handlers(agent: ChannelAgent): {
+  handlers(agent: ChannelAgent, channel?: ConnectedChannel): {
     message(message: ChannelMessage): void;
+    comment(event: CommentEvent): Promise<void>;
     cardAction(event: CardActionEvent): Promise<Record<string, unknown>>;
     reconnecting(): void;
     reconnected(): void;
@@ -73,6 +80,19 @@ export class HostChannelBusiness {
           void this.options.onMessage(agent, event, { wake: decision.wake });
         } catch (error) { this.log(`channel message 处理失败 agent=${agent.name}: ${messageOf(error)}`); }
       },
+      comment: async (event) => {
+        try {
+          this.options.state.updateStatus(agent, {
+            inboundVerifiedAt: this.now().toISOString(),
+            documentCommentEventAt: this.now().toISOString(),
+          });
+          if (!channel || !this.options.onComment) return;
+          await this.options.onComment(agent, event, channel);
+        } catch (error) {
+          this.log(`document comment 处理失败 agent=${agent.name}: ${messageOf(error)}`);
+          this.options.state.recordStatusError(agent, `document comment: ${messageOf(error)}`);
+        }
+      },
       cardAction: async (event) => {
         if (!this.options.onCardAction) return { toast: { type: "error", content: "交互能力未启用，请重新运行 larkin setup 并重启 Larkin。" } };
         return this.options.onCardAction(agent, event);
@@ -85,6 +105,11 @@ export class HostChannelBusiness {
         this.log(`ws 已恢复 agent=${agent.name}`);
         const connectedAt = this.now().toISOString();
         this.options.state.updateStatus(agent, { reconnectingAt: null, reconnectedAt: connectedAt, connectedAt });
+        if (channel && this.options.onReconnected) {
+          void Promise.resolve(this.options.onReconnected(agent, channel)).catch((error) => {
+            this.log(`document comment 恢复重放失败 agent=${agent.name}: ${messageOf(error)}`);
+          });
+        }
       },
       error: () => {
         this.log(`ws 错误 agent=${agent.name}`);

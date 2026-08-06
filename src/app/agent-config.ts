@@ -6,7 +6,16 @@ import { daemonHasAgent, readProcessState } from "../platform/process-state.js";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type PiModelCatalog } from "../runtime/pi-model-catalog.js";
-import { callbackCapability } from "../platform/callback-capability.js";
+import {
+  effectiveDocumentCommentSubscription,
+  readCallbackCapability,
+  readDocumentCommentCapability,
+  readDocumentCommentReplyCapability,
+  readDocumentCommentSubscription,
+  type DocumentCommentEventCapability,
+  type DocumentCommentReplyCapability,
+  type EffectiveDocumentCommentSubscription,
+} from "../platform/callback-capability.js";
 import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus } from "./agent-readiness.js";
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
@@ -67,11 +76,53 @@ interface ConfigModule {
 
 interface StatusRecord extends AgentReadinessStatus {
   inboundVerifiedAt?: string;
+  documentCommentEventAt?: string;
+  documentCommentLastAcceptedAt?: string;
+  documentCommentLastErrorAt?: string | null;
+  documentCommentLastError?: string | null;
+  documentCommentLastErrorCategory?: string | null;
   droughtReconnectAt?: string | null;
   droughtReconnectAbandonedAt?: string | null;
   recentErrors?: Array<{ message?: string; error?: string; [key: string]: unknown }>;
   session?: { runtime?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
   runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready"; executable?: string; version?: string; reason?: string; nextAction?: string };
+}
+
+function safeDocumentCommentCapabilities(configDir: string, profile: string): {
+  event: DocumentCommentEventCapability | null;
+  reply: DocumentCommentReplyCapability | null;
+  subscription: EffectiveDocumentCommentSubscription;
+} {
+  try {
+    return {
+      event: readDocumentCommentCapability(configDir, profile),
+      reply: readDocumentCommentReplyCapability(configDir, profile),
+      subscription: readDocumentCommentSubscription(configDir, profile),
+    };
+  } catch {
+    return { event: null, reply: null, subscription: effectiveDocumentCommentSubscription(null) };
+  }
+}
+
+function projectDocumentCommentDiagnostic(capability: DocumentCommentEventCapability | null, status: StatusRecord | null): {
+  category: "not_requested" | "publish_or_event_unverified" | "event_arrived" | "permission_missing"
+    | "document_access_denied" | "comment_unavailable_or_empty" | "inbox_write_failure"
+    | "pending_capacity_exhausted" | "read_failure_unknown" | "pending_state_failure";
+  reason: string;
+} {
+  const stableFailureCategories = new Set([
+    "permission_missing", "document_access_denied", "comment_unavailable_or_empty", "inbox_write_failure",
+    "pending_capacity_exhausted", "read_failure_unknown", "pending_state_failure",
+  ]);
+  if (status?.documentCommentLastErrorCategory && stableFailureCategories.has(status.documentCommentLastErrorCategory)) {
+    return {
+      category: status.documentCommentLastErrorCategory as ReturnType<typeof projectDocumentCommentDiagnostic>["category"],
+      reason: status.documentCommentLastError || status.documentCommentLastErrorCategory,
+    };
+  }
+  if (status?.documentCommentEventAt) return { category: "event_arrived", reason: "real_event_observed" };
+  if (capability) return { category: "publish_or_event_unverified", reason: "publication_and_real_event_unverified" };
+  return { category: "not_requested", reason: "setup_required" };
 }
 
 
@@ -197,11 +248,33 @@ if (kind === "agents") {
       let status: StatusRecord | null = null;
       try { status = JSON.parse(fs.readFileSync(path.join(agent.stateDir, "status.json"), "utf8")) as StatusRecord; } catch { /* absent */ }
       const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
+      const commentCapabilities = safeDocumentCommentCapabilities(configDir, agent.feishuProfile);
+      const commentCapability = commentCapabilities.event;
+      const commentSubscription = commentCapabilities.subscription;
+      const commentDiagnostic = projectDocumentCommentDiagnostic(commentCapability, status);
       return {
         agent_id: agent.agentId,
         name: agent.name,
         runtime: agent.runtime,
         model: effectiveModel,
+        document_comment: {
+          event: "drive.notice.comment_add_v1",
+          category: commentDiagnostic.category,
+          reason: commentDiagnostic.reason,
+          requested_at: commentCapability?.requestedAt || null,
+          reply_scope: "docs:document.comment:create",
+          reply_requested_at: commentCapabilities.reply?.requestedAt || null,
+          event_verified_at: status?.documentCommentEventAt || null,
+          accepted_at: status?.documentCommentLastAcceptedAt || null,
+          last_error: status?.documentCommentLastError || null,
+          last_error_at: status?.documentCommentLastErrorAt || null,
+          subscription: {
+            mode: commentSubscription.mode,
+            status: commentSubscription.status,
+            source: commentSubscription.source,
+            dimension: commentSubscription.dimension,
+          },
+        },
         ...projectAgentReadiness({ agentId: agent.agentId, daemon, status }),
       };
     });
@@ -221,8 +294,17 @@ if (kind === "agents") {
     const credentialFile = path.join(configDir, "bots", `${agent.feishuProfile}.json`);
     const cred = fs.existsSync(credentialFile);
     let callbackStatus = "missing";
+    let commentCapability: DocumentCommentEventCapability | null = null;
+    let commentReplyCapability: DocumentCommentReplyCapability | null = null;
+    let commentSubscription = effectiveDocumentCommentSubscription(null);
     if (cred) {
-      try { callbackStatus = callbackCapability(JSON.parse(fs.readFileSync(credentialFile, "utf8")))?.status || "missing"; }
+      try {
+        callbackStatus = readCallbackCapability(configDir, agent.feishuProfile)?.status || "missing";
+        const capabilities = safeDocumentCommentCapabilities(configDir, agent.feishuProfile);
+        commentCapability = capabilities.event;
+        commentReplyCapability = capabilities.reply;
+        commentSubscription = capabilities.subscription;
+      }
       catch { callbackStatus = "invalid"; }
     }
     const connected = daemonHasAgent(daemon, agent.agentId)
@@ -231,6 +313,7 @@ if (kind === "agents") {
     const inboundVerified = connected
       && !!status?.inboundVerifiedAt
       && Date.parse(status.inboundVerifiedAt) >= Date.parse(String(daemon.startedAt || 0));
+    const commentDiagnostic = projectDocumentCommentDiagnostic(commentCapability, status);
     say(`  ${agent.name}${agent.name === config.activeAgent ? " [active]" : ""}`);
     const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
     const effectiveEffort = status?.session?.runtime === agent.runtime && status.session.reasoningEffort ? status.session.reasoningEffort : agent.effort;
@@ -249,6 +332,11 @@ if (kind === "agents") {
         : "本次运行尚未收到消息验证"}`);
     say(`    凭证=${cred ? `bots/${agent.feishuProfile}.json` : "无（不能建立专属 channel 长连接）"}  state=${agent.stateDir}`);
     say(`    卡片回调=${callbackStatus === "verified-effective" ? "已通过真实 callback probe 验证" : `${callbackStatus}（业务交互卡片 fail-closed；运行 interaction callback-probe）`}`);
+    say(`    文档评论=${commentDiagnostic.category} reason=${commentDiagnostic.reason}${status?.documentCommentEventAt
+      ? `；真实 comment event 已到达（${status.documentCommentEventAt}）${status.documentCommentLastAcceptedAt ? `；最近入箱 ${status.documentCommentLastAcceptedAt}` : ""}`
+      : commentCapability ? "；event/scope 已请求，但配置是否发布及事件是否生效均未验证" : "；重新运行 larkin setup 并发布"}${status?.documentCommentLastErrorAt ? `；最近失败时间=${status.documentCommentLastErrorAt}` : ""}`);
+    say(`    评论订阅=${commentSubscription.mode}/${commentSubscription.status} source=${commentSubscription.source} dimension=${commentSubscription.dimension || "none"}${commentSubscription.mode === "subscribed" ? "；所有实际送达的支持评论都会唤醒 Agent" : "；仅 @Bot 评论进入 Inbox"}`);
+    say(`    评论回复权限=${commentReplyCapability ? `${commentReplyCapability.scope} requested-unverified` : "missing（重跑 larkin setup；回复将由平台拒绝）"}`);
     const recent = Array.isArray(status?.recentErrors) ? status.recentErrors.at(-1) : null;
     if (recent) say(`    最近错误=${recent.message || recent.error || JSON.stringify(recent)}`);
   }

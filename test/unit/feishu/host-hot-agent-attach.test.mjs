@@ -41,6 +41,93 @@ function cardEvent(root, agentId, eventId) {
   };
 }
 
+test("hot-attached channel queues document comments until activation then persists the semantic wake", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-hot-comment-queue-"));
+  fs.chmodSync(root, 0o700);
+  const existing = configFor(root, "cli_hotCommentExistingA1");
+  const added = configFor(root, "cli_hotCommentAddedB2");
+  const subscribers = [];
+  const deliveries = [];
+  const runtimeHost = {
+    async start(configs) {
+      for (const config of configs) for (const listener of subscribers) {
+        listener({ type: "agent-status", agentId: config.agentId, status: "active" });
+      }
+    },
+    async stop() {}, async shutdown() {},
+    async deliver(agentId, envelope) { deliveries.push({ agentId, envelope }); return { status: "accepted", deliveryId: `delivery-${envelope.message_id}` }; },
+    subscribe(listener) { subscribers.push(listener); return () => {}; },
+  };
+  let releaseCandidate;
+  let addedChannel;
+  let fetches = 0;
+  const channels = [];
+  const channelPackage = { createLarkChannel(options) {
+    const channel = {
+      options, handlers: null, disconnected: 0, registrations: {},
+      botIdentity: { openId: `ou_${options.appId}`, name: options.appId },
+      rawClient: { async request() { return { bot: { open_id: `ou_${options.appId}`, app_name: options.appId } }; } },
+      comments: {
+        async resolveTarget(fileToken, fileType) { return { fileToken, fileType }; },
+        async fetch(_target, commentId) {
+          fetches += 1;
+          return { commentId, isWhole: false, replies: [{
+            reply_id: "reply_hot", content: { elements: [{ type: "text_run", text_run: { text: "queued comment" } }] },
+          }] };
+        },
+      },
+      dispatcher: { register(map) { Object.assign(channel.registrations, map); } },
+      on(handlers) { channel.handlers = handlers; },
+      connect() {
+        if (options.appId !== added.agentId) return Promise.resolve();
+        addedChannel = channel;
+        return new Promise((resolve) => { releaseCandidate = resolve; });
+      },
+      async disconnect() { channel.disconnected += 1; }, async updateCard() {},
+    };
+    channels.push(channel);
+    return channel;
+  } };
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 4, serverId: "server-hot-comment", mentionPolicy: "require", activeAgent: existing.agentId,
+    agents: {
+      [existing.agentId]: { runtime: "codex", model: "gpt-5.6" },
+      [added.agentId]: { runtime: "codex", model: "gpt-5.6" },
+    },
+  })}\n`, { mode: 0o600 });
+  const shell = createHostShell({
+    env: { ...process.env, LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-hot-comment",
+      LARKIN_AGENTS_CONFIG: JSON.stringify([existing]), LARKIN_INBOUND_DROUGHT_SEC: "0" },
+    runtimeHost, channelPackage, eventSourceStartDelayMs: 0,
+  });
+  try {
+    await shell.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const adding = shell.upsertAgent(added);
+    for (let index = 0; !addedChannel?.handlers && index < 100; index += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.ok(addedChannel?.handlers);
+    await addedChannel.handlers.comment({
+      fileToken: "doc_hot", fileType: "docx", commentId: "comment_hot", replyId: "reply_hot",
+      operator: { openId: "ou_human" }, mentionedBot: true, timestamp: 1_786_002_000_000,
+      raw: { event_id: "evt_hot_comment", notice_type: "add_reply" },
+    });
+    assert.equal(fetches, 0, "candidate comment must remain queued before activation");
+    assert.equal(deliveries.length, 0);
+    releaseCandidate();
+    assert.equal(await adding, "added");
+    for (let index = 0; deliveries.length === 0 && index < 100; index += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(fetches, 1);
+    const commentDeliveries = deliveries.filter(({ envelope }) => envelope.kind === "document_comment");
+    assert.equal(commentDeliveries.length, 1);
+    assert.equal(commentDeliveries[0].agentId, added.agentId);
+    assert.equal(createAgentStateStore(root, added.agentId).readNdjson("inbox").filter((row) => row.kind === "document_comment").length, 1);
+  } finally {
+    await shell.shutdown("test");
+    assert.equal(channels.every((channel) => channel.disconnected === 1), true);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("HostShell hot attach adds only the target Agent and duplicate upsert is idempotent", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-hot-attach-"));
   fs.chmodSync(root, 0o700);

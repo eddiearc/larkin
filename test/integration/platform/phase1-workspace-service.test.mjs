@@ -43,20 +43,16 @@ async function loadService() {
   return import(pathToFileURL(BUILT_SERVICE).href);
 }
 
-function splitManaged(content) {
-  const start = content.indexOf(START);
-  const end = content.indexOf(END, start + START.length);
-  assert.notEqual(start, -1, "managed block start marker must exist");
-  assert.notEqual(end, -1, "managed block end marker must exist");
-  return {
-    before: content.slice(0, start),
-    managed: content.slice(start, end + END.length),
-    after: content.slice(end + END.length),
-  };
-}
-
 function count(content, needle) {
   return content.split(needle).length - 1;
+}
+
+function blankManaged(content) {
+  const start = content.indexOf(START);
+  const end = content.indexOf(END, start + START.length);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  return content.slice(0, start) + " ".repeat(end + END.length - start) + content.slice(end + END.length);
 }
 
 function lockDirFor(temp) {
@@ -114,7 +110,7 @@ function assertOwnerPlatformRules(managed) {
   assert.match(managed, /不得泄露[^\n]*thinking[^\n]*凭证[^\n]*原始工具输出[^\n]*内部路径/);
 }
 
-test("WorkspaceService preserves user bytes, upgrades one managed block in both prompt files, and is idempotent", async () => {
+test("WorkspaceService blanks one historical managed block in place, preserves owner bytes and offsets, and is idempotent", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-workspace-"));
   const workspaceDir = path.join(temp, "workspace");
   const trustedWorkspaceRoot = temp;
@@ -125,6 +121,7 @@ test("WorkspaceService preserves user bytes, upgrades one managed block in both 
   const claudeBefore = "claude-owner-content-without-final-newline";
   fs.writeFileSync(agentsFile, agentsBefore);
   fs.writeFileSync(claudeFile, claudeBefore);
+  const agentsStatBefore = fs.statSync(agentsFile);
 
   try {
     const { reconcileAgentWorkspace } = await loadService();
@@ -132,20 +129,12 @@ test("WorkspaceService preserves user bytes, upgrades one managed block in both 
 
     const agentsAfterFirst = fs.readFileSync(agentsFile, "utf8");
     const claudeAfterFirst = fs.readFileSync(claudeFile, "utf8");
-    const agentsOriginalParts = splitManaged(agentsBefore);
-    const agentsUpdatedParts = splitManaged(agentsAfterFirst);
-    const claudeUpdatedParts = splitManaged(claudeAfterFirst);
-
-    assert.equal(agentsUpdatedParts.before, agentsOriginalParts.before, "bytes before a managed block belong to the user");
-    assert.equal(agentsUpdatedParts.after, agentsOriginalParts.after, "bytes after a managed block belong to the user");
-    assert.doesNotMatch(agentsUpdatedParts.managed, /stale managed rules/);
-    assert.equal(claudeUpdatedParts.before, claudeBefore, "an existing file without markers must remain an exact prefix");
-    assert.equal(agentsUpdatedParts.managed, claudeUpdatedParts.managed, "AGENTS.md and CLAUDE.md must receive the identical managed block");
-    for (const content of [agentsAfterFirst, claudeAfterFirst]) {
-      assert.equal(count(content, START), 1);
-      assert.equal(count(content, END), 1);
-      assertOwnerPlatformRules(splitManaged(content).managed);
-    }
+    assert.equal(agentsAfterFirst, blankManaged(agentsBefore), "only the exact Larkin-owned span may be blanked");
+    assert.equal(agentsAfterFirst.length, agentsBefore.length, "migration must preserve owner offsets and file length");
+    assert.equal(fs.statSync(agentsFile).ino, agentsStatBefore.ino, "migration must preserve the owner inode");
+    assert.equal(claudeAfterFirst, claudeBefore, "a marker-free owner file must stay byte-identical");
+    assert.equal(count(agentsAfterFirst, START), 0);
+    assert.equal(count(agentsAfterFirst, END), 0);
 
     await reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
     assert.equal(fs.readFileSync(agentsFile, "utf8"), agentsAfterFirst, "second reconciliation must be byte-stable");
@@ -155,16 +144,82 @@ test("WorkspaceService preserves user bytes, upgrades one managed block in both 
   }
 });
 
-test("WorkspaceService creates both prompt files for a new workspace", async () => {
+test("WorkspaceService creates only the workspace directory and no prompt files for a new workspace", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-new-workspace-"));
   const workspaceDir = path.join(temp, "new-agent-workspace");
   try {
     const { reconcileAgentWorkspace } = await loadService();
     await reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
-    for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-      const content = fs.readFileSync(path.join(workspaceDir, name), "utf8");
-      assert.equal(count(content, START), 1);
-      assert.equal(count(content, END), 1);
+    assert.equal(fs.statSync(workspaceDir).isDirectory(), true);
+    for (const name of ["AGENTS.md", "CLAUDE.md"]) assert.equal(fs.existsSync(path.join(workspaceDir, name)), false);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("WorkspaceService retains a whitespace file when a historical managed block has no owner content", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-managed-only-"));
+  const workspaceDir = path.join(temp, "workspace");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), `\n${START}\nlegacy\n${END}\n\t`);
+  fs.writeFileSync(path.join(workspaceDir, "CLAUDE.md"), `${START}\nlegacy\n${END}\n`);
+  try {
+    const { reconcileAgentWorkspace } = await loadService();
+    const result = reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
+    assert.deepEqual(result.changed.sort(), ["AGENTS.md", "CLAUDE.md"]);
+    assert.equal(fs.readFileSync(path.join(workspaceDir, "AGENTS.md"), "utf8"), blankManaged(`\n${START}\nlegacy\n${END}\n\t`));
+    assert.equal(fs.readFileSync(path.join(workspaceDir, "CLAUDE.md"), "utf8"), blankManaged(`${START}\nlegacy\n${END}\n`));
+    assert.deepEqual(reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" }).changed, []);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("WorkspaceService keeps a pre-opened descriptor on the canonical inode after migration", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-preopened-fd-race-"));
+  const workspaceDir = path.join(temp, "workspace");
+  const agentsFile = path.join(workspaceDir, "AGENTS.md");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const before = `owner-prefix\n${START}\nlegacy\n${END}\nowner-region-000000\n`;
+  fs.writeFileSync(agentsFile, before);
+  const ownerFd = fs.openSync(agentsFile, "r+");
+  const inodeBefore = fs.statSync(agentsFile).ino;
+  try {
+    const { reconcileAgentWorkspace } = await loadService();
+    reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
+    assert.equal(fs.statSync(agentsFile).ino, inodeBefore);
+    const userOffset = before.indexOf("000000");
+    fs.writeSync(ownerFd, Buffer.from("ABCDEF"), 0, 6, userOffset);
+    fs.fsyncSync(ownerFd);
+    const content = fs.readFileSync(agentsFile, "utf8");
+    assert.equal(content, blankManaged(before).replace("000000", "ABCDEF"));
+    assert.equal(content.length, before.length);
+  } finally {
+    fs.closeSync(ownerFd);
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("WorkspaceService leaves marker-free prompt files byte-, inode-, and mode-stable", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-owner-only-"));
+  const workspaceDir = path.join(temp, "workspace");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const snapshots = new Map();
+  for (const [name, content, mode] of [["AGENTS.md", "owner agents\n", 0o640], ["CLAUDE.md", "owner claude", 0o604]]) {
+    const file = path.join(workspaceDir, name);
+    fs.writeFileSync(file, content);
+    fs.chmodSync(file, mode);
+    snapshots.set(name, { content: fs.readFileSync(file), stat: fs.statSync(file) });
+  }
+  try {
+    const { reconcileAgentWorkspace } = await loadService();
+    assert.deepEqual(reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" }).changed, []);
+    for (const [name, before] of snapshots) {
+      const file = path.join(workspaceDir, name);
+      const after = fs.statSync(file);
+      assert.deepEqual(fs.readFileSync(file), before.content);
+      assert.equal(after.ino, before.stat.ino);
+      assert.equal(after.mode & 0o777, before.stat.mode & 0o777);
     }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
@@ -304,11 +359,11 @@ test("WorkspaceService preserves invalid UTF-8 owner bytes outside ASCII managed
     reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
     const agentsAfter = fs.readFileSync(path.join(workspaceDir, "AGENTS.md"));
     const claudeAfter = fs.readFileSync(path.join(workspaceDir, "CLAUDE.md"));
-    const managedStart = agentsAfter.indexOf(startBytes);
-    const managedEnd = agentsAfter.indexOf(endBytes, managedStart) + endBytes.length;
-    assert.deepEqual(agentsAfter.subarray(0, managedStart), prefix);
-    assert.deepEqual(agentsAfter.subarray(managedEnd), suffix);
-    assert.deepEqual(claudeAfter.subarray(0, claudeOwner.length), claudeOwner);
+    const expected = Buffer.from(agentsBefore);
+    expected.fill(0x20, prefix.length, prefix.length + startBytes.length + Buffer.byteLength("\nstale\n") + endBytes.length);
+    assert.deepEqual(agentsAfter, expected);
+    assert.equal(agentsAfter.length, agentsBefore.length);
+    assert.deepEqual(claudeAfter, claudeOwner);
     const firstAgents = Buffer.from(agentsAfter);
     const firstClaude = Buffer.from(claudeAfter);
     reconcileAgentWorkspace({ workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
@@ -319,7 +374,7 @@ test("WorkspaceService preserves invalid UTF-8 owner bytes outside ASCII managed
   }
 });
 
-test("WorkspaceService aborts when owner content changes after staging and preserves that owner edit", async () => {
+test("WorkspaceService aborts when owner content changes before span write and preserves that owner edit", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-owner-race-"));
   const workspaceDir = path.join(temp, "workspace");
   fs.mkdirSync(workspaceDir, { recursive: true });
@@ -333,7 +388,7 @@ test("WorkspaceService aborts when owner content changes after staging and prese
   assert.throws(
     () => reconcileAgentWorkspace({
       workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1",
-      testHooks: { afterStage(file) { if (path.basename(file) === "AGENTS.md") fs.appendFileSync(agentsFile, "owner-concurrent-edit\n"); } },
+      testHooks: { beforeWrite(file) { if (path.basename(file) === "AGENTS.md") fs.appendFileSync(agentsFile, "owner-concurrent-edit\n"); } },
     }),
     /owner prompt.*changed concurrently|content changed concurrently/i,
   );
@@ -346,33 +401,38 @@ test("WorkspaceService aborts when owner content changes after staging and prese
   }
 });
 
-test("WorkspaceService replays an owner edit made in the precise final-check to rename window", async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-rename-window-"));
+test("WorkspaceService rejects a canonical pathname replacement during span write without touching the replacement", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-path-replacement-race-"));
   const workspaceDir = path.join(temp, "workspace");
-  const agentsFile = path.join(workspaceDir, "AGENTS.md");
   fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.writeFileSync(agentsFile, `owner-before\n${START}\nstale\n${END}\nowner-after\n`);
-  fs.writeFileSync(path.join(workspaceDir, "CLAUDE.md"), "claude-owner\n");
-  let injected = false;
+  const agentsFile = path.join(workspaceDir, "AGENTS.md");
+  const displacedFile = path.join(workspaceDir, "AGENTS.displaced.md");
+  const before = `owner-prefix\n${START}\nstale\n${END}\nowner-suffix\n`;
+  fs.writeFileSync(agentsFile, before);
+  const originalInode = fs.statSync(agentsFile).ino;
   const { reconcileAgentWorkspace } = await loadService();
-  reconcileAgentWorkspace({
-    workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1",
-    testHooks: { beforeRename(source, destination) {
-      if (!injected && path.basename(String(destination)) === "AGENTS.md" &&
-          path.basename(String(source)).startsWith(".AGENTS.md.")) {
-        injected = true;
-        fs.appendFileSync(agentsFile, "owner-edit-in-rename-window\n");
-      }
-    } },
-  });
   try {
-    const content = fs.readFileSync(agentsFile, "utf8");
-    assert.equal(injected, true);
-    assert.match(content, /^owner-before\n/);
-    assert.match(content, /owner-after\nowner-edit-in-rename-window\n$/);
-    assert.equal(count(content, START), 1);
-    assert.equal(count(content, END), 1);
-    assert.doesNotMatch(content, /\nstale\n/);
+    assert.throws(
+      () => reconcileAgentWorkspace({
+        workspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1",
+        testHooks: {
+          beforeWrite(file) {
+            if (path.basename(file) !== "AGENTS.md") return;
+            fs.renameSync(agentsFile, displacedFile);
+            fs.writeFileSync(agentsFile, before);
+          },
+        },
+      }),
+      /owner prompt inode or mode changed concurrently/i,
+    );
+    const canonical = fs.readFileSync(agentsFile, "utf8");
+    assert.equal(canonical, before, "the replacement at the canonical pathname must remain byte-identical");
+    assert.equal(count(canonical, START), 1);
+    assert.equal(count(canonical, END), 1);
+    assert.notEqual(fs.statSync(agentsFile).ino, originalInode, "the displaced inode must not be accepted as canonical");
+    assert.equal(fs.statSync(displacedFile).ino, originalInode);
+    assert.equal(fs.readFileSync(displacedFile, "utf8"), before,
+      "a detectable pathname replacement must abort before writing the displaced original inode");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -431,7 +491,7 @@ test("WorkspaceService keeps its lock in Agent state, ignores same-name user fil
     reconcileAgentWorkspace({ workspaceDir: newWorkspaceDir, trustedWorkspaceRoot: temp, lockDir: lockDirFor(temp), agentId: "cli_phase1" });
     for (const name of ["AGENTS.md", "CLAUDE.md"]) {
       assert.equal(fs.statSync(path.join(workspaceDir, name)).mode & 0o777, 0o666);
-      assert.equal(fs.statSync(path.join(newWorkspaceDir, name)).mode & 0o777, 0o600);
+      assert.equal(fs.existsSync(path.join(newWorkspaceDir, name)), false);
     }
     const userFile = path.join(workspaceDir, ".larkin-workspace-reconcile.lock");
     fs.writeFileSync(userFile, "owner file with an old lock-like name\n", { mode: 0o600 });

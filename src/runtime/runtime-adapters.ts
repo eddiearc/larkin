@@ -989,7 +989,8 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
       const runtimeDir = path.join(input.stateDir ?? path.join(input.workspaceDir, ".larkin"), "runtime");
       (dependencies.mkdir ?? fs.mkdirSync)(runtimeDir, { recursive: true });
       const promptFile = path.join(runtimeDir, "claude-system-prompt.md");
-      (dependencies.writeFile ?? fs.writeFileSync)(promptFile, input.standingPrompt.content, { mode: 0o600 });
+      if (dependencies.writeFile) dependencies.writeFile(promptFile, input.standingPrompt.content, { mode: 0o600 });
+      else writePrivateAtomic(promptFile, input.standingPrompt.content);
       const args = [
         "--dangerously-skip-permissions", "--verbose",
         "--permission-mode", "bypassPermissions",

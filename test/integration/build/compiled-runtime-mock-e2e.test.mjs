@@ -77,6 +77,9 @@ esac
 exit 0
 `, { mode: 0o755 });
   fs.symlinkSync(launcher, path.join(mockBin, "lark-cli"));
+  const loginShell = path.join(mockBin, "fixture-login-shell");
+  fs.writeFileSync(loginShell, "#!/bin/sh\nexec /bin/sh -c \"$2\"\n", { mode: 0o755 });
+  return loginShell;
 }
 
 const codexFixtureSource = `import fs from "node:fs";
@@ -193,7 +196,7 @@ test.skipIf(!enabled)("one compiled binary exercises native Codex/Claude/Pi prot
       fs.chmodSync(home, 0o700);
       fs.chmodSync(larkinHome, 0o700);
       fs.writeFileSync(eventFile, "");
-      writeOfficialLarkCli(mockBin);
+      const loginShell = writeOfficialLarkCli(mockBin);
       if (runtime === "codex" || runtime === "claude" || runtime === "pi") {
         const source = path.join(home, `${runtime}-fixture.mjs`);
         fs.writeFileSync(source, runtime === "codex" ? codexFixtureSource : runtime === "claude" ? claudeFixtureSource : piFixtureSource, { mode: 0o600 });
@@ -209,7 +212,7 @@ test.skipIf(!enabled)("one compiled binary exercises native Codex/Claude/Pi prot
       fs.mkdirSync(botsDir, { mode: 0o700 });
       fs.writeFileSync(path.join(botsDir, `${agentId}.json`), `${JSON.stringify({ appId: agentId, appSecret: "fixture-secret", tenant: "feishu" })}\n`, { mode: 0o600 });
       const serviceEnv = {
-        PATH: `${mockBin}:/usr/bin:/bin`, HOME: home, TMPDIR: os.tmpdir(), LARKIN_CONFIG_DIR: larkinHome,
+        PATH: `${mockBin}:/usr/bin:/bin`, HOME: home, SHELL: loginShell, TMPDIR: os.tmpdir(), LARKIN_CONFIG_DIR: larkinHome,
         LARKIN_DASHBOARD_PORT: String(await freePort()), LARKIN_FEISHU_EVENT_FILE: eventFile,
         RUNTIME_PROTOCOL_MARKER: protocolMarker,
         ...(runtime === "codex" ? { LARKIN_CODEX_COMMAND: path.join(mockBin, "codex") } : {}),
@@ -257,21 +260,30 @@ test.skipIf(!enabled)("one compiled binary exercises native Codex/Claude/Pi prot
         if (runtime === "codex") {
           const protocol = rows(protocolMarker);
           assert.deepEqual(protocol.find((row) => row.type === "launch" && row.args.includes("--listen")).args, ["app-server", "--listen", "stdio://"]);
-          assert.match(protocol.find((row) => row.method === "thread/start").params.developerInstructions, /inbox check/);
+          const thread = protocol.find((row) => row.method === "thread/start");
+          assert.match(thread.params.developerInstructions, /inbox check/);
+          assert.match(thread.params.developerInstructions, /Collaboration and delivery/);
+          assert.equal(Object.keys(thread.params).filter((key) => /instructions|prompt/i.test(key)).length, 1);
         } else if (runtime === "claude") {
           const launch = rows(protocolMarker).find((row) => row.type === "launch" && row.args.includes("--append-system-prompt-file"));
           assert.ok(launch.args.includes("--input-format") && launch.args.includes("stream-json"));
-          assert.ok(launch.args.includes("--append-system-prompt-file"));
+          assert.equal(launch.args.filter((arg) => arg === "--append-system-prompt-file").length, 1);
+          assert.equal(launch.args.includes("--system-prompt"), false);
+          assert.match(fs.readFileSync(launch.args[launch.args.indexOf("--append-system-prompt-file") + 1], "utf8"), /Collaboration and delivery/);
         } else {
           const protocol = rows(protocolMarker);
           const launch = protocol.find((row) => row.type === "launch" && row.args.includes("--session-dir"));
           assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
-          assert.ok(launch.args.includes("--append-system-prompt"));
+          assert.equal(launch.args.filter((arg) => arg === "--append-system-prompt").length, 1);
+          assert.equal(launch.args.includes("--system-prompt"), false);
+          assert.match(fs.readFileSync(launch.args[launch.args.indexOf("--append-system-prompt") + 1], "utf8"), /Collaboration and delivery/);
           const methods = protocol.filter((row) => row.type === "protocol").map((row) => row.method);
           assert.deepEqual(methods.slice(0, 2), ["prompt", "steer"]);
           assert.equal(methods.slice(2).every((method) => method === "prompt"), true,
             "durable owners remaining after the settled steer must resume through prompt, not repeat busy steer");
         }
+        const workspace = path.join(larkinHome, "agents", agentId);
+        for (const name of ["AGENTS.md", "CLAUDE.md"]) assert.equal(fs.existsSync(path.join(workspace, name)), false);
       } finally {
         await stop(service);
       }
@@ -305,7 +317,7 @@ test.skipIf(!enabled)("compiled Pi provider auth failure projects unauthenticate
     }, "compile provider-auth artifact");
     const manifest = JSON.parse(fs.readFileSync(path.join(releaseDir, "release-manifest.json"), "utf8"));
     const artifact = path.join(releaseDir, manifest.artifacts[0].file);
-    writeOfficialLarkCli(mockBin);
+    const loginShell = writeOfficialLarkCli(mockBin);
     const piSource = path.join(home, "pi-auth-fixture.mjs");
     fs.writeFileSync(piSource, `import fs from "node:fs";
 import readline from "node:readline";
@@ -372,7 +384,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     fs.mkdirSync(botsDir, { mode: 0o700 });
     fs.writeFileSync(path.join(botsDir, `${agentId}.json`), `${JSON.stringify({ appId: agentId, appSecret: "fixture-secret", tenant: "feishu" })}\n`, { mode: 0o600 });
     const serviceEnv = {
-      PATH: `${mockBin}:/usr/bin:/bin`, HOME: home, TMPDIR: os.tmpdir(), LARKIN_CONFIG_DIR: larkinHome,
+      PATH: `${mockBin}:/usr/bin:/bin`, HOME: home, SHELL: loginShell, TMPDIR: os.tmpdir(), LARKIN_CONFIG_DIR: larkinHome,
       LARKIN_DASHBOARD_PORT: String(await freePort()), LARKIN_FEISHU_EVENT_FILE: eventFile, LARKIN_PI_COMMAND: piCommand,
       PI_AUTH_PROTOCOL_MARKER: authProtocolMarker, PI_AUTH_ALLOW_SUCCESS: allowAuthSuccess,
     };

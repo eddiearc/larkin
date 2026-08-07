@@ -1,12 +1,45 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const enabled = process.env.LARKIN_RUN_STANDALONE_SETUP_WORKFLOW === "1";
+
+async function freePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const port = server.address().port;
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
+async function waitForProcessCommand(needle, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ps = spawnSync("/bin/ps", ["-axo", "command="], { encoding: "utf8" });
+    if (ps.status === 0) {
+      const command = ps.stdout.split("\n").find((line) => line.includes(needle));
+      if (command) return command;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for process command containing ${needle}`);
+}
+
+async function stop(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 8_000))]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await once(child, "exit");
+  }
+}
 
 function checked(result, label) {
   assert.equal(result.error, undefined, `${label}: ${result.error?.message || "spawn error"}`);
@@ -251,6 +284,38 @@ test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent confi
     assert.equal(fs.statSync(path.dirname(piAuth)).mode & 0o777, 0o700);
     assert.equal(fs.statSync(piAuth).mode & 0o777, 0o600);
     assert.equal(JSON.parse(fs.readFileSync(piAuth, "utf8"))["larkin-custom"].key, "standalone-provider-secret");
+
+    const eventFile = path.join(temp, "builtin-events.ndjson");
+    fs.writeFileSync(eventFile, "");
+    fs.writeFileSync(configFile, `${JSON.stringify({
+      ...builtinConfigured,
+      activeAgent: secondAgent,
+      agents: { [secondAgent]: builtinConfigured.agents[secondAgent] },
+    }, null, 2)}\n`, { mode: 0o600 });
+    const builtinService = spawn(artifact, ["start", "--dry-run"], {
+      cwd: temp,
+      env: {
+        ...builtinEnv,
+        LARKIN_FEISHU_EVENT_FILE: eventFile,
+        LARKIN_DASHBOARD_PORT: String(await freePort()),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let builtinServiceOutput = "";
+    builtinService.stdout.on("data", (chunk) => { builtinServiceOutput += String(chunk); });
+    builtinService.stderr.on("data", (chunk) => { builtinServiceOutput += String(chunk); });
+    try {
+      const command = await waitForProcessCommand(`${path.basename(artifact)} __internal pi-rpc`)
+        .catch((error) => { throw new Error(`${error.message}\n${builtinServiceOutput}`); });
+      assert.equal((command.match(/(?:^|\s)--append-system-prompt(?:\s|$)/g) || []).length, 1,
+        "standalone builtin Pi must receive exactly one append standing prompt argument");
+      assert.doesNotMatch(command, /(?:^|\s)--system-prompt(?:\s|$)/,
+        "standalone builtin Pi must not replace the upstream system prompt");
+      assert.match(command, /__internal pi-rpc[\s\S]*--mode rpc/,
+        "the assertion must observe the formal standalone internal Pi adapter process");
+    } finally {
+      await stop(builtinService);
+    }
 
     providerFixture.child.kill();
     providerFixture = undefined;

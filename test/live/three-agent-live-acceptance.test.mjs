@@ -34,19 +34,14 @@ function regularDirectory(directory, label) {
   assert.equal(stat.isSymbolicLink(), false, `${label} must not be a symlink`);
 }
 
-function occurrenceCount(value, marker) {
-  return value.split(marker).length - 1;
-}
-
-function validatePrompt(file) {
+function validateNativePromptBoundary(file) {
+  if (!fs.existsSync(file)) return;
+  const stat = fs.lstatSync(file);
+  assert.equal(stat.isFile(), true, `${path.basename(file)} must be a regular owner file when present`);
+  assert.equal(stat.isSymbolicLink(), false, `${path.basename(file)} must not be a symlink`);
   const content = fs.readFileSync(file, "utf8");
-  assert.equal(occurrenceCount(content, START), 1, `${path.basename(file)} must contain one managed block start`);
-  assert.equal(occurrenceCount(content, END), 1, `${path.basename(file)} must contain one managed block end`);
-  const managed = content.slice(content.indexOf(START), content.indexOf(END) + END.length);
-  assert.match(managed, /群聊里，人只有\s*@你\s*才会唤醒你（免@白名单群例外）/, "managed block must retain the human group wake rule");
-  assert.match(managed, /未\s*@你的消息一律入箱可见/, "managed block must retain non-@ listening");
-  assert.match(managed, /机器人发的消息：只有点名\s*@你\s*才会唤醒你（@所有人不算）/, "managed block must retain directed bot wake and @all exclusion");
-  assert.match(managed, /不设任何冷却或频率闸门/, "managed block must reject cooldown/frequency gates");
+  assert.equal(content.includes(START), false, `${path.basename(file)} must not retain a Larkin managed start marker`);
+  assert.equal(content.includes(END), false, `${path.basename(file)} must not retain a Larkin managed end marker`);
 }
 
 function rejectRawIds(value, at = "evidence") {
@@ -143,8 +138,8 @@ test.skipIf(!ENABLED)(`prepared three-Agent shell baseline is currently healthy 
     const state = path.join(configDir, "state", "agents", agentId);
     regularDirectory(workspace, "canonical Agent workspace");
     regularDirectory(state, "canonical Agent state");
-    validatePrompt(path.join(workspace, "AGENTS.md"));
-    validatePrompt(path.join(workspace, "CLAUDE.md"));
+    validateNativePromptBoundary(path.join(workspace, "AGENTS.md"));
+    validateNativePromptBoundary(path.join(workspace, "CLAUDE.md"));
     const status = readJson(path.join(state, "status.json"), "Agent status.json");
     assert.equal(status.connectedVia, "channel", "each Agent must have a channel connection");
     const connectedAt = isoTime(status.connectedAt, "Agent connectedAt");

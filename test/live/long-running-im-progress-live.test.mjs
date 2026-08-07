@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,17 +90,8 @@ async function runScenario(scenario, repetition) {
       lockDir: stateDir,
       agentId: "cli_evalRuntimeA1",
     });
-    if (omitExplicitResponseRule) {
-      for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-        const file = path.join(workspaceDir, name);
-        const current = fs.readFileSync(file, "utf8");
-        const mutated = current.replace(/\n- 用户明确要求“只回复指定内容一次”[^\n]*\n/, "\n");
-        assert.notEqual(mutated, current, `counterfactual must remove the explicit response/call budget rule from ${name}`);
-        fs.writeFileSync(file, mutated, { mode: 0o600 });
-      }
-    }
     const executable = resolveAgentCliExecutable(FAKE_CLI, process.execPath);
-    const prompt = new ContextPromptBuilder().buildStandingPrompt({
+    let prompt = new ContextPromptBuilder().buildStandingPrompt({
       agent: { id: "cli_evalRuntimeA1",
         name: ["explicit-single-response", "poll-then-stay-silent"].includes(scenario.id) ? "二蛋" : "Long-running IM Eval" },
       runtime,
@@ -111,6 +103,11 @@ async function runScenario(scenario, repetition) {
         ],
       },
     });
+    if (omitExplicitResponseRule) {
+      const content = prompt.content.replace(/If the current user explicitly requests one exact response only[^\n]*\n/, "");
+      assert.notEqual(content, prompt.content, "counterfactual must remove the standing prompt response/call budget rule");
+      prompt = { ...prompt, content, hash: createHash("sha256").update(content).digest("hex") };
+    }
     const adapter = createEvalAdapter();
     const isolatedMessagingEnv = Object.fromEntries(Object.keys(process.env)
       .filter((key) => /(?:LARK|FEISHU)/i.test(key))

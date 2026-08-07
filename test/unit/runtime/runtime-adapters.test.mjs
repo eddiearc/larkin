@@ -72,7 +72,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v9");
+  assert.equal(prompt.version, "larkin-standing-v11");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
@@ -245,6 +245,7 @@ test("Codex adapter initializes a thread and maps busy input to turn/steer", asy
   assert.equal(child.writes[1].method, "initialized");
   assert.equal(child.writes[2].method, "thread/start");
   assert.equal(child.writes[2].params.developerInstructions, "standing");
+  assert.equal(Object.keys(child.writes[2].params).filter((key) => /instructions|prompt/i.test(key)).length, 1);
   child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, result: { thread: { id: "thread-1" } } })}\n`);
   child.stdout.write(`${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn-1" } } })}\n`);
   await new Promise((resolve) => setImmediate(resolve));
@@ -276,6 +277,8 @@ test("Codex resume failure falls back to a fresh thread with the same standing p
   await new Promise((resolve) => setImmediate(resolve));
   const resume = child.writes.find((request) => request.method === "thread/resume");
   assert.equal(resume.params.threadId, "stale-thread");
+  assert.equal(resume.params.developerInstructions, "standing");
+  assert.equal(Object.keys(resume.params).filter((key) => /instructions|prompt/i.test(key)).length, 1);
   child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id, error: { code: -32602, message: "rollout not found" } })}\n`);
   await new Promise((resolve) => setImmediate(resolve));
   const fallback = child.writes.at(-1);
@@ -316,12 +319,15 @@ test("Codex steer precondition failure is deferred and clears the stale active t
 test("Claude adapter appends standing prompt and gates busy input to assistant boundaries", async () => {
   const child = new FakeProcess();
   let promptWrite;
+  let launchArgs;
   const session = await createNativeRuntimeAdapter("claude", {
-    spawn: () => child,
+    spawn: (_command, args) => { launchArgs = args; return child; },
     mkdir: () => {},
     writeFile: (...args) => { promptWrite = args; },
   }).createSession(create());
   assert.equal(promptWrite[1], "standing");
+  assert.equal(launchArgs.filter((arg) => arg === "--append-system-prompt-file").length, 1);
+  assert.equal(launchArgs.includes("--system-prompt"), false);
   const initial = await session.prompt({ inputId: "initial", kind: "initial", text: "start" });
   assert.equal(initial.status, "accepted");
   const gated = session.busyInput({ inputId: "early", kind: "inbox_update", text: "update" });
@@ -350,6 +356,19 @@ test("Claude native stream normalizes start, text/tool output, and result bounda
   ["turn-start", "activity:thinking", "activity:text", "activity:tool", "turn-end"]);
 });
 
+test("Claude resume keeps exactly one append standing-prompt file", async () => {
+  const child = new FakeProcess();
+  let launchArgs;
+  await createNativeRuntimeAdapter("claude", {
+    spawn: (_command, args) => { launchArgs = args; return child; },
+    mkdir: () => {}, writeFile: () => {},
+  }).createSession(create({ resumeSessionId: "claude-resume-session" }));
+  assert.deepEqual(launchArgs.slice(launchArgs.indexOf("--resume"), launchArgs.indexOf("--resume") + 2),
+    ["--resume", "claude-resume-session"]);
+  assert.equal(launchArgs.filter((arg) => arg === "--append-system-prompt-file").length, 1);
+  assert.equal(launchArgs.includes("--system-prompt"), false);
+});
+
 test("Pi adapter maps prompt, steer and abort to its process backend", async () => {
   const calls = [];
   const sdk = {
@@ -371,6 +390,57 @@ test("Pi adapter maps prompt, steer and abort to its process backend", async () 
   await session.busyInput({ inputId: "s", kind: "inbox_update", text: "two" });
   await session.cancel("stop");
   assert.deepEqual(calls, [["prompt", "one"], ["steer", "two"], ["abort"]]);
+});
+
+test.each(["external", "builtin"])("%s Pi launches one shared append standing-prompt path without replacement", async (distribution) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-single-prompt-${distribution}-`));
+  const child = new FakeProcess();
+  let launch;
+  try {
+    const input = create({
+      workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "default",
+      resumeSessionId: `resume-${distribution}`,
+      env: distribution === "builtin" ? { LARKIN_PI_DISTRIBUTION: "builtin", LARKIN_CONFIG_DIR: path.join(root, "config") } : {},
+    });
+    fs.mkdirSync(input.workspaceDir, { recursive: true });
+    const sessionDir = path.join(input.stateDir, "runtime", "pi-sessions");
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const sessionFile = path.join(sessionDir, `${input.resumeSessionId}.jsonl`);
+    fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
+    const pending = createNativeRuntimeAdapter("pi", {
+      env: { LARKIN_PI_COMMAND: "/fixture/external-pi" },
+      spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
+    }).createSession(input);
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const request of child.writes.slice(0, 2)) {
+      const data = request.type === "get_state"
+        ? { sessionId: `session-${distribution}`, model: { provider: "fixture", id: "model" }, thinkingLevel: "off" }
+        : { models: [{ provider: "fixture", id: "model" }] };
+      child.stdout.write(`${JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data })}\n`);
+    }
+    const session = await pending;
+    const appendIndex = launch.args.indexOf("--append-system-prompt");
+    assert.notEqual(appendIndex, -1);
+    assert.equal(launch.args.filter((arg) => arg === "--append-system-prompt").length, 1);
+    assert.equal(launch.args.includes("--system-prompt"), false);
+    assert.deepEqual(launch.args.slice(launch.args.indexOf("--session"), launch.args.indexOf("--session") + 2),
+      ["--session", sessionFile]);
+    const promptFile = launch.args[appendIndex + 1];
+    assert.equal(fs.readFileSync(promptFile, "utf8"), "standing");
+    assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
+    if (distribution === "external") {
+      assert.equal(launch.command, "/fixture/external-pi");
+      assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
+      assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
+    } else {
+      assert.ok(launch.args.includes("__internal") && launch.args.includes("pi-rpc"));
+      assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, "builtin");
+      assert.equal(launch.options.env.PI_TELEMETRY, "0");
+    }
+    await session.close("test complete");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Pi prompt reports acceptance only after the RPC command acknowledgement", async () => {

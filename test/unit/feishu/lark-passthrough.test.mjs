@@ -415,31 +415,36 @@ test("external Agent CLI exposes only Larkin-owned commands and migrates IM to n
   }
 });
 
-test("platform rules teach the sole larkin surface, long-running task updates, and the irreversible-op convention", async () => {
-  const { PLATFORM_RULES } = await import(
-    pathToFileURL(path.join(ROOT, "dist", "platform", "workspace-service.mjs")).href
+test("standing prompt owns collaboration, delivery, safety, and the sole larkin surface", async () => {
+  const { ContextPromptBuilder } = await import(
+    pathToFileURL(path.join(ROOT, "dist", "agent", "context-prompt.mjs")).href
   );
-  assert.match(PLATFORM_RULES, /standing instructions.*Larkin 本地能力/, "platform rules must defer to the capability manifest");
-  assert.match(PLATFORM_RULES, /inbox check/, "platform rules must teach the external Inbox command");
-  assert.match(PLATFORM_RULES, /只用 larkin.*不要调用裸 lark-cli/, "platform rules must teach the Larkin-owned surface");
-  assert.doesNotMatch(PLATFORM_RULES, /larkin message|larkin task claim|larkin docs/, "platform rules must not teach removed commands");
-  assert.match(PLATFORM_RULES, /--as user/, "platform rules must state the identity boundary");
-  assert.match(PLATFORM_RULES, /commentary.*final_answer.*(?:不可见|不等于飞书出站)/, "runtime-native output must not be presented as user-visible IM");
-  assert.match(PLATFORM_RULES, /只有[^\n]*成功调用[^\n]*larkin[^\n]*(?:发送|回复)[^\n]*(?:可见|反馈)/, "only a successful routed send or reply is user-visible");
-  assert.match(PLATFORM_RULES, /多个外部步骤[^\n]*(?:首个|第一个)[^\n]*(?:外部|耗时)步骤前[^\n]*(?:简短确认|首响)/, "multi-step external work must acknowledge before its first external or slow step");
-  assert.match(PLATFORM_RULES, /只回复[^\n]*(?:一次|单次)[^\n]*(?:不得|禁止)[^\n]*首响[^\n]*进度[^\n]*(?:goal|status)[^\n]*控制工具/, "an explicit single response must suppress extra acknowledgement, progress, and control tools");
-  assert.match(PLATFORM_RULES, /只 poll 后保持沉默[^\n]*poll 后[^\n]*(?:立即停止|不得再调用)[^\n]*历史[^\n]*(?:goal|status)[^\n]*(?:控制|发现)工具[^\n]*(?:不发送|不得发送)[^\n]*(?:首响|进度|最终)/, "poll-then-silent must stop all extra reads, control calls, and writes");
-  assert.match(PLATFORM_RULES, /显式限制[^\n]*优先于[^\n]*默认首响[^\n]*进度[^\n]*没有[^\n]*显式限制[^\n]*普通[^\n]*(?:多步骤|长任务)[^\n]*仍[^\n]*首响/, "ordinary long work must retain its acknowledgement contract");
-  assert.match(PLATFORM_RULES, /短任务[^\n]*(?:直接处理|无需)[^\n]*(?:收到|确认|首响)/, "short work must not gain a mechanical acknowledgement");
-  assert.match(PLATFORM_RULES, /用户[^\n]*步骤顺序[^\n]*(?:严格|必须)[^\n]*顺序[^\n]*不得[^\n]*(?:fallback|重排|重复)/, "explicit user ordering must forbid premature fallback, repetition, and reordering");
-  assert.match(PLATFORM_RULES, /进度[^\n]*用户[^\n]*大阶段[^\n]*(?:而非|不按)[^\n]*(?:工具|小步骤)[^\n]*(?:仅在|只在)[^\n]*阶段变化[^\n]*明显延迟[^\n]*需要用户动作[^\n]*用户可感知阻塞[^\n]*同一阶段[^\n]*同一阻塞[^\n]*(?:不重复|只发送一次)/, "phase-level progress must stay bounded and user-meaningful");
-  assert.match(PLATFORM_RULES, /(?:^|\n)- 依赖前一步结果[^\n]*每次只调用一个[^\n]*禁止[^\n]*批量[^\n]*并行[^\n]*观察失败结果后[^\n]*只看下一动作[^\n]*继续同一方案[^\n]*retry[^\n]*禁止重复发送[^\n]*改用[^\n]*fallback[^\n]*其他方案[^\n]*必须先用 larkin[^\n]*阻塞[^\n]*下一步[^\n]*发送成功后[^\n]*才可调用新方案/, "dependent work must be observed one call at a time before one binary retry-or-fallback decision");
-  assert.match(PLATFORM_RULES, /不得[^\n]*(?:每次工具调用|逐次工具调用)[^\n]*(?:刷屏|发送)|(?:而非|不按)[^\n]*(?:工具|小步骤)/, "progress must not spam on every tool call");
-  assert.match(PLATFORM_RULES, /不得泄露[^\n]*thinking[^\n]*凭证[^\n]*原始工具输出[^\n]*内部路径/, "progress must protect sensitive runtime details");
-  assert.match(PLATFORM_RULES, /(?:完成|无法继续|需要用户动作)[^\n]*larkin[^\n]*(?:最终结论|明确请求)/, "terminal outcomes must be sent through larkin");
-  assert.match(PLATFORM_RULES, /不可逆|撤回|删除/, "platform rules must carry the irreversible-op convention");
-  assert.match(PLATFORM_RULES, /standing instructions.*身份.*权威/, "injected identity must be authoritative");
-  assert.match(PLATFORM_RULES, /仅(?:点名|指派).*其他 Agent.*不得回复/, "exclusive assignment must keep non-target agents silent");
-  assert.match(PLATFORM_RULES, /thread:<chat_id>:<thread_id>.*threads-messages-list.*data\.messages/, "thread reads must use one target-scoped stable recipe");
-  assert.match(PLATFORM_RULES, /2>&1.*(?:禁止|不得).*JSON|JSON.*(?:禁止|不得).*2>&1/, "structured output must keep stderr separate");
+  const prompt = new ContextPromptBuilder().build({ agentId: "cli_platform_contract", runtime: "pi" }).content;
+  assert.match(prompt, /inbox check/);
+  assert.match(prompt, /only the Larkin-owned.*never invoke bare `lark-cli`/i);
+  assert.match(prompt, /Never pass `--agent`, `--as user`, `--profile`, or `--config-dir`/i);
+  assert.match(prompt, /missing scope.*error unchanged.*authorize.*do not bypass/i);
+  assert.doesNotMatch(prompt, /larkin message|larkin task claim|larkin docs/);
+  assert.match(prompt, /commentary and final_answer.*not visible.*do not count as outbound/i);
+  assert.match(prompt, /Only a successful Larkin send or reply is user-visible/i);
+  assert.match(prompt, /one exact response only.*strict outbound and tool-call budget.*acknowledgement.*progress.*goal\/status/i);
+  assert.match(prompt, /Runtime input directly contains the complete task.*do not invent an Inbox check, poll, or discovery call/i);
+  assert.match(prompt, /Runtime input supplied the complete task directly.*do not add any Inbox call/i);
+  assert.match(prompt, /multiple external steps.*before the first external or slow step/i);
+  assert.match(prompt, /Short work needs no mechanical acknowledgement/i);
+  assert.match(prompt, /explicit user-ordered sequence exactly.*fallback early.*repeat.*reorder/i);
+  assert.match(prompt, /one call at a time.*retry.*without duplicate sends.*fallback/i);
+  assert.match(prompt, /first ordinary failure.*immediate authorized retry.*same user-meaningful phase.*not yet a user-visible blocker/i);
+  assert.match(prompt, /adjacent retry silently.*no IM between the failed attempt and its retry/i);
+  assert.match(prompt, /explicitly named fallback.*different approach.*strategy change.*blocker-and-next-action IM before invoking/i);
+  assert.match(prompt, /phase-change progress IM.*previous phase's last work.*before the new phase's first work/i);
+  assert.match(prompt, /user-meaningful phase.*phase changes.*delay.*user action.*blocker/i);
+  assert.match(prompt, /Do not repeat.*report every tool call.*thinking.*credentials.*raw tool output.*internal paths/i);
+  assert.match(prompt, /completion.*inability to continue.*user action.*through Larkin.*final_answer alone/i);
+  assert.match(prompt, /irreversible action.*recall.*deletion.*state the intended action and target/i);
+  assert.match(prompt, /config --help.*never edit config\.json directly/i);
+  assert.match(prompt, /One Feishu App ID maps to one Agent/i);
+  assert.match(prompt, /only production runtime path.*second runtime.*legacy daemon/i);
+  assert.match(prompt, /thread:<chat_id>:<thread_id>[\s\S]*threads-messages-list[\s\S]*data\.messages/i);
+  assert.match(prompt, /never merge stderr with `2>&1`.*JSON/i);
 });

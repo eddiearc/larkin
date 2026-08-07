@@ -10,8 +10,6 @@ import { inspectProcess } from "../../../dist/platform/process-state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const HARNESS = path.join(ROOT, "test", "live", "three-agent-live-acceptance.test.mjs");
-const START = "<!-- larkin:platform-rules:start -->";
-const END = "<!-- larkin:platform-rules:end -->";
 
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -60,12 +58,10 @@ test("three-Agent live acceptance is opt-in, hermetic by default, and fixture-ve
     startedAt,
     agents: ids,
   });
-  const rules = `${START}\n群聊里，人只有 @你 才会唤醒你（免@白名单群例外）；未 @你的消息一律入箱可见。\n机器人发的消息：只有点名 @你 才会唤醒你（@所有人不算）。\n不设任何冷却或频率闸门。\n${END}`;
   for (const id of ids) {
     const workspace = path.join(temp, "agents", id);
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(path.join(workspace, "AGENTS.md"), `owner bytes\n${rules}\n`);
-    fs.writeFileSync(path.join(workspace, "CLAUDE.md"), `${rules}\n`);
+    fs.writeFileSync(path.join(workspace, "AGENTS.md"), "owner-maintained native instructions\n");
     writeJson(path.join(temp, "state", "agents", id, "status.json"), { connectedVia: "channel", connectedAt: endedAt, inboundVerifiedAt: endedAt, recentErrors: [] });
   }
   const evidence = path.join(temp, "evidence.json");

@@ -1,7 +1,7 @@
 // larkin 顶级 lark-cli 命令组直通决策（larkin im … == lark-cli im …）：封装转发不改写语义，
 // 唯一硬边界是身份/凭证（Owner 定，2026-07-17，见 coding-context larkin.cli-prompt-alignment plan）。
 // 能力边界交给飞书权限体系（bot scope、群成员身份、文档协作者），壳不做命令级裁剪；
-// 不可逆操作靠 PLATFORM_RULES 行为约定治理。
+// 不可逆操作靠版本化 Runtime standing prompt 的行为约定治理。
 
 import { resolveRuntimeAuthority } from "../platform/config.js";
 

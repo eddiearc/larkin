@@ -10,7 +10,7 @@ export function loadRuntimeAgentInterfaceEval(file) {
   if (value.dataset !== "runtime-agent-interface-v2" || value.version !== 1) throw new Error("eval dataset/version mismatch");
   if (value.runtime?.adapter !== "codex") throw new Error("eval runtime.adapter must be codex");
   nonempty(value.runtime.minimum_cli_version, "runtime.minimum_cli_version");
-  if (value.model?.standing_prompt_version !== "larkin-standing-v11") throw new Error("eval standing prompt version mismatch");
+  if (value.model?.standing_prompt_version !== "larkin-standing-v12") throw new Error("eval standing prompt version mismatch");
   nonempty(value.model.selection, "model.selection");
   if (value.grader?.name !== "runtime-agent-interface-v2-trace-grader" || value.grader.version !== 1) {
     throw new Error("eval grader metadata mismatch");

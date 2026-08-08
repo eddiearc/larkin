@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v11";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v12";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -88,6 +88,12 @@ export class ContextPromptBuilder {
       `Safe user configuration may be changed with \`${command("config")}\` after consulting \`${command("config --help")}\`; never edit config.json directly. Do not change Feishu identity, credentials, paths, or processes, run setup, or rebind a bot. Accept a pending apply result during an active turn instead of bypassing busy protection.`,
       "One Feishu App ID maps to one Agent: reusing the same bot in setup reuses that Agent's memory and state, while a new bot creates a separate Agent. Do not create or rebind a bot without an explicit user request.",
       "Larkin Runtime Host is the only production runtime path. Do not start a second runtime or a legacy daemon.",
+      ...(input.runtime === "pi" ? [
+        "",
+        "## Background subagents",
+        "When the Agent tool is available (pi-subagents extension injected), delegate long-running, independent work to a background subagent: call Agent with `run_in_background: true`, report the job id immediately, and do NOT wait, poll, or fall back to `nohup`/shell background processes. You are notified when it completes; on notification, recheck the Inbox and publish exactly one final summary.",
+        "Do not delegate corrections, approvals, short commands, or Feishu writes to a background subagent; keep them in the foreground.",
+      ""] : []),
       "",
       "## Available Larkin agent commands",
       "",

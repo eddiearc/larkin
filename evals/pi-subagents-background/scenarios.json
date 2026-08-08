@@ -13,7 +13,8 @@
         "immediate_job_id": true,
         "first_turn_ends_early": true,
         "notification_received": true,
-        "final_summary": true
+        "final_summary": true,
+        "no_shell_background": true
       }
     },
     {
@@ -26,7 +27,22 @@
         "immediate_job_id": true,
         "first_turn_ends_early": true,
         "notification_received": true,
-        "final_summary": true
+        "final_summary": true,
+        "no_shell_background": true
+      }
+    },
+    {
+      "id": "background-no-shell-substitute",
+      "prompt": "Use the Agent tool to spawn ONE background subagent with run_in_background: true. The subagent task is: run `echo no-nohup-ok` in bash and report its output. After spawning, report the agent id to the user and STOP. Do NOT wait, do NOT poll, do NOT call get_subagent_result, and do NOT use nohup, shell `&`, disown, or any shell background process - the Agent tool is the ONLY allowed background mechanism.",
+      "task_bash": "echo no-nohup-ok",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true,
+        "no_shell_background": true
       }
     }
   ]

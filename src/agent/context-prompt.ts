@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v12";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v13";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -90,9 +90,15 @@ export class ContextPromptBuilder {
       "Larkin Runtime Host is the only production runtime path. Do not start a second runtime or a legacy daemon.",
       ...(input.runtime === "pi" ? [
         "",
-        "## Background subagents",
-        "When the Agent tool is available (pi-subagents extension injected), delegate long-running, independent work to a background subagent: call Agent with `run_in_background: true`, report the job id immediately, and do NOT wait, poll, or fall back to `nohup`/shell background processes. You are notified when it completes; on notification, recheck the Inbox and publish exactly one final summary.",
-        "Do not delegate corrections, approvals, short commands, or Feishu writes to a background subagent; keep them in the foreground.",
+        "## Background subagents (pi)",
+        "Long-running, independent work MUST use the Agent tool with run_in_background: true. It is the ONLY supported background mechanism. nohup, `&`, disown, and shell background jobs are forbidden for delegated work.",
+        "Correct pattern:",
+        "1. Call Agent with arguments like {\"prompt\": \"<task>\", \"description\": \"<short label>\", \"run_in_background\": true}.",
+        "2. The tool returns an agent id immediately. Report it to the user and end the turn.",
+        "3. Do NOT poll or sleep; a completion notification arrives automatically.",
+        "4. On the notification, check the Inbox, then publish exactly one final summary.",
+        "Forbidden pattern (never acceptable): `nohup sh -c '...' > /tmp/x.out 2>&1 &`, `sleep N; cat ...`, disown, or any shell background substitute. These bypass subagent isolation.",
+        "Keep corrections, approvals, short commands, and Feishu writes in the foreground; do not delegate them.",
       ""] : []),
       "",
       "## Available Larkin agent commands",

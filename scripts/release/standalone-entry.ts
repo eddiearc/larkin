@@ -5,6 +5,7 @@ import javascript from "../../dist/dashboard/web/assets/dashboard.js" with { typ
 import piPackageJson from "../../node_modules/@earendil-works/pi-coding-agent/package.json" with { type: "text" };
 import piDarkTheme from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json" with { type: "text" };
 import piLightTheme from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json" with { type: "text" };
+import piSubagentsBundle from "../../dist/runtime/pi-subagents.bundle.js" with { type: "text" };
 import { main } from "../../dist/app/binary-entry.mjs";
 
 const encoder = new TextEncoder();
@@ -19,6 +20,7 @@ globalThis.__LARKIN_EMBEDDED_BUILTIN_PI_ASSETS__ = Object.freeze({
   darkTheme: piDarkTheme,
   lightTheme: piLightTheme,
 });
+globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ = piSubagentsBundle;
 process.env.LARKIN_STANDALONE = "1";
 // Bun preserves the wrapper entry at argv[1]; the public binary contract is argv[1] = first user argument.
 process.argv.splice(1, 1);

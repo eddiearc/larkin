@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.2.63",
+  "version": "0.2.64",
   "private": true,
   "larkinPackageRole": "development-source-checkout",
   "packageManager": "bun@1.3.14",
@@ -57,6 +57,7 @@
     "test:live:runtime-agent-interface-v2:read-only": "LARKIN_RUN_RUNTIME_AGENT_INTERFACE_V2_LIVE=1 bun test --max-concurrency 1 test/live/runtime-agent-interface-v2-live.test.mjs",
     "test:live:runtime-agent-interface-v2:hold-host": "bun run build && bun run test/live/runtime-agent-interface-v2-hold-host.mjs app/runtime-process.mjs",
     "test:eval:long-running-im-progress": "bun run build && bun test --max-concurrency 1 test/live/long-running-im-progress-live.test.mjs",
+    "test:eval:pi-subagents-background": "bun run build && bun test --max-concurrency 1 test/live/pi-subagents-background-live.test.mjs",
     "test:eval:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/unit/evals/runtime-agent-interface-v2.test.mjs",
     "test:eval:authoritative-freshness-gate": "bun test --max-concurrency 1 test/unit/evals/authoritative-freshness-gate.test.mjs",
     "test:eval:agent-experience-v6": "bun test --max-concurrency 1 test/unit/evals/agent-experience-v6.test.mjs",
@@ -87,6 +88,7 @@
     "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@tintinweb/pi-subagents": "0.14.3",
     "@types/node": "^26.1.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

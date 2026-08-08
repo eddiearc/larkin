@@ -392,6 +392,41 @@ test("Pi adapter maps prompt, steer and abort to its process backend", async () 
   assert.deepEqual(calls, [["prompt", "one"], ["steer", "two"], ["abort"]]);
 });
 
+test.each(["external", "builtin"])("%s Pi injects the pi-subagents bundle via -e when supported", async (distribution) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-subagents-${distribution}-`));
+  const child = new FakeProcess();
+  let launch;
+  try {
+    const input = create({
+      workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "default",
+      env: distribution === "builtin" ? { LARKIN_PI_DISTRIBUTION: "builtin", LARKIN_CONFIG_DIR: path.join(root, "config") } : {},
+    });
+    fs.mkdirSync(input.workspaceDir, { recursive: true });
+    const pending = createNativeRuntimeAdapter("pi", {
+      env: { LARKIN_PI_COMMAND: distribution === "external" ? "/fixture/external-pi" : undefined },
+      spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
+    }).createSession(input);
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const request of child.writes.slice(0, 2)) {
+      const data = request.type === "get_state"
+        ? { sessionId: `session-${distribution}`, model: { provider: "fixture", id: "model" }, thinkingLevel: "off" }
+        : { models: [{ provider: "fixture", id: "model" }] };
+      child.stdout.write(`${JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data })}\n`);
+    }
+    await pending;
+    if (distribution === "builtin") {
+      const extIndex = launch.args.indexOf("-e");
+      assert.notEqual(extIndex, -1, "builtin must inject -e");
+      assert.match(launch.args[extIndex + 1], /pi-subagents\.bundle\.js$/);
+    } else {
+      // external with a missing pi binary cannot probe a version → degrade, no -e.
+      assert.equal(launch.args.includes("-e"), false);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test.each(["external", "builtin"])("%s Pi launches one shared append standing-prompt path without replacement", async (distribution) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-single-prompt-${distribution}-`));
   const child = new FakeProcess();

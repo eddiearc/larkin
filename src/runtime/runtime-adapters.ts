@@ -19,6 +19,7 @@ import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
 import { piAgentDirectory } from "./pi-provider-config.js";
+import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import {
   classifyRuntimePrerequisite,
   probeNativeRuntimeReadiness,
@@ -848,6 +849,12 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     mergedEnv.PI_CODING_AGENT_DIR = piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId);
     mergedEnv.PI_TELEMETRY = "0";
   }
+  const subagentExtension = resolvePiSubagentExtensionArg({
+    distribution: builtin ? "builtin" : "external",
+    piCommand: command,
+    env: mergedEnv,
+  });
+  if (subagentExtension) commandArgs.push("-e", subagentExtension);
   const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
     env: mergedEnv,

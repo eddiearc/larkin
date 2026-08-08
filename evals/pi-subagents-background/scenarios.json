@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "model": "opencode-go/deepseek-v4-flash",
+  "description": "Pi 后台 subagent 行为评估：固定场景 + rubric，验证 Agent 工具 run_in_background 后台委派、立即返回 job id、不轮询、完成通知触发父汇总。",
+  "scenarios": [
+    {
+      "id": "background-delegation",
+      "prompt": "Use the Agent tool to spawn ONE background subagent with run_in_background: true. The subagent task is: run `echo subagent-eval-ok` in bash and report its exact output. After spawning, report the agent id to the user and STOP. Do NOT wait, do NOT poll, do NOT call get_subagent_result, and do NOT run the bash command yourself.",
+      "task_bash": "echo subagent-eval-ok",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true
+      }
+    },
+    {
+      "id": "background-with-foreground-confirmation",
+      "prompt": "Use the Agent tool to spawn ONE background subagent with run_in_background: true. The subagent task is: run `echo fg-ok` in bash and report its output. After spawning, immediately reply to the user with a one-line confirmation that includes the agent id, then STOP your turn. Do NOT wait, do NOT poll, do NOT call get_subagent_result.",
+      "task_bash": "echo fg-ok",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true
+      }
+    }
+  ]
+}

@@ -20,7 +20,7 @@ export function loadPiSubagentsEval(file) {
       if (!scenario.prompt || typeof scenario.prompt !== "string") throw new Error(`scenario ${scenario.id}.prompt required`);
       if (!scenario.task_bash || typeof scenario.task_bash !== "string") throw new Error(`scenario ${scenario.id}.task_bash required`);
       if (!scenario.expectations || typeof scenario.expectations !== "object") throw new Error(`scenario ${scenario.id}.expectations required`);
-      for (const key of ["uses_agent_tool", "run_in_background", "immediate_job_id", "first_turn_ends_early", "notification_received", "final_summary"]) {
+      for (const key of ["uses_agent_tool", "run_in_background", "immediate_job_id", "first_turn_ends_early", "notification_received", "final_summary", "no_shell_background"]) {
         if (typeof scenario.expectations[key] !== "boolean") throw new Error(`scenario ${scenario.id}.expectations.${key} must be boolean`);
       }
       return scenario;
@@ -57,6 +57,12 @@ export function gradePiSubagentsTrace(scenario, trace) {
   results.notification_received = trace.some((event) => {
     if (event?.type !== "agent_end" || !Array.isArray(event.messages)) return false;
     return JSON.stringify(event.messages).includes("subagent-notification");
+  });
+
+  const bashCalls = trace.filter((event) => event?.type === "tool_execution_start" && event.toolName === "bash");
+  results.no_shell_background = !bashCalls.some((event) => {
+    const cmd = JSON.stringify(event.args || "");
+    return /nohup|disown|&\s*(?:echo|sh|sleep)|>\s*\/tmp\.*out/i.test(cmd);
   });
 
   const summaryText = trace.filter((event) => event?.type === "message_update")

@@ -68,7 +68,7 @@ async function runScenario(scenario) {
 test("pi-subagents eval starts from the fixed scenario dataset", () => {
   assert.equal(DATASET.model, "opencode-go/deepseek-v4-flash");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id),
-    ["background-delegation", "background-with-foreground-confirmation"]);
+    ["background-delegation", "background-with-foreground-confirmation", "background-no-shell-substitute"]);
 });
 
 for (const scenario of DATASET.scenarios) {

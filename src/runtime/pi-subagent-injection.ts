@@ -1,7 +1,13 @@
 import fs from "node:fs";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
+
+declare global {
+  // Filled by the standalone wrapper (scripts/release/standalone-entry.ts).
+  var __LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__: string | undefined;
+}
 
 /**
  * pi-subagents 扩展注入。
@@ -15,15 +21,43 @@ import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
  * external 的 pi 版本低于 0.80 时不注入（降级为无 subagent 能力）。
  */
 
-/** 构建产物单文件路径（dist/runtime/pi-subagents.bundle.js，与本模块编译产物同级）。 */
-export function bundledPiSubagentExtensionPath(): string | null {
+/**
+ * 把 embedded bundle 落盘到 <configDir>/providers/pi/extensions/pi-subagents.bundle.js（0700/0600）。
+ * 无 embedded 资产或 configDir 缺失时返回 null。
+ */
+export function materializeEmbeddedPiSubagentBundle(configDir: string | undefined): string | null {
+  const embedded = globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__;
+  if (!embedded || !configDir) return null;
+  const dir = path.join(path.resolve(configDir), "providers", "pi", "extensions");
+  const target = path.join(dir, "pi-subagents.bundle.js");
   try {
-    const url = new URL("./pi-subagents.bundle.js", import.meta.url);
-    const resolved = fileURLToPath(url);
-    return fs.existsSync(resolved) ? resolved : null;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    if (!fs.existsSync(target) || fs.readFileSync(target, "utf8") !== embedded) {
+      const temporary = `${target}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, embedded, { mode: 0o600, flag: "wx" });
+      fs.renameSync(temporary, target);
+      fs.chmodSync(target, 0o600);
+    }
+    return target;
   } catch {
     return null;
   }
+}
+
+/**
+ * 构建产物单文件路径。优先返回 dist/runtime/pi-subagents.bundle.js（源码/编译形态）；
+ * standalone 二进制没有该文件，回退到 embedded 资产落盘（<configDir>/providers/pi/extensions/）。
+ */
+export function bundledPiSubagentExtensionPath(configDir?: string): string | null {
+  try {
+    const url = new URL("./pi-subagents.bundle.js", import.meta.url);
+    const resolved = fileURLToPath(url);
+    if (fs.existsSync(resolved)) return resolved;
+  } catch {
+    /* fall through to embedded */
+  }
+  return materializeEmbeddedPiSubagentBundle(configDir);
 }
 
 /** 解析 `pi --version` 输出中的主版本号，无法解析返回 null。 */
@@ -63,7 +97,7 @@ export function resolvePiSubagentExtensionArg(
   },
   probeVersion: () => { major: number; minor: number } | null = () => probeExternalPiVersion(input.piCommand, input.env),
 ): string | null {
-  const bundle = bundledPiSubagentExtensionPath();
+  const bundle = bundledPiSubagentExtensionPath(input.env.LARKIN_CONFIG_DIR);
   if (!bundle) return null;
   const version = input.distribution === "builtin" ? parsePiVersion(BUNDLED_PI_VERSION) : probeVersion();
   return piVersionSupportsSubagents(version) ? bundle : null;

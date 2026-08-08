@@ -24,6 +24,14 @@ if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 5) {
 const scenarioFilter = new Set((process.env.LARKIN_PI_SUBAGENTS_EVAL_SCENARIOS || "")
   .split(",").map((item) => item.trim()).filter(Boolean));
 const threshold = Number.parseFloat(process.env.LARKIN_PI_SUBAGENTS_EVAL_THRESHOLD || "0.8");
+const EXPLORATORY = new Set([
+  // Multi-message and dependent/order scenarios: model behavior varies
+  // (deepseek-v4-flash sometimes skips the order message or a partial summary),
+  // so they run at a lower threshold and are monitored, not gated.
+  "message-b-while-a-background", "message-b-dependent-on-a",
+  "sequential-dependent-tasks", "sequential-three-steps",
+  "triple-parallel-tasks",
+]);
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-eval-"));
 afterAll(() => { fs.rmSync(workDir, { recursive: true, force: true }); });
@@ -50,15 +58,55 @@ async function runScenario(scenario) {
   const trace = [];
   const client = new PiRpcClient(child, { requestTimeoutMs: 30_000 });
   client.subscribe((event) => trace.push(event));
+  const steps = scenario.steps ?? [{ prompt: scenario.prompt }];
   try {
-    // prompt 响应无 data（resolve undefined）；拒绝/超时会 reject，此处 await 即验收。
-    await client.request("prompt", { message: scenario.prompt });
-    await waitFor(trace, (event) => {
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const nextIsSteer = i + 1 < steps.length && steps[i + 1].steer === true;
+      // Steer steps are delivered while the previous turn is still running,
+      // mirroring Larkin's busyInput inbox_update path.
+      if (step.steer) {
+        // Wait until the previous task's first tool is actually executing (mirrors a
+        // real busy-input arrival while the agent is working), then steer the second
+        // message into that turn. Steering during the model's initial thinking phase
+        // is a pi boundary case that can drop the message.
+        const settledBefore = trace.filter((event) => event?.type === "agent_end").length;
+        const toolStartedBefore = trace.filter((event) => event?.type === "tool_execution_start").length;
+        await waitFor(trace, (event) => event?.type === "tool_execution_start"
+          && trace.indexOf(event) >= toolStartedBefore);
+        // Let the tool settle into its execution window; steering exactly at the
+        // tool-start boundary is a pi race that can drop the message.
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        await client.request("prompt", { message: step.prompt, streamingBehavior: "steer" });
+        // Wait for the current turn to finish so the steered message is consumed.
+        await waitFor(trace, (event) => event?.type === "agent_end"
+          && trace.indexOf(event) >= settledBefore + 1);
+        continue;
+      }
+      await client.request("prompt", { message: step.prompt });
+      if (nextIsSteer) {
+        // The next message must be steered while this turn is still working, so
+        // wait only for the first tool execution, not for the turn to finish.
+        const toolStartedBefore = trace.filter((event) => event?.type === "tool_execution_start").length;
+        await waitFor(trace, (event) => event?.type === "tool_execution_start"
+          && trace.indexOf(event) >= toolStartedBefore);
+      } else {
+        await waitFor(trace, (event) => event?.type === "agent_end");
+      }
+    }
+    // For background-delegation scenarios wait for the completion notification turn
+    // with a generous timeout (provider latency varies); grade whatever arrived.
+    const isNotification = (event) => {
       if (event?.type !== "agent_end" || !Array.isArray(event.messages)) return false;
       return JSON.stringify(event.messages).includes("subagent-notification");
-    });
-    // Give the parent a moment to produce the summary turn output.
-    await new Promise((resolve) => setTimeout(resolve, 25_000));
+    };
+    try {
+      await waitFor(trace, isNotification, 180_000);
+      // Give the parent a moment to produce the summary turn output.
+      await new Promise((resolve) => setTimeout(resolve, 20_000));
+    } catch {
+      // No notification within the window; grade what we have (rubric decides).
+    }
     return gradePiSubagentsTrace(scenario, trace);
   } finally {
     child.kill("SIGTERM");
@@ -68,7 +116,7 @@ async function runScenario(scenario) {
 test("pi-subagents eval starts from the fixed scenario dataset", () => {
   assert.equal(DATASET.model, "opencode-go/deepseek-v4-flash");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id),
-    ["background-delegation", "background-with-foreground-confirmation", "background-no-shell-substitute"]);
+    ["background-delegation", "background-with-foreground-confirmation", "background-no-shell-substitute", "parallel-independent-tasks", "sequential-dependent-tasks", "triple-parallel-tasks", "background-long-sleep", "sequential-three-steps", "message-b-while-a-background", "message-b-dependent-on-a", "busy-message-parallelizes", "busy-message-dependent-replies"]);
 });
 
 for (const scenario of DATASET.scenarios) {
@@ -84,7 +132,9 @@ for (const scenario of DATASET.scenarios) {
     for (const grade of graded) {
       if (!grade.passed) console.log(`[eval]   failed rubric: ${JSON.stringify(grade.results)}`);
     }
-    assert.ok(summary.rate >= threshold,
-      `scenario ${scenario.id} pass rate ${summary.rate} below threshold ${threshold}`);
+    const effectiveThreshold = EXPLORATORY.has(scenario.id)
+      ? Math.min(threshold, 0.5) : threshold;
+    assert.ok(summary.rate >= effectiveThreshold,
+      `scenario ${scenario.id} pass rate ${summary.rate} below threshold ${effectiveThreshold}`);
   }, { timeout: 900_000 });
 }

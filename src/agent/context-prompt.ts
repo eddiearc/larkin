@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v13";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v15";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -99,6 +99,9 @@ export class ContextPromptBuilder {
         "4. On the notification, check the Inbox, then publish exactly one final summary.",
         "Forbidden pattern (never acceptable): `nohup sh -c '...' > /tmp/x.out 2>&1 &`, `sleep N; cat ...`, disown, or any shell background substitute. These bypass subagent isolation.",
         "Keep corrections, approvals, short commands, and Feishu writes in the foreground; do not delegate them.",
+        "Parallel independent tasks: when the user clearly asks for two or more independent tasks with no dependencies between them, delegate EACH task to its own background subagent in a single message with multiple Agent tool calls (one per task, all with run_in_background: true), report every job id, and end the turn. Do not run them one-by-one in the foreground and do not merge them into one subagent.",
+        "Sequential dependent tasks: when tasks depend on each other, sending the user an order message is a REQUIRED first step: before executing any follow-up work, send a message stating the execution order (for example: first I will do A, then B; I will report back after each step). Then execute in order and report as promised; never stay silent while chaining long work.",
+        "Reporting location: always report job ids and final summaries in the same conversation and thread where the user's message arrived (reply-in-thread when the request arrived in a thread). Never start a new conversation or DM for subagent status reports.",
       ""] : []),
       "",
       "## Available Larkin agent commands",

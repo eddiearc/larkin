@@ -14,7 +14,8 @@
         "first_turn_ends_early": true,
         "notification_received": true,
         "final_summary": true,
-        "no_shell_background": true
+        "no_shell_background": true,
+        "prompt_order_reply": false
       }
     },
     {
@@ -28,7 +29,8 @@
         "first_turn_ends_early": true,
         "notification_received": true,
         "final_summary": true,
-        "no_shell_background": true
+        "no_shell_background": true,
+        "prompt_order_reply": false
       }
     },
     {
@@ -42,7 +44,176 @@
         "first_turn_ends_early": true,
         "notification_received": true,
         "final_summary": true,
-        "no_shell_background": true
+        "no_shell_background": true,
+        "prompt_order_reply": false
+      }
+    },
+    {
+      "id": "parallel-independent-tasks",
+      "prompt": "The user asked you to complete TWO independent tasks in parallel: (A) run `echo parallel-a` in bash and report output; (B) run `echo parallel-b` in bash and report output. There is no dependency between them. Use the Agent tool to spawn BOTH as background subagents with run_in_background: true in a single message (two Agent tool calls, one per task). After spawning, report BOTH job ids and STOP. Do NOT wait, do NOT poll, do NOT run them yourself with bash, do NOT use nohup.",
+      "task_bash": "echo parallel-a",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true,
+        "no_shell_background": true,
+        "parallel_agent_calls": true
+      }
+    },
+    {
+      "id": "sequential-dependent-tasks",
+      "prompt": "The user asked you to do two DEPENDENT tasks in sequence: first run `echo step-one` in bash, then (only after the first succeeds) run `echo step-two` in bash, and report both outputs. They depend on each other so they cannot be parallelized. Reply to the user promptly stating the order (e.g. \"first I will do step one, then step two\"), then execute them in order. Do not stay silent. You may use the Agent tool for each step or run them in the foreground, but you MUST reply promptly about the order before/while starting.",
+      "task_bash": "echo step-one",
+      "expectations": {
+        "uses_agent_tool": false,
+        "run_in_background": false,
+        "immediate_job_id": false,
+        "first_turn_ends_early": false,
+        "notification_received": false,
+        "final_summary": true,
+        "no_shell_background": false,
+        "parallel_agent_calls": false,
+        "prompt_order_reply": true
+      }
+    },
+    {
+      "id": "triple-parallel-tasks",
+      "prompt": "The user asked you to complete THREE independent tasks in parallel: (A) run `echo triple-a` in bash, (B) run `echo triple-b` in bash, (C) run `echo triple-c` in bash. None depend on each other. Use the Agent tool to spawn ALL THREE as background subagents with run_in_background: true, in a single message (three Agent tool calls). After spawning, report ALL THREE job ids and STOP. Do NOT wait, poll, run them with bash yourself, or use nohup.",
+      "task_bash": "echo triple-a",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true,
+        "no_shell_background": true,
+        "parallel_agent_calls": true,
+        "prompt_order_reply": false,
+        "min_agent_calls": 3
+      }
+    },
+    {
+      "id": "background-long-sleep",
+      "prompt": "Use the Agent tool to spawn ONE background subagent with run_in_background: true. The subagent task is: run `sleep 8 && echo long-sleep-ok` in bash and report output. After spawning, report the agent id and STOP. Do NOT wait, poll, or use nohup. Wait for the completion notification before summarizing.",
+      "task_bash": "sleep 8 && echo long-sleep-ok",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true,
+        "no_shell_background": true,
+        "prompt_order_reply": false
+      }
+    },
+    {
+      "id": "sequential-three-steps",
+      "prompt": "The user asked you to do three DEPENDENT tasks in strict order: (1) run `echo step-a` in bash, (2) after (1) succeeds run `echo step-b` in bash, (3) after (2) succeeds run `echo step-c` in bash, then report all three outputs. They must run in order. Reply to the user promptly stating the order before starting, then execute them in order without staying silent.",
+      "task_bash": "echo step-a",
+      "expectations": {
+        "uses_agent_tool": false,
+        "run_in_background": false,
+        "immediate_job_id": false,
+        "first_turn_ends_early": false,
+        "notification_received": false,
+        "final_summary": true,
+        "no_shell_background": false,
+        "parallel_agent_calls": false,
+        "prompt_order_reply": true
+      }
+    },
+    {
+      "id": "message-b-while-a-background",
+      "prompt": null,
+      "task_bash": "echo b-done",
+      "steps": [
+        {
+          "prompt": "Use the Agent tool to spawn ONE background subagent with run_in_background: true. The subagent task is: run `sleep 12 && echo a-done` in bash and report output. After spawning, report the agent id and STOP. Do NOT wait, poll, or use nohup."
+        },
+        {
+          "prompt": "A new short task just arrived: run `echo b-done` in bash and reply with the output. Do NOT wait for the earlier background task; handle this now."
+        }
+      ],
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true,
+        "no_shell_background": true,
+        "parallel_agent_calls": false,
+        "prompt_order_reply": false,
+        "second_message_handled_promptly": true,
+        "second_message_before_a_notification": true
+      }
+    },
+    {
+      "id": "message-b-dependent-on-a",
+      "prompt": null,
+      "task_bash": "echo a-done",
+      "steps": [
+        {
+          "prompt": "Use the Agent tool to spawn ONE background subagent with run_in_background: true. The subagent task is: run `sleep 6 && echo a-done` in bash and report output. After spawning, report the agent id and STOP. Do NOT wait, poll, or use nohup."
+        },
+        {
+          "prompt": "A follow-up request: once task A finishes, reply in this conversation with its output followed by the suffix `+b`. Tell me now what you will do."
+        }
+      ],
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "immediate_job_id": true,
+        "first_turn_ends_early": true,
+        "notification_received": true,
+        "final_summary": true,
+        "no_shell_background": true,
+        "parallel_agent_calls": false,
+        "prompt_order_reply": true,
+        "second_message_handled_promptly": true,
+        "second_message_before_a_notification": true
+      }
+    },
+    {
+      "id": "busy-message-parallelizes",
+      "prompt": null,
+      "task_bash": "echo busy-a-done",
+      "steps": [
+        {
+          "prompt": "Execute this task in the foreground now: run `sleep 15 && echo busy-a-done` in bash and report the output when it finishes. Do not use the Agent tool for this one; run it directly."
+        },
+        {
+          "prompt": "New task arrived while you were working: run `echo busy-b-done` in bash and reply with its output. Do not wait for the first task to finish first - handle this now, in parallel if needed (you may use the Agent tool with run_in_background: true for the first task's remaining work or for this one).",
+          "steer": true
+        }
+      ],
+      "expectations": {
+        "no_shell_background": true,
+        "second_message_handled_promptly": true
+      }
+    },
+    {
+      "id": "busy-message-dependent-replies",
+      "prompt": null,
+      "task_bash": "echo busy-dep-a",
+      "steps": [
+        {
+          "prompt": "Execute this task in the foreground now: run `sleep 12 && echo busy-dep-a` in bash and report the output when it finishes. Do not use the Agent tool for this one; run it directly."
+        },
+        {
+          "prompt": "New request arrived while you were working: after the first task finishes, reply in this conversation with its output followed by the suffix `+dep`. Tell me now what you will do.",
+          "steer": true
+        }
+      ],
+      "expectations": {
+        "no_shell_background": true,
+        "second_message_handled_promptly": true,
+        "final_summary": true
       }
     }
   ]

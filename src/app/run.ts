@@ -191,8 +191,56 @@ export async function main(): Promise<void> {
   const dashboardCrashes: number[] = [];
   const dashboardScript = process.env.LARKIN_FEISHU_DRYRUN === "1" && process.env.LARKIN_TEST_DASHBOARD_SCRIPT
     ? path.resolve(process.env.LARKIN_TEST_DASHBOARD_SCRIPT) : path.join(HERE, "dashboard.mjs");
-  const daemonSpec = internalCommandSpec("runtime-process", [], runtimeEnv);
-  const daemon = spawn(daemonSpec.command, daemonSpec.args, { env: runtimeEnv, stdio: "inherit" });
+  const daemonSpec = argv.includes("--dry-run") && process.env.LARKIN_TEST_DAEMON_SCRIPT
+    ? { command: process.execPath, args: [path.resolve(process.env.LARKIN_TEST_DAEMON_SCRIPT)] }
+    : internalCommandSpec("runtime-process", [], runtimeEnv);
+  let daemon!: ChildProcess;
+  const daemonCrashes: number[] = [];
+  let daemonRestartTimer: NodeJS.Timeout | null = null;
+  let resolveDaemonFinal: ((result: { code: number | null; signal: NodeJS.Signals | null }) => void) | null = null;
+  const daemonFinal = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => { resolveDaemonFinal = resolve; });
+
+  // Erlang-style supervision: the supervisor restarts the daemon with a bounded
+  // recovery budget (3 restarts per 60s window, exponential backoff) instead of
+  // exiting on transient failures (e.g. network/proxy ECONNRESET during Feishu
+  // auth). Only when the budget is exhausted does the supervisor exit so the
+  // external process manager (launchd) takes over as the final respawn layer.
+  const launchDaemon = (): void => {
+    daemon = spawn(daemonSpec.command, daemonSpec.args, { env: runtimeEnv, stdio: "inherit" });
+    daemon.once("exit", (code, signal) => {
+      if (stopping) {
+        resolveDaemonFinal?.({ code, signal });
+        return;
+      }
+      const now = Date.now();
+      daemonCrashes.push(now);
+      while (daemonCrashes[0] < now - 60_000) daemonCrashes.shift();
+      if (daemonCrashes.length > 3) {
+        console.error(`✗ daemon 60 秒内连续退出超过 3 次；统一 supervisor 退出，交由外部进程管理器重启`);
+        resolveDaemonFinal?.({ code, signal });
+        return;
+      }
+      const delay = 250 * 2 ** (daemonCrashes.length - 1);
+      console.error(`[start] daemon 异常退出，${delay}ms 后重启（${daemonCrashes.length}/3）`);
+      daemonRestartTimer = setTimeout(() => {
+        daemonRestartTimer = null;
+        if (stopping) return;
+        // The fresh daemon re-registers its control authority; drop the stale one.
+        try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
+        // Dashboard state is coupled to the daemon; restart it alongside.
+        const oldDashboard = dashboard;
+        if (oldDashboard && oldDashboard.exitCode === null && oldDashboard.signalCode === null) {
+          oldDashboard.kill("SIGTERM");
+        }
+        if (dashboardRestartTimer) { clearTimeout(dashboardRestartTimer); dashboardRestartTimer = null; }
+        dashboardCrashes.length = 0;
+        launchDaemon();
+        writeSupervisorStatus(statusFile, supervisor, { daemonPid: daemon.pid });
+        launchDashboard();
+      }, delay);
+    });
+  };
+  launchDaemon();
   const launchDashboard = (): void => {
     const dashboardEnv = { ...process.env, LARKIN_HOME: configDir, LARKIN_CONFIG_DIR: configDir, LARKIN_DASHBOARD_SUPERVISED: "1" };
     const dashboardSpec = process.env.LARKIN_FEISHU_DRYRUN === "1" && process.env.LARKIN_TEST_DASHBOARD_SCRIPT
@@ -245,7 +293,7 @@ export async function main(): Promise<void> {
   };
   process.once("SIGINT", () => requestStop("SIGINT"));
   process.once("SIGTERM", () => requestStop("SIGTERM"));
-  const daemonResult = await childExit(daemon);
+  const daemonResult = await daemonFinal;
   try { cleanupStaleAgentControlSocket(configDir, controlToken); }
   catch (error) {
     console.error(`✗ daemon control socket 清理失败：${error instanceof Error ? error.message : String(error)}`);

@@ -89,6 +89,33 @@ export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv
  * 返回 `-e` 参数值（扩展 bundle 路径），或 null（不注入：产物缺失或版本不达标）。
  * `probeVersion` 仅供测试注入；缺省时 external 用 probeExternalPiVersion 探测。
  */
+/**
+ * 用户 pi 是否已自行安装 pi-subagents（settings.json packages 或 npm 目录）。
+ * 已装时 Larkin 不再 -e 注入，避免同名工具（Agent/get_subagent_result/steer_subagent）
+ * 重复注册导致 pi 扩展加载 FATAL（pi 对 duplicate tool registration 是硬失败）。
+ */
+export function userPiAlreadyHasSubagentsExtension(env: NodeJS.ProcessEnv): boolean {
+  const agentDir = env.PI_CODING_AGENT_DIR || path.join(env.HOME || process.env.HOME || "", ".pi", "agent");
+  try {
+    const settingsFile = path.join(agentDir, "settings.json");
+    if (fs.existsSync(settingsFile)) {
+      const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+      const packages: unknown = settings?.packages;
+      if (Array.isArray(packages)) {
+        for (const entry of packages) {
+          if (typeof entry === "string" && /pi-subagents/i.test(entry)) return true;
+        }
+      }
+    }
+    // settings.json 可能未登记但 npm 目录已存在（残留/手动安装）。
+    const npmDir = path.join(agentDir, "npm", "node_modules", "@tintinweb");
+    if (fs.existsSync(npmDir) && fs.readdirSync(npmDir).some((name) => /pi-subagents/i.test(name))) return true;
+  } catch {
+    /* unreadable config: assume not installed, injection stays safe */
+  }
+  return false;
+}
+
 export function resolvePiSubagentExtensionArg(
   input: {
     distribution: "builtin" | "external";
@@ -99,6 +126,8 @@ export function resolvePiSubagentExtensionArg(
 ): string | null {
   const bundle = bundledPiSubagentExtensionPath(input.env.LARKIN_CONFIG_DIR);
   if (!bundle) return null;
+  // 用户已自行安装同款扩展时跳过注入，避免工具名重复注册冲突。
+  if (input.distribution === "external" && userPiAlreadyHasSubagentsExtension(input.env)) return null;
   const version = input.distribution === "builtin" ? parsePiVersion(BUNDLED_PI_VERSION) : probeVersion();
   return piVersionSupportsSubagents(version) ? bundle : null;
 }

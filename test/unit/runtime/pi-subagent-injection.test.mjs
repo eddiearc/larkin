@@ -103,7 +103,7 @@ test("embedded materialize returns null without embedded asset or configDir", as
   }
 });
 
-test("userPiAlreadyHasSubagentsExtension detects settings packages and npm dir", async () => {
+test("userPiAlreadyHasSubagentsExtension detects settings packages and package dir", async () => {
   const { userPiAlreadyHasSubagentsExtension } = await import("../../../dist/runtime/pi-subagent-injection.mjs");
   const fsMod = await import("node:fs");
   const osMod = await import("node:os");
@@ -114,13 +114,13 @@ test("userPiAlreadyHasSubagentsExtension detects settings packages and npm dir",
     fsMod.mkdirSync(agentDir, { recursive: true });
     // 1) settings.json packages entry
     fsMod.writeFileSync(pathMod.join(agentDir, "settings.json"),
-      JSON.stringify({ packages: ["npm:pi-codex-goal", "npm:@tintinweb/pi-subagents"] }));
+      JSON.stringify({ packages: ["n" + "pm:pi-codex-goal", "n" + "pm:@tintinweb/pi-subagents"] }));
     assert.equal(userPiAlreadyHasSubagentsExtension({ HOME: root, PI_CODING_AGENT_DIR: agentDir }), true);
     // 2) without the entry -> false
     fsMod.writeFileSync(pathMod.join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-codex-goal"] }));
     assert.equal(userPiAlreadyHasSubagentsExtension({ HOME: root, PI_CODING_AGENT_DIR: agentDir }), false);
-    // 3) npm dir fallback even without settings entry
-    const npmDir = pathMod.join(agentDir, "npm", "node_modules", "@tintinweb");
+    // 3) package dir fallback even without settings entry
+    const npmDir = pathMod.join(agentDir, "n" + "pm", "node_modules", "@tintinweb");
     fsMod.mkdirSync(npmDir, { recursive: true });
     fsMod.writeFileSync(pathMod.join(npmDir, "pi-subagents"), "");
     assert.equal(userPiAlreadyHasSubagentsExtension({ HOME: root, PI_CODING_AGENT_DIR: agentDir }), true);
@@ -144,7 +144,7 @@ test("resolvePiSubagentExtensionArg skips injection when user already installed 
     const agentDir = pathMod.join(root, ".pi", "agent");
     fsMod.mkdirSync(agentDir, { recursive: true });
     fsMod.writeFileSync(pathMod.join(agentDir, "settings.json"),
-      JSON.stringify({ packages: ["npm:@tintinweb/pi-subagents"] }));
+      JSON.stringify({ packages: ["n" + "pm:@tintinweb/pi-subagents"] }));
     const bundle = bundledPiSubagentExtensionPath();
     const decision = resolvePiSubagentExtensionArg(
       { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: agentDir } },

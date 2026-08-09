@@ -124,8 +124,11 @@ export function resolvePiSubagentExtensionArg(
     env: NodeJS.ProcessEnv;
   },
   probeVersion: () => { major: number; minor: number } | null = () => probeExternalPiVersion(input.piCommand, input.env),
+  resolveBundle: () => string | null = () => bundledPiSubagentExtensionPath(input.env.LARKIN_CONFIG_DIR),
 ): string | null {
-  const bundle = bundledPiSubagentExtensionPath(input.env.LARKIN_CONFIG_DIR);
+  // resolveBundle is injectable so unit tests stay environment-independent
+  // (no dependency on build artifacts or the filesystem).
+  const bundle = resolveBundle();
   if (!bundle) return null;
   // 用户已自行安装同款扩展时跳过注入，避免工具名重复注册冲突。
   if (input.distribution === "external" && userPiAlreadyHasSubagentsExtension(input.env)) return null;

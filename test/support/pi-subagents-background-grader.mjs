@@ -17,16 +17,29 @@ export function loadPiSubagentsEval(file) {
     scenarios: raw.scenarios.map((scenario) => {
       if (!scenario || typeof scenario !== "object") throw new Error("scenario must be an object");
       if (!scenario.id || typeof scenario.id !== "string") throw new Error("scenario.id required");
-      if (!scenario.prompt || typeof scenario.prompt !== "string") throw new Error(`scenario ${scenario.id}.prompt required`);
+      const hasSteps = Array.isArray(scenario.steps) && scenario.steps.length > 0;
+      if (!hasSteps && (!scenario.prompt || typeof scenario.prompt !== "string")) throw new Error(`scenario ${scenario.id}.prompt required`);
       if (!scenario.task_bash || typeof scenario.task_bash !== "string") throw new Error(`scenario ${scenario.id}.task_bash required`);
+      if (hasSteps) {
+        scenario.steps.forEach((step, index) => {
+          if (!step || typeof step.prompt !== "string" || !step.prompt) throw new Error(`scenario ${scenario.id}.steps[${index}].prompt required`);
+        });
+      }
       if (!scenario.expectations || typeof scenario.expectations !== "object") throw new Error(`scenario ${scenario.id}.expectations required`);
-      for (const key of ["uses_agent_tool", "run_in_background", "immediate_job_id", "first_turn_ends_early", "notification_received", "final_summary", "no_shell_background"]) {
-        if (typeof scenario.expectations[key] !== "boolean") throw new Error(`scenario ${scenario.id}.expectations.${key} must be boolean`);
+      for (const key of ["uses_agent_tool", "run_in_background", "immediate_job_id", "first_turn_ends_early", "notification_received", "final_summary", "no_shell_background", "parallel_agent_calls", "prompt_order_reply", "second_message_handled_promptly", "second_message_before_a_notification"]) {
+        if (scenario.expectations[key] !== undefined && typeof scenario.expectations[key] !== "boolean") throw new Error(`scenario ${scenario.id}.expectations.${key} must be boolean`);
+      }
+      if (scenario.expectations.min_agent_calls !== undefined
+          && (!Number.isInteger(scenario.expectations.min_agent_calls) || scenario.expectations.min_agent_calls < 1)) {
+        throw new Error(`scenario ${scenario.id}.expectations.min_agent_calls must be a positive integer`);
       }
       return scenario;
     }),
   };
 }
+
+const isTextDelta = (event) => event?.type === "message_update"
+  && /^text/.test(String(event.assistantMessageEvent?.type || ""));
 
 function findToolCallEvents(trace, toolName) {
   return trace.filter((event) =>
@@ -40,6 +53,8 @@ export function gradePiSubagentsTrace(scenario, trace) {
 
   const agentCalls = findToolCallEvents(trace, "Agent");
   results.uses_agent_tool = agentCalls.length > 0;
+  const minAgentCalls = expectations.min_agent_calls ?? 1;
+  results.min_agent_calls_ok = agentCalls.length >= minAgentCalls;
 
   const startCall = trace.find((event) => event?.type === "tool_execution_start" && event.toolName === "Agent");
   results.run_in_background = Boolean(startCall?.args?.run_in_background === true
@@ -59,19 +74,54 @@ export function gradePiSubagentsTrace(scenario, trace) {
     return JSON.stringify(event.messages).includes("subagent-notification");
   });
 
+  results.parallel_agent_calls = agentCalls.length >= 2;
+
+  const assistantTexts = trace.filter(isTextDelta)
+    .map((event) => String(event.assistantMessageEvent?.content || event.assistantMessageEvent?.delta || ""))
+    .join(" ");
+  results.prompt_order_reply = /first.*then|then.*after|先.*后|第一步.*第二步|step one.*step two|step 1.*step 2|will.*(?:reply|do|report|run).*after|per your instruction|我会.*(?:完成后|接着|再)|等.*(?:完成|结束).*(?:再|后)/i.test(assistantTexts);
+
+  // Split the trace into turns at agent_end boundaries for multi-message scenarios.
+  const turnSegments = [];
+  let current = [];
+  for (const event of trace) {
+    current.push(event);
+    if (event?.type === "agent_end") { turnSegments.push(current); current = []; }
+  }
+  if (current.length > 0) turnSegments.push(current);
+  const turnText = (segment) => segment.filter(isTextDelta)
+    .map((event) => String(event.assistantMessageEvent?.content || event.assistantMessageEvent?.delta || ""))
+    .join(" ");
+
+  const wholeText = turnSegments.map(turnText).join(" ");
+  console.error("[dep-txt]", scenario.id, JSON.stringify(wholeText.slice(-300)));
+  results.second_message_handled_promptly = turnSegments.length >= 1
+    && /b-done|\+b|\+dep|busy-b|second task|第二/i.test(wholeText);
+
+  const notificationTurnIndex = trace.findIndex((event) => {
+    if (event?.type !== "agent_end" || !Array.isArray(event.messages)) return false;
+    return JSON.stringify(event.messages).includes("subagent-notification");
+  });
+  const notificationSegmentIndex = turnSegments.findIndex((segment) => segment.some((event) => event === trace[notificationTurnIndex]));
+  results.second_message_before_a_notification = notificationSegmentIndex > 1 || notificationTurnIndex === -1;
+
   const bashCalls = trace.filter((event) => event?.type === "tool_execution_start" && event.toolName === "bash");
   results.no_shell_background = !bashCalls.some((event) => {
     const cmd = JSON.stringify(event.args || "");
-    return /nohup|disown|&\s*(?:echo|sh|sleep)|>\s*\/tmp\.*out/i.test(cmd);
+    return /nohup|disown|(?<!&)&(?!&)\s*(?:echo|sh|sleep)|>\s*\/tmp\.*out/i.test(cmd);
   });
 
-  const summaryText = trace.filter((event) => event?.type === "message_update")
-    .map((event) => event.assistantMessageEvent?.content || event.assistantMessageEvent?.delta || "")
+  const summaryText = trace.filter(isTextDelta)
+    .map((event) => String(event.assistantMessageEvent?.content || event.assistantMessageEvent?.delta || ""))
     .join(" ");
   results.final_summary = /completed|result|output/i.test(summaryText)
     && summaryText.includes(scenario.task_bash.split(" ").pop().replace(/[^a-z0-9-]/gi, ""));
 
-  const passed = Object.keys(expectations).every((key) => results[key] === expectations[key]);
+  const resultsWithMin = { ...results, min_agent_calls_ok: results.min_agent_calls_ok };
+  const passed = Object.keys(expectations).every((key) => {
+    if (key === "min_agent_calls") return resultsWithMin.min_agent_calls_ok === true;
+    return resultsWithMin[key] === expectations[key];
+  });
   return { passed, results, expectations };
 }
 

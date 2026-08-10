@@ -39,4 +39,6 @@ Owner policy: every bugfix or feature delivery must increment the version in `pa
 
 Merging an intentional `package.json` version change to `main` authorizes CI to create the matching immutable tag and GitHub Release. Contributors must not manually create a release tag for an ordinary delivery; the explicit tag-push path is reserved for maintainer recovery. Never move, replace, or overwrite an existing release tag or published GitHub Release.
 
+Published GitHub Releases are mirrored to the npm registry by the `npm-publish` workflow (`.github/workflows/npm-publish.yml`), which runs on `release: published` and publishes the same tagged source as `larkin` on npm using the `NPM_TOKEN` repository secret (an npm automation token). `package.json` must remain publishable: keep `private` unset or `false`, and keep the `files` allowlist in sync with the build and notice artifacts.
+
 Release tags use `vX.Y.Z`, must exactly match the version in `package.json`, and must point to a commit already contained in `main`. Outside the authorized workflow, tag operations are explicit maintainer recovery actions; do not create, move, or replace a release tag as part of an ordinary contribution.

@@ -46,6 +46,11 @@ export default function (pi: ExtensionAPI): void {
     description: builtin.description,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : MAX;
+      // 模型显式设置 timeout > 上限 → 它已知这是长任务。立即报错引导改用后台 subagent，
+      // 不真的跑（省掉白等 + 避免产生部分副作用）。
+      if (requested > MAX) {
+        throw new Error(`timeout:${requested} exceeds the ${MAX}s foreground hard limit. ${SUBAGENT_GUIDANCE}`);
+      }
       const timeout = Math.min(requested, MAX);
       try {
         return await builtin.execute(toolCallId, { ...params, timeout } satisfies BashToolInput, signal, onUpdate, ctx);

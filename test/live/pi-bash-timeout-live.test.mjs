@@ -64,20 +64,21 @@ async function runScenario(scenario) {
     stdio: ["pipe", "pipe", "pipe"],
   });
   const trace = [];
-  // 记录每个工具调用的实测时长（含 bash），供"不阻塞回合"断言。
+  // 记录每个 bash 调用的实测时长 + 错误信息，供"不阻塞回合 / 拒绝 vs 超时"断言。
   const startedAt = new Map();
-  const durations = [];
+  const bashRuns = [];
   const client = new PiRpcClient(child, { requestTimeoutMs: 30_000 });
   client.subscribe((event) => {
     trace.push(event);
     if (event?.type === "tool_execution_start") startedAt.set(event.toolCallId, Date.now());
     else if (event?.type === "tool_execution_end" && startedAt.has(event.toolCallId)) {
-      durations.push({
+      const run = {
         toolName: event.toolName,
         durationMs: Date.now() - startedAt.get(event.toolCallId),
         isError: event.isError,
         resultText: event.result ? JSON.stringify(event.result) : "",
-      });
+      };
+      if (run.toolName === "bash") bashRuns.push(run);
       startedAt.delete(event.toolCallId);
     }
   });
@@ -85,7 +86,7 @@ async function runScenario(scenario) {
     await client.request("prompt", { message: scenario.prompt });
     // 等到回合结束：若 bash 一直阻塞，这里会超时失败 → 直接证明"回合被占住"。
     await waitFor(trace, (event) => event?.type === "agent_end");
-    return gradePiBashTimeoutTrace(scenario, trace, durations.map((d) => d.durationMs));
+    return gradePiBashTimeoutTrace(scenario, trace, bashRuns);
   } finally {
     child.kill("SIGTERM");
   }
@@ -94,8 +95,9 @@ async function runScenario(scenario) {
 test("pi-bash-timeout eval starts from the fixed scenario dataset", () => {
   assert.equal(DATASET.model, "opencode-go/deepseek-v4-flash");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id),
-    ["long-bash-steers-to-subagent", "long-bash-with-huge-model-timeout", "long-bash-no-foreground-retry",
-      "deploy-style-long-bash", "long-bash-process-reclaimed", "two-long-tasks-parallel-subagents"]);
+    ["long-bash-steers-to-subagent", "long-bash-with-huge-model-timeout", "oversize-timeout-rejected-immediately",
+      "proactive-subagent-for-known-long", "long-bash-no-foreground-retry", "deploy-style-long-bash",
+      "long-bash-process-reclaimed", "two-long-tasks-parallel-subagents"]);
 });
 
 for (const scenario of DATASET.scenarios) {

@@ -1,0 +1,11 @@
+# GitHub language detection (Linguist) overrides.
+#
+# The product is TypeScript, but most tests and build tooling run as plain
+# ESM/CJS (`.mjs`/`.cjs`). By extension those would be counted as JavaScript and
+# dominate the language breakdown, so GitHub labels this repo "JavaScript".
+# Map them to TypeScript so Linguist reports the project as TypeScript.
+
+test/**/*.mjs          linguist-language=TypeScript
+test/**/*.cjs          linguist-language=TypeScript
+scripts/**/*.mjs       linguist-language=TypeScript
+src/dashboard/**/*.mjs linguist-language=TypeScript

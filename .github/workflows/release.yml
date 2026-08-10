@@ -391,3 +391,11 @@ jobs:
               --repo "$GITHUB_REPOSITORY" --yes
           done
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      - name: Trigger npm publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: |
+          gh workflow run "Publish npm package" --repo "$GITHUB_REPOSITORY" \
+            --ref main -f release_tag="$RELEASE_TAG"

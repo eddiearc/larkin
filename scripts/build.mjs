@@ -224,6 +224,30 @@ function bundlePiSubagentExtension(outFile) {
   return true;
 }
 
+// Bundle the larkin-owned bash 60s timeout guard extension into a single file
+// that a pi runtime process can load via `--extension/-e` (issue #55/#56).
+// pi-* stays external because the extension always runs inside a pi process.
+function bundlePiBashTimeoutExtension(outFile) {
+  const entry = path.join(ROOT, "src", "runtime", "pi-bash-timeout-extension.ts");
+  if (!fs.existsSync(entry)) {
+    process.stderr.write(`[build] pi-bash-timeout extension entry missing: ${entry}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  const result = spawnSync("bun", ["build", entry, "--outfile", outFile, "--external", "@earendil-works/pi-*", "--target", "bun"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    process.stderr.write(result.stderr || result.stdout || `[build] pi-bash-timeout bundle failed: ${result.error?.message || result.status}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  process.stderr.write(result.stderr || result.stdout || "");
+  console.error(`[build] pi-bash-timeout bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
+  return true;
+}
+
 function buildDashboardWeb(outDir) {
   const viteEnv = { ...process.env, LARKIN_DASHBOARD_OUT_DIR: outDir, NODE_DISABLE_COMPILE_CACHE: "1" };
   delete viteEnv.NODE_COMPILE_CACHE;
@@ -290,6 +314,7 @@ try {
   }
   if (!buildDashboardWeb(path.join(outputStage, "dashboard", "web"))) throw new CompilationFailed();
   if (!bundlePiSubagentExtension(path.join(outputStage, "runtime", "pi-subagents.bundle.js"))) throw new CompilationFailed();
+  if (!bundlePiBashTimeoutExtension(path.join(outputStage, "runtime", "pi-bash-timeout.bundle.js"))) throw new CompilationFailed();
 
   // Materialize the whole graph before touching the active dist tree. Failed builds
   // preserve the prior output; successful builds replace it wholesale, removing stale files.

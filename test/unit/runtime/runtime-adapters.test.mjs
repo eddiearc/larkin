@@ -415,9 +415,13 @@ test.each(["external", "builtin"])("%s Pi injects the pi-subagents bundle via -e
     }
     await pending;
     if (distribution === "builtin") {
-      const extIndex = launch.args.indexOf("-e");
-      assert.notEqual(extIndex, -1, "builtin must inject -e");
-      assert.match(launch.args[extIndex + 1], /pi-subagents\.bundle\.js$/);
+      // builtin must inject both pi-subagents and pi-bash-timeout (bash 60s guard).
+      const extPairs = launch.args
+        .map((arg, index) => (arg === "-e" ? [arg, launch.args[index + 1]] : null))
+        .filter((pair) => pair !== null);
+      const bundles = extPairs.map(([, value]) => value);
+      assert.ok(bundles.some((value) => /pi-subagents\.bundle\.js$/.test(value)), "must inject pi-subagents");
+      assert.ok(bundles.some((value) => /pi-bash-timeout\.bundle\.js$/.test(value)), "must inject pi-bash-timeout");
     } else {
       // external with a missing pi binary cannot probe a version → degrade, no -e.
       assert.equal(launch.args.includes("-e"), false);

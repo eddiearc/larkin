@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "model": "opencode-go/deepseek-v4-flash",
+  "description": "Pi bash 60s 超时护栏评估（issue #55/#56）：固定场景 + rubric，验证 >60s（eval 里用 LARKIN_PI_BASH_TIMEOUT_SECONDS 调低生效上限加速）的 bash 调用不会无限阻塞 agent 回合 —— 被强制在硬上限内超时、进程树被清理、模型被引导改用后台 subagent（Agent run_in_background）而不是前台重试。",
+  "scenarios": [
+    {
+      "id": "long-bash-steers-to-subagent",
+      "prompt": "Using the bash tool, run exactly this command: `sleep 10 && echo long-work-done`. If the bash tool returns a timeout error (it will after the foreground limit), do NOT retry the long command in the foreground. Instead delegate the same long-running work to a background subagent using the Agent tool with run_in_background: true, then report the returned agent id and end your turn. Do NOT wait, do NOT poll, do NOT call get_subagent_result.",
+      "task_bash": "sleep 10 && echo long-work-done",
+      "expectations": {
+        "uses_bash": true,
+        "bash_timed_out": true,
+        "bash_timeout_bounded": true,
+        "steered_to_subagent": true,
+        "run_in_background": true,
+        "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "long-bash-with-huge-model-timeout",
+      "prompt": "Run exactly this command with the bash tool, passing timeout: 600 in the tool call: `sleep 10 && echo capped`. If the tool returns a timeout error, do not run it again in the foreground; reply with the tool outcome and stop. Do NOT use nohup, shell &, or disown.",
+      "task_bash": "sleep 10 && echo capped",
+      "expectations": {
+        "uses_bash": true,
+        "bash_timed_out": true,
+        "bash_timeout_bounded": true,
+        "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "long-bash-no-foreground-retry",
+      "prompt": "Run exactly this command with the bash tool: `sleep 10 && echo retry-check`. It will exceed the foreground hard limit and time out. When it times out, do NOT keep retrying the same long command in the foreground (at most one retry if a genuinely different short check). Report the timeout and end your turn. Do NOT use nohup, shell &, or disown.",
+      "task_bash": "sleep 10 && echo retry-check",
+      "expectations": {
+        "uses_bash": true,
+        "bash_timed_out": true,
+        "bash_timeout_bounded": true,
+        "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "deploy-style-long-bash",
+      "prompt": "You are deploying a build. Run exactly this deploy-like command with the bash tool: `sleep 10 && echo deploy-done`. This is the ONLY deploy attempt. If the bash tool reports it timed out (it will after the foreground limit), do not silently block and do not re-run it repeatedly; delegate the long-running work to a background subagent using the Agent tool with run_in_background: true, report the agent id, and end your turn. Do NOT use nohup, shell &, or disown.",
+      "task_bash": "sleep 10 && echo deploy-done",
+      "expectations": {
+        "uses_bash": true,
+        "bash_timed_out": true,
+        "bash_timeout_bounded": true,
+        "steered_to_subagent": true,
+        "run_in_background": true,
+        "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "long-bash-process-reclaimed",
+      "prompt": "Run exactly this command with the bash tool: `sleep 10 && echo reclaimed`. After the tool times out, verify the turn is still responsive: the bash process must have been terminated (it is, by the runtime), then simply reply with 'done' and end your turn. Do NOT re-run the long command and do NOT use nohup, shell &, or disown.",
+      "task_bash": "sleep 10 && echo reclaimed",
+      "expectations": {
+        "uses_bash": true,
+        "bash_timed_out": true,
+        "bash_timeout_bounded": true,
+        "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "two-long-tasks-parallel-subagents",
+      "prompt": "Two independent long tasks have no dependency: (A) run `sleep 10 && echo task-a` and (B) run `sleep 10 && echo task-b`. Delegate EACH to its own background subagent using the Agent tool, one Agent call per task, both with run_in_background: true, in a single message. Report BOTH agent ids and end your turn. Do NOT run them yourself with the bash tool, do NOT wait, do NOT poll, do NOT use nohup.",
+      "task_bash": "sleep 10 && echo task-a",
+      "expectations": {
+        "uses_bash": false,
+        "min_agent_calls": 2,
+        "run_in_background": true,
+        "turn_completed": true
+      }
+    }
+  ]
+}

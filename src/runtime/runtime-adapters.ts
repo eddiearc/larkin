@@ -20,6 +20,7 @@ import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
 import { piAgentDirectory } from "./pi-provider-config.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
+import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
   classifyRuntimePrerequisite,
   probeNativeRuntimeReadiness,
@@ -855,6 +856,13 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     env: mergedEnv,
   });
   if (subagentExtension) commandArgs.push("-e", subagentExtension);
+  // bash 60s 超时护栏（issue #55/#56）：与 pi-subagents 一起注入，两者工具名不冲突。
+  const bashTimeoutExtension = resolvePiBashTimeoutExtensionArg({
+    distribution: builtin ? "builtin" : "external",
+    piCommand: command,
+    env: mergedEnv,
+  });
+  if (bashTimeoutExtension) commandArgs.push("-e", bashTimeoutExtension);
   const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
     env: mergedEnv,

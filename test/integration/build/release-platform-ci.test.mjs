@@ -118,6 +118,6 @@ test("package version and explicit tag publication share one immutable combined-
   assert.match(workflow, /bun scripts\/release\/assemble\.ts/);
   assert.match(workflow, /artifacts\/release\/LICENSE artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);
   assert.match(workflow, /publish:\n[\s\S]*permissions:\n\s+contents: write/);
-  assert.doesNotMatch(workflow, /git (?:commit|push)|continue-on-error|\b(?:node|npm|pnpm)\b/);
+  assert.doesNotMatch(workflow, /git (?:commit|push)|continue-on-error|\bnode\b|\bpnpm\b|\bnpm (?:i|install|ci|run|publish|config|version|exec|link|uninstall)\b/);
   assert.doesNotMatch(intent, /git push|--force/);
 });

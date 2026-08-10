@@ -7,15 +7,32 @@ Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu. It provides
 - A supported macOS or Linux system
 - `lark-cli`
 - At least one supported agent runtime and its authentication
-- Bun 1.3.14 when building from source
+- Bun 1.3.14 when running the npm package or building from source (standalone binaries bundle their own runtime)
+
+## Installation
+
+Larkin is published to the npm registry and also distributed as standalone binaries. Prefer npm:
+
+```bash
+# Run the latest version directly with npx — no install step, always the newest release
+npx larkin@latest setup
+
+# Or install globally and use the plain `larkin` command
+npm install -g larkin
+larkin --version
+```
+
+Standalone binaries for macOS and Linux are attached to every [GitHub Release](https://github.com/eddiearc/larkin/releases) for environments without Bun or npm.
 
 ## Usage
 
 ```bash
-larkin setup
-larkin start
-larkin status
+npx larkin@latest setup
+npx larkin@latest start
+npx larkin@latest status
 ```
+
+The rest of this document uses the short `larkin` form; it works as-is after `npm install -g larkin`, or prefix any command with `npx larkin@latest` to run it without installing.
 
 Run `larkin --help` or `larkin config --help` for the available commands and configuration options. Local configuration is stored under `~/.larkin` by default; set `LARKIN_CONFIG_DIR` to use another directory.
 

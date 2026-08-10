@@ -10,7 +10,7 @@ const dataset = loadAuthoritativeFreshnessEval(path.join(ROOT, "evals/authoritat
 test("authoritative freshness eval is versioned, reproducible, and covers the critical rubric", () => {
   assert.equal(dataset.dataset, "authoritative-freshness-gate");
   assert.equal(dataset.version, 1);
-  assert.equal(dataset.standing_prompt_version, "larkin-standing-v15");
+  assert.equal(dataset.standing_prompt_version, "larkin-standing-v16");
   assert.equal(dataset.threshold, 1);
   assert.deepEqual(dataset.scenarios.map((scenario) => scenario.id), [
     "missing-inbox-history", "direct-ack-retry", "same-ms-new-id", "edited-message",

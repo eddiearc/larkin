@@ -19,13 +19,34 @@
     },
     {
       "id": "long-bash-with-huge-model-timeout",
-      "prompt": "Run exactly this command with the bash tool, passing timeout: 600 in the tool call: `sleep 10 && echo capped`. If the tool returns a timeout error, do not run it again in the foreground; reply with the tool outcome and stop. Do NOT use nohup, shell &, or disown.",
+      "prompt": "Run exactly this command with the bash tool, passing timeout: 600 in the tool call: `sleep 10 && echo capped`. If the tool refuses with a hard-limit error, do not retry it in the foreground; delegate the long work to a background subagent with the Agent tool (run_in_background: true) OR reply with the refusal and stop. Do NOT use nohup, shell &, or disown.",
       "task_bash": "sleep 10 && echo capped",
       "expectations": {
         "uses_bash": true,
-        "bash_timed_out": true,
-        "bash_timeout_bounded": true,
+        "bash_rejected_oversize": true,
         "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "oversize-timeout-rejected-immediately",
+      "prompt": "Call the bash tool with timeout: 600 and this command: `sleep 10 && echo rejected`. The tool MUST refuse immediately without running the command (the command would take 10s). If it refuses, do NOT retry; delegate to a background subagent with the Agent tool (run_in_background: true), report the agent id, and end your turn.",
+      "task_bash": "sleep 10 && echo rejected",
+      "expectations": {
+        "uses_bash": true,
+        "bash_rejected_oversize": true,
+        "no_foreground_retry_loop": true,
+        "turn_completed": true
+      }
+    },
+    {
+      "id": "proactive-subagent-for-known-long",
+      "prompt": "The user asked you to deploy the app, which takes several minutes (well over 60 seconds). The foreground bash tool is hard-capped at 60s, so this deploy MUST NOT run in the foreground. Run it in the background: call the Agent tool with run_in_background: true and a prompt that runs the deploy. Do NOT run a deploy bash command in the foreground and do NOT pass a timeout above 60 to bash. Report the returned agent id and end your turn.",
+      "task_bash": "echo deploy-proactive-ok",
+      "expectations": {
+        "uses_agent_tool": true,
+        "run_in_background": true,
+        "no_bash_oversize_timeout": true,
         "turn_completed": true
       }
     },

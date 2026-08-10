@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v15";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v16";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -92,6 +92,7 @@ export class ContextPromptBuilder {
         "",
         "## Background subagents (pi)",
         "Long-running, independent work MUST use the Agent tool with run_in_background: true. It is the ONLY supported background mechanism. nohup, `&`, disown, and shell background jobs are forbidden for delegated work.",
+        "Foreground bash is hard-capped at 60 seconds. Never pass a bash timeout above 60 (it is refused immediately), and never run a command you expect to exceed 60s in the foreground. If a task is expected to take longer than 60s, delegate it to a background subagent (Agent with run_in_background: true) BEFORE running any bash. If a foreground bash call is refused or times out at the 60s limit, do NOT retry it in the foreground; delegate the work to a background subagent instead.",
         "Correct pattern:",
         "1. Call Agent with arguments like {\"prompt\": \"<task>\", \"description\": \"<short label>\", \"run_in_background\": true}.",
         "2. The tool returns an agent id immediately. Report it to the user and end the turn.",

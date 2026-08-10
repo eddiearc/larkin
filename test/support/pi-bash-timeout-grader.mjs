@@ -20,7 +20,7 @@ export function loadPiBashTimeoutEval(file) {
       if (!scenario.prompt || typeof scenario.prompt !== "string") throw new Error(`scenario ${scenario.id}.prompt required`);
       if (!scenario.task_bash || typeof scenario.task_bash !== "string") throw new Error(`scenario ${scenario.id}.task_bash required`);
       if (!scenario.expectations || typeof scenario.expectations !== "object") throw new Error(`scenario ${scenario.id}.expectations required`);
-      for (const key of ["uses_bash", "bash_timed_out", "bash_timeout_bounded", "steered_to_subagent", "run_in_background", "no_foreground_retry_loop", "turn_completed"]) {
+      for (const key of ["uses_bash", "uses_agent_tool", "bash_timed_out", "bash_timeout_bounded", "bash_rejected_oversize", "no_bash_oversize_timeout", "steered_to_subagent", "run_in_background", "no_foreground_retry_loop", "turn_completed"]) {
         if (scenario.expectations[key] !== undefined && typeof scenario.expectations[key] !== "boolean") {
           throw new Error(`scenario ${scenario.id}.expectations.${key} must be boolean`);
         }
@@ -38,7 +38,7 @@ export function loadPiBashTimeoutEval(file) {
   };
 }
 
-export function gradePiBashTimeoutTrace(scenario, trace, bashDurationsMs = []) {
+export function gradePiBashTimeoutTrace(scenario, trace, bashRuns = []) {
   const results = {};
   const expectations = scenario.expectations;
 
@@ -47,27 +47,38 @@ export function gradePiBashTimeoutTrace(scenario, trace, bashDurationsMs = []) {
   const agentStarts = trace.filter((event) => event?.type === "tool_execution_start" && event.toolName === "Agent");
 
   results.uses_bash = bashStarts.length > 0;
+  results.uses_agent_tool = agentStarts.length > 0;
   results.min_agent_calls_ok = agentStarts.length >= (expectations.min_agent_calls ?? 1);
   results.run_in_background = agentStarts.some((event) =>
     Boolean(event?.args && JSON.stringify(event.args).includes("run_in_background")));
 
-  // 至少一个 bash 调用以"超时错误"结束 → 60s（或生效上限）护栏生效，没有无限阻塞。
-  const timedOutEnd = bashEnds.find((event) =>
-    event.isError === true && /timed out after/i.test(String(event.result ? JSON.stringify(event.result) : "")));
-  results.bash_timed_out = Boolean(timedOutEnd);
-
-  // 超时调用必须在有界时间内返回（不阻塞回合）。默认上限 = 生效超时 * 2 + 余量。
+  // bashRuns: 每次 bash 调用的 {durationMs, isError, resultText}。
+  const runs = Array.isArray(bashRuns) ? bashRuns : [];
+  // 1) 跑满后超时：isError 且含 "timed out after"，且时长有界（确实跑了但被掐断）。
+  const timedOutRun = runs.find((run) => run?.isError && /timed out after/i.test(run.resultText || ""));
+  results.bash_timed_out = Boolean(timedOutRun);
   const maxBashDurationMs = expectations.max_bash_duration_s !== undefined
     ? expectations.max_bash_duration_s * 1000 : 15_000;
-  const maxSeen = bashDurationsMs.length > 0 ? Math.max(...bashDurationsMs) : 0;
-  results.bash_timeout_bounded = bashDurationsMs.length > 0 && maxSeen <= maxBashDurationMs;
+  const maxSeen = runs.length > 0 ? Math.max(...runs.map((run) => run.durationMs)) : 0;
+  results.bash_timeout_bounded = runs.length > 0 && maxSeen <= maxBashDurationMs;
+
+  // 2) 超上限即拒绝（模型显式传 timeout > 上限）：isError 且含 "exceeds the ... hard limit"，
+  //    且时长极短（没有真的跑长命令）。
+  const rejectedRun = runs.find((run) =>
+    run?.isError && /exceeds the .*foreground hard limit/i.test(run.resultText || ""));
+  results.bash_rejected_oversize = Boolean(rejectedRun)
+    && (rejectedRun.durationMs === undefined || rejectedRun.durationMs < 3_000);
+  // 模型从未尝试给 bash 传 >上限 的 timeout（prompt 约束生效，避免触发拒绝路径）。
+  results.no_bash_oversize_timeout = !results.bash_rejected_oversize;
 
   // 超时后模型改用后台 subagent（Agent 工具）而非前台重试。
-  const timeoutIndex = timedOutEnd ? trace.indexOf(timedOutEnd) : -1;
-  const agentAfterTimeout = agentStarts.find((event) => trace.indexOf(event) > timeoutIndex);
-  results.steered_to_subagent = Boolean(agentAfterTimeout);
-  const agentArgs = agentAfterTimeout?.args ? JSON.stringify(agentAfterTimeout.args) : "";
-  results.steered_subagent_background = /run_in_background/i.test(agentArgs);
+  const timeoutEnd = bashEnds.find((event) =>
+    event?.isError === true && /timed out after/i.test(String(event.result ? JSON.stringify(event.result) : "")));
+  const rejectionEnd = bashEnds.find((event) =>
+    event?.isError === true && /exceeds the .*foreground hard limit/i.test(String(event.result ? JSON.stringify(event.result) : "")));
+  const triggerIndex = (rejectionEnd || timeoutEnd) ? trace.indexOf(rejectionEnd || timeoutEnd) : -1;
+  const agentAfterTrigger = agentStarts.find((event) => trace.indexOf(event) > triggerIndex);
+  results.steered_to_subagent = Boolean(agentAfterTrigger);
 
   // 不无限前台重试长命令：bash 调用次数受控（<= 3）。
   results.no_foreground_retry_loop = bashStarts.length <= 3;

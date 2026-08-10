@@ -35,7 +35,7 @@ function currentFiles() {
   return files.filter((file) => file !== SELF);
 }
 
-test("current repository surfaces are Bun-only and native-binary-only", () => {
+test("current repository surfaces are Bun-first, npm, and native-binary-only", () => {
   const forbiddenPaths = [
     "scripts/package.mjs",
     "test/integration/package/installed-tarball-cli.integration.test.mjs",
@@ -50,8 +50,6 @@ test("current repository surfaces are Bun-only and native-binary-only", () => {
     ["Node shebang", /#!\/usr\/bin\/env node/],
     ["Node fixture path", /\/opt\/node/],
     ["Node-only executable naming", /nodeExecutable/],
-    ["npm-compatible distribution", /npm-compatible|\bpack:dist\b|installed-tarball/i],
-    ["npm or pnpm command", /(^|\s)(?:npm|pnpm)(?:\s|$)/m],
   ];
   const violations = [];
   const runnerSeamFiles = [];

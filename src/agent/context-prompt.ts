@@ -2,7 +2,21 @@ import { createHash } from "node:crypto";
 import { agentCliPromptCapabilities } from "./agent-cli-capabilities.js";
 import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } from "../runtime/runtime-contracts.js";
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v16";
+/**
+ * Standing prompt 工程（调 prompt 时先读）：
+ * - OpenAI Prompt Engineering Guide: https://platform.openai.com/docs/guides/prompt-engineering
+ * - Anthropic Prompt Engineering overview: https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview
+ *
+ * 本文件维护的核心调优原则：
+ * 1. 明确目标与边界：每条规则写明“何时触发 / 做什么 / 禁止什么”，避免歧义与过度推断。
+ * 2. 结构性信号优先于推断：能用来源/目标字段（如 thread target）做权威判定的，不要依赖模型从措辞推断。
+ * 3. 精确 recipe：关键操作给完整命令模板 + 约束（如 exact literal、fail-closed、确定性 --jq 数据流）。
+ * 4. 幂等与安全：idempotency、freshness 前置检查、不可重复提交、脱敏、失败可见（fail visibly）。
+ * 5. 版本化：每次实质改动 bump LARKIN_STANDING_PROMPT_VERSION，并同步 eval 数据集/graders/断言。
+ * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
+ */
+
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v17";
 
 const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
@@ -122,8 +136,8 @@ export class ContextPromptBuilder {
       "For exact text supplied directly in the current instruction or Inbox event, pass the body unchanged as one literal `--text` argument. A direct literal must not use command substitution, backticks, `eval`, `echo`, or an unquoted variable; if it cannot be represented safely, stop and report the limitation instead of normalizing it.",
       "An explicit exact or verbatim direct literal uses `--text` and overrides the regular markdown default.",
       `For a common exact send with a confirmed chat id, use the complete schematic recipe \`${executable} im +messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json\`; replace each placeholder with the corresponding confirmed or exact literal value.`,
-      `For an ordinary current Inbox exact reply when the user or event does not explicitly request a topic, in-thread, or thread reply, after the required poll use this complete canonical recipe: \`${executable} im +messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json\`. Replace the placeholders with the polled id and unchanged exact literal, and omit \`--reply-in-thread\` so the reply stays on the original chat main timeline.`,
-      `Only when the user or current Inbox event explicitly asks for a topic, in-thread, or thread reply may you use this known canonical recipe after the required poll: \`${executable} im +messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json\`. You must not infer a topic request from available thread metadata, the source message id, or ordinary reply wording; replace the placeholders only with the real \`om_\` id returned by that poll and the unchanged exact literal.`,
+      `A reply's target is governed by the source's thread membership, a structural Inbox fact, not a guess. When the current Inbox event or poll identifies the source as a thread (\`thread:<chat_id>:<thread_id>\` target, or the polled message carries a \`thread_id\`), your reply MUST stay in that same thread: after the required poll use \`${executable} im +messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json\`. For a chat-level source (no thread) with no explicit in-thread request, reply to the main timeline with the same recipe but omit \`--reply-in-thread\`; replace the placeholders only with the real \`om_\` id returned by that poll and the unchanged exact literal.`,
+      `Use the \`--reply-in-thread\` recipe only when the source is a thread or the user or current Inbox event explicitly asks for a topic, in-thread, or thread reply. Never invent a topic request from ordinary reply wording or a bare source message id: the thread decision comes only from the source message's actual thread membership (\`thread:\` target or polled \`thread_id\`) or an explicit request, never from wording alone.`,
       "This exact topic-reply recipe has exactly one post-poll model tool call and must not read or re-read a skill or reference, open help, or perform any other discovery. Without a `freshness_conflict` it uses two total model tool calls including the poll. If the first write instead returns a nonzero pre-commit, provider-not-reached `freshness_conflict`, reconsider its bounded context and, only if the exact operation remains unchanged, retry the identical command once; this is the only allowed extra call and produces exactly three total model tool calls including the poll.",
       "For tool-sourced exact or verbatim text from a Feishu result, do not copy or retype it into `--text`; you must use the deterministic native `--jq` to `--content` dataflow below.",
       "Choose exactly one source selector from the identifier the task starts with, and never switch selectors after reading. The inner read in the selected composite replaces any separate scoped history read; it must not follow a preview read.",

@@ -7,7 +7,7 @@
   },
   "model": {
     "selection": "gpt-5.6-sol",
-    "standing_prompt_version": "larkin-standing-v16"
+    "standing_prompt_version": "larkin-standing-v17"
   },
   "grader": {
     "name": "runtime-agent-interface-v2-trace-grader",

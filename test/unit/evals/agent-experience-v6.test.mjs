@@ -16,13 +16,14 @@ const DATASET = loadAgentExperienceV6Eval(path.join(ROOT, "evals/agent-experienc
 
 test("fixed Agent Experience v6 eval starts every selected scenario from an empty session", () => {
   assert.equal(DATASET.session.initial_turns, 0);
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v16");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v17");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",
     "exact-text-punctuation",
     "exact-reply-no-help",
     "explicit-topic-exact-reply",
+    "thread-source-reply-stays-in-thread",
     "same-human-correction-precedence",
     "precommit-exact-reply-safe-retry",
     "tool-sourced-verbatim-thread-reply",
@@ -66,17 +67,21 @@ test("standing prompt deletion counterfactual protects the known group user/bot 
 
 test("standing prompt deletion counterfactual protects the ordinary current-Inbox exact reply recipe", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
+  assert.match(prompt, /source's thread membership.*structural Inbox fact.*not a guess/i);
   assert.match(prompt,
-    /ordinary current Inbox.*exact reply.*does not explicitly request.*topic.*in-thread.*messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);
+    /messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>'/i);
   assert.match(prompt,
-    /omit.*--reply-in-thread.*original.*chat.*main timeline/i);
+    /chat-level source.*no thread.*omit.*--reply-in-thread/i);
 });
 
 test("standing prompt deletion counterfactual protects the explicitly requested exact topic reply recipe", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
   assert.match(prompt,
-    /only when.*user.*current Inbox event.*explicitly.*topic.*in-thread.*thread reply.*messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json/i);
-  assert.match(prompt, /must not infer.*thread metadata.*message id.*ordinary reply/i);
+    /MUST stay in that same thread.*messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json/i);
+  assert.match(prompt,
+    /Use the .--reply-in-thread. recipe only when the source is a thread or the user or current Inbox event explicitly asks.*topic.*in-thread.*thread reply/i);
+  assert.match(prompt,
+    /Never invent a topic request from ordinary reply wording or a bare source message id/i);
   assert.match(prompt,
     /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery/i);
   assert.match(prompt,

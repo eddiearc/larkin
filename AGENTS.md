@@ -27,6 +27,15 @@ bun run publication:check
 
 Keep each change focused. Update the closest tests when behavior changes, and run the smallest relevant test first followed by the full suite before delivery. Do not weaken clean-tree, publication, license, security, or release checks to make a change pass.
 
+## Prompt engineering
+
+When tuning the Larkin standing prompt (`src/agent/context-prompt.ts`), follow the two canonical references and the file header notes:
+
+- OpenAI Prompt Engineering Guide: <https://platform.openai.com/docs/guides/prompt-engineering>
+- Anthropic Prompt Engineering overview: <https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview>
+
+Standing rules: prefer structural signals (target/source fields) over model inference; give exact recipe templates plus constraints; keep fail-closed/idempotent/freshness semantics; bump `LARKIN_STANDING_PROMPT_VERSION` on every substantive change and update the affected eval datasets, graders, and assertions; validate behavior changes with the fixed-scenario evals. Do not add new Markdown docs; keep guidance as file-header comments or in this file.
+
 ## Repository hygiene
 
 Never commit credentials, tokens, private keys, local configuration, user data, private filesystem paths, or restricted publication inputs. Do not commit generated `dist/`, release `artifacts/`, dependency directories, or local caches. The repository intentionally contains no `docs/` or `.claude/` tree; do not add unapproved Markdown files.

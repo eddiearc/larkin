@@ -72,7 +72,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v16");
+  assert.equal(prompt.version, "larkin-standing-v17");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
@@ -150,11 +150,11 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /inner read.*replaces.*separate.*history read/i);
   assert.match(prompt.content, /must not.*unquoted.*substitution.*`eval`.*`echo`.*`2>&1`.*temporary/i);
   assert.match(prompt.content,
-    /larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json/i);
+    /source's thread membership.*structural Inbox fact.*not a guess.*MUST stay in that same thread.*messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json.*chat-level source.*omit.*--reply-in-thread/i);
   assert.match(prompt.content,
-    /ordinary current Inbox.*exact reply.*does not explicitly request.*topic.*in-thread.*larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --json.*omit.*--reply-in-thread.*original.*chat.*main timeline/i);
+    /chat-level source.*no thread.*main timeline.*omit.*--reply-in-thread/i);
   assert.match(prompt.content,
-    /only when.*user.*current Inbox event.*explicitly.*topic.*in-thread.*thread reply.*larkin im \+messages-reply --message-id <real_om_message_id> --text '<exact_body_as_one_literal_argument>' --reply-in-thread --json.*must not infer.*thread metadata.*message id.*ordinary reply/i);
+    /Use the .--reply-in-thread. recipe only when the source is a thread or the user or current Inbox event explicitly asks.*topic.*in-thread.*thread reply.*Never invent a topic request from ordinary reply wording or a bare source message id.*thread membership.*thread:.*target.*thread_id.*explicit request.*never from wording alone/i);
   assert.match(prompt.content,
     /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
   assert.match(prompt.content,

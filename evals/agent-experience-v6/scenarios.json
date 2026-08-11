@@ -3,7 +3,7 @@
   "version": 6,
   "model": {
     "selection": "deterministic-trace",
-    "standing_prompt_version": "larkin-standing-v16"
+    "standing_prompt_version": "larkin-standing-v17"
   },
   "session": {
     "initial_turns": 0
@@ -170,6 +170,46 @@
           "command": "larkin im +messages-reply --message-id om_eval_topic_reply --text '收到：“A/B”' --reply-in-thread --json",
           "message_id": "om_eval_topic_reply",
           "transported_text": "收到：“A/B”",
+          "shell_interpolation": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "thread-source-reply-stays-in-thread",
+      "task": "A canonical Inbox event target is a thread: thread:oc_eval_thread_reply:omt_eval_thread_reply. The source message lives inside a thread, so the reply MUST stay in that same thread even though no in-thread word is used. Poll the known thread target, then reply to its real om_ message with the exact literal 收到（thread） using the thread reply recipe. Do not fall back to the chat main timeline.",
+      "expected": {
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "poll_before_write": true,
+        "ordered_commands": [
+          "larkin inbox poll --target thread:oc_eval_thread_reply:omt_eval_thread_reply --limit 1",
+          "larkin im +messages-reply --message-id om_eval_thread_reply --text '收到（thread）' --reply-in-thread --json"
+        ],
+        "ordered_command_exit_code": 0,
+        "reply_anchor": {
+          "poll_command": "larkin inbox poll --target thread:oc_eval_thread_reply:omt_eval_thread_reply --limit 1",
+          "write_command": "larkin im +messages-reply --message-id om_eval_thread_reply --text '收到（thread）' --reply-in-thread --json"
+        },
+        "forbidden_command_fragments": ["--help", " -h", "--markdown", "--idempotency-key"],
+        "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
+        "exact_text": "收到（thread）",
+        "shell_interpolation": false
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target thread:oc_eval_thread_reply:omt_eval_thread_reply --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_thread_reply"
+        },
+        {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_thread_reply --text '收到（thread）' --reply-in-thread --json",
+          "message_id": "om_eval_thread_reply",
+          "transported_text": "收到（thread）",
           "shell_interpolation": false,
           "exit_code": 0
         }

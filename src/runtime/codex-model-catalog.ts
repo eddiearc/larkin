@@ -113,7 +113,30 @@ function parseCatalog(value: unknown): CodexModelCatalog {
   return { models, effectiveModel };
 }
 
+/**
+ * 进程内缓存：同一 codex 可执行文件的模型目录在进程生命周期内不变，
+ * daemon 启动时多个 codex agent 只需探测一次（每次探测都要 spawn 一个
+ * codex app-server 进程）。失败不缓存以便重试；测试注入 runCodexAppServer
+ * 时绕过缓存，保持测试隔离。
+ */
+const discoveryCache = new Map<string, Promise<CodexModelCatalog>>();
+
 export async function discoverCodexModelCatalog(options: DiscoverCodexCatalogOptions = {}): Promise<CodexModelCatalog> {
+  if (!options.runCodexAppServer) {
+    const key = `${options.command || options.env?.LARKIN_CODEX_COMMAND || "codex"}`;
+    const cached = discoveryCache.get(key);
+    if (cached) return cached;
+    const pending = discoverCodexModelCatalogUncached(options);
+    discoveryCache.set(key, pending);
+    pending.catch(() => {
+      if (discoveryCache.get(key) === pending) discoveryCache.delete(key);
+    });
+    return pending;
+  }
+  return discoverCodexModelCatalogUncached(options);
+}
+
+async function discoverCodexModelCatalogUncached(options: DiscoverCodexCatalogOptions): Promise<CodexModelCatalog> {
   const execute = options.runCodexAppServer ?? runCodexAppServer;
   const request = { id: "larkin-model-list", method: "model/list" as const, params: { limit: 100, includeHidden: false as const } };
   try {

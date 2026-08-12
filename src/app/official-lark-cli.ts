@@ -72,7 +72,75 @@ function officialPackage(executable: string): OfficialLarkCliCommand | null {
   return null;
 }
 
-export function probeOfficialLarkCli(dependencies: OfficialLarkCliDependencies = {}): OfficialLarkCliProbe {
+/**
+ * 进程内缓存（仅生产路径，即未注入 spawn/shell 时生效）：登录 shell 探测
+ * 是阻塞 spawnSync，且用户的 .zshrc/.zprofile（nvm 等）偶发需要数十秒才能
+ * 返回，daemon 热路径上反复探测会把启动拖到分钟级。同一进程内 PATH/SHELL
+ * 不变，解析结果也不会变，因此只探测一次。
+ */
+let productionProbeKey: string | null = null;
+let productionProbe: OfficialLarkCliProbe | null = null;
+
+/** setup 安装/升级官方 CLI 后调用，使同一进程内的后续解析重新探测。 */
+export function invalidateOfficialLarkCliProbeCache(): void {
+  productionProbeKey = null;
+  productionProbe = null;
+}
+
+/** 对已确认是官方 @larksuite/cli 的入口做版本与 bind 能力验证（shell 与 PATH 两路共用）。 */
+function validateOfficialCommand(command: OfficialLarkCliCommand, env: NodeJS.ProcessEnv,
+  spawn: typeof spawnSync): OfficialLarkCliProbe {
+  if (!compatibleVersion(command.version)) return {
+    state: "outdated",
+    reason: `官方 lark-cli ${command.version} 低于最低兼容版本 ${OFFICIAL_LARK_CLI_VERSION}: ${command.command}`,
+    nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
+  };
+  const version = spawn(command.command, ["--version"], {
+    encoding: "utf8", env,
+  }) as SpawnSyncReturns<string>;
+  if (version.status !== 0 || version.error || !String(version.stdout || "").includes(command.version)) return {
+    state: "outdated",
+    reason: `官方 lark-cli 版本执行验证失败: ${command.command}`,
+    nextAction: `重新安装：${OFFICIAL_LARK_CLI_INSTALL}`,
+  };
+  const bindHelp = spawn(command.command, ["config", "bind", "--help"], {
+    encoding: "utf8", env,
+  }) as SpawnSyncReturns<string>;
+  const bindText = `${bindHelp.stdout || ""}\n${bindHelp.stderr || ""}`;
+  if (bindHelp.status !== 0 || bindHelp.error || !/--source/.test(bindText) || !/lark-channel/.test(bindText) || !/--identity/.test(bindText)) return {
+    state: "conflict",
+    reason: `官方 lark-cli 缺少 lark-channel bot-only bind 能力: ${command.command}`,
+    nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
+  };
+  return { state: "ready", command };
+}
+
+/**
+ * PATH 直接解析快路径：daemon（launchd）的 PATH 通常已包含官方 lark-cli，
+ * 此时完全不需要拉起登录 shell（这是启动变慢的主要来源之一）。
+ * 仅当 PATH 解析出可用的官方 CLI 时才返回结果；否则返回 null 回退到
+ * 登录 shell 探测（保留对 shell 自定义 PATH 环境的兼容）。
+ */
+function probePathResolution(env: NodeJS.ProcessEnv): OfficialLarkCliProbe | null {
+  const dirs = String(env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    const candidate = path.resolve(dir, "lark-cli");
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+    } catch { continue; }
+    const command = officialPackage(candidate);
+    if (!command) return null;
+    return validateOfficialCommand(command, env, spawnSync);
+  }
+  return null;
+}
+
+function probeOfficialLarkCliUncached(dependencies: OfficialLarkCliDependencies): OfficialLarkCliProbe {
+  const env = dependencies.env ?? process.env;
+  if (!dependencies.spawn && !dependencies.shell) {
+    const fromPath = probePathResolution(env);
+    if (fromPath) return fromPath;
+  }
   const executable = loginShellPath(dependencies);
   if (!executable) return {
     state: "missing",
@@ -90,24 +158,20 @@ export function probeOfficialLarkCli(dependencies: OfficialLarkCliDependencies =
     reason: `真实 login shell 的官方 @larksuite/cli ${command.version} 低于最低兼容版本 ${OFFICIAL_LARK_CLI_VERSION}`,
     nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
   };
-  const version = (dependencies.spawn ?? spawnSync)(command.command, ["--version"], {
-    encoding: "utf8", env: dependencies.env ?? process.env,
-  }) as SpawnSyncReturns<string>;
-  if (version.status !== 0 || version.error || !String(version.stdout || "").includes(command.version)) return {
-    state: "outdated",
-    reason: `官方 lark-cli 版本执行验证失败: ${command.command}`,
-    nextAction: `重新安装：${OFFICIAL_LARK_CLI_INSTALL}`,
-  };
-  const bindHelp = (dependencies.spawn ?? spawnSync)(command.command, ["config", "bind", "--help"], {
-    encoding: "utf8", env: dependencies.env ?? process.env,
-  }) as SpawnSyncReturns<string>;
-  const bindText = `${bindHelp.stdout || ""}\n${bindHelp.stderr || ""}`;
-  if (bindHelp.status !== 0 || bindHelp.error || !/--source/.test(bindText) || !/lark-channel/.test(bindText) || !/--identity/.test(bindText)) return {
-    state: "conflict",
-    reason: `官方 lark-cli 缺少 lark-channel bot-only bind 能力: ${command.command}`,
-    nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
-  };
-  return { state: "ready", command };
+  return validateOfficialCommand(command, env, dependencies.spawn ?? spawnSync);
+}
+
+export function probeOfficialLarkCli(dependencies: OfficialLarkCliDependencies = {}): OfficialLarkCliProbe {
+  if (!dependencies.spawn && !dependencies.shell) {
+    const env = dependencies.env ?? process.env;
+    const key = `${env.SHELL || ""}|${env.PATH || ""}`;
+    if (productionProbe && productionProbeKey === key) return productionProbe;
+    const probe = probeOfficialLarkCliUncached({ env });
+    productionProbeKey = key;
+    productionProbe = probe;
+    return probe;
+  }
+  return probeOfficialLarkCliUncached(dependencies);
 }
 
 export function resolveOfficialLarkCli(dependencies: OfficialLarkCliDependencies = {}): OfficialLarkCliCommand {
@@ -122,6 +186,7 @@ export function installOfficialLarkCli(dependencies: OfficialLarkCliDependencies
     encoding: "utf8", env: dependencies.env ?? process.env, stdio: "inherit",
   }) as SpawnSyncReturns<string>;
   if (result.status !== 0 || result.error) throw new Error(`官方 lark-cli 安装失败（exit=${result.status ?? "none"}）`);
+  invalidateOfficialLarkCliProbeCache();
   return resolveOfficialLarkCli(dependencies);
 }
 

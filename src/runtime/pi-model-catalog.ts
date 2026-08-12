@@ -61,8 +61,32 @@ export function findExactPiModel<T extends PiModelLike>(reference: string, model
   return models.find((model) => piModelId(model) === reference);
 }
 
+/**
+ * 进程内缓存：同一个 pi 可执行文件的模型目录在进程生命周期内不变。
+ * daemon 启动时 3 个 pi agent 会各发起一次发现探测（每个都 spawn 一个 pi 进程
+ * 并做 RPC 握手，约 5s），缓存后只 spawn 一次；失败不缓存以便重试。
+ * 测试注入 options.spawn 时绕过缓存，保持测试隔离。
+ */
+const discoveryCache = new Map<string, Promise<PiModelCatalog>>();
+
 /** Discover only through Pi's structured RPC protocol; no table parsing or static fallback. */
 export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {
+  if (!options.spawn) {
+    const command = options.command ?? options.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
+    const key = `${command}|${options.env?.PI_CODING_AGENT_DIR ?? ""}|${options.agentDir ?? ""}`;
+    const cached = discoveryCache.get(key);
+    if (cached) return cached;
+    const pending = discoverPiModelCatalogUncached(options);
+    discoveryCache.set(key, pending);
+    pending.catch(() => {
+      if (discoveryCache.get(key) === pending) discoveryCache.delete(key);
+    });
+    return pending;
+  }
+  return discoverPiModelCatalogUncached(options);
+}
+
+async function discoverPiModelCatalogUncached(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {
   const spawn = options.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, [...args], spawnOptions as any) as unknown as PiRpcProcess);
   const command = options.command ?? options.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
   const child = spawn(command, ["--mode", "rpc", "--no-session"], {

@@ -787,8 +787,11 @@ export function createRuntimeHost(options: {
       let activeCount = 0;
       let recoveringCount = 0;
       const startupFailures: string[] = [];
-      for (const config of configs) {
-        if (managed.has(config.agentId)) { activeCount += 1; continue; }
+      // Agents start concurrently: each Agent's runtime session is independent,
+      // and serial startup multiplied every per-Agent handshake (login-shell
+      // probe + runtime RPC discovery) by the Agent count.
+      const startups = configs.map(async (config) => {
+        if (managed.has(config.agentId)) { activeCount += 1; return; }
         const stateStore = options.stateStoreFor?.(config.agentId);
         const persisted = stateStore
           ? stateStore.withInboxTransaction(() => {
@@ -832,7 +835,8 @@ export function createRuntimeHost(options: {
             ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) });
         }
         agent.poller = setInterval(() => reconcileExternalConsumption(agent), 250); agent.poller.unref?.();
-      }
+      });
+      await Promise.all(startups);
       if (configs.length > 0 && activeCount === 0 && recoveringCount === 0) {
         throw new Error(`No runtime Agent started: ${startupFailures.join("; ")}`);
       }

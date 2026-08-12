@@ -97,7 +97,30 @@ function parseCatalog(value: unknown): ClaudeModelCatalog {
   return { models, effectiveModel, defaultSupportedReasoningEfforts: efforts(defaultRow || {}) };
 }
 
+/**
+ * 进程内缓存：同一 claude 可执行文件的模型目录在进程生命周期内不变，
+ * daemon 启动时多个 claude agent 只需探测一次（每次探测都要 spawn 一个
+ * claude CLI 进程做 list_models 控制请求）。失败不缓存以便重试；测试注入
+ * runClaudeControl 时绕过缓存，保持测试隔离。
+ */
+const discoveryCache = new Map<string, Promise<ClaudeModelCatalog>>();
+
 export async function discoverClaudeModelCatalog(options: DiscoverClaudeCatalogOptions = {}): Promise<ClaudeModelCatalog> {
+  if (!options.runClaudeControl) {
+    const key = `${options.command || options.env?.LARKIN_CLAUDE_COMMAND || "claude"}`;
+    const cached = discoveryCache.get(key);
+    if (cached) return cached;
+    const pending = discoverClaudeModelCatalogUncached(options);
+    discoveryCache.set(key, pending);
+    pending.catch(() => {
+      if (discoveryCache.get(key) === pending) discoveryCache.delete(key);
+    });
+    return pending;
+  }
+  return discoverClaudeModelCatalogUncached(options);
+}
+
+async function discoverClaudeModelCatalogUncached(options: DiscoverClaudeCatalogOptions): Promise<ClaudeModelCatalog> {
   const execute = options.runClaudeControl ?? runClaudeControl;
   const request = { type: "control_request", request_id: "larkin-model-list", request: { subtype: "list_models" } };
   try {

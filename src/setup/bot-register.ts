@@ -13,7 +13,8 @@ import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "../app/official-lark-cli.js";
 import { collectSetupAgentChoice, recoverUnavailableExternalPi, terminalSetupQuestioner } from "./setup-agent-choice.js";
 import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
-import { configureBuiltinPiProviderModel, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
+import { configureBuiltinPiProviderModel, stageBuiltinPiProvider, validatePiBaseUrl, PI_PROVIDER_PRESETS,
+  type BuiltinPiProviderSetupSelection, type PiProviderPresetId } from "../runtime/pi-provider-config.js";
 import {
   beginBuiltinPiCredentialTransaction,
   createOfficialPiCredentialRuntime,
@@ -540,6 +541,36 @@ if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_
       fs.writeFileSync(temporaryAgentChoiceFile, `${JSON.stringify(serializedChoice)}\n`, { mode: 0o600, flag: "wx" });
     }
   } finally { questioner.close?.(); }
+}
+
+// ── 非交互参数化内置 Pi（builtin-pi 是默认 runtime 类型）──
+// --pi-distribution builtin：需 --provider <id> + --api-key <key>（或 --base-url 自定义端点）。
+const piDistributionFlag = flag("--pi-distribution");
+const setupProvider = flag("--provider");
+const setupApiKey = flag("--api-key");
+const setupBaseUrl = flag("--base-url");
+const setupModel = flag("--model");
+if (piDistributionFlag === "builtin") {
+  if (!setupProvider && !setupBaseUrl) {
+    throw new Error("builtin-pi 需要 --provider <id>（deepseek|kimi|minimax|zhipu|openai|anthropic|gemini|groq|cerebras|xai|fireworks|together|mistral|openrouter|kimi-coding|qwen-cn|custom）或 --base-url；或改用 --runtime external-pi 使用已有 pi 环境");
+  }
+  if (!setupApiKey) throw new Error("builtin-pi 需要 --api-key；或改用 --runtime external-pi 使用已有 pi 登录");
+  const presetId = setupProvider ?? "custom";
+  const presetDef = PI_PROVIDER_PRESETS.find((p) => p.id === presetId);
+  if (!presetDef && !setupBaseUrl) throw new Error(`未知 provider \`${presetId}\`；可选：${PI_PROVIDER_PRESETS.map((p) => p.id).join(" | ")} | custom`);
+  const raw: BuiltinPiProviderSetupSelection = {
+    distribution: "builtin",
+    preset: presetId as PiProviderPresetId,
+    model: setupModel ?? presetDef?.defaultModel ?? "",
+    ...(presetDef ? { baseUrl: presetDef.baseUrl } : setupBaseUrl ? { baseUrl: validatePiBaseUrl(setupBaseUrl) } : {}),
+  };
+  stageBuiltinPiProvider(CFG_DIR, id, { ...raw, apiKey: setupApiKey });
+  temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(temporaryAgentChoiceFile,
+    `${JSON.stringify({ ...raw, authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
+  say(`[setup 2/5] ✓ 内置 Pi provider 已配置（${presetId}${setupBaseUrl ? " / custom" : ""}）`);
+} else if (piDistributionFlag === "external" && (setupProvider || setupApiKey || setupBaseUrl)) {
+  throw new Error("external-pi 使用已有 pi 环境与登录，不接受 --provider/--api-key/--base-url");
 }
 
 const stagedBotFile = path.join(botsDir, `.${id}.${process.pid}.tmp`);

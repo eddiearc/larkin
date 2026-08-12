@@ -7,6 +7,8 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import * as larkinConfig from "../platform/config.js";
+import { PI_PROVIDER_PRESETS } from "../runtime/pi-provider-config.js";
+const PI_PROVIDER_IDS = PI_PROVIDER_PRESETS.map((p) => p.id).join(" | ") + " | custom";
 import { acquireProcessLock, readProcessState } from "../platform/process-state.js";
 import { requestAgentUpsert } from "./local-control.js";
 import { openOwnedDashboardWhenReady } from "./setup-dashboard.js";
@@ -30,30 +32,69 @@ if (argv.some((arg) => arg === "--no-dashboard" || arg.startsWith("--no-dashboar
   die("--no-dashboard 已移除；dashboard 由 larkin start 统一管理");
 }
 if (has("--start") && has("--no-start")) die("--start 与 --no-start 不能同时使用");
-
-const commentSubscription = flag("--comment-subscription") || null;
-if (has("--comment-subscription") && !commentSubscription) die("--comment-subscription 缺少参数值");
-if (commentSubscription && !["none", "application"].includes(commentSubscription)) {
-  die("--comment-subscription 只支持 none 或 application");
+if (has("--comment-subscription")) {
+  die("--comment-subscription 已移除：评论订阅默认 application（平台验证的应用级订阅），不需要该 flag");
 }
-const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: !has("--no-start"), help: has("--help") || has("-h") };
+
+// 默认应用级评论订阅：平台验证的应用订阅让该应用可见文档的全部评论进入 Agent Inbox。
+const commentSubscription = "application";
+const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: true, help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
+
+// runtime 枚举归一：builtin-pi（默认）/ external-pi / codex / claude → 内部 (runtime, distribution)
+const RUNTIME_ENUM = ["builtin-pi", "external-pi", "codex", "claude"] as const;
+type RuntimeEnum = (typeof RUNTIME_ENUM)[number];
+function normalizeRuntime(value: string | null): { runtime: "pi" | "codex" | "claude"; distribution?: "builtin" | "external" } {
+  const chosen: RuntimeEnum = (value || "builtin-pi") as RuntimeEnum;
+  if (!RUNTIME_ENUM.includes(chosen)) {
+    die(`未知 runtime \`${value}\`；可选：${RUNTIME_ENUM.join(" | ")}`);
+  }
+  if (chosen === "builtin-pi") return { runtime: "pi", distribution: "builtin" };
+  if (chosen === "external-pi") return { runtime: "pi", distribution: "external" };
+  return { runtime: chosen };
+}
+const normalizedRuntime = normalizeRuntime(OPT.runtime);
+// 参数化路径：显式 --runtime、无 TTY（Agent 驱动）、或任何 provider 参数。
+// 交互终端且未指定任何参数时，不传 --runtime 给 bot-register，由其交互选择流程接管。
+const parameterized = Boolean(OPT.runtime) || OPT.nonInteractive
+  || ["--provider", "--api-key", "--base-url"].some((name) => has(name));
+// builtin-pi 前置校验：授权前就 fast-fail（避免用户白授权后才发现缺 key）；--help 永远跳过
+if (!OPT.help && parameterized && normalizedRuntime.distribution === "builtin") {
+  const p = flag("--provider");
+  const b = flag("--base-url");
+  const k = flag("--api-key");
+  if (!p && !b) die(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_IDS}）或 --base-url；或 --runtime external-pi 用已有 pi`);
+  if (!k) die("builtin-pi 需要 --api-key；或 --runtime external-pi 用已有登录");
+}
+if (!OPT.help && normalizedRuntime.distribution === "external" && (flag("--provider") || flag("--api-key") || flag("--base-url"))) {
+  die("external-pi 使用已有 pi 环境，不接受 --provider/--api-key/--base-url");
+}
 if (OPT.help) {
   say(`larkin setup — Create or connect a Feishu bot, then configure and attach its Agent
 
 Usage:
-  larkin setup                         Select a bot in the browser and run setup
+  larkin setup                         Select a bot in the browser and run setup（默认：内置 Pi + 配置完成即热挂载）
+  larkin setup --provider <id> --api-key <key>   指定内置 Pi provider（无需交互）
 
 Options:
-  --runtime <runtime>                   Select the Agent runtime
-  --comment-subscription <mode>         none (safe default) or application
-  --no-start                           Configure the Agent without starting or attaching it
+  --runtime <runtime>                   Agent runtime 枚举：builtin-pi（默认，内置 Pi）| external-pi | codex | claude
+  --provider <id>                       内置 Pi provider：deepseek | kimi | minimax | zhipu | openai |
+                                          anthropic | gemini | groq | cerebras | xai | fireworks |
+                                          together | mistral | openrouter | kimi-coding | qwen-cn | custom
+  --api-key <key>                       API key（内置 Pi 必填）
+  --base-url <url>                      custom 端点（provider=custom 时必填；也可覆盖 preset 默认端点）
+  --model <id>                          模型 ID；默认取 provider 预设。不同 runtime 的模型可用
+                                          \`larkin model\` 查看 / 切换
 
 setup handles browser authorization, permission grants, credential storage, Agent configuration,
 and target-only hot attach. Each Agent is identified by its bot App ID: selecting the same bot reuses
 its existing Agent, memory, and state; creating a new bot creates a new Agent.
 
 If larkin is running, only the selected Agent is added or updated. Otherwise setup starts the same
-daemon + dashboard supervisor used by larkin start.`);
+daemon + dashboard supervisor used by larkin start.
+
+Interactive terminals without flags keep the guided flow (browser bot selection + runtime choice).
+Non-interactive (Agent-driven) runs default to builtin-pi and require --provider/--api-key (or
+--runtime external-pi to reuse an existing pi login).`);
   process.exit(0);
 }
 
@@ -104,8 +145,15 @@ export async function main(): Promise<void> {
   fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
   const resultFile = path.join(CFG_DIR, `.setup-result-${process.pid}.json`);
   const registerArgs = ["--auto", "--result-file", resultFile];
-  if (OPT.runtime) registerArgs.push("--runtime", OPT.runtime);
-  if (OPT.commentSubscription) registerArgs.push("--comment-subscription", OPT.commentSubscription);
+  if (parameterized) {
+    registerArgs.push("--runtime", normalizedRuntime.runtime);
+    if (normalizedRuntime.distribution) registerArgs.push("--pi-distribution", normalizedRuntime.distribution);
+  }
+  registerArgs.push("--comment-subscription", OPT.commentSubscription);
+  for (const name of ["--provider", "--api-key", "--base-url", "--model"] as const) {
+    const value = flag(name);
+    if (value) registerArgs.push(name, value);
+  }
   const result = await runForeground("bot-register", registerArgs);
   if (result.code !== 0) die("机器人授权或 Agent 配置未完成");
 
@@ -118,12 +166,16 @@ export async function main(): Promise<void> {
   const configuredAgent = configured.agents[selectedAgentId];
   if (!configuredAgent) die(`setup 完成但 Agent ${selectedAgentId} 配置不可读`);
   if (!(["codex", "claude", "pi"] as const).includes(configuredAgent.runtime as "codex" | "claude" | "pi")) die(`Runtime ${configuredAgent.runtime} 不受支持`);
-  const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
-    agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
-    env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR,
-      ...(configuredAgent.piDistribution ? { LARKIN_PI_DISTRIBUTION: configuredAgent.piDistribution } : {}) } });
-  if (runtimeReadiness.state !== "ready") {
-    die(`Runtime ${configuredAgent.runtime} ${runtimeReadiness.state}：${runtimeReadiness.reason || "prerequisite unavailable"}；${runtimeReadiness.nextAction || "修复后重试"}`);
+  // 非交互（Agent 驱动）时跳过 RPC probe：无 TTY 环境无法进行 pi RPC，探测留到 daemon 启动；
+  // 其余真实阻塞（缺 runtime 可执行文件 / 缺 key / 缺 lark-cli）一律 fast-fail 并给出 agent 可读的修复提示。
+  if (!OPT.nonInteractive) {
+    const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
+      agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
+      env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR,
+        ...(configuredAgent.piDistribution ? { LARKIN_PI_DISTRIBUTION: configuredAgent.piDistribution } : {}) } });
+    if (runtimeReadiness.state !== "ready") {
+      die(`Runtime ${configuredAgent.runtime} ${runtimeReadiness.state}：${runtimeReadiness.reason || "prerequisite unavailable"}；${runtimeReadiness.nextAction || "修复后重试"}`);
+    }
   }
   if (!OPT.start) {
     say(`\n[setup 5/5] ✓ 配置完成。运行 larkin start 启动。`);

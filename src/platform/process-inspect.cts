@@ -25,7 +25,7 @@ function pidAlive(pid: unknown, kill: typeof process.kill = process.kill): boole
   }
 }
 
-function inspectUnix(pid: number): ProcessInspection {
+function inspectUnixOnce(pid: number): ProcessInspection {
   const env = { ...process.env, LC_ALL: "C", LANG: "C" };
   const state = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "stat="], { encoding: "utf8", env });
   const started = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "lstart="], { encoding: "utf8", env });
@@ -45,6 +45,19 @@ function inspectUnix(pid: number): ProcessInspection {
   // state (notably a Bun test parent and a normal Bun child). The value is an
   // opaque identity token, so preserve the stable kernel-provided text.
   return { ok: true, command: commandText, startToken: startedText };
+}
+
+function inspectUnix(pid: number): ProcessInspection {
+  // ps(1) can transiently return empty lstart/command output for a live process
+  // (observed in production as "ps metadata incomplete" taking down the daemon).
+  // Retry briefly so a one-off glitch cannot kill the runtime; liveness is
+  // re-checked on every attempt, so a genuine exit still resolves immediately.
+  for (let attempt = 0; ; attempt += 1) {
+    const result = inspectUnixOnce(pid);
+    if (result.ok || result.dead || attempt >= 2) return result;
+    const deadline = Date.now() + 50 * (attempt + 1);
+    while (Date.now() < deadline) { /* bounded busy wait; ps glitches are sub-second */ }
+  }
 }
 
 function inspectWindows(pid: number): ProcessInspection {

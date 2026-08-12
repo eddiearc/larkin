@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerApp as channelRegisterApp } from "@larksuite/channel";
 import { internalCommandSpec } from "../app/internal-command.js";
 import * as larkinConfig from "../platform/config.js";
+import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { hydrateRuntimeAgent, syncAgentProfile, syncAgentProfileAsync } from "../app/runtime-agent-config.js";
 import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "../app/official-lark-cli.js";
@@ -390,6 +391,59 @@ async function runIdentityProcess(command: string, args: readonly string[], env:
   return runBoundedCliProcess(command, args, env, "Bot identity verification");
 }
 
+/**
+ * 官方 lark-cli 的 `api` 透传只映射响应的 data 字段，而 /open-apis/bot/v3/info 的
+ * bot 对象在顶层（{code, msg, bot}），无法经 lark-cli 读取。这里直接用刚发布的
+ * bot 凭证做一次受限的 HTTP 获取，用于 setup 完成即写入 bot-identity（不依赖首次连接）。
+ */
+interface BotInfoPayload { open_id?: string; app_name?: string; avatar_url?: string }
+
+async function fetchBotInfoViaHttp(appId: string, tenant: "feishu" | "lark" | undefined): Promise<BotInfoPayload | null> {
+  let credential: { appSecret?: unknown };
+  try {
+    credential = JSON.parse(fs.readFileSync(path.join(ensureSecureBotsDir(), `${appId}.json`), "utf8")) as { appSecret?: unknown };
+  } catch { return null; }
+  if (typeof credential.appSecret !== "string" || !credential.appSecret) return null;
+  const base = tenant === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn";
+  try {
+    const tokenResponse = await fetch(`${base}/open-apis/auth/v3/tenant_access_token/internal`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ app_id: appId, app_secret: credential.appSecret }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const tokenPayload = await tokenResponse.json() as { code?: unknown; tenant_access_token?: unknown };
+    if (tokenPayload.code !== 0 || typeof tokenPayload.tenant_access_token !== "string") return null;
+    const infoResponse = await fetch(`${base}/open-apis/bot/v3/info`, {
+      headers: { authorization: `Bearer ${tokenPayload.tenant_access_token}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const infoPayload = await infoResponse.json() as { code?: unknown; bot?: { open_id?: unknown; app_name?: unknown; avatar_url?: unknown } };
+    if (infoPayload.code !== 0 || !infoPayload.bot || typeof infoPayload.bot !== "object") return null;
+    return {
+      open_id: typeof infoPayload.bot.open_id === "string" ? infoPayload.bot.open_id : undefined,
+      app_name: typeof infoPayload.bot.app_name === "string" ? infoPayload.bot.app_name : undefined,
+      avatar_url: typeof infoPayload.bot.avatar_url === "string" ? infoPayload.bot.avatar_url : undefined,
+    };
+  } catch { return null; }
+}
+
+/**
+ * 允许被添加进群：把应用可用范围设为全员可见（更新后线上立即生效）。
+ * 前提是授权确认页勾选了 admin:app.visibility；未勾选时给出可执行提示，不阻断 setup。
+ */
+async function ensureAppVisibleToAll(id: string, official: OfficialLarkCliCommand, cliEnv: NodeJS.ProcessEnv): Promise<boolean> {
+  const result = await runBoundedCliProcess(official.command,
+    [...official.argsPrefix, "api", "PATCH", `/open-apis/application/v6/applications/${id}/visibility`,
+      "--as", "bot", "--data", JSON.stringify({ is_visible_to_all: true }), "--json"],
+    cliEnv, "App visibility grant");
+  if (result.status !== 0) return false;
+  try {
+    const envelope = JSON.parse(result.stdout || "") as { ok?: unknown };
+    return envelope?.ok === true;
+  } catch { return false; }
+}
+
 export async function main(): Promise<void> {
 if (has("--help") || has("-h")) {
   say(`setup 内部机器人注册阶段
@@ -430,14 +484,19 @@ const TENANT_SCOPES = [
   "im:message.p2p_msg:readonly",
   "im:message.group_at_msg:readonly",
   "im:message.group_msg",
+  "im:message:send_as_bot",
   "im:chat:readonly",
   "im:chat:create",
   "im:chat:update",
+  "im:chat.group_info:readonly",
   "im:chat.members:read",
   "im:chat.members:write_only",
+  "im:chat:operate_as_owner",
   "im:resource",
   "application:application:self_manage",
   "contact:user.employee_id:readonly",
+  // 允许 setup 把应用可用范围设为全员可见：任何成员都能把 bot 加进自己的群（修复 230003 类场景）
+  "admin:app.visibility",
   // drive.notice.comment_add_v1 and the stable comment read/reply APIs are
   // currently delivered by Feishu under the aggregate drive tenant scope.
   "drive:drive",
@@ -665,6 +724,37 @@ try {
     } else {
       say(`✓ ${reconciled.dimension} 维度文档评论订阅已取消并由 subscription_status 验证；仅 @Bot 评论进入 Inbox。`);
     }
+  }
+
+  // ── setup 完成即主动写入 bot 身份（不再等首次连接）──
+  // 新 bot 在首次连接前，dashboard/agents 就能显示名字与头像（原：未连接过、无身份缓存）。
+  try {
+    const botInfo = await fetchBotInfoViaHttp(id, tenant);
+    if (botInfo?.open_id) {
+      const store = createAgentStateStore(CFG_DIR, id);
+      store.writeJson("botIdentity", {
+        open_id: botInfo.open_id,
+        name: botInfo.app_name || null,
+        avatar_url: botInfo.avatar_url || null,
+        updated_at: new Date().toISOString(),
+      });
+      say(`✓ bot 身份已写入 state：${botInfo.app_name || "?"}（${botInfo.open_id}）`);
+    } else {
+      say("! bot 身份接口暂未返回完整信息；首次连接后会自动补写");
+    }
+  } catch (error) {
+    say(`! bot 身份主动写入失败（首次连接后会自动补写）：${errorMessage(error)}`);
+  }
+
+  // ── 允许被添加进群：应用可用范围设为全员可见（更新后线上立即生效，best-effort）──
+  try {
+    if (await ensureAppVisibleToAll(id, official, cliEnv)) {
+      say("✓ 应用可用范围已设为全员可见：任何成员都可以把该 bot 添加进自己的群");
+    } else {
+      say("! 未能自动设为全员可见（可能未确认 admin:app.visibility 权限）；如成员无法把 bot 加进群，请在开发者后台「应用发布 → 版本管理与发布」把可用范围设为全部成员，或确认权限后重跑 setup");
+    }
+  } catch (error) {
+    say(`! 自动设置全员可见未完成（${errorMessage(error)}）；可在开发者后台配置可用范围，或确认 admin:app.visibility 后重跑 setup`);
   }
 } catch (error) {
   const diagnostic = errorMessage(error);

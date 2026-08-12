@@ -265,3 +265,33 @@ test("larkApi failure without stderr falls back to stdout head", () => {
   eye.larkApi(agent, "GET", "/open-apis/im/v1/messages/om_fail2", null);
   assert.match(errors[0], /exit=ENOENT \| partial garbage output/);
 });
+
+test("idle completion replaces the 👀 reaction with a ✅ DONE reaction (#70)", () => {
+  const { eye, calls, deletes, logs, timers } = createHarness();
+  eye.add(agent, "om_done");
+  eye.observeActivity(agent, "working");
+  eye.observeActivity(agent, "idle");
+  timers.run(timers.active(1_000)[0]);
+  assert.equal(deletes().length, 1);
+  const donePosts = calls.filter(({ args }) => args.includes("POST") && args.some((arg) => typeof arg === "string" && arg.includes("DONE")));
+  assert.equal(donePosts.length, 1);
+  assert.match(donePosts[0].args.at(-1), /"emoji_type"\s*:\s*"DONE"/);
+  assert.match(logs.join("\n"), /已完成/);
+});
+
+test("error, offline, and fallback clears never add a DONE reaction", () => {
+  for (const terminal of ["error", "offline"]) {
+    const { eye, calls, deletes } = createHarness();
+    eye.add(agent, `om_${terminal}`);
+    eye.observeActivity(agent, "working");
+    eye.observeActivity(agent, terminal);
+    assert.equal(deletes().length, 1, terminal);
+    assert.equal(calls.filter(({ args }) => args.some((arg) => typeof arg === "string" && arg.includes("DONE"))).length, 0, terminal);
+  }
+
+  const { eye, calls, deletes, timers } = createHarness();
+  eye.add(agent, "om_fallback_done");
+  timers.run(timers.active(15 * 60 * 1_000)[0]);
+  assert.equal(deletes().length, 1);
+  assert.equal(calls.filter(({ args }) => args.some((arg) => typeof arg === "string" && arg.includes("DONE"))).length, 0);
+});

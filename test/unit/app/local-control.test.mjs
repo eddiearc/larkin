@@ -395,3 +395,44 @@ test("normal supervisor and daemon close preserve replacement servers at the sam
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("daemon control server heals a missing authority file from the supervisor record", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-control-heal-"));
+  fs.chmodSync(root, 0o700);
+  const previousTestRunner = process.env.LARKIN_BUN_TEST_RUNNER;
+  process.env.LARKIN_BUN_TEST_RUNNER = "1";
+  // The supervisor record must describe a real process whose command line
+  // carries its command token; mirror the harness by spawning one.
+  const supervisor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "app/run.mjs"], { stdio: "ignore" });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const inspected = inspectProcess(supervisor.pid);
+    assert.equal(inspected.ok, true, JSON.stringify(inspected));
+    // Regression: a daemon restart path once deleted daemon-control-auth.json
+    // while the supervisor stayed up; every relaunched daemon then crashed at
+    // secureAuthority() (ENOENT) and the supervisor looped forever. The daemon
+    // must re-establish the authority from supervisor-status.json instead.
+    const token = initializeControlAuthority(root, { pid: supervisor.pid, processStartToken: inspected.startToken });
+    fs.writeFileSync(path.join(root, "supervisor-status.json"), JSON.stringify({
+      pid: supervisor.pid,
+      commandToken: "app/run.mjs",
+      processStartToken: inspected.startToken,
+      nonce: "test-supervisor",
+    }), { mode: 0o600 });
+    const authorityFile = path.join(root, "daemon-control-auth.json");
+    fs.rmSync(authorityFile);
+    assert.equal(fs.existsSync(authorityFile), false, "precondition: authority file missing");
+    const server = createAgentControlServer({ larkinHome: root, authorityToken: token, async upsert() {} });
+    await server.start();
+    const healed = JSON.parse(fs.readFileSync(authorityFile, "utf8"));
+    assert.equal(healed.token, token, "recovery reuses the supervisor-known token");
+    assert.deepEqual(healed.supervisor, { pid: supervisor.pid, processStartToken: inspected.startToken });
+    assert.equal(healed.daemon.pid, process.pid, "recovered authority records the daemon binding");
+    await server.close();
+  } finally {
+    if (previousTestRunner === undefined) delete process.env.LARKIN_BUN_TEST_RUNNER;
+    else process.env.LARKIN_BUN_TEST_RUNNER = previousTestRunner;
+    if (supervisor.exitCode === null) supervisor.kill("SIGTERM");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

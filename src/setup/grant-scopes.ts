@@ -69,11 +69,23 @@ const WAIT_MIN = Number(flag("--wait-min", "9"));
 const URL_FILE = flag("--url-file", "");
 
 const TENANT_SCOPES = [
-  "im:message:readonly",
+  "im:message",
+  "im:message.p2p_msg:readonly",
+  "im:message.group_at_msg:readonly",
+  "im:message.group_msg",
+  "im:message:send_as_bot",
   "im:chat:readonly",
   "im:chat",
+  "im:chat:create",
+  "im:chat:update",
   "im:chat.group_info:readonly",
   "im:chat.members:read",
+  "im:chat.members:write_only",
+  "im:chat:operate_as_owner",
+  "im:resource",
+  "application:application:self_manage",
+  "contact:user.employee_id:readonly",
+  "admin:app.visibility",
   "drive:drive",
   "docs:document.comment:read",
   "docs:document.comment:create",
@@ -83,7 +95,7 @@ const log = (...args: unknown[]): void => { process.stderr.write(`${args.join(" 
 
 function sendUrlToChat(url: string, minutes: number): void {
   if (!SEND_TO) return;
-  const text = `🔐 larkin 给机器人【${APP_ID}】增补读取权限。\n请【应用 owner 本人】打开下面链接确认(约 ${minutes} 分钟内有效)，勾选并确认这些权限：\n${TENANT_SCOPES.join("、")}\n\n${url}\n\n确认后我会自动接上并重试读取。`;
+  const text = `🔐 larkin 给机器人【${APP_ID}】增补权限。\n请【应用 owner 本人】打开下面链接确认(约 ${minutes} 分钟内有效)，勾选并确认这些权限：\n${TENANT_SCOPES.join("、")}\n\n${url}\n\n确认后我会自动接上并重试读取。`;
   const managed = resolveManagedOfficialCli(selected, process.env);
   const result = spawnSync(managed.command.command, [...managed.command.argsPrefix, "im", "+messages-send", "--chat-id", SEND_TO, "--text", text, "--json"], {
     encoding: "utf8", env: managed.env,

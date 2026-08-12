@@ -3,7 +3,7 @@ import fs from "node:fs";
 export function loadAuthoritativeFreshnessEval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "authoritative-freshness-gate" || value.version !== 1) throw new Error("eval dataset/version mismatch");
-  if (value.standing_prompt_version !== "larkin-standing-v18") throw new Error("standing prompt version mismatch");
+  if (value.standing_prompt_version !== "larkin-standing-v19") throw new Error("standing prompt version mismatch");
   if (value.runtime?.adapter !== "codex" || !value.runtime.selection) throw new Error("native runtime metadata is required");
   if (value.grader?.name !== "authoritative-freshness-trace-grader" || value.grader.version !== 1) throw new Error("grader metadata mismatch");
   if (!(value.grader.threshold > 0 && value.grader.threshold <= 1)) throw new Error("grader threshold must be in (0,1]");

@@ -5,3 +5,8 @@ node_modules/
 /dist/
 /artifacts/
 recovered-src/
+
+# 曾经误提交过的私有路径，防止再次进入发布源
+/.agents/
+/fork/
+/packages/larkin-shell/

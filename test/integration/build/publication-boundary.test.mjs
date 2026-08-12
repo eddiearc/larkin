@@ -394,7 +394,7 @@ test("tree scan allows only the approved GitHub pull request Markdown template",
   }
 });
 
-test("default scan covers reachable history, commit messages, paths, and refs", () => {
+test("default scan covers reachable history blobs, paths, and refs but not commit messages", () => {
   const root = fixture();
   try {
     fs.writeFileSync(path.join(root, "temporary.txt"), marker);
@@ -405,7 +405,20 @@ test("default scan covers reachable history, commit messages, paths, and refs", 
     assert.equal(runCheck(root, "--tree-only").status, 0, "tree preparation must ignore private predecessor objects");
     const history = runCheck(root);
     assert.equal(history.status, 1);
-    assert.match(history.stderr, /history (?:commit|blob)/);
+    assert.match(history.stderr, /history blob/);
+
+    // Commit-message-only occurrences are metadata, not publication content:
+    // the published tree never contains commit messages, so scanning them only
+    // produced false positives (e.g. a message quoting a denied path while
+    // describing cleanup of that path).
+    const messageOnly = fixture();
+    try {
+      git(messageOnly, "commit", "--allow-empty", "-m", "message-only-marker");
+      const clean = runCheckWithTerms(messageOnly, ["message-only-marker"]);
+      assert.equal(clean.status, 0, clean.stderr || clean.stdout);
+    } finally {
+      fs.rmSync(messageOnly, { recursive: true, force: true });
+    }
 
     const cleanRoot = fixture();
     try {

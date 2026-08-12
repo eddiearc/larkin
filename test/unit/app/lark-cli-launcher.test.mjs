@@ -312,52 +312,22 @@ test("provider failure and ambiguous termination retain a stable idempotency key
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("--mention translates plain text into a real Feishu mention element (#69)", () => {
+test("--mention is no longer translated: argv passes through to the native CLI untouched", () => {
   const f = fixture();
   try {
-    // --text → text 消息，<at user_id> 前缀；guard 与幂等键照常生效。
+    // --mention 不再触发任何重写：不注入 --content/--msg-type，正文原样透传。
     const result = f.run(["im", "+messages-send", "--chat-id", "oc_mention", "--mention", "ou_mention123", "--text", "hello"]);
     assert.deepEqual({ code: result.code, stdout: result.stdout, stderr: result.stderr }, {
       code: 7, stdout: "native-out\n", stderr: "native-err\n",
     });
     assert.deepEqual(f.calls.map((call) => call.args[2]), ["GET", "+messages-send"]);
     const write = f.calls[1].args;
-    const content = write[write.indexOf("--content") + 1];
-    assert.equal(JSON.parse(content).text, '<at user_id="ou_mention123"></at> hello');
-    assert.equal(write[write.indexOf("--msg-type") + 1], "text");
-    assert.equal(write.includes("--mention"), false);
-    assert.equal(write.includes("--text"), false);
+    assert.equal(write.includes("--content"), false);
+    assert.equal(write.includes("--msg-type"), false);
+    assert.equal(write.includes("--mention"), true);
+    assert.equal(write[write.indexOf("--text") + 1], "hello");
 
-    // --markdown → post 消息，首个元素为 at 标签（reply 目标须先入 Inbox）。
-    f.store.appendInboxOnce({
-      message_id: "om_mention", target: "chat:oc_mention", target_seq: 1, seq: 1,
-      sender_type: "agent", sender_id: "ou_other", channel_type: "channel",
-      content: "source", timestamp: new Date().toISOString(),
-    });
-    const markdown = f.run(["im", "+messages-reply", "--message-id", "om_mention", "--mention", "ou_mention123", "--markdown", "**hi**"]);
-    assert.equal(markdown.code, 7);
-    const replyWrite = f.calls.at(-1).args;
-    const replyContent = JSON.parse(replyWrite[replyWrite.indexOf("--content") + 1]);
-    assert.deepEqual(replyContent.zh_cn.content[0], [{ tag: "at", user_id: "ou_mention123" }]);
-    assert.equal(replyWrite[replyWrite.indexOf("--msg-type") + 1], "post");
-  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
-});
-
-test("--mention rejects invalid ids, missing bodies, and content conflicts before any provider call", () => {
-  const f = fixture();
-  try {
-    for (const argv of [
-      ["im", "+messages-send", "--chat-id", "oc_x", "--mention", "not-an-id", "--text", "hi"],
-      ["im", "+messages-send", "--chat-id", "oc_x", "--mention", "ou_ok123"],
-      ["im", "+messages-send", "--chat-id", "oc_x", "--mention", "ou_ok123", "--text", "a", "--markdown", "b"],
-      ["im", "+messages-send", "--chat-id", "oc_x", "--mention", "ou_ok123", "--content", "{}"],
-    ]) {
-      const res = f.run(argv);
-      assert.equal(res.code, 2, argv.join(" "));
-      assert.match(res.stderr, /--mention/);
-    }
-    assert.equal(f.calls.length, 0);
-    // 非 im +messages-send/reply 命令不受影响，--mention 原样透传。
+    // 非 im +messages-send/reply 命令同样原样透传。
     assert.equal(launcher.classifyLarkCliCommand(["im", "+chat-list", "--mention", "ou_ok123"]).kind, "passthrough");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });

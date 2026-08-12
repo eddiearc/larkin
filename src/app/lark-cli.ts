@@ -53,6 +53,7 @@ const MANAGEMENT_COMMANDS = new Set(["auth", "config", "profile", "update", "ins
 const USER_ONLY_COMMANDS = new Set(["attendance", "mail", "okr"]);
 const POLICY_VALUE_FLAGS = new Set([
   "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--thread-id",
+  "--mention",
 ]);
 const PROTECTED_VALUE_FLAGS = new Set([
   ...POLICY_VALUE_FLAGS,
@@ -128,6 +129,54 @@ function protectedSyntaxTokens(argv: readonly string[]): string[] {
 
 function hasNativeHelpFlag(argv: readonly string[]): boolean {
   return protectedSyntaxTokens(argv).some((argument) => HELP_FLAGS.has(argument));
+}
+
+/**
+ * Agent 间协作唤醒（#69）：把 `--mention <open_id>` 翻译成真实的飞书 mention 元素。
+ * 纯文本 @ 不会产生 mention 事件，目标 agent 不会被唤醒；
+ * `--text` 正文 → text 消息 `<at user_id="..."></at>` 前缀；
+ * `--markdown` 正文 → post 消息首个元素为 at 标签（正文按纯文本元素发送）。
+ * 仅对 im +messages-send / +messages-reply 生效，其余命令原样透传。
+ */
+function mentionTranslation(argv: readonly string[]): string[] {
+  const nativeArgv = nativeArgvBeforeBoundary(argv);
+  if (nativeArgv[0] !== "im"
+      || (nativeArgv[1] !== "+messages-send" && nativeArgv[1] !== "+messages-reply")
+      || hasNativeHelpFlag(argv)) return [...argv];
+  const parsed = parsePolicyArgv(argv);
+  if (parsed.error || !parsed.flags.has("--mention")) return [...argv];
+  const mention = parsed.flags.get("--mention")!;
+  if (!/^ou_[A-Za-z0-9]+$/.test(mention)) {
+    throw new Error("--mention 需要有效的 open_id（ou_ 开头）");
+  }
+  const rawText = rawFlagValue(argv, "--text");
+  const rawMarkdown = rawFlagValue(argv, "--markdown");
+  const text = rawText !== null && !rawText.startsWith("-") ? rawText : null;
+  const markdown = rawMarkdown !== null && !rawMarkdown.startsWith("-") ? rawMarkdown : null;
+  if (nativeArgv.some((argument) => argument === "--content" || argument.startsWith("--content="))) {
+    throw new Error("--mention 不能与 --content 同时使用（会重写消息正文）");
+  }
+  if (text !== null && markdown !== null) throw new Error("--mention 与 --text/--markdown 只能二选一");
+  if (text === null && markdown === null) throw new Error("--mention 需要 --text 或 --markdown 正文");
+  const body = (text ?? markdown ?? "").trim();
+  if (!body) throw new Error("--mention 的正文不能为空");
+  const content = text !== null
+    ? JSON.stringify({ text: `<at user_id="${mention}"></at> ${body}` })
+    : JSON.stringify({ zh_cn: { title: "", content: [[{ tag: "at", user_id: mention }], [{ tag: "text", text: body }]] } });
+  const next: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    const consumed = ["--mention", "--text", "--markdown"].find((name) => argument === name || argument.startsWith(`${name}=`));
+    if (consumed) {
+      if (argument === consumed) index += 1;
+      continue;
+    }
+    next.push(argument);
+  }
+  const boundary = next.indexOf("--");
+  const insertion = boundary < 0 ? next.length : boundary;
+  next.splice(insertion, 0, "--content", content, "--msg-type", text !== null ? "text" : "post");
+  return next;
 }
 
 function protectedOperations(argv: readonly string[]): ProtectedOperation[] {
@@ -732,12 +781,18 @@ export function runLarkCli(
   argv: readonly string[], env: Env = process.env, dependencies: LarkCliLauncherDependencies = {},
 ): number {
   const io = dependencies.io ?? defaultIo();
+  let effectiveArgv: readonly string[];
+  try { effectiveArgv = mentionTranslation(argv); }
+  catch (error) {
+    io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
   const runtimeAgentId = larkinConfig.resolveRuntimeAuthority(env);
   if (!runtimeAgentId) {
     try {
       const nativeDependencies = dependencies.nativeCommand ? dependencies
         : { ...dependencies, nativeCommand: resolveOfficialLarkCli({ spawn: dependencies.spawn, env }) };
-      return spawnNative(argv, env, io, nativeDependencies);
+      return spawnNative(effectiveArgv, env, io, nativeDependencies);
     } catch (error) {
       io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
@@ -752,7 +807,7 @@ export function runLarkCli(
     io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
-  const decision = classifyLarkCliCommand(argv);
+  const decision = classifyLarkCliCommand(effectiveArgv);
   if (decision.kind === "denied") {
     io.stderr(`lark-cli: ${decision.reason}\n`);
     return 2;
@@ -784,9 +839,9 @@ export function runLarkCli(
       return 2;
     }
   }
-  if (decision.kind === "passthrough") return passthroughWithObservation(argv, privateEnv, io, nativeDependencies, store);
+  if (decision.kind === "passthrough") return passthroughWithObservation(effectiveArgv, privateEnv, io, nativeDependencies, store);
   try {
-    const target = guardedTarget(decision, argv, store);
+    const target = guardedTarget(decision, effectiveArgv, store);
     const targetKey = serializeFeishuImTarget(target);
     const generation = freshnessGeneration(privateEnv);
     const seen = store.readFreshnessCursor<FeishuImCursor>(targetKey, generation);
@@ -804,7 +859,7 @@ export function runLarkCli(
       store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, generation);
       return 3;
     }
-    const write = callNative(botArgv(argv, intentId(targetKey, gated.current, argv)), privateEnv, io, nativeDependencies);
+    const write = callNative(botArgv(effectiveArgv, intentId(targetKey, gated.current, effectiveArgv)), privateEnv, io, nativeDependencies);
     if (!write.error && write.status === 0 && !observeSuccessfulWrite(write, target, targetKey, store, generation)) {
       const responseMessage = writeResponseMessage(write);
       try {
@@ -840,10 +895,16 @@ export function runLarkCli(
 }
 
 export async function runLarkCliProcess(argv: readonly string[], env: Env = process.env): Promise<number> {
+  let effectiveArgv: readonly string[];
+  try { effectiveArgv = mentionTranslation(argv); }
+  catch (error) {
+    process.stderr.write(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
   const runtimeAgentId = larkinConfig.resolveRuntimeAuthority(env);
   if (!runtimeAgentId) {
     try {
-      return await spawnNativeTransparent(argv, env, resolveOfficialLarkCli({ env }));
+      return await spawnNativeTransparent(effectiveArgv, env, resolveOfficialLarkCli({ env }));
     } catch (error) {
       process.stderr.write(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
@@ -853,16 +914,16 @@ export async function runLarkCliProcess(argv: readonly string[], env: Env = proc
     const { config } = larkinConfig.loadConfig(env);
     const agent = larkinConfig.selectAgent(config, { ...env, LARKIN_AGENT_ID: runtimeAgentId });
     assertAgentWorkspaceBound(agent);
-    const decision = classifyLarkCliCommand(argv);
-    if (decision.kind === "passthrough" && !requiresCapturedPassthrough(argv)) {
+    const decision = classifyLarkCliCommand(effectiveArgv);
+    if (decision.kind === "passthrough" && !requiresCapturedPassthrough(effectiveArgv)) {
       const privateEnv = managedLarkCliEnv(agent, { ...env, LARKIN_AGENT_ID: agent.agentId });
-      return await spawnNativeTransparent(argv, privateEnv, resolveOfficialLarkCli({ env: privateEnv }));
+      return await spawnNativeTransparent(effectiveArgv, privateEnv, resolveOfficialLarkCli({ env: privateEnv }));
     }
   } catch (error) {
     process.stderr.write(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
-  return runLarkCli(argv, env);
+  return runLarkCli(effectiveArgv, env);
 }
 
 export async function main(argv = process.argv.slice(2), env: Env = process.env): Promise<never> {

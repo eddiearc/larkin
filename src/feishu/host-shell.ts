@@ -438,7 +438,7 @@ export function createHostShell({
           excerpt: safeConversationExcerpt(event.content, 180),
           at: new Date().toISOString(),
         }, 30);
-        if (envelope.sender_type === "human") processingEyes.add(agent, String(envelope.message_id || ""));
+        if (envelope.sender_type === "human" || envelope.sender_type === "agent") processingEyes.add(agent, String(envelope.message_id || ""));
         if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${envelope.seq}: ${receipt.reason}`);
       }
     } catch (error) {

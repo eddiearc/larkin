@@ -266,7 +266,7 @@ test("larkApi failure without stderr falls back to stdout head", () => {
   assert.match(errors[0], /exit=ENOENT \| partial garbage output/);
 });
 
-test("idle completion replaces the 👀 reaction with a ✅ DONE reaction (#70)", () => {
+test("idle completion removes the 👀 reaction without adding a DONE reaction (#70)", () => {
   const { eye, calls, deletes, logs, timers } = createHarness();
   eye.add(agent, "om_done");
   eye.observeActivity(agent, "working");
@@ -274,9 +274,8 @@ test("idle completion replaces the 👀 reaction with a ✅ DONE reaction (#70)"
   timers.run(timers.active(1_000)[0]);
   assert.equal(deletes().length, 1);
   const donePosts = calls.filter(({ args }) => args.includes("POST") && args.some((arg) => typeof arg === "string" && arg.includes("DONE")));
-  assert.equal(donePosts.length, 1);
-  assert.match(donePosts[0].args.at(-1), /"emoji_type"\s*:\s*"DONE"/);
-  assert.match(logs.join("\n"), /已完成/);
+  assert.equal(donePosts.length, 0, "正常结束只摘除 👀，不追加 ✅ DONE");
+  assert.match(logs.join("\n"), /已摘/);
 });
 
 test("error, offline, and fallback clears never add a DONE reaction", () => {

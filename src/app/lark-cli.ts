@@ -137,6 +137,7 @@ function hasNativeHelpFlag(argv: readonly string[]): boolean {
  * `--text` 正文 → text 消息 `<at user_id="..."></at>` 前缀；
  * `--markdown` 正文 → post 消息首个元素为 at 标签（正文按纯文本元素发送）。
  * 仅对 im +messages-send / +messages-reply 生效，其余命令原样透传。
+ * 注意：`--mention` 是 Larkin 扩展参数，官方 lark-cli 无此参数（见 issue #75 上游跟进）。
  */
 function mentionTranslation(argv: readonly string[]): string[] {
   const nativeArgv = nativeArgvBeforeBoundary(argv);

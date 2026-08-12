@@ -142,7 +142,7 @@ export class ProcessingEyeOrchestrator {
     });
   }
 
-  clear(agent: EyeAgent, reason?: string, options: { done?: boolean } = {}): void {
+  clear(agent: EyeAgent, reason?: string): void {
     const state = this.state.get(agent.agentId);
     if (state) {
       state.gen += 1;
@@ -151,7 +151,6 @@ export class ProcessingEyeOrchestrator {
       this.cancelCompletion(state);
     }
     const list = this.pending.get(agent.agentId) || [];
-    const completed = options.done === true && list.length > 0;
     if (!list.length) {
       this.log(`👀 清除(无待摘) agent=${agent.name} 原因=${reason || "?"}`);
       return;
@@ -165,17 +164,7 @@ export class ProcessingEyeOrchestrator {
         }
       });
     }
-    // 执行正常结束：把 👀 替换为 ✅ 已处理（issue #70），让用户/协作 Agent 看到处理完成信号。
-    if (completed) {
-      for (const { msgId } of list) {
-        this.larkApi(agent, "POST", `/open-apis/im/v1/messages/${msgId}/reactions`, { reaction_type: { emoji_type: "DONE" } }, (error, result) => {
-          if (error || result?.ok === false) {
-            this.log(`👀 完成标记失败 msg=${msgId}: ${result ? JSON.stringify(result.error || {}).slice(0, 120) : errorMessage(error)}`);
-          }
-        });
-      }
-      this.log(`👀 已完成 agent=${agent.name} n=${list.length} 原因=${reason || "?"}`);
-    }
+    // 执行结束（含正常完成）：只摘除 👀，不再追加任何完成 reaction（用户 2026-08-12 要求）。
     this.log(`👀 已摘 agent=${agent.name} n=${list.length} 原因=${reason || "?"}`);
   }
 
@@ -192,7 +181,7 @@ export class ProcessingEyeOrchestrator {
       completionTimer = this.setTimer(() => {
         const current = this.state.get(agent.agentId);
         if (current?.gen !== generation || current.completionTimer !== completionTimer) return;
-        this.clear(agent, "activity:idle(执行结束缓冲完成)", { done: true });
+        this.clear(agent, "activity:idle(执行结束缓冲完成)");
       }, 1_000);
       state.completionTimer = completionTimer;
       return;

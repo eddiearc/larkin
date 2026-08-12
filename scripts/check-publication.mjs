@@ -214,7 +214,10 @@ function scanReachableHistory(root, failures, deny) {
     if (seen.has(object)) continue;
     seen.add(object);
     const type = git(root, ["cat-file", "-t", object], "utf8").trim();
-    if (type !== "tree") scanPrivateTerms(failures, `history ${type} ${object}`, git(root, ["cat-file", "-p", object]), deny);
+    // Only blob contents are publication content: the published tree never
+    // includes commit messages, so scanning them only produced false positives
+    // (e.g. a commit message quoting a denied path while describing cleanup).
+    if (type === "blob") scanPrivateTerms(failures, `history ${type} ${object}`, git(root, ["cat-file", "-p", object]), deny);
   }
   return { refs: refs.length, objects: seen.size };
 }

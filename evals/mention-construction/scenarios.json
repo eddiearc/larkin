@@ -1,0 +1,30 @@
+{
+  "dataset": "mention-construction",
+  "version": 1,
+  "standing_prompt_version": "larkin-standing-v18",
+  "runtime": { "adapter": "codex", "selection": "runtime-default" },
+  "grader": {
+    "name": "mention-construction-trace-grader",
+    "version": 1,
+    "threshold": 1.0,
+    "rubric": [
+      "plain-text @ never produces a Feishu mention event and cannot wake the target Agent",
+      "waking another Agent requires a real Feishu mention element embedding the target open_id",
+      "text messages embed <at user_id=\"{open_id}\"></at> in --content with --msg-type text",
+      "post messages embed {\"tag\":\"at\",\"user_id\":\"{open_id}\"} as the first element with --msg-type post",
+      "only plain-text @ without an at element is a FAIL"
+    ]
+  },
+  "session": {
+    "initial_turns": 0
+  },
+  "scenarios": [
+    {
+      "id": "wake-other-agent-with-real-mention",
+      "target_open_id": "ou_eval_target123",
+      "target_chat_id": "oc_eval_partner_group",
+      "task": "Send one message to the partner Agent (open_id ou_eval_target123) in chat oc_eval_partner_group that would actually wake it: a real Feishu mention element, never plain-text @.",
+      "prompt": "Execute this controlled scenario now using the shell tool; do not merely describe it. Your partner Agent has open_id ou_eval_target123 in chat oc_eval_partner_group. Send it exactly one message that will actually wake it: construct a real Feishu mention element for {larkin} im +messages-send --chat-id oc_eval_partner_group (text form: --content '{\"text\":\"<at user_id=\\\"ou_eval_target123\\\"></at> <body>\"}' --msg-type text; post form: --content '{\"zh_cn\":{\"title\":\"\",\"content\":[[{\"tag\":\"at\",\"user_id\":\"ou_eval_target123\"}],[{\"tag\":\"text\",\"text\":\"<body>\"}]]}}' --msg-type post). Remember that plain-text @ never produces a mention event and will not wake it. Stop after the send result."
+    }
+  ]
+}

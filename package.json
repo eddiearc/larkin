@@ -70,6 +70,7 @@
     "test:eval:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/unit/evals/runtime-agent-interface-v2.test.mjs",
     "test:eval:authoritative-freshness-gate": "bun test --max-concurrency 1 test/unit/evals/authoritative-freshness-gate.test.mjs",
     "test:eval:agent-experience-v6": "bun test --max-concurrency 1 test/unit/evals/agent-experience-v6.test.mjs",
+    "test:eval:mention-construction": "bun run build && LARKIN_RUN_MENTION_CONSTRUCTION_EVAL=1 bun test --max-concurrency 1 test/live/mention-construction-agent-eval.test.mjs",
     "test:eval:public-contribution-governance": "bun test --max-concurrency 1 test/unit/evals/public-contribution-governance.test.mjs",
     "test:live:public-contribution-governance": "bun test --max-concurrency 1 test/live/public-contribution-governance-live.test.mjs",
     "test:eval:authoritative-freshness-gate:native": "bun run build && LARKIN_RUN_AUTHORITATIVE_FRESHNESS_EVAL=1 bun test --max-concurrency 1 test/live/authoritative-freshness-gate-agent-eval.test.mjs",

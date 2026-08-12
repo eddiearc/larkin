@@ -171,6 +171,27 @@ function secureAuthority(larkinHome: string): ControlAuthority {
   return value as ControlAuthority;
 }
 
+// The authority file is the single trust anchor between supervisor and daemon.
+// If it goes missing while the supervisor stays up (e.g. a crashed restart
+// cycle deleted it), the daemon re-establishes it from the supervisor's process
+// state instead of dying at startup and crash-looping. Only a missing file is
+// healed; a token mismatch stays fail-closed.
+function secureAuthorityOrRecover(larkinHome: string, authorityToken: string): ControlAuthority {
+  try {
+    return secureAuthority(larkinHome);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const supervisor = readProcessState(larkinHome).supervisor;
+    if (supervisor.state !== "owned" || !supervisor.pid || !supervisor.processStartToken) throw error;
+    initializeControlAuthority(
+      larkinHome,
+      { pid: Number(supervisor.pid), processStartToken: supervisor.processStartToken },
+      authorityToken,
+    );
+    return secureAuthority(larkinHome);
+  }
+}
+
 function sameSecret(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
@@ -323,12 +344,16 @@ async function listenPrivate(server: net.Server, socket: string): Promise<Socket
   }
 }
 
-export function initializeControlAuthority(larkinHome: string, supervisor: ProcessBinding): string {
+function writeControlAuthority(larkinHome: string, authority: ControlAuthority): void {
+  atomicWritePrivateJson(controlAuthorityPath(larkinHome), authority);
+}
+
+export function initializeControlAuthority(larkinHome: string, supervisor: ProcessBinding, explicitToken?: string): string {
   fs.mkdirSync(larkinHome, { recursive: true, mode: 0o700 });
   assertSecureRoot(larkinHome);
   const socketRoot = ensureSecureSocketRoot(larkinHome);
-  const token = crypto.randomBytes(32).toString("base64url");
-  atomicWritePrivateJson(controlAuthorityPath(larkinHome), {
+  const token = explicitToken ?? crypto.randomBytes(32).toString("base64url");
+  writeControlAuthority(larkinHome, {
     version: 2,
     token,
     socketRoot,
@@ -462,7 +487,7 @@ export function createAgentControlServer({
       fs.mkdirSync(larkinHome, { recursive: true, mode: 0o700 });
       assertSecureRoot(larkinHome);
       removeLegacyResetLedger(larkinHome);
-      const authority = secureAuthority(larkinHome);
+      const authority = secureAuthorityOrRecover(larkinHome, authorityToken);
       if (!sameSecret(authority.token, authorityToken)) throw new Error("daemon control authorization 不匹配");
       const supervisor = readProcessState(larkinHome).supervisor;
       if (supervisor.state !== "owned" || !bindingMatches(authority.supervisor, supervisor)) {

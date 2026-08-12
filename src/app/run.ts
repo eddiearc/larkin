@@ -187,6 +187,10 @@ export async function main(): Promise<void> {
 
   let stopping = false;
   let dashboard: ChildProcess | null = null;
+  // Set when the daemon-restart path stops the dashboard on purpose (port
+  // handover). Its exit is then not a crash and must not count against the
+  // dashboard recovery budget nor spawn a duplicate dashboard.
+  let intentionalDashboardExit: ChildProcess | null = null;
   let dashboardRestartTimer: NodeJS.Timeout | null = null;
   const dashboardCrashes: number[] = [];
   const dashboardScript = process.env.LARKIN_FEISHU_DRYRUN === "1" && process.env.LARKIN_TEST_DASHBOARD_SCRIPT
@@ -225,18 +229,26 @@ export async function main(): Promise<void> {
       daemonRestartTimer = setTimeout(() => {
         daemonRestartTimer = null;
         if (stopping) return;
-        // The fresh daemon re-registers its control authority; drop the stale one.
-        try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
-        // Dashboard state is coupled to the daemon; restart it alongside.
+        // Keep the control authority intact: the fresh daemon extends it with its
+        // own binding and replaces the stale control socket via prepareSocket.
+        // Deleting it here makes the daemon's startup fail closed (secureAuthority
+        // ENOENT), so every relaunch would crash and the supervisor would loop
+        // forever (observed in production as daemon 异常退出 2/3 repeats).
+        // Dashboard state is coupled to the daemon; restart it alongside, but let
+        // the old dashboard release the dashboard port first: its intentional
+        // stop is not a crash and the replacement starts from the exit handler.
         const oldDashboard = dashboard;
         if (oldDashboard && oldDashboard.exitCode === null && oldDashboard.signalCode === null) {
+          intentionalDashboardExit = oldDashboard;
+          dashboard = null;
           oldDashboard.kill("SIGTERM");
+        } else {
+          launchDashboard();
         }
         if (dashboardRestartTimer) { clearTimeout(dashboardRestartTimer); dashboardRestartTimer = null; }
         dashboardCrashes.length = 0;
         launchDaemon();
         writeSupervisorStatus(statusFile, supervisor, { daemonPid: daemon.pid });
-        launchDashboard();
       }, delay);
     });
   };
@@ -255,6 +267,13 @@ export async function main(): Promise<void> {
     ownedChild.once("exit", () => {
       if (dashboard === ownedChild) dashboard = null;
       if (stopping) return;
+      if (intentionalDashboardExit === ownedChild) {
+        // Stopped on purpose by the daemon-restart path; bring the replacement
+        // up now that the dashboard port is free.
+        intentionalDashboardExit = null;
+        if (!stopping && daemon.exitCode === null && dashboard === null) launchDashboard();
+        return;
+      }
       const now = Date.now();
       dashboardCrashes.push(now);
       while (dashboardCrashes[0] < now - 60_000) dashboardCrashes.shift();

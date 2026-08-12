@@ -242,6 +242,15 @@ export async function main(): Promise<void> {
           intentionalDashboardExit = oldDashboard;
           dashboard = null;
           oldDashboard.kill("SIGTERM");
+          // If the old dashboard ignores SIGTERM (observed in production holding
+          // the dashboard port for minutes), escalate so the port is released
+          // and the replacement can start. unref keeps an ignored dashboard from
+          // delaying supervisor shutdown.
+          const escalate = setTimeout(() => {
+            if (oldDashboard.exitCode === null && oldDashboard.signalCode === null) oldDashboard.kill("SIGKILL");
+          }, 5_000);
+          escalate.unref?.();
+          oldDashboard.once("exit", () => clearTimeout(escalate));
         } else {
           launchDashboard();
         }
@@ -308,7 +317,15 @@ export async function main(): Promise<void> {
   const requestStop = (signal: NodeJS.Signals): void => {
     if (stopping) return;
     stopping = true;
-    if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill(signal);
+    if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null; }
+    if (daemon.exitCode === null && daemon.signalCode === null) {
+      daemon.kill(signal);
+    } else {
+      // The daemon already exited and the supervisor is inside the restart
+      // backoff window; the pending timer would never fire again (stopping is
+      // set), so resolve the final result now instead of awaiting forever.
+      resolveDaemonFinal?.({ code: daemon.exitCode, signal: daemon.signalCode });
+    }
   };
   process.once("SIGINT", () => requestStop("SIGINT"));
   process.once("SIGTERM", () => requestStop("SIGTERM"));

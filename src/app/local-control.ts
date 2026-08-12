@@ -181,6 +181,12 @@ function secureAuthorityOrRecover(larkinHome: string, authorityToken: string): C
     return secureAuthority(larkinHome);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // The real trust anchor is the supervisor identity: recovery only proceeds
+    // when supervisor-status.json describes a live, token-carrying supervisor
+    // process, and the token written here is the one that supervisor injected
+    // into this daemon. The sameSecret check after recovery is a tautology for
+    // the missing-file case; the supervisor's own control-server start re-verifies
+    // the file against its token, so a forged file still fails closed there.
     const supervisor = readProcessState(larkinHome).supervisor;
     if (supervisor.state !== "owned" || !supervisor.pid || !supervisor.processStartToken) throw error;
     initializeControlAuthority(

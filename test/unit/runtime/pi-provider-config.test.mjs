@@ -12,12 +12,27 @@ import {
 } from "../../../dist/runtime/pi-provider-config.mjs";
 
 test("Pi provider presets keep the requested setup order and audited official endpoints", () => {
-  assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.id), ["deepseek", "kimi", "minimax", "zhipu"]);
+  assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.id), [
+    "deepseek", "kimi", "minimax", "zhipu", "openai", "anthropic", "gemini", "groq",
+    "cerebras", "xai", "fireworks", "together", "mistral", "openrouter", "kimi-coding", "qwen-cn",
+  ]);
   assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.baseUrl), [
     "https://api.deepseek.com",
     "https://api.moonshot.cn/v1",
     "https://api.minimaxi.com/anthropic",
     "https://open.bigmodel.cn/api/coding/paas/v4",
+    "https://api.openai.com/v1",
+    "https://api.anthropic.com",
+    "https://generativelanguage.googleapis.com/v1beta",
+    "https://api.groq.com/openai/v1",
+    "https://api.cerebras.ai/v1",
+    "https://api.x.ai/v1",
+    "https://api.fireworks.ai/inference",
+    "https://api.together.ai/v1",
+    "https://api.mistral.ai",
+    "https://openrouter.ai/api/v1",
+    "https://api.kimi.com/coding",
+    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   ]);
 });
 

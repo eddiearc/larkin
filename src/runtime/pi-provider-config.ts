@@ -4,7 +4,9 @@ import path from "node:path";
 
 export type PiDistribution = "external" | "builtin";
 export const BUNDLED_PI_VERSION = "0.83.0";
-export type PiProviderPresetId = "deepseek" | "kimi" | "minimax" | "zhipu" | "custom";
+export type PiProviderPresetId = "deepseek" | "kimi" | "minimax" | "zhipu" | "openai" | "anthropic"
+  | "gemini" | "groq" | "cerebras" | "xai" | "fireworks" | "together" | "mistral"
+  | "openrouter" | "kimi-coding" | "qwen-cn" | "custom";
 
 export interface PiProviderPreset {
   id: Exclude<PiProviderPresetId, "custom">;
@@ -19,9 +21,21 @@ export interface PiProviderPreset {
 // Keeping the user-facing defaults here makes endpoint changes reviewable in Larkin.
 export const PI_PROVIDER_PRESETS: readonly PiProviderPreset[] = Object.freeze([
   { id: "deepseek", name: "DeepSeek（推荐）", provider: "deepseek", baseUrl: "https://api.deepseek.com", defaultModel: "deepseek-v4-pro", api: "openai-completions" },
-  { id: "kimi", name: "Kimi / Moonshot（中国）", provider: "moonshotai-cn", baseUrl: "https://api.moonshot.cn/v1", defaultModel: "kimi-k2.7-code", api: "openai-completions" },
+  { id: "kimi", name: "Kimi / Moonshot（中国）", provider: "moonshotai-cn", baseUrl: "https://api.moonshot.cn/v1", defaultModel: "kimi-k2.6", api: "openai-completions" },
   { id: "minimax", name: "MiniMax（中国）", provider: "minimax-cn", baseUrl: "https://api.minimaxi.com/anthropic", defaultModel: "MiniMax-M2.7", api: "anthropic-messages" },
   { id: "zhipu", name: "智谱 / BigModel", provider: "zai-coding-cn", baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4", defaultModel: "glm-5.2", api: "openai-completions" },
+  { id: "openai", name: "OpenAI", provider: "openai", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5.5", api: "openai-completions" },
+  { id: "anthropic", name: "Anthropic Claude", provider: "anthropic", baseUrl: "https://api.anthropic.com", defaultModel: "claude-opus-4-8", api: "anthropic-messages" },
+  { id: "gemini", name: "Google Gemini", provider: "google", baseUrl: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-3.1-pro-preview", api: "openai-completions" },
+  { id: "groq", name: "Groq", provider: "groq", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "openai/gpt-oss-120b", api: "openai-completions" },
+  { id: "cerebras", name: "Cerebras", provider: "cerebras", baseUrl: "https://api.cerebras.ai/v1", defaultModel: "zai-glm-4.7", api: "openai-completions" },
+  { id: "xai", name: "xAI Grok", provider: "xai", baseUrl: "https://api.x.ai/v1", defaultModel: "grok-4.5", api: "openai-completions" },
+  { id: "fireworks", name: "Fireworks AI", provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference", defaultModel: "accounts/fireworks/models/kimi-k2p6", api: "openai-completions" },
+  { id: "together", name: "Together AI", provider: "together", baseUrl: "https://api.together.ai/v1", defaultModel: "moonshotai/Kimi-K2.6", api: "openai-completions" },
+  { id: "mistral", name: "Mistral", provider: "mistral", baseUrl: "https://api.mistral.ai", defaultModel: "devstral-medium-latest", api: "openai-completions" },
+  { id: "openrouter", name: "OpenRouter", provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "moonshotai/kimi-k2.6", api: "openai-completions" },
+  { id: "kimi-coding", name: "Kimi For Coding", provider: "kimi-coding", baseUrl: "https://api.kimi.com/coding", defaultModel: "kimi-for-coding", api: "openai-completions" },
+  { id: "qwen-cn", name: "通义千问 Token Plan（中国）", provider: "qwen-token-plan-cn", baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen3.7-max", api: "openai-completions" },
 ]);
 
 export interface BuiltinPiProviderSetupSelection {

@@ -53,8 +53,8 @@ if (runtimeAgentAuthority && command === "comment") routes.comment = ["lark-cli"
 const commandHelp: Record<string, string> = {
   start: `Usage: larkin start [--agent <App ID> | --agents <App ID,...>]
 Start one foreground supervisor for the daemon and local dashboard, or reuse it.`,
-  setup: `Usage: larkin setup [--runtime <runtime>] [--comment-subscription <none|application>] [--no-start]
-Run the interactive setup to create or connect a bot and configure its Agent.`,
+  setup: `Usage: larkin setup [--runtime <builtin-pi|external-pi|codex|claude>] [--provider <id> --api-key <key>]
+Run setup to create or connect a bot, configure its Agent, and attach it. Interactive terminals keep the guided flow; Agent-driven (non-TTY) runs default to builtin-pi and need --provider/--api-key (or --runtime external-pi).`,
   status: `Usage: larkin status [--json]
 Show Agent configuration, bot identity, credentials, and connection status. Use --json for readiness automation.`,
   agents: `Usage: larkin agents [--json]

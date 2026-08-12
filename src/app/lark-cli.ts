@@ -288,6 +288,31 @@ type CommentReplyLedger = {
   document_comment_replies?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
 };
 
+type ImWriteMemoEntry = { message_id: string; updated_at: string };
+type ImWriteMemoState = {
+  version: 1;
+  cursors?: Record<string, unknown>;
+  im_write_memo?: Record<string, ImWriteMemoEntry>;
+};
+
+const IM_WRITE_MEMO_LIMIT = 512;
+
+// 只标注、不拦截：每次成功写把「实际生效的幂等 key → 服务端返回的 message_id」记进备忘。
+// 同 key 再次成功且服务端返回同一个 message_id，说明服务端走了幂等去重（没有产生新消息），
+// 返回 true 供输出标注 duplicate。拦截权始终在服务端，备忘不会吞掉任何发送。
+function recordImWriteMemo(store: AgentStateStore, key: string, messageId: string): boolean {
+  let duplicate = false;
+  store.mutateJson<ImWriteMemoState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
+    state.im_write_memo ??= {};
+    const prior = state.im_write_memo[key];
+    if (prior && prior.message_id === messageId) duplicate = true;
+    state.im_write_memo[key] = { message_id: messageId, updated_at: new Date().toISOString() };
+    const keys = Object.keys(state.im_write_memo);
+    for (const stale of keys.slice(0, Math.max(0, keys.length - IM_WRITE_MEMO_LIMIT))) delete state.im_write_memo[stale];
+  });
+  return duplicate;
+}
+
 function runCommentReply(
   argv: readonly string[], privateEnv: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
 ): number {
@@ -499,9 +524,12 @@ function parseHistory(result: SpawnSyncReturns<string>, target: FreshnessTarget,
   return { messages };
 }
 
-function intentId(target: string, cursor: FeishuImCursor | null, argv: readonly string[]): string {
+// 防重编号只由 target + argv 决定：同一逻辑命令的重试永远得到同一个 key，
+// 服务端幂等去重才能生效。cursor（freshness 水位）会随每次观察读/冲突合并推进，
+// 掺入会让「已送达但回执丢失」的重试漂移成新 key，从而发出第二条消息。
+function intentId(target: string, argv: readonly string[]): string {
   const fingerprint = createHash("sha256")
-    .update(JSON.stringify([target, cursor, argv])).digest("hex");
+    .update(JSON.stringify([target, argv])).digest("hex");
   return `larkin-${fingerprint.slice(0, 32)}`;
 }
 
@@ -698,6 +726,27 @@ function emitNativeResult(result: SpawnSyncReturns<string>, io: LarkCliIo): numb
   return result.status ?? (result.signal ? portableSignalCode(result.signal) : 1);
 }
 
+function emitDuplicatedWrite(
+  result: SpawnSyncReturns<string>,
+  io: LarkCliIo,
+  input: { target: string },
+): number {
+  let providerResponse: unknown;
+  try { providerResponse = JSON.parse(result.stdout || ""); }
+  catch { providerResponse = { raw_stdout: result.stdout || "" }; }
+  const providerDocument = providerResponse && typeof providerResponse === "object" && !Array.isArray(providerResponse)
+    ? providerResponse as Record<string, unknown>
+    : { provider_response: providerResponse };
+  io.stdout(`${JSON.stringify({
+    ...providerDocument,
+    ok: true,
+    duplicate: true,
+    target: input.target,
+    ...(result.stderr ? { provider_stderr_present: true } : {}),
+  })}\n`);
+  return 0;
+}
+
 function emitCommittedUnverified(
   result: SpawnSyncReturns<string>,
   io: LarkCliIo,
@@ -805,7 +854,16 @@ export function runLarkCli(
       store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, generation);
       return 3;
     }
-    const write = callNative(botArgv(effectiveArgv, intentId(targetKey, gated.current, effectiveArgv)), privateEnv, io, nativeDependencies);
+    const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
+    const write = callNative(botArgv(effectiveArgv, intentKey), privateEnv, io, nativeDependencies);
+    const writeMessage = writeResponseMessage(write);
+    const duplicate = !write.error && write.status === 0 && writeMessage
+      ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;
+    if (duplicate) {
+      observeSuccessfulWrite(write, target, targetKey, store, generation);
+      emitDuplicatedWrite(write, io, { target: targetKey });
+      return 0;
+    }
     if (!write.error && write.status === 0 && !observeSuccessfulWrite(write, target, targetKey, store, generation)) {
       const responseMessage = writeResponseMessage(write);
       try {

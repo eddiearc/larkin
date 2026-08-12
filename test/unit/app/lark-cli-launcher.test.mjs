@@ -19,6 +19,7 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
   const store = stateModule.createAgentStateStore(root, agentId);
   const output = { stdout: "", stderr: "" };
   const calls = [];
+  const historyHolder = { value: history };
   let writeResult = { status: 7, signal: null, output: [], pid: 1,
     stdout: "native-out\n", stderr: "native-err\n", error: undefined };
   const spawn = (command, args, options) => {
@@ -26,7 +27,7 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     const isHistory = ["+chat-messages-list", "+threads-messages-list"].includes(args[2])
       || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages");
     return isHistory
-      ? { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(history), stderr: "", error: undefined }
+      ? { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(historyHolder.value), stderr: "", error: undefined }
       : writeResult;
   };
   const run = (argv) => {
@@ -38,7 +39,7 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     });
     return { code, ...output };
   };
-  return { root, store, calls, run, setWriteResult(value) { writeResult = value; } };
+  return { root, store, calls, run, setWriteResult(value) { writeResult = value; }, setHistory(value) { historyHolder.value = value; } };
 }
 
 test("launcher classifies protected writes, removed drafts, bypasses, and observational help", () => {
@@ -329,5 +330,52 @@ test("--mention is no longer translated: argv passes through to the native CLI u
 
     // 非 im +messages-send/reply 命令同样原样透传。
     assert.equal(launcher.classifyLarkCliCommand(["im", "+chat-list", "--mention", "ou_ok123"]).kind, "passthrough");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("cursor advancement between attempts keeps the derived idempotency key stable and flags provider dedup", () => {
+  const f = fixture();
+  try {
+    const argv = ["im", "+messages-send", "--chat-id", "oc_retry", "--text", "same intent"];
+    f.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: "failed\n", error: undefined });
+    assert.equal(f.run(argv).code, 7);
+    const firstKey = f.calls.at(-1).args[f.calls.at(-1).args.indexOf("--idempotency-key") + 1];
+
+    // 两次尝试之间 Agent 读了一次历史：观察读会推进 freshness 水位（正是事故中的解除 gate 动作）。
+    f.setHistory({ ok: true, identity: "bot", data: { messages: [
+      { message_id: "om_seen1", chat_id: "oc_retry", create_time: "1786553650353" },
+    ] } });
+    assert.equal(f.run(["im", "+chat-messages-list", "--chat-id", "oc_retry", "--order", "desc", "--json"]).code, 0);
+
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: `${JSON.stringify({ ok: true, identity: "bot", data: { message_id: "om_dedup1", chat_id: "oc_retry", create_time: "1786553650354" } })}\n`,
+      stderr: "", error: undefined });
+    const sent = f.run(argv);
+    assert.equal(sent.code, 0, sent.stderr);
+    const retryKey = f.calls.at(-1).args[f.calls.at(-1).args.indexOf("--idempotency-key") + 1];
+    assert.equal(retryKey, firstKey, "水位推进后，同一命令重试的幂等 key 必须不变");
+    assert.equal(JSON.parse(sent.stdout).duplicate, undefined, "首次成功不是 duplicate");
+
+    // 服务端幂等去重：同 key 返回同一个 message_id → 标注 duplicate，不产生第二条消息。
+    // 首次成功后 provider 历史里已有该消息，探测才能建立可比对的 head。
+    f.setHistory({ ok: true, identity: "bot", data: { messages: [
+      { message_id: "om_dedup1", chat_id: "oc_retry", create_time: "1786553650354" },
+      { message_id: "om_seen1", chat_id: "oc_retry", create_time: "1786553650353" },
+    ] } });
+    const duplicated = f.run(argv);
+    assert.equal(duplicated.code, 0, duplicated.stderr);
+    assert.equal(JSON.parse(duplicated.stdout).duplicate, true);
+    assert.match(duplicated.stdout, /om_dedup1/);
+
+    // 不同内容 → 不同 key。
+    const changed = f.run(["im", "+messages-send", "--chat-id", "oc_retry", "--text", "different"]);
+    const changedKey = f.calls.at(-1).args[f.calls.at(-1).args.indexOf("--idempotency-key") + 1];
+    assert.notEqual(changedKey, retryKey);
+
+    // 显式传入的 --idempotency-key 被尊重：不注入默认编号。
+    f.run(["im", "+messages-send", "--chat-id", "oc_retry", "--text", "same intent", "--idempotency-key", "forced-fresh-key"]);
+    const forced = f.calls.at(-1).args.slice(1);
+    assert.equal(forced[forced.indexOf("--idempotency-key") + 1], "forced-fresh-key");
+    assert.equal(forced.filter((argument) => argument === "--idempotency-key").length, 1);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });

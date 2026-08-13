@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerApp as channelRegisterApp } from "@larksuite/channel";
+import { isWindows, secureWindowsDirectoryAcl } from "../platform/secure-metadata.js";
 import { internalCommandSpec } from "../app/internal-command.js";
 import * as larkinConfig from "../platform/config.js";
 import { createAgentStateStore } from "../agent/agent-state-store.js";
@@ -278,6 +279,13 @@ function ensureSecureBotsDir(): string {
   const directory = path.join(CFG_DIR, "bots");
   try { fs.mkdirSync(directory, { mode: 0o700 }); }
   catch (error) { if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error; }
+  if (isWindows) {
+    // Windows 无 POSIX 权限位（mode 恒 0o666）：改用 icacls 收紧 CFG_DIR 与 bots 目录
+    // 的 ACL 为「当前用户 + SYSTEM」并回读校验，fail-closed。
+    secureWindowsDirectoryAcl(CFG_DIR, { label: "Larkin 配置目录" });
+    secureWindowsDirectoryAcl(directory, { label: "bots 凭证目录" });
+    return directory;
+  }
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())

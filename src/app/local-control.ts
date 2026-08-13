@@ -7,7 +7,7 @@ import path from "node:path";
 import { readProcessState } from "../platform/process-state.js";
 import { currentProcessMetadata } from "../platform/process-inspect.cjs";
 import { processCommandToken } from "./internal-command.js";
-import { isWindows, notGroupOrWorldAccessible } from "../platform/secure-metadata.js";
+import { isWindows, notGroupOrWorldAccessible, secureWindowsDirectoryAcl } from "../platform/secure-metadata.js";
 
 export interface AgentUpsertRequest { operationId: string; agentId: string; authorization: string }
 export type AgentUpsertOperation = Pick<AgentUpsertRequest, "operationId" | "agentId">;
@@ -25,6 +25,9 @@ type AgentControlPayload = Omit<AgentUpsertRequest, "authorization"> | Omit<Sess
 
 interface ProcessBinding { pid: number; processStartToken: string }
 interface SocketBinding { device: string; inode: string; owner: string; changeTimeNs: string }
+// Windows 上 socket 无法 lstat（EACCES），用全数字占位 binding 使 authority 校验通过；
+// 该平台的安全边界是 socket root 目录的 ACL，而非 inode 身份比对。
+const WINDOWS_SOCKET_BINDING: SocketBinding = { device: "0", inode: "0", owner: "0", changeTimeNs: "0" };
 interface ControlAuthority {
   version: 2;
   token: string;
@@ -61,6 +64,12 @@ function controlSocketRoot(larkinHome: string): string {
 }
 
 function assertSecureSocketDirectory(root: string): string {
+  if (isWindows) {
+    // Windows：socket 本身无法 lstat（EACCES），安全边界是目录 ACL。
+    // 每次启动重新收紧为「当前用户 + SYSTEM」并回读校验。
+    secureWindowsDirectoryAcl(root, { label: "control socket root" });
+    return root;
+  }
   const stat = fs.lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
@@ -262,6 +271,12 @@ function assertSupervisorAuthority(larkinHome: string, expectedToken?: string): 
 }
 
 function prepareSocket(socket: string): void {
+  if (isWindows) {
+    // Windows：socket 路径无法 lstat（EACCES）；尽力清除陈旧占用，失败即忽略，
+    // 由 listen 的独占语义兜底（见 listenPrivate 的 win32 分支）。
+    try { fs.unlinkSync(socket); } catch { /* ignore */ }
+    return;
+  }
   try {
     const stat = fs.lstatSync(socket);
     if (!stat.isSocket() || stat.isSymbolicLink()
@@ -286,6 +301,14 @@ async function closePrivateServer(
   socket: string,
   identity: SocketBinding | null,
 ): Promise<void> {
+  if (isWindows) {
+    // Windows：socket 无 lstat 身份可比对，直接关服并清理目录（残留由 ENOTEMPTY 忽略）。
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+    cleanupSocketRoot(path.dirname(socket));
+    return;
+  }
   let shield: string | null = null;
   let closeError: unknown;
   try {
@@ -326,6 +349,22 @@ async function closePrivateServer(
 }
 
 async function listenPrivate(server: net.Server, socket: string): Promise<SocketBinding> {
+  if (isWindows) {
+    // Windows：bun 的 unix socket 可正常 listen/connect/chmod/close，但 lstatSync(socket)
+    // 抛 EACCES（socket 不是普通文件系统节点）。因此跳过 lstat 身份比对，安全边界
+    // 由 assertSecureSocketDirectory 收紧的目录 ACL 承担。
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socket, () => { server.off("error", reject); resolve(); });
+      });
+      try { fs.chmodSync(socket, 0o600); } catch { /* Windows chmod best-effort */ }
+      return WINDOWS_SOCKET_BINDING;
+    } catch (error) {
+      await closePrivateServer(server, socket, WINDOWS_SOCKET_BINDING);
+      throw error;
+    }
+  }
   let identity: SocketBinding | null = null;
   try {
     await new Promise<void>((resolve, reject) => {

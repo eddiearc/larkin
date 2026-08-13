@@ -1,11 +1,12 @@
 {
   "name": "larkin",
-  "version": "0.2.76",
+  "version": "0.2.77",
   "private": false,
   "larkinPackageRole": "npm-published",
   "files": [
     "dist/",
     "assets/",
+    "scripts/npm/",
     "README.md",
     "LICENSE",
     "SECURITY.md",
@@ -15,9 +16,9 @@
   "packageManager": "bun@1.3.14",
   "license": "Apache-2.0",
   "type": "module",
-  "description": "把 Codex、Claude Code 和 Pi Agent Runtime 接到飞书的本地 Runtime Host",
+  "description": "把 Codex、Claude Code 和 Pi Agent Runtime 接到飞书（Lark）的本地 Runtime Host",
   "bin": {
-    "larkin": "dist/app/cli.mjs"
+    "larkin": "scripts/npm/larkin-bin-shim.mjs"
   },
   "repository": {
     "type": "git",
@@ -28,6 +29,7 @@
     "typecheck": "bun run scripts/typecheck.mjs",
     "build": "bun run scripts/build.mjs",
     "prepare": "bun run build",
+    "postinstall": "node scripts/npm/install-binary.mjs",
     "version:bump": "bun run scripts/bump-version.mjs",
     "release:check-version": "bun run scripts/check-release-version.mjs",
     "release:smoke": "bun run scripts/release/smoke.ts",

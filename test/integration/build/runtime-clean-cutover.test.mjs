@@ -21,7 +21,7 @@ test("authored source and generated runtime use the seven-domain mirrored layout
     "src root must not retain flat production modules",
   );
   const packageJson = JSON.parse(source("package.json"));
-  assert.equal(packageJson.bin.larkin, "dist/app/cli.mjs");
+  assert.equal(packageJson.bin.larkin, "scripts/npm/larkin-bin-shim.mjs");
   assert.equal(packageJson.packageManager, "bun@1.3.14");
   assert.equal(fs.existsSync(path.join(ROOT, "bun.lock")), true);
   assert.equal(fs.existsSync(path.join(ROOT, "package-lock.json")), false);
@@ -44,6 +44,7 @@ test("production build, start, and Agent CLI graph contain only current entries"
   assert.deepEqual(packageJson.files, [
     "dist/",
     "assets/",
+    "scripts/npm/",
     "README.md",
     "LICENSE",
     "SECURITY.md",

@@ -122,7 +122,7 @@ if (!routes[command] && !wantsHelp) {
 }
 
 if (!routes[command]) {
-  console.log(`larkin — Run persistent-personality agents on Feishu
+  console.log(`larkin — Run persistent-personality agents on Feishu (Lark)
 
 Usage: larkin <command>
   setup            Create or connect a bot, configure its Agent, start it, and open the dashboard

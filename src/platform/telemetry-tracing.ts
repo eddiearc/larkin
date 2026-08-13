@@ -10,6 +10,7 @@ import type { TelemetryConfig } from "./telemetry-config.js";
 import { TelemetrySpool, type OtlpPayload } from "./telemetry-spool.js";
 import { startTelemetryUploader } from "./telemetry-uploader.js";
 import { inspectProcess } from "./process-state.js";
+import { fsyncDirectoryOf } from "./secure-metadata.js";
 
 const nanos = ([seconds, nanoseconds]: readonly [number, number]): string => (BigInt(seconds) * 1_000_000_000n + BigInt(nanoseconds)).toString();
 // OTel JS uses zero-based SpanKind values while OTLP's enum starts at 1.
@@ -88,8 +89,7 @@ function atomicStateWrite(file: string, value: unknown): void {
   try {
     fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: "wx" });
     fs.renameSync(temporary, file); fs.chmodSync(file, 0o600);
-    const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    fsyncDirectoryOf(file);
   } finally { try { fs.unlinkSync(temporary); } catch { /* isolated */ } }
 }
 function readStateJson(file: string): Record<string, unknown> {

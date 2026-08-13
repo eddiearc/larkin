@@ -62,7 +62,7 @@ const selected = larkinConfig.selectAgent(config, (explicitAgent || explicitAppI
   ? { LARKIN_AGENT_ID: explicitAgent || explicitAppId } : process.env);
 const APP_ID = selected.agentId;
 if (explicitAppId && explicitAppId !== selected.feishuAppId) throw new Error("--app-id 必须等于所选 Agent 的 App ID");
-if (!/^cli_[A-Za-z0-9]+$/.test(APP_ID)) throw new Error(`无效飞书 App ID：${APP_ID}`);
+if (!/^cli_[A-Za-z0-9]+$/.test(APP_ID)) throw new Error(`无效飞书（Lark） App ID：${APP_ID}`);
 const SEND_TO = flag("--send-to", "");
 const TENANT = flag("--tenant", "feishu");
 const WAIT_MIN = Number(flag("--wait-min", "9"));
@@ -100,7 +100,7 @@ function sendUrlToChat(url: string, minutes: number): void {
   const result = spawnSync(managed.command.command, [...managed.command.argsPrefix, "im", "+messages-send", "--chat-id", SEND_TO, "--text", text, "--json"], {
     encoding: "utf8", env: managed.env,
   });
-  log(result.status === 0 ? "[grant] 更新链接已发到飞书群" : `[grant] 发链接失败: ${(result.stderr || "").trim().split("\n")[0]}`);
+  log(result.status === 0 ? "[grant] 更新链接已发到飞书（Lark）群" : `[grant] 发链接失败: ${(result.stderr || "").trim().split("\n")[0]}`);
 }
 
 export async function main(): Promise<void> {
@@ -119,7 +119,7 @@ export async function main(): Promise<void> {
     },
     onQRCodeReady: (info) => {
       const minutes = Math.max(1, Math.round(info.expireIn / 60));
-      log("\n请用飞书扫码或打开链接，确认给应用增补权限：\n");
+      log("\n请用飞书（Lark）扫码或打开链接，确认给应用增补权限：\n");
       qrcode.generate(info.url, { small: true });
       log(`\n链接: ${info.url}\n有效期约 ${minutes} 分钟（⚠️ 需本进程保持轮询，否则 user_code 立即失效）\n`);
       if (URL_FILE) {

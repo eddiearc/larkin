@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HydratedAgent } from "../platform/config.js";
+import { exactMode, notGroupOrWorldAccessible } from "../platform/secure-metadata.js";
 import { acquireProcessLock } from "../platform/process-state.js";
 import {
   assertSecureBotsDirectory,
@@ -47,7 +48,7 @@ function assertSecureProfileDirectory(directory: string): void {
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o777) !== 0o700) throw new Error("lark-cli profile 目录不安全");
+      || !exactMode(stat, 0o700)) throw new Error("lark-cli profile 目录不安全");
 }
 
 function captureProfileSnapshot(file: string): ProfileSnapshot | null {
@@ -57,7 +58,7 @@ function captureProfileSnapshot(file: string): ProfileSnapshot | null {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()
         || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) throw new Error("lark-cli config.json 不安全");
+      || !notGroupOrWorldAccessible(stat)) throw new Error("lark-cli config.json 不安全");
     const raw = fs.readFileSync(fd);
     const value = JSON.parse(raw.toString("utf8")) as LarkCliConfig;
     if (!value || typeof value !== "object" || (value.apps !== undefined && !Array.isArray(value.apps))) {

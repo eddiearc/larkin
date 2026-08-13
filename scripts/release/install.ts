@@ -20,8 +20,10 @@ const value = (name: string, fallback = ""): string => {
 const installDirInput = value("--install-dir");
 if (!installDirInput) throw new Error("--install-dir is required");
 const installDir = path.resolve(installDirInput);
-const destination = path.join(installDir, "larkin");
-const previous = path.join(installDir, "larkin.previous");
+const osPlatform = value("--platform", os.platform());
+const windows = osPlatform === "win32" || osPlatform === "windows";
+const destination = path.join(installDir, windows ? "larkin.exe" : "larkin");
+const previous = path.join(installDir, windows ? "larkin.previous.exe" : "larkin.previous");
 
 fs.mkdirSync(installDir, { recursive: true, mode: 0o755 });
 if (has("--rollback")) {
@@ -46,7 +48,7 @@ const manifestFile = path.join(releaseDir, "release-manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as ReleaseManifest;
 verifyReleaseNotices(releaseDir, manifest);
 if (manifest.sourceDirty && !has("--allow-dirty")) throw new Error("refusing an artifact built from a dirty source tree");
-const platform = value("--platform", os.platform());
+const platform = osPlatform;
 const arch = value("--arch", os.arch());
 const record = selectReleaseArtifact(manifest, platform, arch);
 const artifact = verifyReleaseArtifact(releaseDir, record);

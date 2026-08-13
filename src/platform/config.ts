@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { TargetRootLayout, resolveConfigDir as resolveRootConfigDir } from "./root-layout.js";
+import { exactMode, fsyncDirectoryOf } from "./secure-metadata.js";
 import { CURRENT_RUNTIME_MODELS, type RuntimeModels } from "../runtime/runtime-model-catalog.js";
 import processInspect from "./process-inspect.cjs";
 
@@ -250,7 +251,7 @@ export function normalizeConfig(raw: unknown, configDir: string, { mint }: { min
 export function assertPrivateConfigMetadata(metadata: { regularFile: boolean; uid: number; mode: number }, label = "配置文件"): void {
   if (!metadata.regularFile) throw new Error(`${label} 必须是普通文件`);
   if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) throw new Error(`${label} owner 不是当前用户`);
-  if ((metadata.mode & 0o777) !== 0o600) throw new Error(`${label} 权限必须是 0600`);
+  if (!exactMode(metadata, 0o600)) throw new Error(`${label} 权限必须是 0600`);
 }
 
 function readPrivateFile(file: string, root: string, limit: number, label: string): Buffer | null {
@@ -573,8 +574,7 @@ function atomicWriteConfig(file: string, value: unknown): Buffer {
   try {
     fs.renameSync(temporary, file);
     fs.chmodSync(file, 0o600);
-    const dirFd = fs.openSync(path.dirname(file), "r");
-    try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    fsyncDirectoryOf(file);
   } catch (error) { try { fs.unlinkSync(temporary); } catch { /* best effort */ } throw error; }
   return bytes;
 }

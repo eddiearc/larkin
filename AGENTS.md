@@ -27,6 +27,10 @@ bun run publication:check
 
 Keep each change focused. Update the closest tests when behavior changes, and run the smallest relevant test first followed by the full suite before delivery. Do not weaken clean-tree, publication, license, security, or release checks to make a change pass.
 
+### npm distribution surface
+
+The npm package keeps a Bun-first runtime surface, but its install/invocation glue (`scripts/npm/install-binary.mjs` and `scripts/npm/larkin-bin-shim.mjs`) intentionally runs under Node. npm only guarantees Node at install time, and the postinstall binary download plus the `bin` shim must work without Bun so npm users do not need to install it. Node shebangs are therefore allowed only for those two files; `test/integration/build/bun-only-runtime-contract.test.mjs` enforces this single exception.
+
 ## Prompt engineering
 
 When tuning the Larkin standing prompt (`src/agent/context-prompt.ts`), follow the two canonical references and the file header notes:

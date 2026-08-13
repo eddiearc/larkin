@@ -21,6 +21,22 @@ function officialFixture() {
   return { root, executable };
 }
 
+function windowsFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-win-cli-"));
+  const packageDir = path.join(root, "node_modules", "@larksuite", "cli");
+  const native = path.join(packageDir, "bin", "lark-cli.exe");
+  fs.mkdirSync(path.dirname(native), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.js" },
+  }));
+  fs.mkdirSync(path.join(packageDir, "scripts"), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "scripts", "run.js"), "// mock official launcher\n");
+  fs.writeFileSync(native, "MZ", { mode: 0o755 });
+  const shim = path.join(root, "lark-cli.cmd");
+  fs.writeFileSync(shim, "@echo off\n");
+  return { root, native, shim };
+}
+
 const result = (status, stdout = "", stderr = "") => ({ status, signal: null, stdout, stderr, error: undefined });
 
 test("official CLI probe distinguishes missing, unknown collision, and the verified package launcher", () => {
@@ -44,6 +60,21 @@ test("official CLI probe distinguishes missing, unknown collision, and the verif
     assert.equal(probeOfficialLarkCli({ env: {}, spawn(command, args) {
       return args?.[0] === "-lc" ? result(0, `${unknown}\n`) : result(0, "1.0.79\n");
     } }).state, "conflict");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("windows resolution derives the native @larksuite/cli binary from the npm shim", () => {
+  const f = windowsFixture();
+  try {
+    const ready = probeOfficialLarkCli({ env: {}, platform: "win32", spawn(command, args) {
+      const joined = args?.join(" ") || "";
+      if (joined.includes("where lark-cli")) return result(0, `${f.shim}\n`);
+      if (args?.[0] === "--version") return result(0, "1.0.79\n");
+      return result(0, "--source lark-channel --identity bot-only\n");
+    } });
+    assert.equal(ready.state, "ready");
+    assert.equal(ready.command.command, f.native);
+    assert.equal(ready.command.version, "1.0.79");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

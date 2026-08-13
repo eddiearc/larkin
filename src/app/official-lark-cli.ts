@@ -2,6 +2,10 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+function safeRealpath(target: string): string | null {
+  try { return fs.realpathSync(target); } catch { return null; }
+}
+
 export const OFFICIAL_LARK_CLI_VERSION = "1.0.79";
 export const OFFICIAL_LARK_CLI_INSTALL = `npm install --global @larksuite/cli@${OFFICIAL_LARK_CLI_VERSION}`;
 
@@ -21,10 +25,12 @@ export interface OfficialLarkCliDependencies {
   spawn?: typeof spawnSync;
   shell?: string;
   env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
 }
 
 function loginShellPath(dependencies: OfficialLarkCliDependencies): string | null {
   const env = dependencies.env ?? process.env;
+  if ((dependencies.platform ?? process.platform) === "win32") return windowsLoginShellPath(dependencies, env);
   const shell = dependencies.shell || env.SHELL || "/bin/sh";
   const result = (dependencies.spawn ?? spawnSync)(shell, ["-lc", "command -v lark-cli 2>/dev/null"], {
     encoding: "utf8", env,
@@ -32,6 +38,27 @@ function loginShellPath(dependencies: OfficialLarkCliDependencies): string | nul
   if (result.status !== 0 || result.error) return null;
   const candidate = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
   return path.isAbsolute(candidate) ? path.resolve(candidate) : null;
+}
+
+/**
+ * Windows 登录 shell 探测：npm 全局安装会生成 `lark-cli.cmd`/`lark-cli` shim，真正的
+ * 原生二进制位于 `<npm 前缀>/node_modules/@larksuite/cli/bin/lark-cli.exe`。`where lark-cli`
+ * 返回 shim 路径，从 shim 所在目录推导原生二进制优先返回；否则回退到命中的 .exe/.cmd
+ * 路径（交由 officialPackage 校验）。
+ */
+function windowsLoginShellPath(dependencies: OfficialLarkCliDependencies, env: NodeJS.ProcessEnv): string | null {
+  const shell = dependencies.shell || "cmd.exe";
+  const result = (dependencies.spawn ?? spawnSync)(shell, ["/d", "/s", "/c", "where lark-cli 2>nul"], {
+    encoding: "utf8", env,
+  }) as SpawnSyncReturns<string>;
+  if (result.status !== 0 || result.error) return null;
+  for (const line of String(result.stdout || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+    if (!path.isAbsolute(line)) continue;
+    const native = path.join(path.dirname(line), "node_modules", "@larksuite", "cli", "bin", "lark-cli.exe");
+    if (safeRealpath(native)) return path.resolve(native);
+    if (/\.(exe|cmd)$/i.test(line)) return path.resolve(line);
+  }
+  return null;
 }
 
 function compatibleVersion(version: string): boolean {
@@ -46,7 +73,7 @@ function compatibleVersion(version: string): boolean {
     && (actual[1] > minimum[1] || (actual[1] === minimum[1] && actual[2] >= minimum[2])));
 }
 
-function officialPackage(executable: string): OfficialLarkCliCommand | null {
+function officialPackage(executable: string, platform: NodeJS.Platform = process.platform): OfficialLarkCliCommand | null {
   let resolved: string;
   try { resolved = fs.realpathSync(executable); } catch { return null; }
   let directory = path.dirname(resolved);
@@ -61,8 +88,11 @@ function officialPackage(executable: string): OfficialLarkCliCommand | null {
         const packageRoot = fs.realpathSync(directory);
         const requested = path.resolve(packageRoot, bin);
         const relative = path.relative(packageRoot, requested);
-        if ((relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".."))
-            && fs.realpathSync(requested) === resolved) {
+        const withinPackage = relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+        const matchesBinTarget = withinPackage && safeRealpath(requested) === resolved;
+        const matchesNativeWindows = withinPackage && platform === "win32"
+          && safeRealpath(path.join(packageRoot, "bin", "lark-cli.exe")) === resolved;
+        if (matchesBinTarget || matchesNativeWindows) {
           return { command: path.resolve(executable), argsPrefix: [], version: manifest.version };
         }
       }
@@ -121,14 +151,30 @@ function validateOfficialCommand(command: OfficialLarkCliCommand, env: NodeJS.Pr
  * 仅当 PATH 解析出可用的官方 CLI 时才返回结果；否则返回 null 回退到
  * 登录 shell 探测（保留对 shell 自定义 PATH 环境的兼容）。
  */
-function probePathResolution(env: NodeJS.ProcessEnv): OfficialLarkCliProbe | null {
+function probePathResolution(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): OfficialLarkCliProbe | null {
   const dirs = String(env.PATH || "").split(path.delimiter).filter(Boolean);
+  if (platform === "win32") {
+    for (const dir of dirs) {
+      for (const candidate of [
+        path.resolve(dir, "node_modules", "@larksuite", "cli", "bin", "lark-cli.exe"),
+        path.resolve(dir, "lark-cli.exe"),
+      ]) {
+        try {
+          if (!fs.statSync(candidate).isFile()) continue;
+        } catch { continue; }
+        const command = officialPackage(candidate, platform);
+        if (!command) continue;
+        return validateOfficialCommand(command, env, spawnSync);
+      }
+    }
+    return null;
+  }
   for (const dir of dirs) {
     const candidate = path.resolve(dir, "lark-cli");
     try {
       if (!fs.statSync(candidate).isFile()) continue;
     } catch { continue; }
-    const command = officialPackage(candidate);
+    const command = officialPackage(candidate, platform);
     if (!command) return null;
     return validateOfficialCommand(command, env, spawnSync);
   }
@@ -137,8 +183,9 @@ function probePathResolution(env: NodeJS.ProcessEnv): OfficialLarkCliProbe | nul
 
 function probeOfficialLarkCliUncached(dependencies: OfficialLarkCliDependencies): OfficialLarkCliProbe {
   const env = dependencies.env ?? process.env;
+  const platform = dependencies.platform ?? process.platform;
   if (!dependencies.spawn && !dependencies.shell) {
-    const fromPath = probePathResolution(env);
+    const fromPath = probePathResolution(env, platform);
     if (fromPath) return fromPath;
   }
   const executable = loginShellPath(dependencies);
@@ -147,7 +194,7 @@ function probeOfficialLarkCliUncached(dependencies: OfficialLarkCliDependencies)
     reason: "真实 login shell 找不到官方 lark-cli",
     nextAction: `运行 larkin setup，并确认执行：${OFFICIAL_LARK_CLI_INSTALL}`,
   };
-  const command = officialPackage(executable);
+  const command = officialPackage(executable, platform);
   if (!command) return {
     state: "conflict",
     reason: `真实 login shell 的 lark-cli 不是兼容的官方 @larksuite/cli ${OFFICIAL_LARK_CLI_VERSION}: ${executable}`,

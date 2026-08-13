@@ -150,7 +150,7 @@ async function pickProfile(): Promise<Profile> {
   const profiles = listProfiles();
   if (profiles.length === 0) die("lark-cli 里还没有 bot profile。请运行 larkin setup 创建或连接机器人");
 
-  say("\n可复用的飞书机器人（lark-cli profiles）：");
+  say("\n可复用的飞书（Lark）机器人（lark-cli profiles）：");
   profiles.forEach((profile, index) => say(`  [${index + 1}] ${profile.name}  appId=${profile.appId}${profile.active ? "  (当前活跃，默认)" : ""}`));
   say("  （创建新机器人请退出后运行 larkin setup）");
   const activeIndex = Math.max(0, profiles.findIndex((profile) => profile.active));
@@ -354,7 +354,7 @@ export async function main(): Promise<void> {
       }
       if (!readinessAlreadyCompleted) {
         piRuntime ??= await createOfficialPiModelRuntime(CFG_DIR, profile.appId);
-        say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
+        say("正在验证内置 Pi provider（受控单轮，不发送飞书（Lark）消息）…");
         try {
           if (!(process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN === "1" && process.env.LARKIN_TEST_BOT_REGISTER_MODULE)) {
             await verifyOfficialPiProviderTurn(piRuntime, selection.model, authAbort.signal);
@@ -382,7 +382,7 @@ export async function main(): Promise<void> {
   say("\n启动这个 Agent：");
   say("  larkin start                     # 单服务启动全部已配置 Agent");
   say(`  larkin start --agent ${profile.appId}  # 仅调试这个 Agent`);
-  say("创建独立飞书机器人 + Agent：");
+  say("创建独立飞书（Lark）机器人 + Agent：");
   say("  larkin setup");
 }
 

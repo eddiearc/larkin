@@ -12,12 +12,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  RELEASE_TARGETS,
-  artifactFilename,
-  normalizeReleasePlatform,
-  sha256File,
-} from "../../dist/platform/release-artifacts.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(HERE, "..", "..");
@@ -53,6 +47,12 @@ function expectedSha256(checksumsText, filename) {
 async function main() {
   if (process.env.LARKIN_NPM_BINARY_DISABLE === "1") return;
   if (inSourceRepo()) return;
+
+  // 延迟导入编译产物：源码仓库/CI 中 `dist/` 可能尚未构建，静态 import 会在
+  // 守卫之前失败（bun install 会运行根包 postinstall）。
+  const { RELEASE_TARGETS, artifactFilename, normalizeReleasePlatform, sha256File } = await import(
+    "../../dist/platform/release-artifacts.mjs"
+  );
 
   const platform = normalizeReleasePlatform(os.platform());
   const arch = os.arch();

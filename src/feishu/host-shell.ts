@@ -753,6 +753,9 @@ export function createHostShell({
       domain: agent.feishuDomain || "https://open.feishu.cn",
       source: "larkin",
       policy: { dmMode: "open", requireMention: false, respondToMentionAll: true },
+      // issue #88：关闭 SDK 的防抖批量合并（默认 600ms），逐条投递，
+      // 保证 messageId/threadId/发送者与内容、提及永远同源（见 #66）。
+      batch: { text: { delayMs: 0 } },
       handshakeTimeoutMs: 15_000,
       keepalive: {
         enabled: true,
@@ -857,6 +860,9 @@ export function createHostShell({
         domain: agent.feishuDomain || "https://open.feishu.cn",
         source: "larkin",
         policy: { dmMode: "open", requireMention: false, respondToMentionAll: true },
+        // issue #88：关闭 SDK 的防抖批量合并（默认 600ms），逐条投递，
+        // 保证 messageId/threadId/发送者与内容、提及永远同源（见 #66）。
+        batch: { text: { delayMs: 0 } },
         handshakeTimeoutMs: 15_000,
         keepalive: { enabled: true, intervalMs: 15_000 },
         includeRawEvent: true,

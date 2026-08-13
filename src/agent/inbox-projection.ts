@@ -15,7 +15,8 @@ export interface InboxEnvelope {
 
 export function targetKeyOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string {
   if (!envelope) return "runtime:unknown";
-  if (envelope.kind === "document_comment" && typeof envelope.target === "string" && envelope.target) {
+  if ((envelope.kind === "document_comment" || envelope.kind === "email")
+      && typeof envelope.target === "string" && envelope.target) {
     return envelope.target;
   }
   if (typeof envelope.chat_id === "string" && envelope.chat_id) {
@@ -74,7 +75,7 @@ export function projectInboxEnvelope(
 /** Preserve the target/thread format consumed by the existing Agent CLI. */
 export function targetOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string | null {
   if (!envelope) return null;
-  if (envelope.kind === "document_comment") {
+  if (envelope.kind === "document_comment" || envelope.kind === "email") {
     return typeof envelope.target === "string" && envelope.target ? envelope.target : null;
   }
   if (envelope.channel_type === "thread" && envelope.parent_channel_name) {

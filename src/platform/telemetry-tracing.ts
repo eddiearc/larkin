@@ -66,12 +66,12 @@ interface MessageTrace {
 export interface TelemetryRuntime {
   beginMessage(agentId: string, messageId: string, source?: "im" | "document_comment"): void;
   phase<T>(messageId: string, name: "feishu.receive" | "runtime.deliver" | "document.comment.receive" | "document.comment.gate"
-    | "document.comment.pending" | "document.comment.replay" | "document.comment.resolve" | "document.comment.inbox",
+    | "document.comment.pending" | "document.comment.replay" | "document.comment.resolve" | "document.comment.inbox" | "email.receive",
     spanKind: SpanKind, operation: () => Promise<T>): Promise<T>;
   filterMessage(messageId: string, reason: "subscription_unverified" | "self_or_missing_operator" | "unsupported_file_type" | "duplicate"): void;
   delivery(agentId: string, messageId: string, status: "accepted" | "consumed" | "deferred" | "duplicate" | "error"): void;
   runtimeEvent(agentId: string, event: NormalizedRuntimeEvent): void;
-  externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send" | "document.comment.reply", spanKind: SpanKind,
+  externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send" | "document.comment.reply" | "email.send", spanKind: SpanKind,
     operation: () => T | Promise<T>, boundary?: "agent_cli" | "agent_transport" | "comment_cli"): T | Promise<T>;
   shutdown(): Promise<void>;
 }
@@ -384,7 +384,7 @@ export function createTelemetryRuntime(config: TelemetryConfig, options: Telemet
         else if (event.type === "error" || event.type === "configuration-error" || event.type === "closed") endTrace(current, true);
       } catch { /* isolated */ }
     },
-    externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send" | "document.comment.reply", spanKind: SpanKind,
+    externalPhase<T>(agentId: string, stateDir: string, name: "inbox.consume" | "tool.execute" | "feishu.send" | "document.comment.reply" | "email.send", spanKind: SpanKind,
       operation: () => T | Promise<T>, boundary: "agent_cli" | "agent_transport" | "comment_cli" = "agent_transport") {
       let span: Span; let parentContext: Context;
       try {

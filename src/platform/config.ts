@@ -21,6 +21,14 @@ export interface StoredAgent {
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
   createdAt?: string;
+  email?: StoredEmailAccount;
+  emailAllowlist?: string[];
+}
+
+export interface StoredEmailAccount {
+  address: string;
+  imap: { host: string; port: number; tls: boolean; user: string; password: string };
+  smtp: { host: string; port: number; tls: boolean; user: string; password: string };
 }
 
 export interface HydratedAgent extends StoredAgent {
@@ -73,7 +81,7 @@ interface ConfigApplyFile { version: 1; persistedRevision: string; agents: Recor
 const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt", "email", "emailAllowlist"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -186,6 +194,27 @@ function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asser
   if (Object.hasOwn(agent, "createdAt") && (typeof agent.createdAt !== "string" || !agent.createdAt || !Number.isFinite(Date.parse(agent.createdAt)))) {
     throw new Error(`Agent ${key}.createdAt 格式无效`);
   }
+  if (Object.hasOwn(agent, "email")) {
+    const email = agent.email;
+    if (!isPlainObject(email)) throw new Error(`Agent ${key}.email 必须是普通 object`);
+    if (typeof email.address !== "string" || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email.address)) throw new Error(`Agent ${key}.email.address 非法`);
+    for (const endpoint of ["imap", "smtp"] as const) {
+      const value = email[endpoint];
+      const port = isPlainObject(value) ? value.port : undefined;
+      if (!isPlainObject(value) || typeof value.host !== "string" || !value.host
+          || !Number.isInteger(port) || Number(port) < 1 || Number(port) > 65535
+          || typeof value.tls !== "boolean"
+          || typeof value.user !== "string" || !value.user
+          || typeof value.password !== "string" || !value.password) {
+        throw new Error(`Agent ${key}.email.${endpoint} 非法（需要 host/port/tls/user/password）`);
+      }
+    }
+  }
+  if (Object.hasOwn(agent, "emailAllowlist")) {
+    if (!Array.isArray(agent.emailAllowlist) || agent.emailAllowlist.some((value) => typeof value !== "string" || !value)) {
+      throw new Error(`Agent ${key}.emailAllowlist 必须是字符串数组`);
+    }
+  }
 }
 
 function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAgent & { noMentionChats?: string[] } {
@@ -203,6 +232,8 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
     ...(typeof agent.createdAt === "string" ? { createdAt: agent.createdAt } : {}),
+    ...(version === 4 && isPlainObject(agent.email) ? { email: agent.email as unknown as StoredEmailAccount } : {}),
+    ...(version === 4 && Array.isArray(agent.emailAllowlist) ? { emailAllowlist: agent.emailAllowlist as string[] } : {}),
   };
 }
 
@@ -219,6 +250,8 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
     ...(agent.chatMentionPolicies ? { chatMentionPolicies: { ...agent.chatMentionPolicies } } : {}),
     ...(agent.noMentionChats ? { noMentionChats: [...agent.noMentionChats] } : {}),
     ...(agent.createdAt ? { createdAt: agent.createdAt } : {}),
+    ...(agent.email ? { email: structuredClone(agent.email) } : {}),
+    ...(agent.emailAllowlist ? { emailAllowlist: [...agent.emailAllowlist] } : {}),
   };
 }
 
@@ -312,6 +345,8 @@ export function toStored(config: HydratedConfig): { version: 4; serverId: string
     if (agent.mentionPolicy) stored.mentionPolicy = agent.mentionPolicy;
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
     if (typeof agent.createdAt === "string" && agent.createdAt) stored.createdAt = agent.createdAt;
+    if (agent.email) stored.email = agent.email as unknown as StoredEmailAccount;
+    if (Array.isArray(agent.emailAllowlist) && agent.emailAllowlist.length) stored.emailAllowlist = [...agent.emailAllowlist];
     out.agents[key] = stored;
   }
   return out;

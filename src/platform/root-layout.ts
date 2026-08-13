@@ -24,6 +24,7 @@ export interface AgentStatePaths {
   conversation: string;
   inbox: string;
   reminders: string;
+  emailChannelState: string;
 }
 
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
@@ -97,6 +98,7 @@ export class TargetRootLayout {
       conversation: path.join(root, "conversation.ndjson"),
       inbox: path.join(root, "feishu-inbox.ndjson"),
       reminders: path.join(root, "reminders.json"),
+      emailChannelState: path.join(root, "email-channel-state.json"),
     });
   }
 }

@@ -14,6 +14,8 @@ import * as larkinConfig from "../platform/config.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "./agent-lark-cli-workspace.js";
 import { parseDocumentCommentTarget } from "../feishu/document-comment.js";
+import { sendEmail } from "../email/smtp-send.js";
+import type { EmailAccountConfig } from "../email/email-types.js";
 import { SpanKind } from "@opentelemetry/api";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
 import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
@@ -33,6 +35,7 @@ export interface LarkCliLauncherDependencies {
   stateStore?: AgentStateStore;
   now?(): number;
   telemetry?: TelemetryRuntime;
+  smtpTransportFactory?: typeof import("nodemailer").createTransport;
 }
 
 function portableSignalCode(signal: NodeJS.Signals): number {
@@ -46,6 +49,7 @@ export type LarkCliCommandDecision =
   | { kind: "passthrough" }
   | { kind: "guarded"; operation: "send" | "reply" | "card" }
   | { kind: "comment-reply" }
+  | { kind: "email-reply" }
   | { kind: "denied"; reason: string };
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
@@ -206,6 +210,9 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (command === "comment") return exactPath(parsed.commandArgv, ["comment", "reply"])
     ? { kind: "comment-reply" }
     : { kind: "denied", reason: "comment 只支持绑定 canonical Inbox locator 的 `comment reply`" };
+  if (command === "email") return exactPath(parsed.commandArgv, ["email", "reply"])
+    ? { kind: "email-reply" }
+    : { kind: "denied", reason: "email 只支持绑定 email Inbox 消息的 `email reply`" };
   if (MANAGEMENT_COMMANDS.has(command)) return { kind: "denied", reason: `身份边界：Runtime 不开放 lark-cli ${command} 管理命令` };
   if (command === "event") return { kind: "denied", reason: "Runtime 不允许另开 event 连接与 Host 争抢事件流" };
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
@@ -287,6 +294,110 @@ type CommentReplyLedger = {
   cursors?: Record<string, unknown>;
   document_comment_replies?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
 };
+
+type EmailChannelLedger = {
+  imap?: { uidValidity: string | null; lastUid: number };
+  replyMemo?: Record<string, { digest: string; status: "sending" | "sent"; messageId: string; at: string }>;
+};
+
+type EmailInboxRow = {
+  message_id?: unknown;
+  kind?: unknown;
+  target?: unknown;
+  sender_id?: unknown;
+  email_message_id?: unknown;
+  email_references?: unknown;
+  subject?: unknown;
+};
+
+function parseEmailReply(argv: readonly string[]): { messageId: string; text: string; subject?: string } {
+  const values = new Map<string, string>();
+  const positionals: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (!argument.startsWith("--")) { positionals.push(argument); continue; }
+    const separator = argument.indexOf("=");
+    const flag = separator >= 0 ? argument.slice(0, separator) : argument;
+    const inline = separator >= 0 ? argument.slice(separator + 1) : null;
+    if (inline !== null) values.set(flag, inline);
+    else {
+      const value = argv[++index];
+      if (value === undefined) throw new Error(`${flag} 需要值`);
+      values.set(flag, value);
+    }
+  }
+  if (positionals.length !== 2 || positionals[0] !== "email" || positionals[1] !== "reply") {
+    throw new Error("用法: larkin email reply --message-id <em_id> --text '<reply>'");
+  }
+  const messageId = values.get("--message-id") || "";
+  const text = values.get("--text") || "";
+  const subject = values.get("--subject");
+  if (!/^em_[0-9a-f]{32}$/.test(messageId)) throw new Error("email reply 需要 Inbox 提供的 em_ message id");
+  if (!text.trim()) throw new Error("email reply 的 --text 不能为空");
+  if (text.length > 200_000) throw new Error("email reply 的 --text 超过 200000 字符");
+  return { messageId, text, ...(subject ? { subject } : {}) };
+}
+
+export async function runEmailReply(
+  argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
+  agent: larkinConfig.HydratedAgent,
+): Promise<number> {
+  const input = parseEmailReply(argv);
+  const email = agent.email as EmailAccountConfig | undefined;
+  if (!email) throw new Error("email reply 需要 Agent 配置 email 账户（config.json agents.<id>.email）");
+
+  // 1. 解析 Inbox 信封（必须与本 Agent 的 email Inbox 一致，且先 poll 过）
+  const row = store.readNdjson<EmailInboxRow>("inbox").find((candidate) => candidate.message_id === input.messageId);
+  if (!row || row.kind !== "email") throw new Error("email reply 需要先 poll 对应 email Inbox 消息");
+  const target = typeof row.target === "string" && row.target ? row.target : null;
+  if (!target || !target.startsWith("email:")) throw new Error("email reply 无法确定 email Inbox target");
+  if (!store.inboxTargetIsFresh(target)) throw new Error("email reply 需要先 poll 当前 email target 的最新 Inbox 消息");
+  const toAddress = typeof row.sender_id === "string" && row.sender_id ? row.sender_id : "";
+  const emailMessageId = typeof row.email_message_id === "string" && row.email_message_id ? row.email_message_id : "";
+  const references = Array.isArray(row.email_references) ? row.email_references.filter((value): value is string => typeof value === "string") : [];
+  if (!toAddress || !emailMessageId) throw new Error("email reply Inbox 信封缺少 sender/email_message_id");
+  const baseSubject = typeof row.subject === "string" ? row.subject : "";
+
+  // 2. 本地幂等账本（每封入站邮件一条回复）：同正文已发 → duplicate；改正文 → 拒绝；
+  //    上一次结果不明确 → fail-closed，避免邮件重复（SMTP 无服务端去重）。
+  const digest = createHash("sha256").update(input.text).digest("hex");
+  const claim = store.mutateJson<EmailChannelLedger, "ready" | "sent" | "ambiguous" | "conflict">(
+    "emailChannelState", {}, (state) => {
+      state.replyMemo ??= {};
+      const prior = state.replyMemo[input.messageId];
+      if (prior?.status === "sent" && prior.digest === digest) return "sent";
+      if (prior?.status === "sending" && prior.digest === digest) return "ambiguous";
+      if (prior && prior.digest !== digest) return "conflict";
+      state.replyMemo[input.messageId] = { digest, status: "sending", messageId: "", at: new Date().toISOString() };
+      const keys = Object.keys(state.replyMemo);
+      for (const stale of keys.slice(0, Math.max(0, keys.length - 512))) delete state.replyMemo[stale];
+      return "ready";
+    },
+  );
+  if (claim === "sent") {
+    const sent = store.readJson<EmailChannelLedger>("emailChannelState", {}).replyMemo?.[input.messageId];
+    io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target, email_message_id: sent?.messageId })}\n`);
+    return 0;
+  }
+  if (claim === "ambiguous") throw new Error("email reply 上次调用结果不明确，已 fail-closed 以避免重复邮件；请检查邮箱发件箱后联系用户");
+  if (claim === "conflict") throw new Error("email reply 已为同一封 Inbox 邮件提交不同正文，拒绝覆盖或重复发送");
+
+  // 3. SMTP 发送（幂等 key 保证重试产生同一 Message-ID）
+  const result = await sendEmail(email, {
+    to: toAddress,
+    subject: input.subject ?? `Re: ${baseSubject}`,
+    text: input.text,
+    inReplyTo: emailMessageId,
+    references,
+    idempotencyKey: `${input.messageId}:${digest.slice(0, 24)}`,
+  }, dependencies.smtpTransportFactory ? { createTransport: dependencies.smtpTransportFactory } : {});
+  store.mutateJson<EmailChannelLedger, void>("emailChannelState", {}, (state) => {
+    state.replyMemo ??= {};
+    state.replyMemo[input.messageId] = { digest, status: "sent", messageId: result.messageId, at: new Date().toISOString() };
+  });
+  io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, target, email_message_id: result.messageId, duplicate: false })}\n`);
+  return 0;
+}
 
 type ImWriteMemoEntry = { message_id: string; updated_at: string };
 type ImWriteMemoState = {
@@ -834,6 +945,12 @@ export function runLarkCli(
       return 2;
     }
   }
+  if (decision.kind === "email-reply") {
+    // 同步入口（runLarkCli）无法执行异步 SMTP 发送；生产路径由 runLarkCliProcess
+    // 在分类后直接 await 异步执行器，此处只对直连调用者报错。
+    io.stderr("lark-cli: email reply 必须经异步进程入口执行\n");
+    return 2;
+  }
   if (decision.kind === "passthrough") return passthroughWithObservation(effectiveArgv, privateEnv, io, nativeDependencies, store);
   try {
     const target = guardedTarget(decision, effectiveArgv, store);
@@ -898,7 +1015,7 @@ export function runLarkCli(
   }
 }
 
-export async function runLarkCliProcess(argv: readonly string[], env: Env = process.env): Promise<number> {
+export async function runLarkCliProcess(argv: readonly string[], env: Env = process.env, dependencies: LarkCliLauncherDependencies = {}): Promise<number> {
   const effectiveArgv = argv;
   const runtimeAgentId = larkinConfig.resolveRuntimeAuthority(env);
   if (!runtimeAgentId) {
@@ -914,12 +1031,20 @@ export async function runLarkCliProcess(argv: readonly string[], env: Env = proc
     const agent = larkinConfig.selectAgent(config, { ...env, LARKIN_AGENT_ID: runtimeAgentId });
     assertAgentWorkspaceBound(agent);
     const decision = classifyLarkCliCommand(effectiveArgv);
+    if (decision.kind === "email-reply") {
+      const privateEnv = managedLarkCliEnv(agent, { ...env, LARKIN_AGENT_ID: agent.agentId });
+      const store = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
+      const io = dependencies.io ?? defaultIo();
+      return await runEmailReply(effectiveArgv, privateEnv, io, dependencies, store, agent);
+    }
     if (decision.kind === "passthrough" && !requiresCapturedPassthrough(effectiveArgv)) {
       const privateEnv = managedLarkCliEnv(agent, { ...env, LARKIN_AGENT_ID: agent.agentId });
       return await spawnNativeTransparent(effectiveArgv, privateEnv, resolveOfficialLarkCli({ env: privateEnv }));
     }
   } catch (error) {
-    process.stderr.write(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+    const text = `lark-cli: ${error instanceof Error ? error.message : String(error)}\n`;
+    if (dependencies.io) dependencies.io.stderr(text);
+    else process.stderr.write(text);
     return 2;
   }
   return runLarkCli(effectiveArgv, env);

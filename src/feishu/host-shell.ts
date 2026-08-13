@@ -37,6 +37,8 @@ import {
 } from "./document-comment.js";
 import type { CommentEvent, CommentTarget, FetchedComment } from "@larksuite/channel";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
+import { createEmailChannel, type EmailChannelHandle, type EmailInboundEnvelope } from "../email/email-source.js";
+import type { EmailAccountConfig } from "../email/email-types.js";
 
 interface ConfiguredAgent {
   agentId: string;
@@ -450,6 +452,86 @@ export function createHostShell({
     }
   };
   const interactionChannels = new Map<string, LarkChannel>();
+  const emailChannels = new Map<string, EmailChannelHandle>();
+  const emailChannelState = (agent: ConfiguredAgent) => {
+    const store = stateStore(agent);
+    return {
+      readImapState: () => {
+        const state = store.readJson<{ imap?: { uidValidity: string | null; lastUid: number } }>(
+          "emailChannelState", {});
+        return state.imap ?? { uidValidity: null, lastUid: 0 };
+      },
+      writeImapState: (value: { uidValidity: string | null; lastUid: number }) => {
+        const state = store.readJson<Record<string, unknown>>("emailChannelState", {});
+        state.imap = value;
+        store.writeJson("emailChannelState", state);
+      },
+      readReplyMemo: () => store.readJson<{ replyMemo?: Record<string, { digest: string; messageId: string; at: string }> }>(
+        "emailChannelState", {}).replyMemo ?? {},
+      writeReplyMemo: (value: Record<string, { digest: string; messageId: string; at: string }>) => {
+        const state = store.readJson<Record<string, unknown>>("emailChannelState", {});
+        state.replyMemo = value;
+        store.writeJson("emailChannelState", state);
+      },
+    };
+  };
+  const onEmailMessage = async (agent: ConfiguredAgent, envelope: EmailInboundEnvelope, options: { wake: boolean }): Promise<void> => {
+    const eventKey = `${agent.agentId}:${envelope.message_id}`;
+    if (seenEventIds.has(eventKey)) return;
+    const telemetryMessageId = String(envelope.message_id || eventKey);
+    if (options.wake) telemetry?.beginMessage(agent.agentId, telemetryMessageId);
+    try {
+      const receive = async (): Promise<Record<string, unknown>> => {
+        const inboxEnvelope = projectInboxEnvelope({ ...envelope } as unknown as Parameters<typeof projectInboxEnvelope>[0], {
+          chat_id: envelope.target,
+          thread_id: envelope.thread_id,
+          create_time: envelope.create_time,
+          sender_id: envelope.sender_id,
+          content: envelope.content,
+        });
+        try { stateStore(agent).appendNdjson("inbox", inboxEnvelope); }
+        catch (error) { throw new Error(`inbox 写失败: ${errorMessage(error)}`); }
+        seenEventIds.add(eventKey);
+        hostState.appendConversation(agent, {
+          direction: "in", from: envelope.sender_name, senderType: "human",
+          target: envelope.target, wake: options.wake, text: envelope.content, messageId: envelope.message_id,
+          at: envelope.create_time || new Date().toISOString(),
+        });
+        return envelope as unknown as Record<string, unknown>;
+      };
+      const projected = options.wake && telemetry
+        ? await telemetry.phase(telemetryMessageId, "email.receive", SpanKind.CONSUMER, receive)
+        : await receive();
+      if (!options.wake) return;
+      const receipt = await runtimeHost.deliver(agent.agentId, projected);
+      if (receipt.status === "accepted" || receipt.status === "duplicate" || receipt.status === "deferred") {
+        hostState.appendStatusLog(agent, "deliverLog", {
+          from: envelope.sender_name,
+          target: envelope.target,
+          excerpt: safeConversationExcerpt(envelope.content, 180),
+          at: new Date().toISOString(),
+        }, 30);
+      }
+    } catch (error) {
+      hostState.recordStatusError(agent, `onEmailMessage: ${errorMessage(error)}`);
+    }
+  };
+  const startEmailChannel = (agent: ConfiguredAgent): EmailChannelHandle | null => {
+    const email = (agent as ConfiguredAgent & { email?: EmailAccountConfig }).email;
+    if (!email) return null;
+    const handle = createEmailChannel(
+      { agentId: agent.agentId, name: agent.name, email, stateDir: agent.stateDir },
+      emailChannelState(agent),
+      {
+        onMessage: (subject, envelope, options) => onEmailMessage(subject as unknown as ConfiguredAgent, envelope, options),
+        onError: (subject, error) => hostState.recordStatusError(subject as unknown as ConfiguredAgent, `email 通道: ${errorMessage(error)}`),
+        allowlist: () => (agent as ConfiguredAgent & { emailAllowlist?: string[] }).emailAllowlist ?? [],
+        log,
+      },
+    );
+    void handle.start().catch((error) => hostState.recordStatusError(agent, `email 通道启动失败: ${errorMessage(error)}`));
+    return handle;
+  };
   const interaction = new HostInteractionOrchestrator({
     agents,
     stateStore,
@@ -968,6 +1050,8 @@ export function createHostShell({
         channels.push(channel);
         channelOwners.set(channel, agent);
         activeChannels.set(agent.agentId, channel);
+        const emailHandle = startEmailChannel(agent);
+        if (emailHandle) emailChannels.set(agent.agentId, emailHandle);
       };
       reconnectFns.set(agent.agentId, tryChannel);
       tryChannel();
@@ -1047,6 +1131,10 @@ export function createHostShell({
       channelOwners.set(nextChannel, candidate);
       activeChannels.set(candidate.agentId, nextChannel);
       interactionChannels.set(candidate.agentId, nextChannel);
+      const previousEmail = emailChannels.get(candidate.agentId);
+      if (previousEmail) { await previousEmail.stop(); emailChannels.delete(candidate.agentId); }
+      const nextEmail = startEmailChannel(candidate);
+      if (nextEmail) emailChannels.set(candidate.agentId, nextEmail);
       nextConnection.activate();
       reconnectFns.set(candidate.agentId, () => {
         void connectCandidate(candidate, true).then(({ channel }) => {
@@ -1254,6 +1342,10 @@ export function createHostShell({
       if (eventSourceStartTimer) clearTimeout(eventSourceStartTimer);
       eventSourceStartTimer = null;
       await Promise.resolve(eventSourceStop());
+      for (const [agentId, emailChannel] of emailChannels) {
+        try { await emailChannel.stop(); } catch { /* best effort */ }
+        emailChannels.delete(agentId);
+      }
       reminder.stopSync();
       interaction.stopSync();
       await runtimeHost.shutdown(reason);

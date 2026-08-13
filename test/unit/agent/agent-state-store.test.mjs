@@ -36,6 +36,7 @@ test("Agent state layout owns every canonical persistence path", async () => {
       conversation: "conversation.ndjson",
       inbox: "feishu-inbox.ndjson",
       reminders: "reminders.json",
+      emailChannelState: "email-channel-state.json",
     });
     assert.equal(fs.existsSync(store.paths.root), false, "layout planning must not touch disk");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

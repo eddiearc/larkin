@@ -1,10 +1,10 @@
 # Larkin
 
-Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu. It provides a local runtime host, persistent sessions, reminders, interactive messages, and a local dashboard.
+Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu (Lark). It provides a local runtime host, persistent sessions, reminders, interactive messages, and a local dashboard.
 
 ## Requirements
 
-- A supported macOS or Linux system
+- A supported macOS, Linux, or Windows (x64) system
 - `lark-cli`
 - At least one supported agent runtime and its authentication
 - Bun 1.3.14 when running the npm package or building from source (standalone binaries bundle their own runtime)
@@ -22,7 +22,7 @@ npm install -g larkin
 larkin --version
 ```
 
-Standalone binaries for macOS and Linux are attached to every [GitHub Release](https://github.com/eddiearc/larkin/releases) for environments without Bun or npm.
+Standalone binaries for macOS, Linux, and Windows (x64) are attached to every [GitHub Release](https://github.com/eddiearc/larkin/releases) for environments without Bun or npm. Windows binaries are cross-compiled; their runtime behavior has not been end-to-end verified on a Windows host.
 
 ## Usage
 

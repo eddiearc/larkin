@@ -468,7 +468,7 @@ if (resultFile && (path.dirname(resultFile) !== path.resolve(CFG_DIR) || !/^\.se
   die("--result-file 必须是配置根目录内的 .setup-result-<pid>.json");
 }
 if (argv.some((arg) => arg === "--app-id" || arg.startsWith("--app-id="))) {
-  die("不支持 --app-id；机器人必须在飞书网页中选择");
+  die("不支持 --app-id；机器人必须在飞书（Lark）网页中选择");
 }
 if (!autoSelect) die("setup 注册阶段必须由交互式选择流程启动");
 say("[setup 1/5] 在网页选择已有机器人或创建新机器人");
@@ -515,13 +515,13 @@ const result = await registerApp({
   },
   onQRCodeReady: ({ url, expireIn }) => {
     qrcode.generate(url, { small: true }, (code: string) => say(code));
-    say(`\n打开以下链接（或扫码），${Math.round(expireIn / 60)} 分钟内有效：\n\n  ${url}\n\n[setup 2/5] 等待飞书网页完成授权并回传凭证…`);
+    say(`\n打开以下链接（或扫码），${Math.round(expireIn / 60)} 分钟内有效：\n\n  ${url}\n\n[setup 2/5] 等待飞书（Lark）网页完成授权并回传凭证…`);
     say(openBrowser(url) ? "[setup] 已在默认浏览器打开授权页" : "[setup] 未能自动打开浏览器，请手动打开上面的链接");
   },
   onStatusChange: ({ status, interval }) => {
     if (status === "domain_switched") say("[setup] 已切换到 Lark 域名");
-    if (status === "slow_down") say(`[setup] 飞书要求降低轮询频率，${interval || "稍后"}秒后继续`);
-    if (status === "polling" && ++pollingCount % 12 === 0) say(`[setup] 仍在等待飞书回传凭证（约 ${pollingCount / 12} 分钟）…`);
+    if (status === "slow_down") say(`[setup] 飞书（Lark）要求降低轮询频率，${interval || "稍后"}秒后继续`);
+    if (status === "polling" && ++pollingCount % 12 === 0) say(`[setup] 仍在等待飞书（Lark）回传凭证（约 ${pollingCount / 12} 分钟）…`);
   },
 }).catch(() => die("网页授权失败；未执行凭证同步、文件写入或 Agent 绑定，请重试 setup"));
 
@@ -586,7 +586,7 @@ if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_
           throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`);
         }
         if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN !== "1") {
-          say("正在验证内置 Pi provider（受控单轮，不发送飞书消息）…");
+          say("正在验证内置 Pi provider（受控单轮，不发送飞书（Lark）消息）…");
           try { await verifyOfficialPiProviderTurn(piRuntime, choice.model); }
           catch {
             pendingPiAuthTransaction.rollback();

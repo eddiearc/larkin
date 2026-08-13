@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { exactMode } from "./secure-metadata.js";
 
 export type CardActionCallbackStatus = "missing" | "requested-unverified" | "probe-issued" | "verified-effective";
 
@@ -77,7 +78,7 @@ function credentialFile(configDir: string, appId: string): string {
 
 function readCredential(file: string): CredentialRecord {
   const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600
+  if (!stat.isFile() || stat.isSymbolicLink() || !exactMode(stat, 0o600)
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
     throw new Error("callback capability credential must be an owned 0600 regular file");
   }

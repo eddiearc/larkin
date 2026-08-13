@@ -26,7 +26,7 @@ const say = (...args: unknown[]): void => console.log(...args);
 const die = (message: string): never => { console.error(`✗ ${message}`); process.exit(1); };
 
 if (argv.some((arg) => arg === "--app-id" || arg.startsWith("--app-id="))) {
-  die("setup 不支持 --app-id；请运行 larkin setup 并在飞书网页中选择机器人");
+  die("setup 不支持 --app-id；请运行 larkin setup 并在飞书（Lark）网页中选择机器人");
 }
 if (argv.some((arg) => arg === "--no-dashboard" || arg.startsWith("--no-dashboard="))) {
   die("--no-dashboard 已移除；dashboard 由 larkin start 统一管理");
@@ -69,7 +69,7 @@ if (!OPT.help && normalizedRuntime.distribution === "external" && (flag("--provi
   die("external-pi 使用已有 pi 环境，不接受 --provider/--api-key/--base-url");
 }
 if (OPT.help) {
-  say(`larkin setup — Create or connect a Feishu bot, then configure and attach its Agent
+  say(`larkin setup — Create or connect a Feishu (Lark) bot, then configure and attach its Agent
 
 Usage:
   larkin setup                         Select a bot in the browser and run setup（默认：内置 Pi + 配置完成即热挂载）
@@ -130,7 +130,7 @@ export async function main(): Promise<void> {
     env: process.env,
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     async confirmInstall(command) {
-      say("[setup 0/5] Larkin 需要未修改的官方 lark-cli 作为 Feishu 命令下游。");
+      say("[setup 0/5] Larkin 需要未修改的官方 lark-cli 作为 Feishu (Lark) 命令下游。");
       say(`将执行：${command}`);
       const input = readline.createInterface({ input: process.stdin, output: process.stdout });
       const answer = (await input.question("是否安装？[y/N] ")).trim().toLowerCase();
@@ -139,7 +139,7 @@ export async function main(): Promise<void> {
     },
   }).catch((error) => die(error instanceof Error ? error.message : String(error)));
   say(`[setup 0/5] ✓ 官方 lark-cli ${official.command.version}: ${official.command.command}${official.installed ? "（刚刚安装）" : ""}`);
-  say("\nAgent 与飞书机器人按 App ID 一一对应：");
+  say("\nAgent 与飞书（Lark）机器人按 App ID 一一对应：");
   say("  • 网页选择同一个机器人 → 热更新该 Agent，不重启其他 Agent");
   say("  • 网页创建新机器人 → 热挂载新 Agent，状态彼此独立\n");
   fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });

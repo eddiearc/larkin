@@ -13,6 +13,7 @@ const targets = [
   ["darwin", "x64", "adhoc"],
   ["linux", "arm64", "unsigned"],
   ["linux", "x64", "unsigned"],
+  ["windows", "x64", "unsigned"],
 ];
 
 function hash(value) {
@@ -28,7 +29,7 @@ test("assembles four independently built platform artifacts", () => {
   for (const [platform, arch, signing] of targets) {
     const directory = path.join(input, `release-${platform}-${arch}`);
     fs.mkdirSync(directory, { recursive: true });
-    const file = `larkin-v1.2.3-${platform}-${arch}`;
+    const file = `larkin-v1.2.3-${platform}-${arch}${platform === "windows" ? ".exe" : ""}`;
     const body = Buffer.from(`${platform}-${arch}`);
     fs.writeFileSync(path.join(directory, file), body, { mode: 0o755 });
     fs.writeFileSync(path.join(directory, `release-manifest-${platform}-${arch}.json`), `${JSON.stringify({
@@ -44,11 +45,12 @@ test("assembles four independently built platform artifacts", () => {
   }
 
   const manifest = assembleRelease(input, output);
-  assert.equal(manifest.artifacts.length, 4);
+  assert.equal(manifest.artifacts.length, 5);
   assert.deepEqual(manifest.artifacts.map(({ platform, arch }) => `${platform}-${arch}`), [
-    "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64",
+    "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64",
   ]);
   assert.match(fs.readFileSync(path.join(output, "SHA256SUMS"), "utf8"), /larkin-v1\.2\.3-linux-x64/);
+  assert.match(fs.readFileSync(path.join(output, "SHA256SUMS"), "utf8"), /larkin-v1\.2\.3-windows-x64\.exe/);
   assert.match(fs.readFileSync(path.join(output, "SHA256SUMS"), "utf8"), /^[a-f0-9]{64}  THIRD_PARTY_NOTICES\.txt$/m);
   assert.equal(fs.readFileSync(path.join(output, "LICENSE"), "utf8"), fs.readFileSync(path.join(import.meta.dirname, "../../../LICENSE"), "utf8"));
   assert.equal(
@@ -69,7 +71,7 @@ test("rejects platform manifests whose runtime notices are not bound to the rele
   for (const [platform, arch, signing] of targets) {
     const directory = path.join(input, `release-${platform}-${arch}`);
     fs.mkdirSync(directory, { recursive: true });
-    const file = `larkin-v1.2.3-${platform}-${arch}`;
+    const file = `larkin-v1.2.3-${platform}-${arch}${platform === "windows" ? ".exe" : ""}`;
     const body = Buffer.from(`${platform}-${arch}`);
     fs.writeFileSync(path.join(directory, file), body);
     fs.writeFileSync(path.join(directory, `release-manifest-${platform}-${arch}.json`), `${JSON.stringify({
@@ -84,5 +86,5 @@ test("rejects platform manifests whose runtime notices are not bound to the rele
 test("rejects incomplete release input", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-release-assemble-missing-"));
   fs.mkdirSync(path.join(root, "input"));
-  assert.throws(() => assembleRelease(path.join(root, "input"), path.join(root, "output")), /expected 4/);
+  assert.throws(() => assembleRelease(path.join(root, "input"), path.join(root, "output")), /expected 5/);
 });

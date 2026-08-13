@@ -4,6 +4,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import type { TelemetryConfig } from "./telemetry-config.js";
 import { inspectProcess } from "./process-state.js";
+import { fsyncDirectory } from "./secure-metadata.js";
 
 export interface OtlpPayload { resourceSpans: unknown[] }
 export interface QueueRecord { file: string; payload: OtlpPayload; device: number; inode: number }
@@ -226,8 +227,7 @@ export class TelemetrySpool {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
       fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); fs.closeSync(descriptor); descriptor = undefined;
       fs.renameSync(temporary, file); fs.chmodSync(file, 0o600);
-      const directory = fs.openSync(this.config.spoolDir, fs.constants.O_RDONLY);
-      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      fsyncDirectory(this.config.spoolDir);
     } finally {
       if (descriptor !== undefined) try { fs.closeSync(descriptor); } catch { /* isolated */ }
       try { fs.unlinkSync(temporary); } catch { /* isolated */ }
@@ -305,8 +305,7 @@ export class TelemetrySpool {
         if (!stat.isFile() || stat.isSymbolicLink() || stat.dev !== record.device || stat.ino !== record.inode) throw new Error("record changed");
       }
       for (const entry of moved) fs.unlinkSync(entry.quarantine);
-      const directory = fs.openSync(this.config.spoolDir, fs.constants.O_RDONLY);
-      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      fsyncDirectory(this.config.spoolDir);
     } catch {
       for (const entry of moved.reverse()) try { fs.renameSync(entry.quarantine, entry.original); } catch { /* preserve without deleting */ }
       throw new Error("telemetry acknowledgement failed");

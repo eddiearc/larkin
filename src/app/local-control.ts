@@ -7,6 +7,7 @@ import path from "node:path";
 import { readProcessState } from "../platform/process-state.js";
 import { currentProcessMetadata } from "../platform/process-inspect.cjs";
 import { processCommandToken } from "./internal-command.js";
+import { isWindows, notGroupOrWorldAccessible } from "../platform/secure-metadata.js";
 
 export interface AgentUpsertRequest { operationId: string; agentId: string; authorization: string }
 export type AgentUpsertOperation = Pick<AgentUpsertRequest, "operationId" | "agentId">;
@@ -42,6 +43,7 @@ const AUTHORIZATION = /^[A-Za-z0-9_-]{43,128}$/;
 const UNIX_SOCKET_PATH_MAX_BYTES = process.platform === "darwin" ? 103 : 107;
 
 function socketPathsFit(root: string): boolean {
+  if (isWindows) return true; // Windows named-pipe socket paths use a much larger limit
   return ["supervisor.sock", "daemon.sock"].every((name) =>
     Buffer.byteLength(path.join(root, name)) <= UNIX_SOCKET_PATH_MAX_BYTES);
 }
@@ -52,6 +54,7 @@ function controlSocketRoot(larkinHome: string): string {
   const leaf = `lk-${owner}-${identity}`;
   const preferred = path.join(path.resolve(os.tmpdir()), leaf);
   if (socketPathsFit(preferred)) return preferred;
+  if (isWindows) throw new Error("无法生成满足 Windows socket 路径限制的 control root");
   const fallback = path.join("/tmp", leaf);
   if (socketPathsFit(fallback)) return fallback;
   throw new Error("无法生成满足 Unix socket 长度限制的 control root");
@@ -61,7 +64,7 @@ function assertSecureSocketDirectory(root: string): string {
   const stat = fs.lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) throw new Error("control socket root 不安全");
+      || !notGroupOrWorldAccessible(stat)) throw new Error("control socket root 不安全");
   return root;
 }
 
@@ -87,7 +90,7 @@ function assertSecureRoot(root: string): void {
   const stat = fs.lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) throw new Error("Larkin config root 必须由当前用户拥有且不可被其他用户访问");
+      || !notGroupOrWorldAccessible(stat)) throw new Error("Larkin config root 必须由当前用户拥有且不可被其他用户访问");
 }
 
 function removeLegacyResetLedger(larkinHome: string): void {
@@ -99,7 +102,7 @@ function removeLegacyResetLedger(larkinHome: string): void {
     throw error;
   }
   if (!stat.isFile() || stat.isSymbolicLink()
-      || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) {
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || !notGroupOrWorldAccessible(stat)) {
     throw new Error("legacy daemon control operation ledger 不安全");
   }
   fs.unlinkSync(file);
@@ -145,7 +148,7 @@ function secureAuthority(larkinHome: string): ControlAuthority {
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) throw new Error("daemon control authority 不安全");
+      || !notGroupOrWorldAccessible(stat)) throw new Error("daemon control authority 不安全");
   const value = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ControlAuthority>;
   const validBinding = (binding: ProcessBinding | undefined): binding is ProcessBinding =>
     !!binding && Number.isSafeInteger(binding.pid) && binding.pid > 0
@@ -645,7 +648,7 @@ async function sendSupervisorRecovery(larkinHome: string, operationId: string, t
   const stat = fs.lstatSync(socket);
   if (!stat.isSocket() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) throw new Error("supervisor control socket 不安全");
+      || !notGroupOrWorldAccessible(stat)) throw new Error("supervisor control socket 不安全");
   return await new Promise<DashboardRecoveryResponse>((resolve, reject) => {
     const client = net.createConnection(socket);
     const timer = setTimeout(() => { client.destroy(); reject(new Error("dashboard recovery control timeout")); }, timeoutMs);
@@ -708,7 +711,7 @@ async function requestAgentControl<T>({
   const stat = fs.lstatSync(socket);
   if (!stat.isSocket() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) throw new Error("daemon control socket 不安全");
+      || !notGroupOrWorldAccessible(stat)) throw new Error("daemon control socket 不安全");
   return await new Promise<T>((resolve, reject) => {
     const client = net.createConnection(socket);
     const timer = setTimeout(() => { client.destroy(); reject(new Error("agent control timeout")); }, timeoutMs);

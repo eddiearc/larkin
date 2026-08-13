@@ -7,6 +7,7 @@ export const RELEASE_TARGETS = Object.freeze([
   { platform: "darwin", arch: "x64", bunTarget: "bun-darwin-x64-baseline" },
   { platform: "linux", arch: "arm64", bunTarget: "bun-linux-arm64" },
   { platform: "linux", arch: "x64", bunTarget: "bun-linux-x64-baseline" },
+  { platform: "windows", arch: "x64", bunTarget: "bun-windows-x64-baseline" },
 ] as const);
 
 export type ReleasePlatform = typeof RELEASE_TARGETS[number]["platform"];
@@ -44,7 +45,13 @@ export function artifactFilename(version: string, platform: ReleasePlatform, arc
   if (!RELEASE_TARGETS.some((target) => target.platform === platform && target.arch === arch)) {
     throw new Error(`unsupported release target: ${platform}-${arch}`);
   }
-  return `larkin-v${version}-${platform}-${arch}`;
+  const suffix = platform === "windows" ? ".exe" : "";
+  return `larkin-v${version}-${platform}-${arch}${suffix}`;
+}
+
+/** Node's `os.platform()` reports Windows as "win32"; canonical release manifests use "windows". */
+export function normalizeReleasePlatform(platform: string): string {
+  return platform === "win32" ? "windows" : platform;
 }
 
 export function sha256File(file: string): string {
@@ -56,8 +63,9 @@ export function selectReleaseArtifact(
   platform: string,
   arch: string,
 ): ReleaseArtifactRecord {
-  const record = manifest.artifacts.find((candidate) => candidate.platform === platform && candidate.arch === arch);
-  if (!record || !RELEASE_TARGETS.some((target) => target.platform === platform && target.arch === arch)) {
+  const canonicalPlatform = normalizeReleasePlatform(platform);
+  const record = manifest.artifacts.find((candidate) => candidate.platform === canonicalPlatform && candidate.arch === arch);
+  if (!record || !RELEASE_TARGETS.some((target) => target.platform === canonicalPlatform && target.arch === arch)) {
     throw new Error(`unsupported platform: ${platform}-${arch}`);
   }
   if (record.file !== artifactFilename(manifest.version, record.platform, record.arch) || !/^[a-f0-9]{64}$/.test(record.sha256)) {

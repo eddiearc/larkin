@@ -253,6 +253,8 @@ jobs:
             target: darwin-arm64
           - runner: macos-15-intel
             target: darwin-x64
+          - runner: ubuntu-24.04
+            target: windows-x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -302,6 +304,7 @@ jobs:
         run: bun run scripts/check-publication.mjs --trusted --denylist "$RUNNER_TEMP/larkin-publication-denylist.txt" artifacts/release/larkin-v* artifacts/release/THIRD_PARTY_NOTICES.txt
 
       - name: Smoke current platform artifact
+        if: matrix.target != 'windows-x64'
         run: bun run release:smoke -- --release-dir artifacts/release
 
       - name: Upload platform artifact to draft release

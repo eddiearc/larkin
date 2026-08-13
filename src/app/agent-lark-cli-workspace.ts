@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { exactMode } from "../platform/secure-metadata.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 
 export interface AgentLarkCliWorkspace {
@@ -51,12 +52,12 @@ export function managedOfficialLarkCli(
 
 function readPrivateJson(file: string, label: string): Record<string, any> {
   const directory = fs.lstatSync(path.dirname(file));
-  if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o777) !== 0o700
+  if (!directory.isDirectory() || directory.isSymbolicLink() || !exactMode(directory, 0o700)
       || (typeof process.getuid === "function" && directory.uid !== process.getuid())) throw new Error(`${label} 目录不安全`);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600
+    if (!stat.isFile() || !exactMode(stat, 0o600)
         || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new Error(`${label} 文件不安全`);
     return JSON.parse(fs.readFileSync(fd, "utf8")) as Record<string, any>;
   } finally { fs.closeSync(fd); }

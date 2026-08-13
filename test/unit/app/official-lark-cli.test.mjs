@@ -30,7 +30,7 @@ function windowsFixture() {
     name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.js" },
   }));
   fs.mkdirSync(path.join(packageDir, "scripts"), { recursive: true });
-  fs.writeFileSync(path.join(packageDir, "scripts", "run.js"), "#!/usr/bin/env node\n");
+  fs.writeFileSync(path.join(packageDir, "scripts", "run.js"), "// mock official launcher\n");
   fs.writeFileSync(native, "MZ", { mode: 0o755 });
   const shim = path.join(root, "lark-cli.cmd");
   fs.writeFileSync(shim, "@echo off\n");

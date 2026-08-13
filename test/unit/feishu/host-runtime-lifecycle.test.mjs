@@ -282,3 +282,48 @@ test("production HostShell clears eyes on inactive/error and ignores heartbeat a
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("channel options disable inbound message merging (issue #88)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-no-merge-"));
+  const agentId = "cli_nomergeA1";
+  let capturedOptions = null;
+  let channelCreated = false;
+  const runtimeHost = {
+    subscribe() { return () => {}; },
+    async start() {},
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const channelPackage = {
+    createLarkChannel(options) {
+      capturedOptions = options;
+      channelCreated = true;
+      return {
+        botIdentity: { openId: "ou_nomerge", name: "NoMerge" },
+        rawClient: null,
+        dispatcher: { register() {} },
+        on() {},
+        async connect() {},
+        async disconnect() {},
+      };
+    },
+  };
+  const agent = { agentId, name: agentId, runtime: "codex", model: "gpt", feishuAppId: agentId,
+    feishuAppSecret: "fixture-secret", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId), stateDir: path.join(root, "state", "agents", agentId) };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-nomerge",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0 });
+  try {
+    host.start();
+    const deadline = Date.now() + 2_000;
+    while (!channelCreated && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(channelCreated, true);
+    assert.deepEqual(capturedOptions.batch, { text: { delayMs: 0 } },
+      "必须关闭 SDK 防抖批量合并，逐条投递以保持身份与内容同源（#88/#66）");
+  } finally {
+    await host.shutdown("issue88 test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

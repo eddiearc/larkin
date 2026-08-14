@@ -633,11 +633,16 @@ if (piDistributionFlag === "builtin") {
   };
   if (setupModel && raw.baseUrl) {
     // Owner 决策：模型名必须来自 provider 的权威可用列表，输错即报错，不做运行时猜测。
+    // 网络超时/不可达时不阻塞 setup（null），运行时对账会严格兜底。
     const availableIds = await listProviderModels(raw.baseUrl, setupApiKey);
-    const matched = availableIds.some((id) => id === setupModel || id.endsWith(`/${setupModel}`));
-    if (!matched) {
-      const preview = availableIds.slice(0, 12).join(", ") + (availableIds.length > 12 ? ", …" : "");
-      throw new Error(`未知模型 ${setupModel}；provider 可用模型：[${preview || "无"}]`);
+    if (availableIds !== null) {
+      const matched = availableIds.some((id) => id === setupModel || id.endsWith(`/${setupModel}`));
+      if (!matched) {
+        const preview = availableIds.slice(0, 12).join(", ") + (availableIds.length > 12 ? ", …" : "");
+        throw new Error(`未知模型 ${setupModel}；provider 可用模型：[${preview || "无"}]`);
+      }
+    } else {
+      say("[setup] 网络暂不可达，跳过 /models 预校验；运行时将对模型严格对账");
     }
   }
   stageBuiltinPiProvider(CFG_DIR, id, { ...raw, apiKey: setupApiKey });

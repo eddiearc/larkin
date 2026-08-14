@@ -85,22 +85,31 @@ export function validatePiBaseUrl(raw: string): string {
 
 /**
  * 查询 OpenAI 兼容 provider 的 /models 列表（setup 时校验 --model 是否真实可用）。
- * 失败即抛错：setup 不应该接受一个没有依据的模型名。
+ * 网络超时/不可达返回 null（不阻塞 setup——运行时对账会严格兜底）；
+ * 列表拿到但模型不在其中时抛错。
  */
 export async function listProviderModels(
   baseUrl: string,
   apiKey: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<string[]> {
-  const url = `${validatePiBaseUrl(baseUrl)}/models`;
-  const response = await fetchImpl(url, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`provider /models 查询失败：HTTP ${response.status}`);
-  const payload = await response.json() as { data?: Array<{ id?: unknown }> } | null;
-  if (!payload || !Array.isArray(payload.data)) throw new Error("provider /models 响应格式非法");
-  return payload.data.map((entry) => String(entry.id ?? "")).filter(Boolean);
+): Promise<string[] | null> {
+  try {
+    const url = `${validatePiBaseUrl(baseUrl)}/models`;
+    const response = await fetchImpl(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`provider /models 查询失败：HTTP ${response.status}`);
+    const payload = await response.json() as { data?: Array<{ id?: unknown }> } | null;
+    if (!payload || !Array.isArray(payload.data)) throw new Error("provider /models 响应格式非法");
+    return payload.data.map((entry) => String(entry.id ?? "")).filter(Boolean);
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"
+        || /fetch failed|network|ETIMEDOUT|ECONNREFUSED/i.test(error.message))) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export function resolveBuiltinPiProviderSetupSelection(input: BuiltinPiProviderSetupSelection): ResolvedBuiltinPiProviderSetupSelection {

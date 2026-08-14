@@ -128,6 +128,13 @@ test("safe dynamic runtime models and runtime effort enums survive persistence r
       assert.throws(() => configApi.mutateConfig({ LARKIN_CONFIG_DIR: root }, mutation, { kind: "user" }), /model|effort|安全|格式/i);
       assert.equal(fs.readFileSync(file, "utf8"), before);
     }
+
+    // pi 模型 ID 允许带斜杠（openrouter 风格）与不带斜杠（内置 provider 隐式模型）两种形式。
+    configApi.mutateConfig({ LARKIN_CONFIG_DIR: root }, {
+      kind: "set-agent-runtime", agentId: APP, runtime: "pi", model: "deepseek-v4-pro",
+    }, { kind: "user" });
+    const piReloaded = configApi.loadConfig({ LARKIN_CONFIG_DIR: root }).config;
+    assert.equal(piReloaded.agents[APP].model, "deepseek-v4-pro");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -105,7 +105,7 @@ export async function listProviderModels(
     return payload.data.map((entry) => String(entry.id ?? "")).filter(Boolean);
   } catch (error) {
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"
-        || /fetch failed|network|ETIMEDOUT|ECONNREFUSED/i.test(error.message))) {
+        || /fetch failed|network|ETIMEDOUT|ECONNREFUSED|ConnectionRefused|Unable to connect/i.test(error.message))) {
       return null;
     }
     throw error;

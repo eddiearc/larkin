@@ -629,7 +629,8 @@ if (piDistributionFlag === "builtin") {
     distribution: "builtin",
     preset: presetId as PiProviderPresetId,
     model: setupModel ?? presetDef?.defaultModel ?? "",
-    ...(presetDef ? { baseUrl: presetDef.baseUrl } : setupBaseUrl ? { baseUrl: validatePiBaseUrl(setupBaseUrl) } : {}),
+    // 显式 --base-url 优先于预设默认值（自定义网关场景，如 opencode）。
+    ...(setupBaseUrl ? { baseUrl: validatePiBaseUrl(setupBaseUrl) } : presetDef ? { baseUrl: presetDef.baseUrl } : {}),
   };
   if (setupModel && raw.baseUrl) {
     // Owner 决策：模型名必须来自 provider 的权威可用列表，输错即报错，不做运行时猜测。

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isWindows, secureWindowsDirectoryAcl } from "../platform/secure-metadata.js";
 
 export type PiDistribution = "external" | "builtin";
 export const BUNDLED_PI_VERSION = "0.83.0";
@@ -114,6 +115,11 @@ export function piAgentDirectory(configDir: string, agentId: string): string {
 }
 
 function assertPrivateDirectory(directory: string): void {
+  if (isWindows) {
+    // Windows 无 POSIX 权限位：icacls 收紧为「当前用户 + SYSTEM」并回读校验。
+    secureWindowsDirectoryAcl(directory, { label: "Pi provider 凭证目录" });
+    return;
+  }
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
@@ -146,7 +152,7 @@ function readSnapshot(file: string): Buffer | null {
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink()
         || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-        || (stat.mode & 0o777) !== 0o600) throw new Error(`Pi provider 文件不安全: ${path.basename(file)}`);
+        || (!isWindows && (stat.mode & 0o777) !== 0o600)) throw new Error(`Pi provider 文件不安全: ${path.basename(file)}`);
     return fs.readFileSync(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

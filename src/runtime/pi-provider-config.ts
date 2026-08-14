@@ -7,7 +7,7 @@ export type PiDistribution = "external" | "builtin";
 export const BUNDLED_PI_VERSION = "0.83.0";
 export type PiProviderPresetId = "deepseek" | "kimi" | "minimax" | "zhipu" | "openai" | "anthropic"
   | "gemini" | "groq" | "cerebras" | "xai" | "fireworks" | "together" | "mistral"
-  | "openrouter" | "kimi-coding" | "qwen-cn" | "custom";
+  | "openrouter" | "kimi-coding" | "qwen-cn" | "opencode-go" | "custom";
 
 export interface PiProviderPreset {
   id: Exclude<PiProviderPresetId, "custom">;
@@ -37,6 +37,7 @@ export const PI_PROVIDER_PRESETS: readonly PiProviderPreset[] = Object.freeze([
   { id: "openrouter", name: "OpenRouter", provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "moonshotai/kimi-k2.6", api: "openai-completions" },
   { id: "kimi-coding", name: "Kimi For Coding", provider: "kimi-coding", baseUrl: "https://api.kimi.com/coding", defaultModel: "kimi-for-coding", api: "openai-completions" },
   { id: "qwen-cn", name: "通义千问 Token Plan（中国）", provider: "qwen-token-plan-cn", baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen3.7-max", api: "openai-completions" },
+  { id: "opencode-go", name: "OpenCode Go", provider: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1", defaultModel: "kimi-k2.6", api: "openai-completions" },
 ]);
 
 export interface BuiltinPiProviderSetupSelection {

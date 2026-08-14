@@ -877,7 +877,12 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ]);
     if (!available?.models?.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow or configure provider credentials; Larkin will not create a fallback session.");
     const effectiveModel = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
-    if (requestedModel && effectiveModel !== requestedModel) throw new Error(`Pi model fallback refused: requested ${requestedModel}, effective ${effectiveModel || "none"}`);
+    // pi 回报的是 provider/model 两段式；Larkin 配置允许只存 model 段（内置 Pi 单 provider）。
+    const effectiveMatches = (candidate: string): boolean => effectiveModel === candidate
+      || (effectiveModel ? effectiveModel.endsWith(`/${candidate}`) : false);
+    if (requestedModel && !effectiveMatches(requestedModel)) {
+      throw new Error(`Pi model fallback refused: requested ${requestedModel}, effective ${effectiveModel || "none"}`);
+    }
     if (requestedEffort && state.thinkingLevel !== requestedEffort) throw new Error(`Pi thinking level ${requestedEffort} was not accepted by effective model ${effectiveModel || "unknown"}`);
     return new PiRpcBackend(client, state);
   } catch (error) {

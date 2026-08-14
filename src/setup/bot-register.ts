@@ -15,7 +15,7 @@ import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "../app/official-lark-cli.js";
 import { collectSetupAgentChoice, recoverUnavailableExternalPi, terminalSetupQuestioner } from "./setup-agent-choice.js";
 import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
-import { configureBuiltinPiProviderModel, stageBuiltinPiProvider, validatePiBaseUrl, PI_PROVIDER_PRESETS,
+import { configureBuiltinPiProviderModel, stageBuiltinPiProvider, validatePiBaseUrl, listProviderModels, PI_PROVIDER_PRESETS,
   type BuiltinPiProviderSetupSelection, type PiProviderPresetId } from "../runtime/pi-provider-config.js";
 import {
   beginBuiltinPiCredentialTransaction,
@@ -631,6 +631,15 @@ if (piDistributionFlag === "builtin") {
     model: setupModel ?? presetDef?.defaultModel ?? "",
     ...(presetDef ? { baseUrl: presetDef.baseUrl } : setupBaseUrl ? { baseUrl: validatePiBaseUrl(setupBaseUrl) } : {}),
   };
+  if (setupModel && raw.baseUrl) {
+    // Owner 决策：模型名必须来自 provider 的权威可用列表，输错即报错，不做运行时猜测。
+    const availableIds = await listProviderModels(raw.baseUrl, setupApiKey);
+    const matched = availableIds.some((id) => id === setupModel || id.endsWith(`/${setupModel}`));
+    if (!matched) {
+      const preview = availableIds.slice(0, 12).join(", ") + (availableIds.length > 12 ? ", …" : "");
+      throw new Error(`未知模型 ${setupModel}；provider 可用模型：[${preview || "无"}]`);
+    }
+  }
   stageBuiltinPiProvider(CFG_DIR, id, { ...raw, apiKey: setupApiKey });
   temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(temporaryAgentChoiceFile,

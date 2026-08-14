@@ -14,7 +14,7 @@ import {
 test("Pi provider presets keep the requested setup order and audited official endpoints", () => {
   assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.id), [
     "deepseek", "kimi", "minimax", "zhipu", "openai", "anthropic", "gemini", "groq",
-    "cerebras", "xai", "fireworks", "together", "mistral", "openrouter", "kimi-coding", "qwen-cn",
+    "cerebras", "xai", "fireworks", "together", "mistral", "openrouter", "kimi-coding", "qwen-cn", "opencode-go",
   ]);
   assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.baseUrl), [
     "https://api.deepseek.com",
@@ -33,6 +33,7 @@ test("Pi provider presets keep the requested setup order and audited official en
     "https://openrouter.ai/api/v1",
     "https://api.kimi.com/coding",
     "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "https://opencode.ai/zen/go/v1",
   ]);
 });
 

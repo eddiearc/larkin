@@ -27,19 +27,9 @@ test("piVersionSupportsSubagents enforces the >=0.80.0 peer requirement", () => 
   assert.equal(piVersionSupportsSubagents(null), false);
 });
 
-test("builtin always injects when a bundle is resolvable (bundled pi 0.83.0)", () => {
-  const fakeBundle = "/tmp/fake/pi-subagents.bundle.js";
-  const decision = resolvePiSubagentExtensionArg(
-    { distribution: "builtin", piCommand: "pi", env: { LARKIN_PI_DISTRIBUTION: "builtin" } },
-    () => null, // builtin ignores the probe; version comes from BUNDLED_PI_VERSION
-    () => fakeBundle, // injected resolver: no filesystem/build-artifact dependency
-  );
-  assert.equal(decision, fakeBundle);
-});
-
 test("resolve returns null when the bundle resolver yields nothing", () => {
   const decision = resolvePiSubagentExtensionArg(
-    { distribution: "builtin", piCommand: "pi", env: {} },
+    { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: "/missing/larkin-pi-agent" } },
     () => null,
     () => null,
   );
@@ -49,7 +39,7 @@ test("resolve returns null when the bundle resolver yields nothing", () => {
 test("external injects when the probed pi version satisfies the gate", () => {
   const fakeBundle = "/tmp/fake/pi-subagents.bundle.js";
   const decision = resolvePiSubagentExtensionArg(
-    { distribution: "external", piCommand: "pi", env: {} },
+    { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: "/missing/larkin-pi-agent" } },
     () => ({ major: 0, minor: 84 }),
     () => fakeBundle,
   );
@@ -163,13 +153,6 @@ test("resolvePiSubagentExtensionArg skips injection when user already installed 
       () => fakeBundle,
     );
     assert.equal(decision, null, "must not inject when user already has pi-subagents");
-    // builtin is unaffected (managed agent dir, no user config)
-    const builtin = resolvePiSubagentExtensionArg(
-      { distribution: "builtin", piCommand: "pi", env: { PI_CODING_AGENT_DIR: agentDir } },
-      () => null,
-      () => fakeBundle,
-    );
-    assert.equal(builtin, fakeBundle);
   } finally {
     fsMod.rmSync(root, { recursive: true, force: true });
   }

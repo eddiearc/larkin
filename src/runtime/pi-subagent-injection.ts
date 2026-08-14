@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
 
 declare global {
   // Filled by the standalone wrapper (scripts/release/standalone-entry.ts).
@@ -13,9 +12,9 @@ declare global {
  * pi-subagents 扩展注入。
  *
  * 分发：构建期把 @tintinweb/pi-subagents bundle 成单文件
- * `dist/runtime/pi-subagents.bundle.js`（pi-* 包 external），运行时通过
- * `pi --extension/-e` 显式注入 —— builtin（binary-entry pi-rpc）与 external
- * （用户 pi CLI）走同一路径，不碰用户 ~/.pi 配置。
+ * `dist/runtime/pi-subagents.bundle.js`（pi-* 包 external），运行时仅向 external
+ * （用户 pi CLI）通过 `pi --extension/-e` 显式注入，不碰用户 ~/.pi 配置。
+ * Builtin Pi 直接接收静态 factory，不经过本文件或 Pi 的路径加载器。
  *
  * 版本门槛：pi-subagents peerDependency 要求 @earendil-works/pi-* >= 0.80.0；
  * external 的 pi 版本低于 0.80 时不注入（降级为无 subagent 能力）。
@@ -74,21 +73,13 @@ export function piVersionSupportsSubagents(version: { major: number; minor: numb
   return version.major > 0 || (version.major === 0 && version.minor >= 80);
 }
 
-/**
- * 解析 `pi --version`（external 专用；builtin 用 BUNDLED_PI_VERSION 常量，无需探测）。
- * 返回 null 表示无法确认版本（视为不支持，不注入）。
- */
+/** 解析 external `pi --version`；无法确认版本时视为不支持，不注入。 */
 export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv): { major: number; minor: number } | null {
   const result = spawnSync(piCommand, ["--version"], { env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
   if (result.error || result.status !== 0) return null;
   return parsePiVersion(String(result.stdout || result.stderr || ""));
 }
 
-/**
- * 注入决策：builtin 恒注入（内嵌 pi 版本固定 BUNDLED_PI_VERSION）；external 需探测版本。
- * 返回 `-e` 参数值（扩展 bundle 路径），或 null（不注入：产物缺失或版本不达标）。
- * `probeVersion` 仅供测试注入；缺省时 external 用 probeExternalPiVersion 探测。
- */
 /**
  * 用户 pi 是否已自行安装 pi-subagents（settings.json packages 或包目录）。
  * 已装时 Larkin 不再 -e 注入，避免同名工具（Agent/get_subagent_result/steer_subagent）
@@ -119,7 +110,7 @@ export function userPiAlreadyHasSubagentsExtension(env: NodeJS.ProcessEnv): bool
 
 export function resolvePiSubagentExtensionArg(
   input: {
-    distribution: "builtin" | "external";
+    distribution: "external";
     piCommand: string;
     env: NodeJS.ProcessEnv;
   },
@@ -131,7 +122,6 @@ export function resolvePiSubagentExtensionArg(
   const bundle = resolveBundle();
   if (!bundle) return null;
   // 用户已自行安装同款扩展时跳过注入，避免工具名重复注册冲突。
-  if (input.distribution === "external" && userPiAlreadyHasSubagentsExtension(input.env)) return null;
-  const version = input.distribution === "builtin" ? parsePiVersion(BUNDLED_PI_VERSION) : probeVersion();
-  return piVersionSupportsSubagents(version) ? bundle : null;
+  if (userPiAlreadyHasSubagentsExtension(input.env)) return null;
+  return piVersionSupportsSubagents(probeVersion()) ? bundle : null;
 }

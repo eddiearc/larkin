@@ -2,19 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { resolvePiBashTimeoutExtensionArg } from "../../../dist/runtime/pi-bash-timeout-injection.mjs";
 
-test("builtin always injects bash-timeout when a bundle is resolvable (bundled pi 0.83.0)", () => {
-  const fakeBundle = "/tmp/fake/pi-bash-timeout.bundle.js";
-  const decision = resolvePiBashTimeoutExtensionArg(
-    { distribution: "builtin", piCommand: "pi", env: { LARKIN_PI_DISTRIBUTION: "builtin" } },
-    () => null, // builtin ignores the probe; version comes from BUNDLED_PI_VERSION
-    () => fakeBundle,
-  );
-  assert.equal(decision, fakeBundle);
-});
-
 test("resolve returns null when the bundle resolver yields nothing", () => {
   const decision = resolvePiBashTimeoutExtensionArg(
-    { distribution: "builtin", piCommand: "pi", env: {} },
+    { distribution: "external", piCommand: "pi", env: {} },
     () => null,
     () => null,
   );

@@ -4,15 +4,16 @@ import type { BashToolInput } from "@earendil-works/pi-coding-agent";
 /**
  * pi bash 工具超时护栏扩展。
  *
- * 由 larkin 通过 `pi --extension/-e <bundle>` 注入，覆盖内置 `bash` 工具：
+ * 由 Larkin 向 builtin Pi 传入 inline factory，或通过 external Pi 的
+ * `pi --extension/-e <bundle>` 注入，覆盖内置 `bash` 工具：
  * - 无论模型是否传 `timeout`，都强制收窄到 <= MAX_BASH_SECONDS（默认 60s），
  *   避免单个 bash 调用无限期占住整个 agent 回合（issue #55）。
  * - 超时时 pi 会杀掉整个进程树（不残留卡死子进程，issue #56 的进程堆积），
  *   并在返回的错误里明确提示：长任务必须改用后台 subagent
  *   （Agent(run_in_background: true)，来自 pi-subagents 扩展）。
  *
- * 这是 pi 扩展，运行在 pi 进程内部；larkin 主进程不加载本模块（只通过
- * build.mjs 单独 bundle 成单文件后注入）。pi-* 保持 external。
+ * 这是 pi 扩展，运行在 Pi RPC 子进程内部；build.mjs 仍为 external Pi
+ * 单独产出注入 bundle。
  */
 
 /** 前台 bash 的硬性上限（秒）。issue #55 建议默认 60s。 */

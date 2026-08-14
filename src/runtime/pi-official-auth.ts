@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { isWindows, secureWindowsDirectoryAcl } from "../platform/secure-metadata.js";
 // proper-lockfile does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import properLockfile from "proper-lockfile";
@@ -69,6 +70,11 @@ function ensureLockDirectory(lockPath: string): void {
   const directory = path.dirname(lockPath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(directory, 0o700);
+  if (isWindows) {
+    // Windows 无 POSIX 权限位（mode 恒 0o666）：改用 icacls 收紧 ACL 并回读校验。
+    secureWindowsDirectoryAcl(directory, { label: "Pi credential lock 目录" });
+    return;
+  }
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
@@ -119,6 +125,11 @@ function ensurePrivateDirectory(directory: string): void {
   fs.chmodSync(path.dirname(directory), 0o700);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(directory, 0o700);
+  if (isWindows) {
+    // Windows 无 POSIX 权限位：icacls 收紧为「当前用户 + SYSTEM」并回读校验。
+    secureWindowsDirectoryAcl(directory, { label: "Pi official credential 目录" });
+    return;
+  }
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
@@ -132,7 +143,7 @@ function safeRead(file: string): Buffer | null {
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink()
         || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-        || (stat.mode & 0o777) !== 0o600) throw new Error(`unsafe Pi auth file: ${path.basename(file)}`);
+        || (!isWindows && (stat.mode & 0o777) !== 0o600)) throw new Error(`unsafe Pi auth file: ${path.basename(file)}`);
     return fs.readFileSync(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

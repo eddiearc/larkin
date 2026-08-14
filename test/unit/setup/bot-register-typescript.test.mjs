@@ -70,6 +70,8 @@ test("registration publishes the credential before binding, then verifies the bo
   assert.doesNotMatch(source, /config["', ]+init/);
   assert.match(source, /mode: 0o700/);
   assert.match(source, /mode: 0o600, flag: "wx"/);
+  assert.match(source, /JSON\.stringify\(\{ \.\.\.raw, runtime: "pi", authCompleted: true, readinessCompleted: true \}\)/,
+    "非交互 builtin-pi 的选择文件必须带 runtime:pi（否则 setup-bind 报 Agent 选择无效）");
   assert.match(source, /callbacks:\s*\{ items: \["card\.action\.trigger"\] \}/);
   assert.match(source, /systemSpawn\(command, args, \{ stdio: "ignore", shell: false \}\)/,
     "browser launch must be non-blocking and shell-free");

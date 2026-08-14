@@ -634,7 +634,7 @@ if (piDistributionFlag === "builtin") {
   stageBuiltinPiProvider(CFG_DIR, id, { ...raw, apiKey: setupApiKey });
   temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(temporaryAgentChoiceFile,
-    `${JSON.stringify({ ...raw, authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
+    `${JSON.stringify({ ...raw, runtime: "pi", authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
   say(`[setup 2/5] ✓ 内置 Pi provider 已配置（${presetId}${setupBaseUrl ? " / custom" : ""}）`);
 } else if (piDistributionFlag === "external" && (setupProvider || setupApiKey || setupBaseUrl)) {
   throw new Error("external-pi 使用已有 pi 环境与登录，不接受 --provider/--api-key/--base-url");

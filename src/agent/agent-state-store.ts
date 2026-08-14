@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.js";
 import { acquireProcessLock, inspectProcess } from "../platform/process-state.js";
+import { isWindows } from "../platform/secure-metadata.js";
 import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
@@ -264,7 +265,8 @@ export class AgentStateStore {
     try {
       fd = fs.openSync(ownerFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
       const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) {
+      if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+          || (!isWindows && (stat.mode & 0o077) !== 0)) {
         throw new Error(`Inbox lock owner 文件不安全：${ownerFile}`);
       }
       const value = JSON.parse(fs.readFileSync(fd, "utf8")) as unknown;

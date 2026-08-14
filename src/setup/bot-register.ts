@@ -622,7 +622,10 @@ if (piDistributionFlag === "builtin") {
     throw new Error("builtin-pi 需要 --provider <id>（deepseek|kimi|minimax|zhipu|openai|anthropic|gemini|groq|cerebras|xai|fireworks|together|mistral|openrouter|kimi-coding|qwen-cn|custom）或 --base-url；或改用 --runtime external-pi 使用已有 pi 环境");
   }
   if (!setupApiKey) throw new Error("builtin-pi 需要 --api-key；或改用 --runtime external-pi 使用已有 pi 登录");
-  const presetId = setupProvider ?? "custom";
+  // 自定义网关（--base-url）走 custom 预设：pi 会把 baseUrl 作为 provider 端点写入配置，
+  // 而不是用预设厂商目录（否则会打到预设默认地址，如 api.openai.com）。
+  const presetId = setupBaseUrl ? "custom" : (setupProvider ?? "custom");
+  if (presetId === "custom" && !setupModel) throw new Error("custom base-url 需要 --model <模型名>");
   const presetDef = PI_PROVIDER_PRESETS.find((p) => p.id === presetId);
   if (!presetDef && !setupBaseUrl) throw new Error(`未知 provider \`${presetId}\`；可选：${PI_PROVIDER_PRESETS.map((p) => p.id).join(" | ")} | custom`);
   const raw: BuiltinPiProviderSetupSelection = {

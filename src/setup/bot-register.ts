@@ -15,7 +15,7 @@ import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "../app/official-lark-cli.js";
 import { collectSetupAgentChoice, recoverUnavailableExternalPi, terminalSetupQuestioner } from "./setup-agent-choice.js";
 import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
-import { configureBuiltinPiProviderModel, stageBuiltinPiProvider, validatePiBaseUrl, listProviderModels, PI_PROVIDER_PRESETS,
+import { configureBuiltinPiProviderModel, stageBuiltinPiProvider, validatePiBaseUrl, validateBuiltinPiProviderSelection, listProviderModels, PI_PROVIDER_PRESETS,
   type BuiltinPiProviderSetupSelection, type PiProviderPresetId } from "../runtime/pi-provider-config.js";
 import {
   beginBuiltinPiCredentialTransaction,
@@ -650,9 +650,13 @@ if (piDistributionFlag === "builtin") {
     }
   }
   stageBuiltinPiProvider(CFG_DIR, id, { ...raw, apiKey: setupApiKey });
+  // 选择文件写入解析后的全称模型（custom 预设为 larkin-custom/<model>）：
+  // pi 运行时按 provider 前缀解析凭证，裸模型名会回落到默认 provider（deepseek）
+  // 导致「No API key found for deepseek」。
+  const validated = validateBuiltinPiProviderSelection({ ...raw, apiKey: setupApiKey });
   temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(temporaryAgentChoiceFile,
-    `${JSON.stringify({ ...raw, runtime: "pi", authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
+    `${JSON.stringify({ ...raw, runtime: "pi", model: validated.model, authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
   say(`[setup 2/5] ✓ 内置 Pi provider 已配置（${presetId}${setupBaseUrl ? " / custom" : ""}）`);
 } else if (piDistributionFlag === "external" && (setupProvider || setupApiKey || setupBaseUrl)) {
   throw new Error("external-pi 使用已有 pi 环境与登录，不接受 --provider/--api-key/--base-url");

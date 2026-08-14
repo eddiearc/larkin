@@ -877,11 +877,16 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ]);
     if (!available?.models?.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow or configure provider credentials; Larkin will not create a fallback session.");
     const effectiveModel = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
-    // pi 回报的是 provider/model 两段式；Larkin 配置允许只存 model 段（内置 Pi 单 provider）。
-    const effectiveMatches = (candidate: string): boolean => effectiveModel === candidate
-      || (effectiveModel ? effectiveModel.endsWith(`/${candidate}`) : false);
-    if (requestedModel && !effectiveMatches(requestedModel)) {
-      throw new Error(`Pi model fallback refused: requested ${requestedModel}, effective ${effectiveModel || "none"}`);
+    // 严格对账（Owner 决策）：模型必须来自 pi 的权威可用列表，不做后缀猜测——
+    // 配置的模型与 pi 可用列表不符即报错，并在错误里列出可用模型。
+    const availableEntries = (available.models ?? []).map((entry) => ({
+      provider: String(entry.provider ?? ""), id: String(entry.id ?? ""),
+    }));
+    const matchesAvailable = (candidate: string): boolean => availableEntries.some((entry) =>
+      entry.id === candidate || (entry.provider ? `${entry.provider}/${entry.id}` === candidate : false));
+    if (requestedModel && effectiveModel !== requestedModel && !matchesAvailable(requestedModel)) {
+      const availableText = availableEntries.slice(0, 10).map((entry) => entry.provider ? `${entry.provider}/${entry.id}` : entry.id).join(", ");
+      throw new Error(`Pi model fallback refused: requested ${requestedModel} is not in Pi's available models${availableText ? ` (${availableText})` : ""}`);
     }
     if (requestedEffort && state.thinkingLevel !== requestedEffort) throw new Error(`Pi thinking level ${requestedEffort} was not accepted by effective model ${effectiveModel || "unknown"}`);
     return new PiRpcBackend(client, state);

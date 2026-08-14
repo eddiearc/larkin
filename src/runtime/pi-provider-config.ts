@@ -83,6 +83,26 @@ export function validatePiBaseUrl(raw: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
+/**
+ * 查询 OpenAI 兼容 provider 的 /models 列表（setup 时校验 --model 是否真实可用）。
+ * 失败即抛错：setup 不应该接受一个没有依据的模型名。
+ */
+export async function listProviderModels(
+  baseUrl: string,
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string[]> {
+  const url = `${validatePiBaseUrl(baseUrl)}/models`;
+  const response = await fetchImpl(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`provider /models 查询失败：HTTP ${response.status}`);
+  const payload = await response.json() as { data?: Array<{ id?: unknown }> } | null;
+  if (!payload || !Array.isArray(payload.data)) throw new Error("provider /models 响应格式非法");
+  return payload.data.map((entry) => String(entry.id ?? "")).filter(Boolean);
+}
+
 export function resolveBuiltinPiProviderSetupSelection(input: BuiltinPiProviderSetupSelection): ResolvedBuiltinPiProviderSetupSelection {
   if (input.distribution !== "builtin") throw new Error("provider 凭证只能用于内置 Pi");
   const model = input.model.trim();

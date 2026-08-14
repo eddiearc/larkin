@@ -10,19 +10,21 @@ const GITLEAKS_BASELINE = [
   "1e12236e5462a361cf45e1b1b218aae035ed7451:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:138",
 ];
 
-test("PR and main CI validate source without building release artifacts", () => {
+test("PR and main CI retain Linux source checks and add a blocking native Windows x64 gate", () => {
   const workflow = read(".github/workflows/release-platform-smoke.yml");
+  const windowsJob = workflow.slice(workflow.indexOf("  windows-native:"));
   assert.equal(read(".gitleaksignore"), `${GITLEAKS_BASELINE.join("\n")}\n`, "only the two verified synthetic history fingerprints may be ignored");
   assert.equal(fs.existsSync(path.join(ROOT, "THIRD_PARTY_NOTICES.md")), false, "complete lock-graph notices must not be tracked at the repository root");
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/);
-  assert.equal(workflow.match(/runs-on: ubuntu-24\.04/g)?.length, 1);
+  assert.equal(workflow.match(/runs-on: ubuntu-24\.04/g)?.length, 2);
+  assert.equal(workflow.match(/runs-on: windows-latest/g)?.length, 1);
   assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies ?? [], []);
-  assert.match(workflow, /bun-version: 1\.3\.14/);
+  assert.equal(workflow.match(/bun-version: 1\.3\.14/g)?.length, 3);
   assert.doesNotMatch(workflow, /actions\/setup-go|go-version:/);
-  assert.match(workflow, /bun install --frozen-lockfile/);
+  assert.equal(workflow.match(/bun install --frozen-lockfile/g)?.length, 3);
   assert.match(workflow, /bun run licenses:check/);
   assert.match(workflow, /bun run publication:check:tree/);
   assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/);
@@ -38,10 +40,17 @@ test("PR and main CI validate source without building release artifacts", () => 
   assert.match(workflow, /run: bun run test/);
   assert.match(workflow, /LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND: "1"/);
   assert.match(workflow, /bun test --max-concurrency 1 test\/integration\/app\/official-lark-channel-bind-live\.test\.mjs/);
+  assert.match(workflow, /windows-release-artifact:[\s\S]*bun scripts\/release\/build\.ts --target windows-x64 --out-dir artifacts\/release[\s\S]*actions\/upload-artifact@v4/);
+  assert.match(workflow, /windows-native:\n\s+name: Windows 11 x64 core and standalone gate\n\s+needs: windows-release-artifact\n\s+runs-on: windows-latest/);
+  assert.match(windowsJob, /bun run build/);
+  assert.match(windowsJob, /test\/unit\/runtime\/pi-inline-extensions\.test\.mjs/);
+  assert.match(windowsJob, /test\/unit\/runtime\/runtime-adapters\.test\.mjs/);
+  assert.match(windowsJob, /test\/integration\/build\/release-platform-ci\.test\.mjs/);
+  assert.match(windowsJob, /actions\/download-artifact@v4[\s\S]*bun run release:smoke -- --release-dir artifacts\/release/);
+  assert.doesNotMatch(windowsJob, /secrets\.|LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND|test\/live|continue-on-error/);
   assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);
   assert.match(workflow, /persist-credentials: false/);
-  assert.doesNotMatch(workflow, /scripts\/release\/build\.ts|release:smoke|artifacts\/release|matrix\./);
-  assert.doesNotMatch(workflow, /continue-on-error|actions\/(?:upload|download)-artifact|\b(?:node|npm|pnpm)\b/);
+  assert.doesNotMatch(workflow, /matrix\.|continue-on-error|\b(?:node|npm|pnpm)\b/);
 });
 
 test("package version and explicit tag publication share one immutable combined-release run", () => {
@@ -109,11 +118,16 @@ test("package version and explicit tag publication share one immutable combined-
   assert.ok(workflow.indexOf("run: rm -f -- results.sarif") < workflow.indexOf("- name: Build current platform release"));
   assert.match(workflow, /bun run scripts\/check-publication\.mjs --trusted --denylist "\$RUNNER_TEMP\/larkin-publication-denylist\.txt" artifacts\/release\/larkin-v\*/);
   assert.match(workflow, /artifacts\/release\/larkin-v\* artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);
-  for (const target of ["linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"]) {
+  for (const target of ["linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64", "windows-x64"]) {
     assert.match(workflow, new RegExp(`target: ${target}`));
   }
   assert.match(workflow, /gh release upload/);
   assert.match(workflow, /gh release download/);
+  assert.match(workflow, /assemble-release:[\s\S]*bun scripts\/release\/assemble\.ts[\s\S]*actions\/upload-artifact@v4/);
+  assert.match(workflow, /verify-windows-release:[\s\S]*runs-on: windows-latest/);
+  assert.match(workflow, /verify-windows-release:[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*path: release-tooling[\s\S]*actions\/download-artifact@v4[\s\S]*Get-FileHash[\s\S]*release-tooling\/scripts\/release\/smoke\.ts" --release-dir artifacts\/release/);
+  assert.match(workflow, /publish:[\s\S]*- verify-windows-release[\s\S]*Download Windows-verified assembled release[\s\S]*Finalize GitHub release/);
+  assert.ok(workflow.indexOf("  verify-windows-release:") < workflow.indexOf("  publish:"));
   assert.match(workflow, /gh release edit[\s\S]*--draft=false/);
   assert.match(workflow, /bun scripts\/release\/assemble\.ts/);
   assert.match(workflow, /artifacts\/release\/LICENSE artifacts\/release\/THIRD_PARTY_NOTICES\.txt/);

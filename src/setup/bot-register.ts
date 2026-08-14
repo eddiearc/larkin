@@ -619,7 +619,7 @@ const setupBaseUrl = flag("--base-url");
 const setupModel = flag("--model");
 if (piDistributionFlag === "builtin") {
   if (!setupProvider && !setupBaseUrl) {
-    throw new Error("builtin-pi 需要 --provider <id>（deepseek|kimi|minimax|zhipu|openai|anthropic|gemini|groq|cerebras|xai|fireworks|together|mistral|openrouter|kimi-coding|qwen-cn|custom）或 --base-url；或改用 --runtime external-pi 使用已有 pi 环境");
+    throw new Error(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_PRESETS.map((p) => p.id).join("|")}|custom）或 --base-url；或改用 --runtime external-pi 使用已有 pi 环境`);
   }
   if (!setupApiKey) throw new Error("builtin-pi 需要 --api-key；或改用 --runtime external-pi 使用已有 pi 登录");
   // 自定义网关（--base-url）走 custom 预设：pi 会把 baseUrl 作为 provider 端点写入配置，

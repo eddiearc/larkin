@@ -7,7 +7,10 @@ export type PiDistribution = "external" | "builtin";
 export const BUNDLED_PI_VERSION = "0.83.0";
 export type PiProviderPresetId = "deepseek" | "kimi" | "minimax" | "zhipu" | "openai" | "anthropic"
   | "gemini" | "groq" | "cerebras" | "xai" | "fireworks" | "together" | "mistral"
-  | "openrouter" | "kimi-coding" | "qwen-cn" | "opencode-go" | "custom";
+  | "openrouter" | "kimi-coding" | "qwen-cn" | "opencode-go" | "ant-ling" | "nvidia"
+  | "huggingface" | "minimax-global" | "moonshotai" | "opencode" | "qwen-token-plan"
+  | "vercel-ai-gateway" | "xiaomi" | "xiaomi-token-plan-cn" | "xiaomi-token-plan-ams"
+  | "xiaomi-token-plan-sgp" | "zai" | "custom";
 
 export interface PiProviderPreset {
   id: Exclude<PiProviderPresetId, "custom">;
@@ -38,6 +41,19 @@ export const PI_PROVIDER_PRESETS: readonly PiProviderPreset[] = Object.freeze([
   { id: "kimi-coding", name: "Kimi For Coding", provider: "kimi-coding", baseUrl: "https://api.kimi.com/coding", defaultModel: "kimi-for-coding", api: "openai-completions" },
   { id: "qwen-cn", name: "通义千问 Token Plan（中国）", provider: "qwen-token-plan-cn", baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen3.7-max", api: "openai-completions" },
   { id: "opencode-go", name: "OpenCode Go", provider: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1", defaultModel: "kimi-k2.6", api: "openai-completions" },
+  { id: "ant-ling", name: "Ant Ling", provider: "ant-ling", baseUrl: "https://api.ant-ling.com/v1", defaultModel: "Ring-2.6-1T", api: "openai-completions" },
+  { id: "nvidia", name: "NVIDIA NIM", provider: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1", defaultModel: "google/gemma-3-12b-it", api: "openai-completions" },
+  { id: "huggingface", name: "Hugging Face", provider: "huggingface", baseUrl: "https://router.huggingface.co/v1", defaultModel: "MiniMaxAI/MiniMax-M2", api: "openai-completions" },
+  { id: "minimax-global", name: "MiniMax（全球）", provider: "minimax", baseUrl: "https://api.minimax.io/anthropic", defaultModel: "MiniMax-M2.7", api: "anthropic-messages" },
+  { id: "moonshotai", name: "Moonshot（全球）", provider: "moonshotai", baseUrl: "https://api.moonshot.ai/v1", defaultModel: "kimi-k2-0711-preview", api: "openai-completions" },
+  { id: "opencode", name: "OpenCode Zen", provider: "opencode", baseUrl: "https://opencode.ai/zen", defaultModel: "claude-fable-5", api: "openai-completions" },
+  { id: "qwen-token-plan", name: "通义千问 Token Plan（全球）", provider: "qwen-token-plan", baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen3.7-max", api: "openai-completions" },
+  { id: "vercel-ai-gateway", name: "Vercel AI Gateway", provider: "vercel-ai-gateway", baseUrl: "https://ai-gateway.vercel.sh", defaultModel: "zai/glm-5.1", api: "anthropic-messages" },
+  { id: "xiaomi", name: "Xiaomi MiMo", provider: "xiaomi", baseUrl: "https://api.xiaomimimo.com/v1", defaultModel: "mimo-v2-flash", api: "openai-completions" },
+  { id: "xiaomi-token-plan-cn", name: "Xiaomi MiMo Token Plan（中国）", provider: "xiaomi-token-plan-cn", baseUrl: "https://token-plan-cn.xiaomimimo.com/v1", defaultModel: "mimo-v2.5-pro", api: "openai-completions" },
+  { id: "xiaomi-token-plan-ams", name: "Xiaomi MiMo Token Plan（阿姆斯特丹）", provider: "xiaomi-token-plan-ams", baseUrl: "https://token-plan-ams.xiaomimimo.com/v1", defaultModel: "mimo-v2.5-pro", api: "openai-completions" },
+  { id: "xiaomi-token-plan-sgp", name: "Xiaomi MiMo Token Plan（新加坡）", provider: "xiaomi-token-plan-sgp", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", defaultModel: "mimo-v2.5-pro", api: "openai-completions" },
+  { id: "zai", name: "ZAI Coding Plan（全球）", provider: "zai", baseUrl: "https://api.z.ai/api/coding/paas/v4", defaultModel: "glm-4.5-air", api: "openai-completions" },
 ]);
 
 export interface BuiltinPiProviderSetupSelection {

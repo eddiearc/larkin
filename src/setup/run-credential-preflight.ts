@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isWindows } from "../platform/secure-metadata.js";
 
 import {
   callbackCapability,
@@ -69,7 +70,8 @@ export function validCredentialRecord(value: unknown, appId: string): value is B
 }
 
 function isOwnedWithExactMode(stat: fs.Stats, mode: number): boolean {
-  return (typeof process.getuid !== "function" || stat.uid === process.getuid()) && (stat.mode & 0o777) === mode;
+  return (typeof process.getuid !== "function" || stat.uid === process.getuid())
+    && (isWindows || (stat.mode & 0o777) === mode);
 }
 
 export function assertSecureBotsDirectory(botsDir: string): void {

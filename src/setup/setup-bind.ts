@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { isWindows } from "../platform/secure-metadata.js";
 import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
@@ -188,7 +189,7 @@ function readSetupSelection(fileArg: string | undefined): SetupAgentChoice | nul
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o777) !== 0o600) die("setup Agent 选择文件必须是当前用户拥有的 0600 普通文件");
+      || (!isWindows && (stat.mode & 0o777) !== 0o600)) die("setup Agent 选择文件必须是当前用户拥有的 0600 普通文件");
   const bytes = fs.readFileSync(file, "utf8");
   fs.unlinkSync(file);
   const raw = JSON.parse(bytes) as SetupAgentChoice;

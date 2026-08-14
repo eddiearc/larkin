@@ -15,6 +15,8 @@ test("Pi provider presets keep the requested setup order and audited official en
   assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.id), [
     "deepseek", "kimi", "minimax", "zhipu", "openai", "anthropic", "gemini", "groq",
     "cerebras", "xai", "fireworks", "together", "mistral", "openrouter", "kimi-coding", "qwen-cn", "opencode-go",
+    "ant-ling", "nvidia", "huggingface", "minimax-global", "moonshotai", "opencode", "qwen-token-plan",
+    "vercel-ai-gateway", "xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp", "zai",
   ]);
   assert.deepEqual(PI_PROVIDER_PRESETS.map((item) => item.baseUrl), [
     "https://api.deepseek.com",
@@ -34,6 +36,19 @@ test("Pi provider presets keep the requested setup order and audited official en
     "https://api.kimi.com/coding",
     "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     "https://opencode.ai/zen/go/v1",
+    "https://api.ant-ling.com/v1",
+    "https://integrate.api.nvidia.com/v1",
+    "https://router.huggingface.co/v1",
+    "https://api.minimax.io/anthropic",
+    "https://api.moonshot.ai/v1",
+    "https://opencode.ai/zen",
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    "https://ai-gateway.vercel.sh",
+    "https://api.xiaomimimo.com/v1",
+    "https://token-plan-cn.xiaomimimo.com/v1",
+    "https://token-plan-ams.xiaomimimo.com/v1",
+    "https://token-plan-sgp.xiaomimimo.com/v1",
+    "https://api.z.ai/api/coding/paas/v4",
   ]);
 });
 

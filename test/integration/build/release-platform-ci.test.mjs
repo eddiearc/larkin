@@ -43,6 +43,7 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
   assert.match(workflow, /windows-release-artifact:[\s\S]*bun scripts\/release\/build\.ts --target windows-x64 --out-dir artifacts\/release[\s\S]*actions\/upload-artifact@v4/);
   assert.match(workflow, /windows-native:\n\s+name: Windows 11 x64 core and standalone gate\n\s+needs: windows-release-artifact\n\s+runs-on: windows-latest/);
   assert.match(windowsJob, /bun run build/);
+  assert.match(windowsJob, /bun test --isolate --max-concurrency 1/);
   assert.match(windowsJob, /test\/unit\/runtime\/pi-inline-extensions\.test\.mjs/);
   assert.match(windowsJob, /test\/unit\/runtime\/runtime-adapters\.test\.mjs/);
   assert.match(windowsJob, /test\/integration\/build\/release-platform-ci\.test\.mjs/);

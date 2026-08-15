@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { spawnSync } from "node:child_process";
-import { test } from "bun:test";
+import { afterEach, test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { resolveAgentCliExecutable } from "../../../dist/agent/agent-cli-capabilities.mjs";
 import {
@@ -16,7 +16,22 @@ import {
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
 
+const fakeProcesses = new Set();
+
+afterEach(() => {
+  for (const child of fakeProcesses) {
+    child.stdin.destroyed = true;
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+  fakeProcesses.clear();
+});
+
 class FakeProcess extends EventEmitter {
+  constructor() {
+    super();
+    fakeProcesses.add(this);
+  }
   stdout = new PassThrough();
   stderr = new PassThrough();
   writes = [];

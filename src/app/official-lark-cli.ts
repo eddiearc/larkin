@@ -6,7 +6,7 @@ function safeRealpath(target: string): string | null {
   try { return fs.realpathSync(target); } catch { return null; }
 }
 
-export const OFFICIAL_LARK_CLI_VERSION = "1.0.79";
+export const OFFICIAL_LARK_CLI_VERSION = "1.0.80";
 export const OFFICIAL_LARK_CLI_INSTALL = `npm install --global @larksuite/cli@${OFFICIAL_LARK_CLI_VERSION}`;
 
 export interface OfficialLarkCliCommand {
@@ -148,7 +148,7 @@ function validateOfficialCommand(command: OfficialLarkCliCommand, env: NodeJS.Pr
   spawn: typeof spawnSync): OfficialLarkCliProbe {
   if (!compatibleVersion(command.version)) return {
     state: "outdated",
-    reason: `官方 lark-cli ${command.version} 低于最低兼容版本 ${OFFICIAL_LARK_CLI_VERSION}: ${command.command}`,
+    reason: `官方 lark-cli ${command.version} 低于产品策略最低版本 ${OFFICIAL_LARK_CLI_VERSION}: ${command.command}`,
     nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
   };
   const version = spawn(command.command, ["--version"], {
@@ -228,7 +228,7 @@ function probeOfficialLarkCliUncached(dependencies: OfficialLarkCliDependencies)
   };
   if (!compatibleVersion(command.version)) return {
     state: "outdated",
-    reason: `真实 login shell 的官方 @larksuite/cli ${command.version} 低于最低兼容版本 ${OFFICIAL_LARK_CLI_VERSION}`,
+    reason: `真实 login shell 的官方 @larksuite/cli ${command.version} 低于产品策略最低版本 ${OFFICIAL_LARK_CLI_VERSION}`,
     nextAction: `升级：${OFFICIAL_LARK_CLI_INSTALL}`,
   };
   return validateOfficialCommand(command, env, dependencies.spawn ?? spawnSync);

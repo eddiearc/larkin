@@ -54,10 +54,10 @@ function fixture(agentId = "cli_authoritativeA1") {
   fs.mkdirSync(path.dirname(executable), { recursive: true, mode: 0o700 });
   fs.mkdirSync(bin, { mode: 0o700 });
   fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" },
   }), { mode: 0o600 });
   fs.writeFileSync(executable, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.79\\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.80\\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\\n' 'Usage: lark-cli config bind --source lark-channel --identity bot-only'; exit 0; fi
 export LARKIN_TEST_PROVIDER_PARENT_PID="$PPID"
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"

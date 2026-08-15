@@ -103,10 +103,10 @@ test.skipIf(!ENABLED)("standalone binary preserves CLI, Agent, local-control, Da
     const officialLauncher = path.join(officialPackage, "scripts", "run.sh");
     fs.mkdirSync(path.dirname(officialLauncher), { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(officialPackage, "package.json"), JSON.stringify({
-      name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+      name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" },
     }), { mode: 0o600 });
     fs.writeFileSync(officialLauncher, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'lark-cli version 1.0.79\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf 'lark-cli version 1.0.80\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0; fi
 printf '%s\n' "$*" >> "$STANDALONE_LARK_MARKER"
 if [ "$1" = "config" ] && [ "$2" = "bind" ]; then

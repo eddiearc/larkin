@@ -57,7 +57,7 @@ const resetAgent = { agentId: resetAgentId, name: resetAgentId, runtime: "codex"
 const resetHost = createHostShell({ env: { ...process.env, LARKIN_HOME: root, LARKIN_CONFIG_DIR: root,
   LARKIN_SERVER_ID: "server-control", LARKIN_AGENTS_CONFIG: JSON.stringify([resetAgent]), LARKIN_INBOUND_DROUGHT_SEC: "0" },
   runtimeHost: resetRuntimeHost, eventSourceStartDelayMs: 60_000,
-  managedCliForAgent: () => ({ command: { command: "/test/lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} }),
+  managedCliForAgent: () => ({ command: { command: "/test/lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} }),
   channelPackage: { createLarkChannel() { throw new Error("not started in control harness"); } }, logImpl: () => {} });
 await resetHost.start();
 resetStore.writeJson("status", { ...resetStore.readJson("status", {}), connectedAt: new Date().toISOString(), connectedVia: "mock",

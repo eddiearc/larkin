@@ -23,7 +23,7 @@ function fixture(root, mode) {
       workspaceDir: path.join(root, "agents", agentId), runtime: "pi", model: "default", feishuProfile: agentId,
     },
     env: { ...process.env, LARKIN_CONFIG_DIR: root, LARKIN_BUN_TEST_RUNNER: "1", TEST_CLI_MODE: mode, TEST_APP_ID: agentId },
-    resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [script], version: "1.0.79" }),
+    resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [script], version: "1.0.80" }),
   };
 }
 

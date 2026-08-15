@@ -14,7 +14,7 @@ import { InteractionStateMachine } from "../../dist/agent/interaction-state-mach
 import { createTelemetryRuntime } from "../../dist/platform/telemetry-tracing.mjs";
 import { TelemetrySpool } from "../../dist/platform/telemetry-spool.mjs";
 
-const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
+const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} });
 
 function callbackValue(card, index = 0) {
   const button = card.body.elements.filter((item) => item.tag === "button")[index];
@@ -384,7 +384,7 @@ test("production HostShell startup zero-unread one-shot cannot redeliver post-re
   }
 });
 
-test("member parser accepts the real lark-cli 1.0.79 get/bots shapes", () => {
+test("member parser accepts the real lark-cli 1.0.80 get/bots shapes", () => {
   assert.deepEqual(memberNamesFromPayloads([
     { ok: true, data: { items: [{ member_id: "ou_user", name: "User" }] } },
     { ok: true, data: { items: [{ bot_id: "cli_bot", bot_name: "Bot" }] } },
@@ -533,7 +533,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       env.LARKIN_TELEMETRY_SPOOL_DIR = telemetryConfig.spoolDir;
       const fakeCliRoot = path.join(root, "fake-official-lark-cli"); const binDir = path.join(fakeCliRoot, "bin"); fs.mkdirSync(binDir, { recursive: true });
       fs.writeFileSync(path.join(fakeCliRoot, "package.json"), JSON.stringify({
-        name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "bin/lark-cli" },
+        name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "bin/lark-cli" },
       }));
       const sourceDir = path.join(stateDir, "lark-channel-source");
       const channelConfigDir = path.join(agent.larkConfigDir, "lark-channel");
@@ -550,7 +550,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       }] }), { mode: 0o600 });
       fs.writeFileSync(path.join(binDir, "lark-cli"), `#!/usr/bin/env bun
 const args=process.argv.slice(2);
-if(args[0]==="--version")process.stdout.write("1.0.79");
+if(args[0]==="--version")process.stdout.write("1.0.80");
 else if(args[0]==="config"&&args[1]==="bind"&&args[2]==="--help")process.stdout.write("--source lark-channel --identity bot");
 else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message_id:"om_mock_sent"}}));
 `, { mode: 0o755 });
@@ -608,7 +608,7 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
       let guardedStdout = "", guardedStderr = "";
       const guardedDependencies = {
         stateStore: store,
-        nativeCommand: { command: "/fixture/@larksuite/cli/scripts/run.js", argsPrefix: [], version: "1.0.79" },
+        nativeCommand: { command: "/fixture/@larksuite/cli/scripts/run.js", argsPrefix: [], version: "1.0.80" },
         spawn(command, args, options) {
           if (["+chat-messages-list", "+threads-messages-list"].includes(args[1])
               || (args[0] === "api" && args[1] === "GET" && args[2] === "/open-apis/im/v1/messages")) {

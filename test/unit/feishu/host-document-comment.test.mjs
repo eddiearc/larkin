@@ -217,7 +217,7 @@ test("document comment Mock workflow traces safe rejection, pending replay, Inbo
     const cliDependencies = {
         telemetry, stateStore: fixture.store,
         io: { stdout: (text) => { output.stdout += text; }, stderr: (text) => { output.stderr += text; } },
-        nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.79" },
+        nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.80" },
         spawn: (command, args, options) => {
           nativeCalls.push({ command, args, options });
           return { status: 0, signal: null, output: [], pid: 1, stdout: "{\"ok\":true}\n", stderr: "", error: undefined };

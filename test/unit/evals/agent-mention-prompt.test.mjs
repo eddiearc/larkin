@@ -76,7 +76,7 @@ test("lark-cli launcher passes --mention argv through without injecting --conten
     const code = launcher.runLarkCli(argv, { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, {
       io: { stdout() {}, stderr() {} },
       spawn,
-      nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.79" },
+      nativeCommand: { command: process.execPath, argsPrefix: ["/fixed/@larksuite/cli/scripts/run.js"], version: "1.0.80" },
       stateStore: store,
     });
     assert.equal(code, 0);

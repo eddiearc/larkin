@@ -92,7 +92,7 @@ childProcess.spawnSync = function(command, args, options = {}) {
   const pinned = require("node:path").resolve(String(command)) === require("node:path").resolve(process.env.OFFICIAL_CLI);
   if (!pinned) return originalSpawnSync.apply(this, arguments);
   const cli = args;
-  if (cli[0] === "--version") return { status: 0, stdout: "1.0.79\\n", stderr: "" };
+  if (cli[0] === "--version") return { status: 0, stdout: "1.0.80\\n", stderr: "" };
   if (cli[0] === "config" && cli[1] === "bind" && cli[2] === "--help") {
     return { status: 0, stdout: "Usage: lark-cli config bind --source lark-channel --identity bot-only\\n", stderr: "" };
   }
@@ -143,7 +143,7 @@ test("real run.mjs spawn gives host one root and canonical hydrated Agent paths"
     const fixtureBin = path.join(temp, "bin");
     fs.mkdirSync(path.dirname(official), { recursive: true, mode: 0o700 });
     fs.mkdirSync(fixtureBin, { mode: 0o700 });
-    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" } }), { mode: 0o600 });
     fs.writeFileSync(official, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
     fs.symlinkSync(official, path.join(fixtureBin, "lark-cli"));
     const result = spawnSync(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agent", APP, "--dry-run"], {

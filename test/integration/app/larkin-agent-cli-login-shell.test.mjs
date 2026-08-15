@@ -44,10 +44,10 @@ function fixture(shell) {
   const official = path.join(packageDir, "scripts", "run.sh");
   fs.mkdirSync(path.dirname(official), { recursive: true, mode: 0o700 });
   writePrivate(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" },
   }));
   fs.writeFileSync(official, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.79\\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.80\\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\\n' '--source lark-channel --identity bot-only'; exit 0; fi
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
 `, { mode: 0o700 });

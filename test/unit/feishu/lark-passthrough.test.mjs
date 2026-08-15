@@ -191,11 +191,11 @@ function passthroughWorkspace() {
   const officialPackage = path.join(temp, "official", "node_modules", "@larksuite", "cli");
   fs.mkdirSync(path.join(officialPackage, "scripts"), { recursive: true });
   fs.writeFileSync(path.join(officialPackage, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" },
   }));
   const official = path.join(officialPackage, "scripts", "run.sh");
   fs.writeFileSync(official, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.79\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.80\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0; fi
 {
   printf 'CONFIGDIR=%s\\n' "$LARKSUITE_CLI_CONFIG_DIR"

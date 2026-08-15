@@ -419,7 +419,10 @@ jobs:
       - resolve-release
       - prepare-release
       - assemble-release
-    if: needs.prepare-release.outputs.should_publish == 'true'
+    if: >-
+      always() &&
+      needs.prepare-release.outputs.should_publish == 'true' &&
+      needs.assemble-release.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
@@ -482,7 +485,11 @@ jobs:
       - prepare-release
       - assemble-release
       - verify-windows-release
-    if: needs.prepare-release.outputs.should_publish == 'true'
+    if: >-
+      always() &&
+      needs.prepare-release.outputs.should_publish == 'true' &&
+      needs.assemble-release.result == 'success' &&
+      needs.verify-windows-release.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -132,9 +132,9 @@ test("package version and explicit tag publication share one immutable combined-
   assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\/assets\/\$\{asset_ids\[0\]\}/);
   assert.match(workflow, /Expected exactly one uploaded draft asset named \$asset_name/);
   assert.match(workflow, /assemble-release:[\s\S]*bun scripts\/release\/assemble\.ts[\s\S]*actions\/upload-artifact@v4/);
-  assert.match(workflow, /verify-windows-release:[\s\S]*runs-on: windows-latest/);
+  assert.match(workflow, /verify-windows-release:[\s\S]*always\(\)[\s\S]*needs\.assemble-release\.result == 'success'[\s\S]*runs-on: windows-latest/);
   assert.match(workflow, /verify-windows-release:[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*path: release-tooling[\s\S]*actions\/download-artifact@v4[\s\S]*Get-FileHash[\s\S]*release-tooling\/scripts\/release\/smoke\.ts" --release-dir artifacts\/release/);
-  assert.match(workflow, /publish:[\s\S]*- verify-windows-release[\s\S]*Download Windows-verified assembled release[\s\S]*Finalize GitHub release/);
+  assert.match(workflow, /publish:[\s\S]*- verify-windows-release[\s\S]*always\(\)[\s\S]*needs\.verify-windows-release\.result == 'success'[\s\S]*Download Windows-verified assembled release[\s\S]*Finalize GitHub release/);
   assert.ok(workflow.indexOf("  verify-windows-release:") < workflow.indexOf("  publish:"));
   assert.match(workflow, /gh release edit[\s\S]*--draft=false/);
   assert.match(workflow, /bun scripts\/release\/assemble\.ts/);

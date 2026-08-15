@@ -50,11 +50,16 @@ async function stop(child: ChildProcess, platform: NodeJS.Platform = process.pla
   if (!child.pid) throw new Error("release smoke dashboard child has no pid");
   const plan = smokeTerminationPlan(platform, child.pid);
   if (plan.kind === "windows-tree") {
-    const killed = spawnSync(plan.command, plan.args, { encoding: "utf8", timeout: 10_000 });
-    if ((killed.error || killed.status !== 0) && child.exitCode === null && child.signalCode === null) {
-      throw new Error(`failed to terminate Windows dashboard process tree: ${killed.error?.message || `exit ${killed.status}`}\n${killed.stderr || ""}`);
+    const killer = spawn(plan.command, plan.args, { stdio: ["ignore", "ignore", "pipe"] });
+    let killerError: Error | null = null;
+    let killerStderr = "";
+    killer.once("error", (error) => { killerError = error; });
+    killer.stderr?.on("data", (chunk) => { killerStderr = `${killerStderr}${chunk}`.slice(-16_384); });
+    if (!await waitForExit(child, 10_000)) {
+      killer.kill();
+      throw new Error(`failed to terminate Windows dashboard process tree${killerError ? `: ${killerError.message}` : ""}\n${killerStderr}`);
     }
-    if (!await waitForExit(child, 5_000)) throw new Error("Windows dashboard process tree did not exit after taskkill");
+    if (!await waitForExit(killer, 1_000)) killer.kill();
     return;
   }
 

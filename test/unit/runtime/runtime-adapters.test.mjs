@@ -832,11 +832,16 @@ test("Pi default runtime fails closed with an empty unauthenticated official age
   const child = new FakeProcess();
   child.kill = (signal) => {
     child.killed.push(signal);
+    child.stdout.end();
+    child.stderr.end();
     child.emit("exit", 0, null);
     return true;
   };
   try {
-    const pending = createNativeRuntimeAdapter("pi", { spawn: () => child }).createSession(create({
+    const pending = createNativeRuntimeAdapter("pi", {
+      piCommand: process.execPath,
+      spawn: () => child,
+    }).createSession(create({
       workspaceDir: path.join(root, "workspace"),
       stateDir: path.join(root, "state"),
       model: "default",

@@ -146,7 +146,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       async busyInput(input) { submittedInputs.push(structuredClone(input)); return { status: "accepted", inputId: input.inputId }; },
       async cancel() {}, async close() {}, subscribe() { return () => {}; },
     };
-    const upgradeStore = createAgentStateStore(larkinHome, upgradeFixture.agent_id);
+    const upgradeStore = createAgentStateStore(larkinHome, upgradeFixture.agent_id, {
+      inspectProcess: (pid: number) => ({ ok: true, dead: false, startToken: `release-upgrade-${pid}` }),
+    });
     const runtimeHost = createRuntimeHost({
       adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return runtimeSession; } }),
       promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => upgradeStore, assertOfficialCliReady: () => {},

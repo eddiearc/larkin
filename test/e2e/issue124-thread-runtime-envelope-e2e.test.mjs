@@ -28,7 +28,9 @@ class FakeRuntimeSession {
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue124-boundary-"));
   const agentId = "cli_issue124BoundaryA1";
-  const store = createAgentStateStore(root, agentId);
+  const store = createAgentStateStore(root, agentId, {
+    inspectProcess: (pid) => ({ ok: true, dead: false, startToken: `issue124-e2e-${pid}` }),
+  });
   const agent = {
     agentId, name: agentId, runtime: "codex", model: "fixture", feishuAppId: agentId, feishuProfile: agentId,
     larkConfigDir: path.join(store.paths.root, "lark-cli-config"), workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root,

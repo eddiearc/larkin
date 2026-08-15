@@ -12,7 +12,9 @@ for (const mode of ["error-receipt", "throw-after-persist", "async-input-error"]
   test(`HostShell ${mode} keeps Inbox durable and degrades visible health without raw Runtime error data`, { timeout: 10_000 }, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-host-delivery-health-${mode}-`));
     const agentId = `cli_issue124Health${mode === "error-receipt" ? "Receipt" : mode === "throw-after-persist" ? "Throw" : "Async"}A1`;
-    const store = createAgentStateStore(root, agentId);
+    const store = createAgentStateStore(root, agentId, {
+      inspectProcess: (pid) => ({ ok: true, dead: false, startToken: `issue124-health-${pid}` }),
+    });
     const secret = "api_key=issue124-super-secret";
     let listener = () => {};
     let deliveries = 0;

@@ -240,7 +240,7 @@ jobs:
     needs:
       - resolve-release
       - prepare-release
-    if: needs.prepare-release.outputs.should_publish == 'true'
+    if: needs.prepare-release.outputs.should_publish == 'true' && github.event_name != 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -320,14 +320,18 @@ jobs:
           mv artifacts/release/release-manifest.json "$manifest"
           gh release upload "$RELEASE_TAG" \
             artifacts/release/larkin-v* "$manifest" \
-            --repo "$GITHUB_REPOSITORY" --clobber
+            --repo "$GITHUB_REPOSITORY"
 
   assemble-release:
     needs:
       - resolve-release
       - prepare-release
       - build
-    if: needs.prepare-release.outputs.should_publish == 'true'
+    if: >-
+      always() &&
+      needs.prepare-release.outputs.should_publish == 'true' &&
+      (needs.build.result == 'success' ||
+      (github.event_name == 'workflow_dispatch' && needs.build.result == 'skipped'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -357,9 +361,40 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
         run: |
           mkdir -p artifacts/platform
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'larkin-v*' --pattern 'release-manifest-*.json' \
-            --dir artifacts/platform
+          release_id="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\" and .draft == true) | .id"
+          )"
+          test -n "$release_id" && test "${release_id//$'\n'/}" = "$release_id" || {
+            echo "Expected exactly one draft release for $RELEASE_TAG" >&2
+            exit 1
+          }
+          metadata="$RUNNER_TEMP/larkin-release-assets.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" > "$metadata"
+          expected_assets=(
+            "larkin-${RELEASE_TAG}-linux-x64"
+            "larkin-${RELEASE_TAG}-linux-arm64"
+            "larkin-${RELEASE_TAG}-darwin-arm64"
+            "larkin-${RELEASE_TAG}-darwin-x64"
+            "larkin-${RELEASE_TAG}-windows-x64.exe"
+            release-manifest-linux-x64.json
+            release-manifest-linux-arm64.json
+            release-manifest-darwin-arm64.json
+            release-manifest-darwin-x64.json
+            release-manifest-windows-x64.json
+          )
+          for asset_name in "${expected_assets[@]}"; do
+            mapfile -t asset_ids < <(
+              jq -r --arg name "$asset_name" \
+                '.[] | select(.name == $name and .state == "uploaded") | .id' "$metadata"
+            )
+            test "${#asset_ids[@]}" -eq 1 || {
+              echo "Expected exactly one uploaded draft asset named $asset_name" >&2
+              exit 1
+            }
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_ids[0]}" \
+              -H 'Accept: application/octet-stream' > "artifacts/platform/$asset_name"
+          done
 
       - name: Assemble release manifest and checksums
         run: bun scripts/release/assemble.ts --input-dir artifacts/platform --out-dir artifacts/release
@@ -501,7 +536,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             artifacts/release/SHA256SUMS artifacts/release/release-manifest.json \
             artifacts/release/LICENSE artifacts/release/THIRD_PARTY_NOTICES.txt \
-            --repo "$GITHUB_REPOSITORY" --clobber
+            --repo "$GITHUB_REPOSITORY"
           for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64 windows-x64; do
             gh release delete-asset "$RELEASE_TAG" "release-manifest-${target}.json" \
               --repo "$GITHUB_REPOSITORY" --yes

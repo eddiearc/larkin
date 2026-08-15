@@ -4,7 +4,7 @@ import path from "node:path";
 import { test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
-const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
+const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8").replace(/\r\n/g, "\n");
 const GITLEAKS_BASELINE = [
   "26a9006be595b4bc86b851d797bbc58bb815a772:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:202",
   "1e12236e5462a361cf45e1b1b218aae035ed7451:test/unit/app/runtime-agent-interface-v2-live-safety.test.mjs:generic-api-key:138",

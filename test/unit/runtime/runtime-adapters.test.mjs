@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { resolveAgentCliExecutable } from "../../../dist/agent/agent-cli-capabilities.mjs";
@@ -458,7 +457,7 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
       ["--session", sessionFile]);
     const promptFile = launch.args[appendIndex + 1];
     assert.equal(fs.readFileSync(promptFile, "utf8"), "standing");
-    assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
     if (distribution === "external") {
       assert.equal(launch.command, "/fixture/external-pi");
       assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
@@ -830,40 +829,28 @@ test("Pi replaces only a provably zero-turn missing session and keeps meaningful
 
 test("Pi default runtime fails closed with an empty unauthenticated official agent directory", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-no-auth-"));
+  const child = new FakeProcess();
+  child.kill = (signal) => {
+    child.killed.push(signal);
+    child.emit("exit", 0, null);
+    return true;
+  };
   try {
-    const agentDir = path.join(root, "pi-agent");
-    const workspaceDir = path.join(root, "workspace");
-    const piCommand = path.join(root, "pi");
-    fs.mkdirSync(agentDir, { recursive: true });
-    fs.mkdirSync(workspaceDir, { recursive: true });
-    fs.writeFileSync(piCommand, `#!/usr/bin/env bun
-import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log("0.82.0"); process.exit(0); }
-const lines = readline.createInterface({ input: process.stdin });
-lines.on("line", (line) => {
-  const request = JSON.parse(line);
-  const data = request.type === "get_available_models" ? { models: [] } : { model: null, thinkingLevel: "off" };
-  console.log(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data }));
-});
-`, { mode: 0o755 });
-    fs.chmodSync(piCommand, 0o755);
-    const moduleUrl = new URL("../../../dist/runtime/runtime-adapters.mjs", import.meta.url).href;
-    const script = `
-      import { createNativeRuntimeAdapter } from ${JSON.stringify(moduleUrl)};
-      const input = { agentId: "cli_test", workspaceDir: ${JSON.stringify(workspaceDir)}, stateDir: ${JSON.stringify(path.join(root, "state"))}, standingPrompt: { version: "v1", content: "standing", hash: "abc" }, model: "default" };
-      createNativeRuntimeAdapter("pi").createSession(input).then(() => process.exit(2), error => { console.error(error.message); process.exit(1); });
-    `;
-    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
-      encoding: "utf8",
-      env: {
-        HOME: path.join(root, "home"),
-        PATH: process.env.PATH || "",
-        PI_CODING_AGENT_DIR: agentDir,
-        LARKIN_PI_COMMAND: piCommand,
-      },
-    });
-    assert.equal(result.status, 1, result.stderr || result.stdout);
-    assert.match(result.stderr, /no authenticated available models.*will not create a fallback session/i);
+    const pending = createNativeRuntimeAdapter("pi", { spawn: () => child }).createSession(create({
+      workspaceDir: path.join(root, "workspace"),
+      stateDir: path.join(root, "state"),
+      model: "default",
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const request of child.writes.slice(0, 2)) {
+      const data = request.type === "get_available_models"
+        ? { models: [] }
+        : { model: null, thinkingLevel: "off" };
+      child.stdout.write(`${JSON.stringify({
+        type: "response", id: request.id, command: request.type, success: true, data,
+      })}\n`);
+    }
+    await assert.rejects(pending, /no authenticated available models.*will not create a fallback session/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

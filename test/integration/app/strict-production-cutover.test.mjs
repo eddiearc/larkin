@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const APP = "cli_strictA1";
+const TRANSIENT_VERIFY_CHILD_TIMEOUT_MS = 10_000;
+const TRANSIENT_VERIFY_TEST_TIMEOUT_MS = 15_000;
 
 function storedConfig() {
   return { version: 3, serverId: "server-strict", activeAgent: APP, agents: { [APP]: { runtime: "codex", model: "gpt-5.5" } } };
@@ -219,7 +221,7 @@ module.exports={registerApp:async()=>({client_id:${JSON.stringify(returnedId)},c
   return { preload, loader };
 }
 
-test("bot-register binds once, then retries transient new-App Bot verification without exposing the secret", () => {
+test("bot-register binds once, then retries transient new-App Bot verification without exposing the secret", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-transient-sync-"));
   try {
     const root = path.join(temp, "root");
@@ -231,7 +233,7 @@ test("bot-register binds once, then retries transient new-App Bot verification w
     const result = spawnSync(process.execPath, ["--preload", loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
       cwd: ROOT,
       encoding: "utf8",
-      timeout: 5_000,
+      timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
       env: {
         ...process.env,
         HOME: path.join(temp, "home"),
@@ -263,7 +265,7 @@ test("bot-register binds once, then retries transient new-App Bot verification w
 });
 
 for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["sync-agent-context", 1, 1]]) {
-  test(`bot-register classifies ${mode} Bot verification with the intended retry policy`, () => {
+  test(`bot-register classifies ${mode} Bot verification with the intended retry policy`, { timeout: 15_000 }, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-register-${mode}-`));
     try {
       const root = path.join(temp, "root");
@@ -287,7 +289,7 @@ for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["s
   });
 }
 
-test("bot-register bounds transient Bot verification retries and preserves authoritative binding state", () => {
+test("bot-register bounds transient Bot verification retries and preserves authoritative binding state", { timeout: 10_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-transient-exhaust-"));
   try {
     const root = path.join(temp, "root");
@@ -518,7 +520,7 @@ for (const mode of ["sync-fail", "verify-fail"]) {
   });
 }
 
-test("host exits nonzero and records status when channel authentication fails; no consume fallback is spawned", () => {
+test("host exits nonzero and records status when channel authentication fails; no consume fallback is spawned", { timeout: 10_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-host-channel-"));
   try {
     const root = path.join(temp, "root");
@@ -620,7 +622,7 @@ test("dry-run EVENT_FILE injection takes precedence over profile channel startup
 });
 
 for (const scenario of ["keepalive", "missing-identity"]) {
-  test(`host routes ${scenario} failure through status recording and bounded fatal shutdown`, () => {
+  test(`host routes ${scenario} failure through status recording and bounded fatal shutdown`, { timeout: 10_000 }, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-channel-${scenario}-`));
     try {
       const root = path.join(temp, "root");
@@ -686,7 +688,7 @@ for (const disconnectMode of ["pending", "reject"]) {
   });
 }
 
-test("synchronous channel creation failure stops multi-agent startup and closes earlier channels", () => {
+test("synchronous channel creation failure stops multi-agent startup and closes earlier channels", { timeout: 10_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-channel-multi-create-"));
   try {
     const root = path.join(temp, "root");

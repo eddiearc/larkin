@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const source = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
+const CLEAN_BUILD_CHILD_TIMEOUT_MS = 60_000;
+const CLEAN_BUILD_TEST_TIMEOUT_MS = 70_000;
 
 test("authored source and generated runtime use the seven-domain mirrored layout", () => {
   const domains = ["agent", "app", "dashboard", "feishu", "platform", "runtime", "setup"];
@@ -63,14 +65,14 @@ test("production build, start, and Agent CLI graph contain only current entries"
   assert.match(source("scripts/release/install.ts"), /--rollback/);
 });
 
-test("a clean standalone shell build contains the complete new production entry graph", () => {
+test("a clean standalone shell build contains the complete new production entry graph", { timeout: CLEAN_BUILD_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-clean-build-"));
   try {
     const outDir = path.join(temp, "dist");
     const result = spawnSync(process.execPath, [path.join(ROOT, "scripts/build.mjs"), "--out-dir", outDir], {
       cwd: ROOT,
       encoding: "utf8",
-      timeout: 60_000,
+      timeout: CLEAN_BUILD_CHILD_TIMEOUT_MS,
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     for (const entry of ["app/runtime-process.mjs", "runtime/runtime-host.mjs", "runtime/runtime-adapters.mjs", "agent/context-prompt.mjs", "app/agent-cli.mjs"]) {

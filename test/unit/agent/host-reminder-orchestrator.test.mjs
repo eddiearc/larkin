@@ -65,7 +65,10 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   assert.strictEqual(f.inbox[0], f.deliveries[0], "the same target-complete envelope is persisted and delivered");
 });
 
-test("due reminder and startup redelivery reach final Runtime input with the same durable dm target", async () => {
+// Hosted Windows needed 7.3s under the serialized native gate; only the runner envelope is widened.
+test("due reminder and startup redelivery reach final Runtime input with the same durable dm target", {
+  timeout: 20_000,
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-target-runtime-"));
   const agentId = "cli_reminderTargetA1";
   const realAgent = { agentId, name: agentId, stateDir: path.join(root, "state", "agents", agentId) };

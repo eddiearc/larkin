@@ -124,7 +124,7 @@ jobs:
         run: bun run build
 
       - name: Run focused Windows unit and integration tests
-        run: bun test --isolate --max-concurrency 1 test/unit/agent/host-reminder-orchestrator.test.mjs test/unit/agent/inbox-projection.test.mjs test/unit/feishu/host-business-state.test.mjs test/unit/platform/release-artifacts.test.mjs test/unit/runtime/pi-inline-extensions.test.mjs test/unit/runtime/runtime-adapters.test.mjs test/unit/runtime/runtime-host.test.mjs test/integration/build/runtime-clean-cutover.test.mjs test/integration/build/release-platform-ci.test.mjs
+        run: bun test --isolate --max-concurrency 1 test/unit/agent/host-reminder-orchestrator.test.mjs test/unit/feishu/host-business-state.test.mjs test/unit/platform/release-artifacts.test.mjs test/unit/runtime/pi-inline-extensions.test.mjs test/unit/runtime/runtime-adapters.test.mjs test/unit/runtime/runtime-inbox-target.test.mjs test/integration/build/runtime-clean-cutover.test.mjs test/integration/build/release-platform-ci.test.mjs
 
       - name: Download exact Windows standalone build
         uses: actions/download-artifact@v4

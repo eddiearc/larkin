@@ -275,30 +275,6 @@ test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary r
   await host.shutdown("test complete");
 });
 
-test("targetless Runtime delivery derives canonical dm, chat, thread, and unlocatable targets in final input", async () => {
-  const session = new FakeSession();
-  const host = createRuntimeHost({
-    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
-    promptBuilder: new ContextPromptBuilder(),
-  });
-  try {
-    const agentId = "cli_targetDefenseA1";
-    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
-    await host.deliver(agentId, { message_id: "rem_dm", channel_type: "dm", channel_name: "system" });
-    await host.deliver(agentId, { message_id: "om_chat", chat_id: "oc_chat" });
-    await host.deliver(agentId, { message_id: "om_thread", chat_id: "oc_chat", thread_id: "omt_thread" });
-    await host.deliver(agentId, { message_id: "runtime_unlocatable" });
-    const inputs = [...session.prompts, ...session.steers].map((input) => input.text);
-    assert.equal(inputs.length, 4);
-    for (const target of ["dm:@system", "chat:oc_chat", "thread:oc_chat:omt_thread", "runtime:system"]) {
-      assert.ok(inputs.some((text) => text.includes(`Inbox changed for ${target}`)), `final Runtime input names ${target}`);
-    }
-    assert.equal(inputs.some((text) => /Inbox changed \(/.test(text)), false, "no final notice is targetless");
-  } finally {
-    await host.shutdown("target derivation test complete");
-  }
-});
-
 test("issue 122 old/base counterfactual retries a targetless notice while canonical poll makes the new path terminal", async () => {
   const run = async (oldProjection) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), oldProjection ? "larkin-issue122-old-" : "larkin-issue122-new-"));

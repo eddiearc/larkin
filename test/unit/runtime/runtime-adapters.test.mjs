@@ -452,9 +452,10 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     fs.mkdirSync(sessionDir, { recursive: true });
     const sessionFile = path.join(sessionDir, `${input.resumeSessionId}.jsonl`);
     fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
-    const piCommand = process.platform === "win32" ? process.execPath : "/fixture/external-pi";
+    const piCommand = "/fixture/external-pi";
     const pending = createNativeRuntimeAdapter("pi", {
       env: { LARKIN_PI_COMMAND: piCommand },
+      resolvePiProcessExtensionArgs: () => [],
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
     await new Promise((resolve) => setImmediate(resolve));
@@ -850,6 +851,7 @@ test("Pi default runtime fails closed with an empty unauthenticated official age
   try {
     const pending = createNativeRuntimeAdapter("pi", {
       env: { LARKIN_PI_COMMAND: process.execPath },
+      resolvePiProcessExtensionArgs: () => [],
       spawn: () => child,
     }).createSession(create({
       workspaceDir: path.join(root, "workspace"),

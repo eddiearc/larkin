@@ -61,6 +61,7 @@ export interface NativeRuntimeAdapterDependencies {
   createPiSession?: (input: RuntimeSessionCreate) => Promise<PiSessionProcessLike>;
   piRpcClientOptions?: PiRpcClientOptions;
   piCommand?: string;
+  resolvePiProcessExtensionArgs?: typeof resolvePiProcessExtensionArgs;
   codexCommand?: string;
   codexModelOverride?: string;
   spawnCodexUpdate?: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike;
@@ -871,7 +872,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     mergedEnv.PI_CODING_AGENT_DIR = piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId);
     mergedEnv.PI_TELEMETRY = "0";
   }
-  commandArgs.push(...resolvePiProcessExtensionArgs({
+  commandArgs.push(...(dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,
     env: mergedEnv,

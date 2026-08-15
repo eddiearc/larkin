@@ -10,7 +10,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const APP = "cli_dashboardDirectoryA1";
 const CONTROLLER = pathToFileURL(path.join(ROOT, "dist/dashboard/dashboard-config-controller.mjs")).href;
 const CONFIG = pathToFileURL(path.join(ROOT, "dist/platform/config.mjs")).href;
-const testManagedCli = (agent, env) => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" },
+const testManagedCli = (agent, env) => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.80" },
   env: { ...env, LARK_CHANNEL: "1", LARK_CHANNEL_CONFIG: path.join(agent.stateDir, "lark-channel-source", "config.json"),
     LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir } });
 

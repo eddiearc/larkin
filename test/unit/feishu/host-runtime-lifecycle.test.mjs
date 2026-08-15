@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} });
+const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} });
 
 test("production channel disconnect and RuntimeHost use one idempotent ordered shutdown", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-lifecycle-"));

@@ -58,10 +58,10 @@ function writeOfficialLarkCli(mockBin) {
   const launcher = path.join(packageDir, "scripts", "run.sh");
   fs.mkdirSync(path.dirname(launcher), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" },
   }), { mode: 0o600 });
   fs.writeFileSync(launcher, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.79\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.80\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then
   printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0
 fi

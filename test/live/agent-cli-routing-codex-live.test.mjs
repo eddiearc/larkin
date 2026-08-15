@@ -64,7 +64,7 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
       interactive: true, confirmInstall: () => true, env: installEnv, shell,
     });
     assert.equal(installed.installed, true);
-    assert.equal(installed.command.version, "1.0.79");
+    assert.equal(installed.command.version, "1.0.80");
 
     fs.writeFileSync(path.join(bin, "larkin"), `#!/bin/sh\nBUN_OPTIONS=--preload=${JSON.stringify(PRELOAD)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, "dist/app/cli.mjs"))} "$@"\n`, { mode: 0o700 });
     fs.writeFileSync(path.join(configDir, "config.json"), `${JSON.stringify({
@@ -80,7 +80,7 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
     // workflow seeds the same validated workspace shape without accessing the
     // macOS Keychain, then exercises the production routing/AOP process.
     loadAndSyncRuntimeAgent({ ...installEnv, LARKIN_CONFIG_DIR: configDir }, agentId, {
-      resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [KEYCHAIN_SAFE_BINDER], version: "1.0.79" }),
+      resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [KEYCHAIN_SAFE_BINDER], version: "1.0.80" }),
     });
     fs.writeFileSync(callsFile, "", { mode: 0o600 });
     fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), [

@@ -52,10 +52,10 @@ function writeLarkCli(binDir) {
   const launcher = path.join(packageDir, "scripts", "run.sh");
   fs.mkdirSync(path.dirname(launcher), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.sh" },
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.sh" },
   }), { mode: 0o600 });
   fs.writeFileSync(launcher, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.0.79\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '1.0.80\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then printf '%s\n' 'Usage: config bind --source lark-channel --identity bot-only'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ]; then
   ${JSON.stringify(process.execPath)} --eval 'const fs=require("node:fs"),path=require("node:path"),source=JSON.parse(fs.readFileSync(process.env.LARK_CHANNEL_CONFIG,"utf8")),id=source.accounts.app.id,dir=path.join(process.env.LARKSUITE_CLI_CONFIG_DIR,"lark-channel");fs.mkdirSync(dir,{recursive:true,mode:0o700});fs.writeFileSync(path.join(dir,"config.json"),JSON.stringify({apps:[{appId:id,appSecret:{source:"keychain",id:"appsecret:"+id},defaultAs:"bot",strictMode:"bot",users:[]}]}),{mode:0o600})'

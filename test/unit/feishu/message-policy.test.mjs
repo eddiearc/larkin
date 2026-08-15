@@ -151,7 +151,7 @@ module.exports.execFileImpl = function(_command, _args, _options, callback) {
   callback(null, JSON.stringify({ ok: true, data: { users: [], bots: [] } }), "");
 };
 module.exports.managedCliForAgent = function() {
-  return { command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.79" }, env: {} };
+  return { command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} };
 };
 module.exports.channelPackage = {
     createLarkChannel() {

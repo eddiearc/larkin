@@ -16,6 +16,7 @@ import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
 import { internalCommandSpec, processCommandToken, type InternalMode } from "./internal-command.js";
 import {
   ensureOfficialLarkCliForSetup,
+  formatOfficialLarkCliConsent,
 } from "./official-lark-cli.js";
 
 const CFG_DIR = process.env.LARKIN_CONFIG_DIR || path.join(os.homedir(), ".larkin");
@@ -129,16 +130,18 @@ export async function main(): Promise<void> {
   const official = await ensureOfficialLarkCliForSetup({
     env: process.env,
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-    async confirmInstall(command) {
-      say("[setup 0/5] Larkin 需要未修改的官方 lark-cli 作为 Feishu (Lark) 命令下游。");
-      say(`将执行：${command}`);
+    async confirmInstall(request) {
+      const copy = formatOfficialLarkCliConsent(request);
+      for (const line of copy.lines) say(line);
       const input = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const answer = (await input.question("是否安装？[y/N] ")).trim().toLowerCase();
+      const answer = (await input.question(copy.question)).trim().toLowerCase();
       input.close();
       return answer === "y" || answer === "yes";
     },
   }).catch((error) => die(error instanceof Error ? error.message : String(error)));
-  say(`[setup 0/5] ✓ 官方 lark-cli ${official.command.version}: ${official.command.command}${official.installed ? "（刚刚安装）" : ""}`);
+  const completedAction = official.setupAction === "upgrade" ? "（刚刚升级）"
+    : official.setupAction === "install" ? "（刚刚安装）" : "";
+  say(`[setup 0/5] ✓ 官方 lark-cli ${official.command.version}: ${official.command.command}${completedAction}`);
   say("\nAgent 与飞书（Lark）机器人按 App ID 一一对应：");
   say("  • 网页选择同一个机器人 → 热更新该 Agent，不重启其他 Agent");
   say("  • 网页创建新机器人 → 热挂载新 Agent，状态彼此独立\n");

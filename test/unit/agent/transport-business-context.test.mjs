@@ -82,10 +82,10 @@ test("production context renders a display-name mention and preserves exact lark
       appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
     }] }), { mode: 0o600 });
     fs.mkdirSync(path.dirname(official), { recursive: true });
-    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.mjs" } }));
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.mjs" } }));
     fs.writeFileSync(official, `#!/usr/bin/env bun
 const fs=require("node:fs"); const args=process.argv.slice(2);
-if(args[0]==="--version") { process.stdout.write("1.0.79\\n"); process.exit(0); }
+if(args[0]==="--version") { process.stdout.write("1.0.80\\n"); process.exit(0); }
 if(args[0]==="config"&&args[1]==="bind"&&args[2]==="--help") { process.stdout.write("--source lark-channel --identity bot-only\\n"); process.exit(0); }
 fs.appendFileSync(process.env.CALL_SINK,JSON.stringify(args)+"\\n");
 if(args.includes("+chat-members-list")) process.stdout.write(JSON.stringify({ok:true,data:{users:[{name:"林一丹",member_id:"ou_lin"}],bots:[]}}));

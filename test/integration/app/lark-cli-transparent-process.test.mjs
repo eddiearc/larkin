@@ -40,11 +40,11 @@ function fixture() {
     appId: agentId, appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
   }] })}\n`);
   writePrivate(path.join(packageDir, "package.json"), JSON.stringify({
-    name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.mjs" },
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.mjs" },
   }));
   writePrivate(official, `#!${process.execPath}
 import fs from "node:fs";
-if (process.argv[2] === "--version") { console.log("1.0.79"); process.exit(0); }
+if (process.argv[2] === "--version") { console.log("1.0.80"); process.exit(0); }
 if (process.argv[2] === "config" && process.argv[3] === "bind" && process.argv[4] === "--help") {
   console.log("--source lark-channel --identity bot-only"); process.exit(0);
 }

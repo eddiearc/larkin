@@ -287,7 +287,7 @@ test("post-stale official AuthStorage contender blocks behind the live heartbeat
     };
     const profileSync = syncAgentProfileAsync(agent, { ...process.env, LARKIN_CONFIG_DIR: temp }, {
       forceRebind: true, timeoutMs: 45_000,
-      resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [bindScript], version: "1.0.79" }),
+      resolveOfficialCli: () => ({ command: process.execPath, argsPrefix: [bindScript], version: "1.0.80" }),
     });
 
     await new Promise((resolve) => setTimeout(resolve, 31_500));

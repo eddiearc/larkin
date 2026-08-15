@@ -11,7 +11,7 @@ import { loadAndSyncRuntimeAgent } from "../../../dist/app/runtime-process.mjs";
 // CLI evidence runnable on non-macOS CI; macOS requires a separately designed
 // keychain-safe harness instead of silently touching the user's keychain.
 const RUN = process.env.LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND === "1" && process.platform !== "darwin";
-const VERSION = "1.0.79";
+const VERSION = "1.0.80";
 
 function privateJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -33,7 +33,7 @@ test.skipIf(!RUN)("published lark-cli binds two isolated lark-channel Bot worksp
       cwd: root, env: { ...process.env, HOME: home }, stdio: "pipe", timeout: 2 * 60_000,
     });
     const cli = path.join(prefix, "node_modules", ".bin", "lark-cli");
-    assert.match(execFileSync(cli, ["--version"], { encoding: "utf8", env: { ...process.env, HOME: home } }), /1\.0\.79/);
+    assert.match(execFileSync(cli, ["--version"], { encoding: "utf8", env: { ...process.env, HOME: home } }), /1\.0\.80/);
     assert.match(execFileSync(cli, ["config", "bind", "--help"], { encoding: "utf8", env: { ...process.env, HOME: home } }), /lark-channel/);
 
     const unboundRoot = path.join(root, "unbound", "lark-cli-config");

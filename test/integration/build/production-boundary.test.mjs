@@ -64,7 +64,7 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     fs.writeFileSync(preload, `module.exports={
   registerApp:async(opts)=>{require("node:fs").writeFileSync(process.env.REGISTER_MARKER,JSON.stringify(opts));opts.onQRCodeReady({url:"https://mock.invalid/grant",expireIn:60});return {client_id:opts.appId}},
   qrcode:{generate(){}},
-  managedOfficialCli:()=>({command:{command:"/verified/official-lark-cli",argsPrefix:[],version:"1.0.79"},env:{}}),
+  managedOfficialCli:()=>({command:{command:"/verified/official-lark-cli",argsPrefix:[],version:"1.0.80"},env:{}}),
   spawnSync(command,args){require("node:fs").appendFileSync(process.env.SPAWN_MARKER,JSON.stringify({command,args})+"\\n");return {status:0,stdout:"{}",stderr:""}}
 };`);
     const run = (args = [], extra = {}) => spawnSync(process.execPath, [path.join(ROOT, "dist/setup/grant-scopes.mjs"), "--wait-min", "1", ...args], {

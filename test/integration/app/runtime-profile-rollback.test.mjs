@@ -51,7 +51,7 @@ function fakeOfficialRunner({ fail = false, invalidWorkspace = false } = {}) {
     }] }, null, 2)}\n`, { mode: 0o600 });
     return { status: 0, signal: null, stdout: JSON.stringify({ ok: true, workspace: "lark-channel", app_id: appId, identity: "bot-only" }), stderr: "", error: undefined };
   };
-  return { calls, resolveOfficialCli: () => ({ command: "/usr/local/bin/lark-cli", argsPrefix: [], version: "1.0.79" }), runOfficialCli };
+  return { calls, resolveOfficialCli: () => ({ command: "/usr/local/bin/lark-cli", argsPrefix: [], version: "1.0.80" }), runOfficialCli };
 }
 
 test("profile sync binds one Bot through the verified official lark-channel workspace without argv/stdin secret", () => {

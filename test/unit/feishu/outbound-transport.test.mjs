@@ -132,10 +132,10 @@ test("production transport preserves topic reply then attachment lark-cli side-e
       appSecret: { source: "keychain", id: `appsecret:${agentId}` }, defaultAs: "bot", strictMode: "bot", users: [],
     }] }), { mode: 0o600 });
     fs.mkdirSync(path.dirname(official), { recursive: true });
-    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.79", bin: { "lark-cli": "scripts/run.mjs" } }));
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.mjs" } }));
     fs.writeFileSync(official, `#!/usr/bin/env bun
 const args=process.argv.slice(2);
-if(args[0]==="--version") { process.stdout.write("1.0.79\\n"); process.exit(0); }
+if(args[0]==="--version") { process.stdout.write("1.0.80\\n"); process.exit(0); }
 if(args[0]==="config"&&args[1]==="bind"&&args[2]==="--help") { process.stdout.write("--source lark-channel --identity bot-only\\n"); process.exit(0); }
 require("node:fs").appendFileSync(process.env.LARK_CALL_SINK, JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})+"\\n");
 process.stdout.write(JSON.stringify({data:{message_id:process.argv.includes("--image")?"om_image":"om_text"}}));

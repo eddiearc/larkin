@@ -1,0 +1,63 @@
+{
+  "fixture_version": 1,
+  "provenance": {
+    "release_tag": "v0.2.79",
+    "source_commit": "7d08182d3e6f0b4a0bbfe3dce34834f14af14abb",
+    "captured_at": "2026-08-15T19:47:31.667Z",
+    "capture_method": "Built the exact tagged source and invoked its exported createAgentStateStore/createRuntimeHost APIs with a canonical thread Inbox row plus a targetless Runtime deliver call.",
+    "claim_boundary": "Source-tag API capture with volatile UUID/time retained; not a customer home, npm install, standalone binary capture, or full historical environment checkout."
+  },
+  "agent_id": "cli_upgrade0279A1",
+  "files": {
+    "feishu-inbox.ndjson": [
+      {
+        "message_id": "om_upgrade_0279",
+        "chat_id": "oc_issue124_upgrade",
+        "thread_id": "omt_issue124_upgrade",
+        "channel_type": "thread",
+        "channel_name": "issue124upgrade",
+        "parent_channel_type": "channel",
+        "parent_channel_name": "cissue124upgrade",
+        "content": "captured upgrade fixture body",
+        "envelope_version": 2,
+        "target": "thread:oc_issue124_upgrade:omt_issue124_upgrade",
+        "target_seq": 1
+      }
+    ],
+    "inbox-state.json": {
+      "version": 2,
+      "targets": {
+        "thread:oc_issue124_upgrade:omt_issue124_upgrade": {
+          "latest_received_seq": 1,
+          "model_seen_seq": 0
+        }
+      },
+      "messages": {
+        "om_upgrade_0279": {
+          "target": "thread:oc_issue124_upgrade:omt_issue124_upgrade",
+          "seq": 1
+        }
+      },
+      "drafts": {},
+      "intents": {}
+    },
+    "runtime-deliveries.json": {
+      "version": 1,
+      "records": [
+        {
+          "deliveryId": "f24f5cb8-7c7c-407c-ac14-a92f1a0638f4",
+          "messageId": "om_upgrade_0279",
+          "status": "accepted",
+          "input": {
+            "inputId": "f24f5cb8-7c7c-407c-ac14-a92f1a0638f4",
+            "deliveryId": "f24f5cb8-7c7c-407c-ac14-a92f1a0638f4",
+            "kind": "wake",
+            "text": "The Larkin Inbox changed (1 pending message). Poll that target at the next safe boundary before any target-local side effect.",
+            "attempt": 0
+          },
+          "updatedAt": "2026-08-15T19:47:31.667Z"
+        }
+      ]
+    }
+  }
+}

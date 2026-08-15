@@ -237,6 +237,16 @@ function validInboxLockOwner(value: unknown): value is InboxLockOwner {
 
 export type InboxDeliveryPreparation = "appended" | "present" | "active" | "terminal_error" | "consumed";
 
+export type CanonicalInboxAppendResult =
+  | { status: "appended" | "duplicate_pending"; envelope: InboxEnvelope }
+  | { status: "duplicate_consumed"; envelope: null };
+
+export type InboxDeliverySourceResolution =
+  | { status: "pending"; target: string; envelope: InboxEnvelope }
+  | { status: "consumed"; target: string }
+  | { status: "missing"; code: "canonical_inbox_row_missing" }
+  | { status: "invalid"; code: "canonical_inbox_malformed" | "duplicate_message_id" | "inbox_state_conflict" };
+
 export class AgentStateStore {
   readonly paths: AgentStatePaths;
   private readonly boundary: string;
@@ -602,18 +612,82 @@ export class AgentStateStore {
     else append();
   }
 
-  /** Append a canonical Inbox envelope once by stable message_id under the shared cross-process lock. */
-  appendInboxOnce(value: unknown): boolean {
+  /**
+   * Append one canonical Inbox envelope and return the exact normalized object
+   * serialized to disk. Stable message_id dedupe and locator coherence share the
+   * same lock as poll, so HostShell can deliver that very object without a
+   * persistence/delivery split.
+   */
+  appendCanonicalInboxOnce(value: unknown): CanonicalInboxAppendResult {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Inbox envelope must be an object");
-    const messageId = (value as Record<string, unknown>).message_id;
+    const input = value as InboxEnvelope;
+    const messageId = input.message_id;
     if (typeof messageId !== "string" || !messageId) throw new Error("Inbox envelope requires message_id");
-    targetKeyOfInboxEnvelope(value as InboxEnvelope);
+    const incomingTarget = targetKeyOfInboxEnvelope(input);
     const file = this.file("inbox");
     return this.withInboxLock(file, () => {
-      if (this.inboxState().messages[messageId]) return false;
-      if (this.readNdjson<Record<string, unknown>>("inbox").some((row) => row.message_id === messageId)) return false;
-      this.appendInboxUnlocked(value);
-      return true;
+      const state = this.inboxState();
+      const matching = this.readNdjson<InboxEnvelope>("inbox").filter((row) => row.message_id === messageId);
+      if (matching.length > 1) throw new Error("Inbox duplicate message_id has multiple pending canonical rows");
+      if (matching.length === 1) {
+        const existing = matching[0]!;
+        if (targetKeyOfInboxEnvelope(existing) !== incomingTarget) {
+          throw new Error("Inbox duplicate message_id conflicts with its canonical target");
+        }
+        const known = state.messages[messageId];
+        if (known && known.target !== incomingTarget) throw new Error("Inbox message state conflicts with its canonical target");
+        return { status: "duplicate_pending", envelope: existing };
+      }
+      const known = state.messages[messageId];
+      if (known) {
+        if (known.target !== incomingTarget) throw new Error("Inbox duplicate message_id conflicts with consumed canonical target");
+        const targetState = state.targets[known.target];
+        if (!targetState || targetState.model_seen_seq < known.seq) {
+          throw new Error("Inbox state references a missing unconsumed canonical row");
+        }
+        return { status: "duplicate_consumed", envelope: null };
+      }
+      return { status: "appended", envelope: this.appendInboxUnlocked(input) };
+    });
+  }
+
+  /** Append a canonical Inbox envelope once by stable message_id under the shared cross-process lock. */
+  appendInboxOnce(value: unknown): boolean {
+    return this.appendCanonicalInboxOnce(value).status === "appended";
+  }
+
+  /**
+   * Resolve one Runtime delivery solely from canonical Inbox row/state. This is
+   * the single replay resolver used for startup migration and every retry; it
+   * never derives a DM/generic fallback from stale RuntimeInput text.
+   */
+  resolveInboxDeliverySource(messageId: string): InboxDeliverySourceResolution {
+    if (!messageId) return { status: "missing", code: "canonical_inbox_row_missing" };
+    return this.withInboxLock(this.file("inbox"), () => {
+      let rows: InboxEnvelope[];
+      try { rows = this.readNdjson<InboxEnvelope>("inbox"); }
+      catch { return { status: "invalid", code: "canonical_inbox_malformed" }; }
+      const matching = rows.filter((row) => row?.message_id === messageId);
+      if (matching.length > 1) return { status: "invalid", code: "duplicate_message_id" };
+      const state = this.inboxState();
+      const known = state.messages[messageId];
+      if (matching.length === 1) {
+        const envelope = matching[0]!;
+        let target: string;
+        try { target = targetKeyOfInboxEnvelope(envelope); }
+        catch { return { status: "invalid", code: "canonical_inbox_malformed" }; }
+        if (known && (known.target !== target || !validSequence(known.seq))) {
+          return { status: "invalid", code: "inbox_state_conflict" };
+        }
+        return { status: "pending", target, envelope };
+      }
+      if (!known) return { status: "missing", code: "canonical_inbox_row_missing" };
+      if (!isCanonicalInboxTarget(known.target) || !validSequence(known.seq)) {
+        return { status: "invalid", code: "inbox_state_conflict" };
+      }
+      const targetState = state.targets[known.target];
+      if (targetState && targetState.model_seen_seq >= known.seq) return { status: "consumed", target: known.target };
+      return { status: "missing", code: "canonical_inbox_row_missing" };
     });
   }
 

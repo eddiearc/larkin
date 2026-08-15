@@ -13,6 +13,7 @@ const GITLEAKS_BASELINE = [
 test("PR and main CI retain Linux source checks and add a blocking native Windows x64 gate", () => {
   const workflow = read(".github/workflows/release-platform-smoke.yml");
   const windowsJob = workflow.slice(workflow.indexOf("  windows-native:"));
+  const releaseSmoke = read("scripts/release/smoke.ts");
   assert.equal(read(".gitleaksignore"), `${GITLEAKS_BASELINE.join("\n")}\n`, "only the two verified synthetic history fingerprints may be ignored");
   assert.equal(fs.existsSync(path.join(ROOT, "THIRD_PARTY_NOTICES.md")), false, "complete lock-graph notices must not be tracked at the repository root");
   assert.match(workflow, /pull_request:/);
@@ -46,11 +47,14 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
   const expectedWindowsTestInputs = [
     "test/unit/agent/host-reminder-orchestrator.test.mjs",
     "test/unit/feishu/host-business-state.test.mjs",
+    "test/unit/feishu/host-runtime-delivery-health.test.mjs",
     "test/unit/platform/release-artifacts.test.mjs",
     "test/unit/runtime/pi-inline-extensions.test.mjs",
     "test/unit/runtime/runtime-adapters.test.mjs",
     "test/unit/runtime/runtime-inbox-target.test.mjs",
     "test/integration/build/runtime-clean-cutover.test.mjs",
+    "test/integration/build/runtime-upgrade-in-place.test.mjs",
+    "test/e2e/issue124-thread-runtime-envelope-e2e.test.mjs",
     "test/integration/build/release-platform-ci.test.mjs",
   ];
   const focusedWindowsCommand = windowsJob.split("\n").map((line) => line.trim())
@@ -63,6 +67,16 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
     "test/unit/feishu/host-business-state.test.mjs",
     "test/unit/runtime/runtime-inbox-target.test.mjs",
   ]) assert.ok(expectedWindowsTestInputs.includes(issue122Test), `${issue122Test} covers issue 122 natively`);
+  for (const issue124Test of [
+    "test/unit/feishu/host-runtime-delivery-health.test.mjs",
+    "test/integration/build/runtime-upgrade-in-place.test.mjs",
+    "test/e2e/issue124-thread-runtime-envelope-e2e.test.mjs",
+  ]) assert.ok(expectedWindowsTestInputs.includes(issue124Test), `${issue124Test} covers issue 124 natively`);
+  assert.match(releaseSmoke, /v0\.3\.3-active-thread\.json/);
+  assert.match(releaseSmoke, /createRuntimeHost/);
+  assert.match(releaseSmoke, /candidate Runtime did not migrate the active targetless v0\.3\.3 ledger/);
+  assert.match(releaseSmoke, /artifact v0\.3\.3 same-home upgrade state/);
+  assert.match(releaseSmoke, /read-only artifact upgrade check mutated candidate Runtime state/);
   for (const broadProblematicTest of [
     "test/unit/agent/inbox-projection.test.mjs",
     "test/unit/runtime/runtime-host.test.mjs",

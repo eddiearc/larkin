@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
-import { targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
+import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
+import type { InboxDeliverySourceResolution } from "../agent/agent-state-store.js";
 import { SpanKind } from "@opentelemetry/api";
 import type { ContextPromptBuilder } from "../agent/context-prompt.js";
 import type {
@@ -30,6 +31,9 @@ export interface AgentRuntimeConfig {
 export type DeliveryStatus = "pending" | "submitting" | "accepted" | "consumed" | "error";
 export interface DeliveryRecord {
   deliveryId: string; messageId: string; status: DeliveryStatus; input: RuntimeInput; updatedAt: string;
+  /** Structured canonical target is authoritative; RuntimeInput.text is always rebuilt before submission. */
+  target?: string;
+  wakeReason?: string;
   reason?: string; retryable?: boolean;
 }
 interface DeliveryFile { version: 1; records: DeliveryRecord[] }
@@ -38,6 +42,7 @@ interface DeliveryStateStore {
   readNdjson?<T>(key: "inbox"): T[];
   writeJson(key: "runtimeDeliveries", value: unknown): void;
   withInboxTransaction<T>(operation: () => T): T;
+  resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
 }
 
 export type RuntimeHostEvent =
@@ -103,6 +108,21 @@ export interface StagedRuntimeCandidate {
 const MAX_DELIVERIES = 2048;
 const now = (): string => new Date().toISOString();
 const isActiveDelivery = (status: DeliveryStatus): boolean => ["pending", "submitting", "accepted"].includes(status);
+type ReplayFailureCode = "canonical_inbox_row_missing" | "canonical_inbox_malformed" | "duplicate_message_id" | "inbox_state_conflict" | "delivery_target_conflict" | "structured_target_missing";
+const REPLAY_FAILURE_CODES: ReadonlySet<string> = new Set<ReplayFailureCode>([
+  "canonical_inbox_row_missing", "canonical_inbox_malformed", "duplicate_message_id",
+  "inbox_state_conflict", "delivery_target_conflict", "structured_target_missing",
+]);
+
+function replayFailureReason(code: ReplayFailureCode): string {
+  return `Runtime delivery quarantined (${code}): no safe canonical Inbox target is available; the Inbox/ledger remain durable for operator recovery`;
+}
+
+function replayFailureCodeOf(record: DeliveryRecord): ReplayFailureCode | null {
+  if (record.status !== "error" || typeof record.reason !== "string") return null;
+  const code = /^Runtime delivery quarantined \(([^)]+)\):/.exec(record.reason)?.[1];
+  return code && REPLAY_FAILURE_CODES.has(code) ? code as ReplayFailureCode : null;
+}
 
 function deliveryFile(agent: ManagedAgent): string | null {
   return agent.config.stateDir ? path.join(agent.config.stateDir, "runtime-deliveries.json") : null;
@@ -228,6 +248,66 @@ export function createRuntimeHost(options: {
     agent.byMessage.set(record.messageId, record.deliveryId);
     emitConsumed(agent, persist(agent));
     return agent.records.get(record.deliveryId) ?? record;
+  };
+
+  type RecordInputPreparation =
+    | { status: "ready"; target: string }
+    | { status: "consumed" }
+    | { status: "error"; code: ReplayFailureCode; reason: string };
+
+  const scrubQuarantinedInput = (record: DeliveryRecord, reason: string): void => {
+    const staleInput = record.input && typeof record.input === "object" ? record.input : null;
+    record.input = {
+      inputId: typeof staleInput?.inputId === "string" && staleInput.inputId ? staleInput.inputId : record.deliveryId,
+      deliveryId: record.deliveryId,
+      kind: "wake",
+      text: reason,
+      attempt: Number.isSafeInteger(staleInput?.attempt) && Number(staleInput?.attempt) >= 0 ? Number(staleInput!.attempt) : 0,
+    };
+  };
+
+  /** Rebuild every submitted notice from canonical structured state, never persisted text. */
+  const prepareRecordInput = (agent: ManagedAgent, record: DeliveryRecord, busy: boolean): RecordInputPreparation => {
+    let target = typeof record.target === "string" && isCanonicalInboxTarget(record.target) ? record.target : null;
+    if (agent.stateStore?.resolveInboxDeliverySource) {
+      let source: InboxDeliverySourceResolution;
+      try { source = agent.stateStore.resolveInboxDeliverySource(record.messageId); }
+      catch { source = { status: "invalid", code: "canonical_inbox_malformed" }; }
+      if (source.status === "consumed") return { status: "consumed" };
+      if (source.status === "missing" || source.status === "invalid") {
+        return { status: "error", code: source.code, reason: replayFailureReason(source.code) };
+      }
+      if (target && target !== source.target) {
+        return { status: "error", code: "delivery_target_conflict", reason: replayFailureReason("delivery_target_conflict") };
+      }
+      target = source.target;
+    }
+    if (!target) return { status: "error", code: "structured_target_missing", reason: replayFailureReason("structured_target_missing") };
+    const staleInput = record.input && typeof record.input === "object" ? record.input : null;
+    const attempt = Number.isSafeInteger(staleInput?.attempt) && Number(staleInput?.attempt) >= 0 ? Number(staleInput!.attempt) : 0;
+    const inputId = typeof staleInput?.inputId === "string" && staleInput.inputId ? staleInput.inputId : record.deliveryId;
+    record.target = target;
+    record.input = {
+      inputId,
+      deliveryId: record.deliveryId,
+      kind: busy ? "inbox_update" : "wake",
+      text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId: record.deliveryId, target,
+        ...(record.wakeReason ? { wakeReason: record.wakeReason } : {}) }),
+      attempt,
+    };
+    return { status: "ready", target };
+  };
+
+  const quarantineRecord = (agent: ManagedAgent, record: DeliveryRecord, code: ReplayFailureCode): DeliveryReceipt => {
+    const reason = replayFailureReason(code);
+    scrubQuarantinedInput(record, reason);
+    record.reason = reason;
+    record.retryable = false;
+    const finalRecord = setRecord(agent, record, "error");
+    if (finalRecord.status === "consumed") return { status: "accepted", deliveryId: record.deliveryId };
+    emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
+      messageId: record.messageId, status: "error", reason });
+    return { status: "error", deliveryId: record.deliveryId, reason, retryable: false };
   };
 
   const reconcileExternalConsumption = (agent: ManagedAgent): void => {
@@ -375,6 +455,18 @@ export function createRuntimeHost(options: {
     agent.submitting = true;
     if (!busy) agent.busy = true; // Reserve the turn before prompt() can yield.
     try {
+      const prepared = prepareRecordInput(agent, record, busy);
+      if (prepared.status === "consumed") {
+        if (!busy) agent.busy = false;
+        const consumedRecord = setRecord(agent, record, "consumed");
+        emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: consumedRecord.deliveryId,
+          messageId: consumedRecord.messageId, status: "consumed" });
+        return { status: "accepted", deliveryId: record.deliveryId };
+      }
+      if (prepared.status === "error") {
+        if (!busy) agent.busy = false;
+        return quarantineRecord(agent, record, prepared.code);
+      }
       const session = await ensureSession(agent);
       const submittingRecord = setRecord(agent, record, "submitting");
       if (submittingRecord.status === "consumed") {
@@ -798,7 +890,10 @@ export function createRuntimeHost(options: {
           ? stateStore.withInboxTransaction(() => {
             const deliveryFile = stateStore.readJson<DeliveryFile>("runtimeDeliveries", { version: 1, records: [] });
             if (!stateStore.readNdjson) return deliveryFile;
-            const inboxIds = new Set(stateStore.readNdjson<Record<string, unknown>>("inbox").flatMap((row) =>
+            let inboxRows: Record<string, unknown>[];
+            try { inboxRows = stateStore.readNdjson<Record<string, unknown>>("inbox"); }
+            catch { return deliveryFile; }
+            const inboxIds = new Set(inboxRows.flatMap((row) =>
               typeof row?.message_id === "string" ? [row.message_id] : []));
             let changed = false;
             const records = deliveryFile.records.map((record) => {
@@ -820,8 +915,32 @@ export function createRuntimeHost(options: {
           stabilityTimer: null, recreateReason: null, stopped: false, disabledReason: null,
           configurationRecovery: null, stateStore, readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false };
-        for (const record of agent.records.values()) if (isActiveDelivery(record.status)) record.status = "pending";
-        emitConsumed(agent, persist(agent)); managed.set(config.agentId, agent);
+        const startupConsumed: DeliveryRecord[] = [];
+        const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
+        for (const record of agent.records.values()) {
+          const existingQuarantine = replayFailureCodeOf(record);
+          if (existingQuarantine) {
+            startupQuarantined.push({ record, code: existingQuarantine });
+            continue;
+          }
+          if (!isActiveDelivery(record.status)) continue;
+          record.status = "pending";
+          const prepared = prepareRecordInput(agent, record, false);
+          if (prepared.status === "consumed") {
+            record.status = "consumed";
+            record.updatedAt = now();
+            startupConsumed.push(record);
+          } else if (prepared.status === "error") {
+            record.status = "error";
+            record.updatedAt = now();
+            scrubQuarantinedInput(record, prepared.reason);
+            record.reason = prepared.reason;
+            record.retryable = false;
+            startupQuarantined.push({ record, code: prepared.code });
+          }
+        }
+        managed.set(config.agentId, agent);
+        emitConsumed(agent, [...startupConsumed, ...persist(agent)]);
         try {
           await ensureSession(agent);
           activeCount += 1;
@@ -835,6 +954,11 @@ export function createRuntimeHost(options: {
           emit({ type: "agent-status", agentId: config.agentId, status: "error", error: reason,
             ...(error instanceof RuntimePrerequisiteError ? { readiness: error.readiness } : {}) });
         }
+        const visibleQuarantines = startupQuarantined.filter(({ record }) => agent.records.get(record.deliveryId)?.status === "error");
+        for (const { record, code } of visibleQuarantines) emit({ type: "delivery", agentId: config.agentId,
+          deliveryId: record.deliveryId, messageId: record.messageId, status: "error", reason: replayFailureReason(code) });
+        if (visibleQuarantines.length) emit({ type: "agent-status", agentId: config.agentId, status: "error",
+          error: `${visibleQuarantines.length} Runtime delivery record(s) quarantined; canonical Inbox recovery is required` });
         agent.poller = setInterval(() => reconcileExternalConsumption(agent), 250); agent.poller.unref?.();
       });
       await Promise.all(startups);
@@ -861,7 +985,13 @@ export function createRuntimeHost(options: {
       if (existingId) {
         const existing = agent.records.get(existingId);
         if (existing?.status === "error") {
-          existing.input.attempt += 1;
+          if (existing.target && existing.target !== target) return quarantineRecord(agent, existing, "delivery_target_conflict");
+          existing.target = target;
+          if (typeof envelope.wake_reason === "string") existing.wakeReason = envelope.wake_reason;
+          const priorAttempt = existing.input && Number.isSafeInteger(existing.input.attempt) ? existing.input.attempt : 0;
+          existing.input = existing.input && typeof existing.input === "object"
+            ? { ...existing.input, attempt: priorAttempt + 1 }
+            : { inputId: existing.deliveryId, deliveryId: existing.deliveryId, kind: "wake", text: "", attempt: priorAttempt + 1 };
           delete existing.reason;
           delete existing.retryable;
           setRecord(agent, existing, "pending");
@@ -882,10 +1012,12 @@ export function createRuntimeHost(options: {
       }
       const deliveryId = crypto.randomUUID();
       const busy = agent.busy || agent.submitting;
+      const wakeReason = typeof envelope.wake_reason === "string" ? envelope.wake_reason : undefined;
       const input: RuntimeInput = { inputId: deliveryId, deliveryId, kind: busy ? "inbox_update" : "wake",
         text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId, target,
-          ...(typeof envelope.wake_reason === "string" ? { wakeReason: envelope.wake_reason } : {}) }), attempt: 0 };
-      const record: DeliveryRecord = { deliveryId, messageId, status: "pending", input, updatedAt: now() };
+          ...(wakeReason ? { wakeReason } : {}) }), attempt: 0 };
+      const record: DeliveryRecord = { deliveryId, messageId, status: "pending", input, target,
+        ...(wakeReason ? { wakeReason } : {}), updatedAt: now() };
       agent.records.set(deliveryId, record); agent.byMessage.set(messageId, deliveryId); persist(agent);
       if (agent.disabledReason) {
         reconcileAbsentCanonical(agent, record);

@@ -406,10 +406,11 @@ test("delivery ownership, dedupe and correlation survive recreation and reach co
   const adapter = { id: "codex", capabilities: {}, async createSession() { const session = new FakeSession(); session.sessionId = `session-${sessions.length + 1}`; sessions.push(session); return session; } };
   const config = { agentId, name: agentId, runtime: "codex", model: "gpt", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
   try {
-    store.appendNdjson("inbox", { message_id: "om_persist", target: "chat:oc_persist", content: "canonical" });
+    const persistedEnvelope = { message_id: "om_persist", target: "chat:oc_persist", chat_id: "oc_persist", content: "canonical" };
+    store.appendNdjson("inbox", persistedEnvelope);
     const host1 = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
     await host1.start([config]);
-    const accepted = await host1.deliver(agentId, { message_id: "om_persist" });
+    const accepted = await host1.deliver(agentId, persistedEnvelope);
     await host1.shutdown("simulated process exit");
 
     const events = [];
@@ -417,7 +418,7 @@ test("delivery ownership, dedupe and correlation survive recreation and reach co
     host2.subscribe((event) => events.push(event));
     await host2.start([config]);
     assert.equal(sessions[1].prompts[0].inputId, accepted.deliveryId, "pending reconstruction preserves deliveryId");
-    assert.deepEqual(await host2.deliver(agentId, { message_id: "om_persist" }), { status: "duplicate", deliveryId: accepted.deliveryId });
+    assert.deepEqual(await host2.deliver(agentId, persistedEnvelope), { status: "duplicate", deliveryId: accepted.deliveryId });
     store.drainInbox();
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(events.some((event) => event.type === "delivery" && event.status === "consumed" && event.deliveryId === accepted.deliveryId));
@@ -525,7 +526,7 @@ test("turn end retries an accepted wake when the Agent never polls without advan
   }
 });
 
-test("startup migration consumes orphan synthetic active deliveries but never guesses for real om_ messages", async () => {
+test("startup migration consumes orphan synthetic active deliveries and quarantines a real message without canonical Inbox evidence", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-synthetic-migration-"));
   const agentId = "cli_migrateA1";
   const store = createAgentStateStore(root, agentId);
@@ -540,13 +541,16 @@ test("startup migration consumes orphan synthetic active deliveries but never gu
     promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
   try {
     await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
-    assert.deepEqual(session.prompts.map((input) => input.inputId), ["delivery-real"], "only the real message retains delivery ownership");
-    const statuses = Object.fromEntries(store.readJson("runtimeDeliveries", { records: [] }).records
-      .map((item) => [item.messageId, item.status]));
-    assert.equal(statuses.redeliver_509c, "consumed");
-    assert.equal(statuses.rem_legacy, "consumed");
-    assert.equal(statuses.interaction_run_missing, "consumed");
-    assert.equal(statuses.om_real_missing, "accepted", "real Feishu delivery is never blindly consumed without Inbox evidence");
+    assert.deepEqual(session.prompts, [], "a real message without canonical Inbox evidence is never resubmitted from stale text");
+    const records = Object.fromEntries(store.readJson("runtimeDeliveries", { records: [] }).records
+      .map((item) => [item.messageId, item]));
+    assert.equal(records.redeliver_509c.status, "consumed");
+    assert.equal(records.rem_legacy.status, "consumed");
+    assert.equal(records.interaction_run_missing.status, "consumed");
+    assert.equal(records.om_real_missing.status, "error");
+    assert.equal(records.om_real_missing.retryable, false);
+    assert.match(records.om_real_missing.reason, /canonical_inbox_row_missing/);
+    assert.notEqual(records.om_real_missing.input.text, "check", "quarantine scrubs the stale targetless Runtime input");
   } finally {
     await host.shutdown("test complete");
     fs.rmSync(root, { recursive: true, force: true });

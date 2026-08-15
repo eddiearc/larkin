@@ -151,6 +151,33 @@ test("Inbox delivery preparation treats consumed Runtime ownership as final acro
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("canonical Inbox append returns the exact persisted shape and deduplicates coherently across consumption", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-canonical-append-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateCanonicalAppendA1");
+    const candidate = { message_id: "om_canonical_once", chat_id: "oc_canonical", thread_id: "omt_canonical",
+      target: "thread:oc_canonical:omt_canonical", content: "canonical" };
+    const appended = store.appendCanonicalInboxOnce(candidate);
+    assert.equal(appended.status, "appended");
+    assert.deepEqual(store.readNdjson("inbox"), [appended.envelope]);
+    assert.equal(appended.envelope.envelope_version, 2);
+    assert.equal(appended.envelope.target_seq, 1);
+
+    const pendingDuplicate = store.appendCanonicalInboxOnce(candidate);
+    assert.equal(pendingDuplicate.status, "duplicate_pending");
+    assert.deepEqual(pendingDuplicate.envelope, appended.envelope);
+    assert.equal(store.readNdjson("inbox").length, 1);
+    assert.throws(() => store.appendCanonicalInboxOnce({ ...candidate, chat_id: "oc_wrong",
+      target: "thread:oc_wrong:omt_canonical" }), /duplicate message_id conflicts/);
+    assert.equal(store.readNdjson("inbox").length, 1);
+
+    store.pollInbox({ target: candidate.target, limit: 1 });
+    assert.deepEqual(store.appendCanonicalInboxOnce(candidate), { status: "duplicate_consumed", envelope: null });
+    assert.deepEqual(store.readNdjson("inbox"), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-stable-inbox-id-"));
   try {

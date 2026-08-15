@@ -120,6 +120,9 @@ test("invalid or missing legacy canonical rows are quarantined visibly without t
     ["missing", (files) => { files["feishu-inbox.ndjson"] = null; }],
     ["orphan-thread", (files) => { delete files["feishu-inbox.ndjson"][0].chat_id; }],
     ["conflicting-target", (files) => { files["feishu-inbox.ndjson"][0].target = "chat:oc_wrong"; }],
+    ["conflicting-sequence", (files) => { files["inbox-state.json"].messages.om_upgrade_033.seq = 2; }],
+    ["malformed-row-sequence", (files) => { files["feishu-inbox.ndjson"][0].target_seq = "one"; }],
+    ["pending-row-marked-consumed", (files) => { files["inbox-state.json"].targets[TARGET].model_seen_seq = 1; }],
     ["duplicate-message-id", (files) => { files["feishu-inbox.ndjson"].push(structuredClone(files["feishu-inbox.ndjson"][0])); }],
     ["syntactically-malformed", (files) => { files["feishu-inbox.ndjson"] = "syntactically-malformed"; }],
   ];

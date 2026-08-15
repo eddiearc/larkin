@@ -634,8 +634,20 @@ export class AgentStateStore {
         if (targetKeyOfInboxEnvelope(existing) !== incomingTarget) {
           throw new Error("Inbox duplicate message_id conflicts with its canonical target");
         }
+        if (existing.target_seq !== undefined && !validSequence(existing.target_seq)) {
+          throw new Error("Inbox duplicate message_id has a malformed canonical sequence");
+        }
         const known = state.messages[messageId];
-        if (known && known.target !== incomingTarget) throw new Error("Inbox message state conflicts with its canonical target");
+        if (known) {
+          if (known.target !== incomingTarget) throw new Error("Inbox message state conflicts with its canonical target");
+          if (validSequence(existing.target_seq) && existing.target_seq !== known.seq) {
+            throw new Error("Inbox message state conflicts with its canonical sequence");
+          }
+          const targetState = state.targets[known.target];
+          if (targetState && targetState.model_seen_seq >= known.seq) {
+            throw new Error("Inbox pending row conflicts with consumed model-seen state");
+          }
+        }
         return { status: "duplicate_pending", envelope: existing };
       }
       const known = state.messages[messageId];
@@ -676,8 +688,16 @@ export class AgentStateStore {
         let target: string;
         try { target = targetKeyOfInboxEnvelope(envelope); }
         catch { return { status: "invalid", code: "canonical_inbox_malformed" }; }
-        if (known && (known.target !== target || !validSequence(known.seq))) {
-          return { status: "invalid", code: "inbox_state_conflict" };
+        if (envelope.target_seq !== undefined && !validSequence(envelope.target_seq)) {
+          return { status: "invalid", code: "canonical_inbox_malformed" };
+        }
+        if (known) {
+          const targetState = state.targets[known.target];
+          if (known.target !== target || !validSequence(known.seq)
+            || (validSequence(envelope.target_seq) && envelope.target_seq !== known.seq)
+            || Boolean(targetState && targetState.model_seen_seq >= known.seq)) {
+            return { status: "invalid", code: "inbox_state_conflict" };
+          }
         }
         return { status: "pending", target, envelope };
       }

@@ -46,7 +46,12 @@ export function smokeArtifactEnvironment(input: SmokeEnvironmentInput): NodeJS.P
     NO_COLOR: "1",
   };
   if (input.platform === "win32") {
-    const root = windowsRoot(input.systemEnvironment || process.env);
+    const systemEnvironment = input.systemEnvironment || process.env;
+    const root = windowsRoot(systemEnvironment);
+    const psModulePath = systemEnvironment.PSModulePath;
+    if (!psModulePath || /[\r\n\0]/.test(psModulePath)) {
+      throw new Error("release smoke requires a valid Windows PowerShell module path");
+    }
     return {
       ...common,
       USERPROFILE: input.home,
@@ -54,6 +59,7 @@ export function smokeArtifactEnvironment(input: SmokeEnvironmentInput): NodeJS.P
       TMP: temporaryDirectory,
       SystemRoot: root,
       WINDIR: root,
+      PSModulePath: psModulePath,
     };
   }
   return { ...common, TMPDIR: temporaryDirectory };

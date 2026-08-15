@@ -20,7 +20,7 @@ test("Windows smoke uses only system PowerShell and Windows profile/temp variabl
     larkinHome: "C:\\smoke\\home\\.larkin",
     restrictedPath,
     temporaryDirectory: "C:\\smoke\\tmp",
-    systemEnvironment: { SystemRoot: root },
+    systemEnvironment: { SystemRoot: root, PSModulePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules" },
   }), {
     HOME: "C:\\smoke\\home",
     LARKIN_HOME: "C:\\smoke\\home\\.larkin",
@@ -32,6 +32,7 @@ test("Windows smoke uses only system PowerShell and Windows profile/temp variabl
     TMP: "C:\\smoke\\tmp",
     SystemRoot: root,
     WINDIR: root,
+    PSModulePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules",
   });
 });
 
@@ -62,4 +63,8 @@ test("dashboard cleanup uses taskkill tree termination on Windows and signals on
   });
   assert.throws(() => smokeTerminationPlan("win32", 0, { SystemRoot: "C:\\Windows" }), /valid pid/);
   assert.throws(() => prepareRestrictedSmokePath("win32", "unused", {}, () => true), /system root/);
+  assert.throws(() => smokeArtifactEnvironment({
+    platform: "win32", home: "C:\\smoke\\home", larkinHome: "C:\\smoke\\home\\.larkin",
+    restrictedPath: "C:\\Windows", systemEnvironment: { SystemRoot: "C:\\Windows" },
+  }), /PowerShell module path/);
 });

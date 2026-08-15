@@ -385,7 +385,7 @@ test("an artificially old but live Inbox lock cannot be reclaimed by a cross-pro
   const moduleFile = path.join(ROOT, "dist/agent/agent-state-store.cjs");
   let child;
   try {
-    f.store.appendNdjson("inbox", { message_id: "om_old" });
+    f.store.appendNdjson("inbox", { message_id: "om_old", chat_id: "oc_old" });
     const drained = f.store.pollInbox({
       afterRead() {
         const old = new Date(Date.now() - 60_000);
@@ -394,7 +394,7 @@ test("an artificially old but live Inbox lock cannot be reclaimed by a cross-pro
 const fs = require("node:fs");
 const { createAgentStateStore } = require(process.argv[1]);
 fs.writeFileSync(process.argv[4], "started");
-createAgentStateStore(process.argv[2], process.argv[3]).appendNdjson("inbox", { message_id: "om_new" });
+createAgentStateStore(process.argv[2], process.argv[3]).appendNdjson("inbox", { message_id: "om_new", chat_id: "oc_new" });
 fs.writeFileSync(process.argv[5], "complete");
 `, moduleFile, f.root, f.agentId, marker, appended], { stdio: "ignore" });
         const deadline = Date.now() + 2_000;

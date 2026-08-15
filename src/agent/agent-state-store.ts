@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.js";
 import { acquireProcessLock, inspectProcess } from "../platform/process-state.js";
 import { isWindows } from "../platform/secure-metadata.js";
-import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
+import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
   "senderProfiles" | "readReceipts" | "pendingReact" | "runtimeDeliveries" | "inboxState" | "freshnessState" | "documentComments" | "reminders" | "interactions";
@@ -120,7 +120,7 @@ interface InboxSendIntent {
 interface InboxStateFile {
   version: 2;
   targets: Record<string, InboxTargetState>;
-  messages: Record<string, { target: string; seq: number }>;
+  messages: Record<string, { target: string; seq: number; kind?: string }>;
   drafts: Record<string, InboxDraft>;
   intents: Record<string, InboxSendIntent>;
 }
@@ -153,8 +153,10 @@ function normalizeInboxState(value: unknown): InboxStateFile {
   if (raw.messages && typeof raw.messages === "object" && !Array.isArray(raw.messages)) {
     for (const [messageId, candidate] of Object.entries(raw.messages)) {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
-      const row = candidate as { target?: unknown; seq?: unknown };
-      if (typeof row.target === "string" && row.target && validSequence(row.seq)) state.messages[messageId] = { target: row.target, seq: row.seq };
+      const row = candidate as { target?: unknown; seq?: unknown; kind?: unknown };
+      if (typeof row.target === "string" && row.target && validSequence(row.seq)) state.messages[messageId] = {
+        target: row.target, seq: row.seq, ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}),
+      };
     }
   }
   if (raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) {
@@ -469,13 +471,14 @@ export class AgentStateStore {
   private normalizeInboxEnvelope(value: unknown, state: InboxStateFile): InboxEnvelope {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Inbox envelope must be an object");
     const input = value as InboxEnvelope;
-    const target = typeof input.target === "string" && input.target ? input.target : targetKeyOfInboxEnvelope(input);
+    const target = targetKeyOfInboxEnvelope(input);
     const current = state.targets[target] ?? { latest_received_seq: 0, model_seen_seq: 0 };
     const requested = validSequence(input.target_seq) ? input.target_seq : 0;
     const targetSeq = requested > current.latest_received_seq ? requested : current.latest_received_seq + 1;
     state.targets[target] = { ...current, latest_received_seq: targetSeq };
     if (typeof input.message_id === "string" && input.message_id) {
-      state.messages[input.message_id] = { target, seq: targetSeq };
+      state.messages[input.message_id] = { target, seq: targetSeq,
+        ...(typeof input.kind === "string" && input.kind ? { kind: input.kind } : {}) };
       const messageIds = Object.keys(state.messages);
       for (const stale of messageIds.slice(0, Math.max(0, messageIds.length - 2_048))) delete state.messages[stale];
     }
@@ -483,15 +486,17 @@ export class AgentStateStore {
   }
 
   private reconcileInboxRows(rows: InboxEnvelope[], state: InboxStateFile): InboxEnvelope[] {
-    return rows.map((row) => {
-      const target = typeof row.target === "string" && row.target ? row.target : targetKeyOfInboxEnvelope(row);
+    const targets = rows.map((row) => targetKeyOfInboxEnvelope(row));
+    return rows.map((row, index) => {
+      const target = targets[index]!;
       const existing = typeof row.message_id === "string" ? state.messages[row.message_id] : undefined;
       const current = state.targets[target] ?? { latest_received_seq: 0, model_seen_seq: 0 };
       const targetSeq = validSequence(row.target_seq) ? row.target_seq
         : existing?.target === target ? existing.seq : current.latest_received_seq + 1;
       current.latest_received_seq = Math.max(current.latest_received_seq, targetSeq);
       state.targets[target] = current;
-      if (typeof row.message_id === "string" && row.message_id) state.messages[row.message_id] = { target, seq: targetSeq };
+      if (typeof row.message_id === "string" && row.message_id) state.messages[row.message_id] = { target, seq: targetSeq,
+        ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}) };
       return { ...row, envelope_version: 2, target, target_seq: targetSeq };
     });
   }
@@ -602,6 +607,7 @@ export class AgentStateStore {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Inbox envelope must be an object");
     const messageId = (value as Record<string, unknown>).message_id;
     if (typeof messageId !== "string" || !messageId) throw new Error("Inbox envelope requires message_id");
+    targetKeyOfInboxEnvelope(value as InboxEnvelope);
     const file = this.file("inbox");
     return this.withInboxLock(file, () => {
       if (this.inboxState().messages[messageId]) return false;
@@ -620,6 +626,7 @@ export class AgentStateStore {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Inbox envelope must be an object");
     const messageId = (value as Record<string, unknown>).message_id;
     if (typeof messageId !== "string" || !messageId) throw new Error("Inbox envelope requires message_id");
+    targetKeyOfInboxEnvelope(value as InboxEnvelope);
     const file = this.file("inbox");
     return this.withInboxLock(file, () => {
       const ledger = this.readJson<RuntimeDeliveryStore>("runtimeDeliveries", { version: 1, records: [] });
@@ -657,6 +664,9 @@ export class AgentStateStore {
    * this transaction is active waits and becomes part of the next batch.
    */
   pollInbox<T extends InboxEnvelope = InboxEnvelope>(options: InboxPollOptions = {}): InboxPollResult<T> {
+    if (options.target && !isCanonicalInboxTarget(options.target)) {
+      throw new Error(`Invalid canonical Inbox poll target ${JSON.stringify(options.target)}`);
+    }
     const file = this.file("inbox");
     return this.withInboxLock(file, () => {
       let rawRows: T[];
@@ -670,13 +680,13 @@ export class AgentStateStore {
       const envelopes: T[] = [];
       const remaining: T[] = [];
       for (const row of rows) {
-        const selectedTarget = typeof row.target === "string" ? row.target : targetKeyOfInboxEnvelope(row);
+        const selectedTarget = targetKeyOfInboxEnvelope(row);
         if (envelopes.length < limit && (!options.target || options.target === selectedTarget)) envelopes.push(row);
         else remaining.push(row);
       }
       const pendingCount = remaining.reduce((count, row) => {
         if (!options.target) return count + 1;
-        const rowTarget = typeof row.target === "string" ? row.target : targetKeyOfInboxEnvelope(row);
+        const rowTarget = targetKeyOfInboxEnvelope(row);
         return count + (rowTarget === options.target ? 1 : 0);
       }, 0);
       if (!envelopes.length) return { envelopes, consumedDeliveryIds: [], seenThroughSeq: null, pendingCount };
@@ -703,7 +713,7 @@ export class AgentStateStore {
       }
       let seenThroughSeq: number | null = null;
       for (const envelope of envelopes) {
-        const target = String(envelope.target || targetKeyOfInboxEnvelope(envelope));
+        const target = targetKeyOfInboxEnvelope(envelope);
         const targetSeq = Number(envelope.target_seq);
         const targetState = state.targets[target] ?? { latest_received_seq: targetSeq, model_seen_seq: 0 };
         if (validSequence(targetSeq)) {
@@ -726,10 +736,11 @@ export class AgentStateStore {
   resolveInboxMessageTarget(messageId: string): string | null {
     return this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      const known = state.messages[messageId]?.target;
-      if (known) return known;
+      const known = state.messages[messageId];
+      if (known) return targetKeyOfInboxEnvelope({ message_id: messageId, target: known.target,
+        ...(known.kind ? { kind: known.kind } : {}) });
       const row = this.readNdjson<InboxEnvelope>("inbox").find((candidate) => candidate.message_id === messageId);
-      return row ? (typeof row.target === "string" ? row.target : targetKeyOfInboxEnvelope(row)) : null;
+      return row ? targetKeyOfInboxEnvelope(row) : null;
     });
   }
 

@@ -184,7 +184,7 @@ test("local control keeps upsert ID idempotency and coalesces only concurrent re
     const publicStore = createAgentStateStore(root, "cli_newA1");
     const status = publicStore.readJson("status", {});
     publicStore.writeJson("status", { ...status, reconnectingAt: new Date(Date.now() + 1_000).toISOString() });
-    publicStore.appendNdjson("inbox", { message_id: "om_reconnect_refusal", content: "pending during reconnect" });
+    publicStore.appendNdjson("inbox", { message_id: "om_reconnect_refusal", chat_id: "oc_reconnect_refusal", content: "pending during reconnect" });
     const refused = await requestSessionReset({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 0 });
     assert.deepEqual(refused, {
       ok: false, agentId: "cli_newA1", code: "channel_reconnecting",

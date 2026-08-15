@@ -4,10 +4,25 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
-import { createRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
+import { createRuntimeHost as createProductionRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
 import { RuntimePrerequisiteError } from "../../../dist/runtime/runtime-readiness.mjs";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
 import { ProcessingEyeOrchestrator } from "../../../dist/feishu/host-processing-eye.mjs";
+
+// Unrelated RuntimeHost scenarios use a producer-valid canonical chat locator. The dedicated
+// runtime-inbox-target contract invokes the unwrapped production host for rejection coverage.
+function createRuntimeHost(options) {
+  const host = createProductionRuntimeHost(options);
+  const deliver = host.deliver.bind(host);
+  host.deliver = (agentId, envelope) => {
+    const messageId = typeof envelope?.message_id === "string" ? envelope.message_id : "";
+    const alreadyLocatable = typeof envelope?.target === "string" || typeof envelope?.chat_id === "string"
+      || (envelope?.kind === "reminder" && /^rem_[A-Za-z0-9_-]+$/.test(messageId))
+      || (envelope?.kind === "redelivery" && /^redeliver_[A-Za-z0-9_-]+$/.test(messageId));
+    return deliver(agentId, alreadyLocatable ? envelope : { ...envelope, chat_id: "oc_runtime_host_fixture" });
+  };
+  return host;
+}
 
 class FakeSession {
   sessionId = "session-1";
@@ -275,6 +290,55 @@ test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary r
   await host.shutdown("test complete");
 });
 
+test("issue 122 injected former prompt-builder target omission retries while the corrected exact-target path is terminal", async () => {
+  const run = async (formerPromptOmission) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), formerPromptOmission ? "larkin-issue122-former-prompt-" : "larkin-issue122-current-"));
+    const agentId = formerPromptOmission ? "cli_issue122FormerA1" : "cli_issue122CurrentA1";
+    const store = createAgentStateStore(root, agentId);
+    const session = new FakeSession();
+    const canonicalBuilder = new ContextPromptBuilder();
+    const promptBuilder = formerPromptOmission ? {
+      build(input) { return canonicalBuilder.build(input); },
+      buildInboxNotice(input) { return canonicalBuilder.buildInboxNotice({ ...input, target: undefined }); },
+    } : canonicalBuilder;
+    const host = createRuntimeHost({
+      adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+      promptBuilder, stateStoreFor: () => store,
+    });
+    try {
+      await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+      const source = { kind: "reminder", message_id: formerPromptOmission ? "rem_issue122_former" : "rem_issue122_current",
+        target: "runtime:reminder", channel_type: "dm", channel_name: "system", wake: true };
+      store.appendNdjson("inbox", source);
+      assert.equal(store.readNdjson("inbox")[0].target, "runtime:reminder");
+      await host.deliver(agentId, source);
+      if (formerPromptOmission) {
+        assert.doesNotMatch(session.prompts[0].text, /Inbox changed for /, "injected former prompt-builder omission produces a targetless final payload");
+      } else {
+        assert.match(session.prompts[0].text, /Inbox changed for runtime:reminder/, "new final payload names the exact poll target");
+        const polled = store.pollInbox({ target: "runtime:reminder", limit: 1 });
+        assert.deepEqual(polled.envelopes.map((row) => row.message_id), [source.message_id]);
+      }
+      session.emit({ type: "turn-start", turnId: formerPromptOmission ? "former-turn" : "current-turn" });
+      session.emit({ type: "turn-end", turnId: formerPromptOmission ? "former-turn" : "current-turn" });
+      await new Promise((resolve) => setImmediate(resolve));
+      return { prompts: session.prompts.length, inbox: store.readNdjson("inbox"),
+        statuses: store.readJson("runtimeDeliveries", { records: [] }).records.map((record) => record.status) };
+    } finally {
+      await host.shutdown("issue 122 counterfactual complete");
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const oldResult = await run(true);
+  const newResult = await run(false);
+  assert.equal(oldResult.prompts, 2, "the injected former prompt-builder target omission leaves the valid durable row and retries at turn end");
+  assert.equal(oldResult.inbox.length, 1);
+  assert.deepEqual(oldResult.statuses, ["accepted"]);
+  assert.equal(newResult.prompts, 1, "exact-target durable poll prevents turn-end retry");
+  assert.deepEqual(newResult.inbox, []);
+  assert.deepEqual(newResult.statuses, ["consumed"]);
+});
+
 test("Codex compatibility recovery closes, updates once, recreates, and retries the owned delivery", async () => {
   const sessions = [];
   let recoveries = 0;
@@ -342,7 +406,7 @@ test("delivery ownership, dedupe and correlation survive recreation and reach co
   const adapter = { id: "codex", capabilities: {}, async createSession() { const session = new FakeSession(); session.sessionId = `session-${sessions.length + 1}`; sessions.push(session); return session; } };
   const config = { agentId, name: agentId, runtime: "codex", model: "gpt", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
   try {
-    store.appendNdjson("inbox", { message_id: "om_persist", content: "canonical" });
+    store.appendNdjson("inbox", { message_id: "om_persist", target: "chat:oc_persist", content: "canonical" });
     const host1 = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
     await host1.start([config]);
     const accepted = await host1.deliver(agentId, { message_id: "om_persist" });
@@ -497,7 +561,7 @@ test("a canonical drain that wins before the current deliver call atomically clo
   const host = createRuntimeHost({ adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
   try {
-    store.appendNdjson("inbox", { message_id: "om_drain_won", wake: true });
+    store.appendNdjson("inbox", { message_id: "om_drain_won", target: "chat:oc_drain_won", wake: true });
     store.drainInbox();
     await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
     const receipt = await host.deliver(agentId, { message_id: "om_drain_won", wake: true });

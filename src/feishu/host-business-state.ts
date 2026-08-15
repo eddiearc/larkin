@@ -1,4 +1,5 @@
 import type { AgentStatePaths } from "../platform/root-layout.js";
+import { RUNTIME_REDELIVERY_TARGET, RUNTIME_REMINDER_TARGET } from "../agent/inbox-projection.js";
 import crypto from "node:crypto";
 import {
   createMessageEnvelope,
@@ -318,7 +319,9 @@ export interface InboundEnvelopeOptions {
 }
 
 export interface ReminderEnvelope {
+  kind: "reminder";
   message_id: string;
+  target: typeof RUNTIME_REMINDER_TARGET;
   seq: number;
   sender_name: "定时提醒";
   sender_type: "system";
@@ -331,7 +334,9 @@ export interface ReminderEnvelope {
 }
 
 export interface RedeliveryEnvelope {
+  kind: "redelivery";
   message_id: string;
+  target: typeof RUNTIME_REDELIVERY_TARGET;
   seq: number;
   sender_name: "系统";
   sender_type: "system";
@@ -428,33 +433,37 @@ export class HostEnvelopeProjector {
             : `本条存量提醒缺少可用的飞书 message_id/chat_id，无法安全推断原会话；请先用 ${this.larkCommand("im +chat-search")} 确认目标，禁止猜测发送`,
       `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
     ].filter((line): line is string => Boolean(line));
-    return {
+    const envelope = {
+      kind: "reminder" as const,
       message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}`,
       seq,
-      sender_name: "定时提醒",
-      sender_type: "system",
-      channel_type: "dm",
-      channel_name: "system",
+      sender_name: "定时提醒" as const,
+      sender_type: "system" as const,
+      channel_type: "dm" as const,
+      channel_name: "system" as const,
       content: lines.join("\n"),
       timestamp: this.now().toISOString(),
       thread_id: null,
-      wake: true,
+      wake: true as const,
     };
+    return { ...envelope, target: RUNTIME_REMINDER_TARGET };
   }
 
   createRedeliveryEnvelope(agentId: string, wakeCount: number): RedeliveryEnvelope {
     const seq = this.nextSequence(agentId);
-    return {
+    const envelope = {
+      kind: "redelivery" as const,
       message_id: `redeliver_${this.randomHex(6)}`,
       seq,
-      sender_name: "系统",
-      sender_type: "system",
-      channel_type: "dm",
-      channel_name: "system",
+      sender_name: "系统" as const,
+      sender_type: "system" as const,
+      channel_type: "dm" as const,
+      channel_name: "system" as const,
       content: `[启动补投] 服务重启期间有 ${wakeCount} 条本应唤醒你的消息未被读取（可能包含用户消息、@提及或定时提醒）。请先用 ${this.agentCommand("inbox check")} 看目标摘要，再用 ${this.agentCommand("inbox poll")} 领取完整消息；仅当 message_id 以 om_ 开头时才用 ${this.larkCommand("im +messages-reply")}，系统 rem_/redeliver_ ID 不可回复；有 chat_id 时可用 ${this.larkCommand("im +messages-send")}，否则先查询确认目标，禁止猜测。`,
       timestamp: this.now().toISOString(),
       thread_id: null,
     };
+    return { ...envelope, target: RUNTIME_REDELIVERY_TARGET };
   }
 }
 

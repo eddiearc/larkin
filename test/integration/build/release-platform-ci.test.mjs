@@ -43,10 +43,31 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
   assert.match(workflow, /windows-release-artifact:[\s\S]*bun scripts\/release\/build\.ts --target windows-x64 --out-dir artifacts\/release[\s\S]*actions\/upload-artifact@v4/);
   assert.match(workflow, /windows-native:\n\s+name: Windows 11 x64 core and standalone gate\n\s+needs: windows-release-artifact\n\s+runs-on: windows-latest/);
   assert.match(windowsJob, /bun run build/);
-  assert.match(windowsJob, /bun test --isolate --max-concurrency 1/);
-  assert.match(windowsJob, /test\/unit\/runtime\/pi-inline-extensions\.test\.mjs/);
-  assert.match(windowsJob, /test\/unit\/runtime\/runtime-adapters\.test\.mjs/);
-  assert.match(windowsJob, /test\/integration\/build\/release-platform-ci\.test\.mjs/);
+  const expectedWindowsTestInputs = [
+    "test/unit/agent/host-reminder-orchestrator.test.mjs",
+    "test/unit/feishu/host-business-state.test.mjs",
+    "test/unit/platform/release-artifacts.test.mjs",
+    "test/unit/runtime/pi-inline-extensions.test.mjs",
+    "test/unit/runtime/runtime-adapters.test.mjs",
+    "test/unit/runtime/runtime-inbox-target.test.mjs",
+    "test/integration/build/runtime-clean-cutover.test.mjs",
+    "test/integration/build/release-platform-ci.test.mjs",
+  ];
+  const focusedWindowsCommand = windowsJob.split("\n").map((line) => line.trim())
+    .find((line) => line.startsWith("run: bun test --isolate --max-concurrency 1 "));
+  assert.equal(focusedWindowsCommand,
+    `run: bun test --isolate --max-concurrency 1 ${expectedWindowsTestInputs.join(" ")}`,
+    "the native Windows gate keeps the exact focused coverage contract");
+  for (const issue122Test of [
+    "test/unit/agent/host-reminder-orchestrator.test.mjs",
+    "test/unit/feishu/host-business-state.test.mjs",
+    "test/unit/runtime/runtime-inbox-target.test.mjs",
+  ]) assert.ok(expectedWindowsTestInputs.includes(issue122Test), `${issue122Test} covers issue 122 natively`);
+  for (const broadProblematicTest of [
+    "test/unit/agent/inbox-projection.test.mjs",
+    "test/unit/runtime/runtime-host.test.mjs",
+  ]) assert.equal(expectedWindowsTestInputs.includes(broadProblematicTest), false,
+    `${broadProblematicTest} is not a standalone native Windows input`);
   assert.match(windowsJob, /actions\/download-artifact@v4[\s\S]*bun run release:smoke -- --release-dir artifacts\/release/);
   assert.doesNotMatch(windowsJob, /secrets\.|LARKIN_RUN_OFFICIAL_LARK_CHANNEL_BIND|test\/live|continue-on-error/);
   assert.match(workflow, /fetch-depth: 0\n\s+persist-credentials: false/);

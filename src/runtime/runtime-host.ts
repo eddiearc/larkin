@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
+import { targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { SpanKind } from "@opentelemetry/api";
 import type { ContextPromptBuilder } from "../agent/context-prompt.js";
 import type {
@@ -845,6 +846,16 @@ export function createRuntimeHost(options: {
       const messageId = String(envelope.message_id || envelope.seq || crypto.randomUUID());
       const agent = managed.get(agentId);
       if (!agent) { telemetry?.delivery(agentId, messageId, "error"); throw new Error(`unknown runtime Agent: ${agentId}`); }
+      let target: string;
+      try {
+        target = targetKeyOfInboxEnvelope(envelope);
+      } catch (error) {
+        const reason = `Inbox target derivation failed: ${error instanceof Error ? error.message : String(error)}`;
+        const deliveryId = `invalid-target-${crypto.createHash("sha256").update(`${agentId}\0${messageId}`).digest("hex").slice(0, 24)}`;
+        telemetry?.delivery(agentId, messageId, "error");
+        emit({ type: "delivery", agentId, deliveryId, messageId, status: "error", reason });
+        return { status: "error", deliveryId, reason, retryable: false };
+      }
       reconcileExternalConsumption(agent);
       const existingId = agent.byMessage.get(messageId);
       if (existingId) {
@@ -872,8 +883,7 @@ export function createRuntimeHost(options: {
       const deliveryId = crypto.randomUUID();
       const busy = agent.busy || agent.submitting;
       const input: RuntimeInput = { inputId: deliveryId, deliveryId, kind: busy ? "inbox_update" : "wake",
-        text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId,
-          ...(typeof envelope.target === "string" ? { target: envelope.target } : {}),
+        text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId, target,
           ...(typeof envelope.wake_reason === "string" ? { wakeReason: envelope.wake_reason } : {}) }), attempt: 0 };
       const record: DeliveryRecord = { deliveryId, messageId, status: "pending", input, updatedAt: now() };
       agent.records.set(deliveryId, record); agent.byMessage.set(messageId, deliveryId); persist(agent);

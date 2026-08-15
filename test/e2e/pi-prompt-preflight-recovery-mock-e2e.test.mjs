@@ -71,7 +71,7 @@ test("production-order Pi preflight progress preserves one durable Inbox deliver
   const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
     stateStoreFor: () => store, telemetry, retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 2 },
     assertOfficialCliReady: () => {} });
-  const target = "chat:PRIVATE_TARGET";
+  const target = "chat:oc_private_target";
   const envelope = { message_id: messageId, target, content: "PRIVATE_PROMPT_BODY", wake: true };
   try {
     fs.mkdirSync(workspaceDir, { recursive: true });
@@ -130,7 +130,7 @@ test("external Pi production-order preflight timeout stays bounded, pending, obs
   const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
     stateStoreFor: () => store, telemetry, retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 0 },
     assertOfficialCliReady: () => {} });
-  const target = "chat:PRIVATE_TIMEOUT_TARGET";
+  const target = "chat:oc_private_timeout_target";
   const envelope = { message_id: messageId, target, content: "PRIVATE_TIMEOUT_BODY", wake: true };
   try {
     fs.mkdirSync(workspaceDir, { recursive: true });

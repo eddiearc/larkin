@@ -126,6 +126,7 @@ test("package version and explicit tag publication share one immutable combined-
   assert.doesNotMatch(workflow, /gh release download|--clobber/);
   assert.match(workflow, /build:[\s\S]*github\.event_name != 'workflow_dispatch'/);
   assert.match(workflow, /assemble-release:[\s\S]*always\(\)[\s\S]*needs\.build\.result == 'skipped'/);
+  assert.match(workflow, /assemble-release:[\s\S]*permissions:\n\s+# GitHub hides draft releases and their assets from read-only workflow tokens\.\n\s+contents: write/);
   assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
   assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\/\$\{release_id\}\/assets\?per_page=100/);
   assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\/assets\/\$\{asset_ids\[0\]\}/);

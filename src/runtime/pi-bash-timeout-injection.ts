@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
-import { parsePiVersion, piVersionSupportsSubagents, probeExternalPiVersion } from "./pi-subagent-injection.js";
+import { piVersionSupportsSubagents, probeExternalPiVersion } from "./pi-subagent-injection.js";
 
 declare global {
   // Filled by the standalone wrapper (scripts/release/standalone-entry.ts).
@@ -13,9 +12,9 @@ declare global {
  * pi-bash-timeout 扩展注入（bash 60s 超时护栏，issue #55/#56）。
  *
  * 分发：构建期把 src/runtime/pi-bash-timeout-extension.ts bundle 成单文件
- * `dist/runtime/pi-bash-timeout.bundle.js`（pi-* 包 external），运行时通过
- * `pi --extension/-e` 显式注入 —— builtin 与 external（用户 pi CLI）走同一
- * 路径，不碰用户 ~/.pi 配置。与 pi-subagents 共享同一个 pi 版本门槛。
+ * `dist/runtime/pi-bash-timeout.bundle.js`（pi-* 包 external），运行时仅向 external
+ * （用户 pi CLI）通过 `pi --extension/-e` 显式注入，不碰用户 ~/.pi 配置。
+ * Builtin Pi 直接接收静态 factory。与 pi-subagents 共享同一个 external 版本门槛。
  */
 
 /** 把 embedded bundle 落盘到 <configDir>/providers/pi/extensions/（0700/0600）。无 embedded 资产返回 null。 */
@@ -51,18 +50,13 @@ export function bundledPiBashTimeoutExtensionPath(configDir?: string): string | 
   return materializeEmbeddedPiBashTimeoutBundle(configDir);
 }
 
-/**
- * 注入决策：builtin 恒注入（内嵌 pi 版本固定）；external 需探测版本（与
- * pi-subagents 同门槛 >= 0.80.0，保证 createBashToolDefinition 可用）。
- * 返回 `-e` 参数值，或 null（产物缺失或版本不达标）。
- */
+/** External Pi 需满足 >= 0.80.0；返回 bundle 路径或 null。 */
 export function resolvePiBashTimeoutExtensionArg(
-  input: { distribution: "builtin" | "external"; piCommand: string; env: NodeJS.ProcessEnv },
+  input: { distribution: "external"; piCommand: string; env: NodeJS.ProcessEnv },
   probeVersion: () => { major: number; minor: number } | null = () => probeExternalPiVersion(input.piCommand, input.env),
   resolveBundle: () => string | null = () => bundledPiBashTimeoutExtensionPath(input.env.LARKIN_CONFIG_DIR),
 ): string | null {
   const bundle = resolveBundle();
   if (!bundle) return null;
-  const version = input.distribution === "builtin" ? parsePiVersion(BUNDLED_PI_VERSION) : probeVersion();
-  return piVersionSupportsSubagents(version) ? bundle : null;
+  return piVersionSupportsSubagents(probeVersion()) ? bundle : null;
 }

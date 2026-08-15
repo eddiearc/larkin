@@ -29,7 +29,12 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
     case "pi-rpc": {
       const { prepareBuiltinPiPackageAssets } = await import("../runtime/builtin-pi-assets.js");
       prepareBuiltinPiPackageAssets();
-      await import("@earendil-works/pi-coding-agent/rpc-entry");
+      process.title = "pi-rpc";
+      process.env.PI_CODING_AGENT = "true";
+      process.emitWarning = (() => {}) as typeof process.emitWarning;
+      const { main: piMain } = await import("@earendil-works/pi-coding-agent");
+      const { invokeBuiltinPiRpc } = await import("../runtime/pi-inline-extensions.js");
+      await invokeBuiltinPiRpc(piMain, rest);
       return;
     }
     case "pi-auth": await (await import("./pi-auth-cli.js")).main(rest, process.env); return;

@@ -22,7 +22,7 @@ npm install -g larkin
 larkin --version
 ```
 
-Standalone binaries for macOS, Linux, and Windows (x64) are attached to every [GitHub Release](https://github.com/eddiearc/larkin/releases) for environments without Bun or npm. Windows binaries are cross-compiled; their runtime behavior has not been end-to-end verified on a Windows host.
+Standalone binaries for macOS, Linux, and Windows (x64) are attached to every [GitHub Release](https://github.com/eddiearc/larkin/releases) for environments without Bun or npm. The Windows 11 x64 core path has passed native end-to-end startup verification. Pull requests and releases also have a blocking native Windows gate that verifies the standalone executable's manifest and SHA-256 before checking its version, help output, and embedded Dashboard over HTTP.
 
 ## Usage
 
@@ -42,6 +42,32 @@ DeepSeek, Kimi/Moonshot, MiniMax, Zhipu/BigModel, and a custom OpenAI-compatible
 are stored only in the selected Agent's private provider directory, not in the ordinary Agent config. Setup
 also discovers every API-key and OAuth/subscription login exposed by the pinned official Pi registry and
 delegates those flows to Pi. Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage them.
+The builtin Pi runtime loads Larkin's two supported extensions inline: background subagents and the 60-second
+foreground bash timeout guard are enabled without writing extension files or arguments. A compatible external
+Pi installation keeps the existing explicit `-e` extension path.
+
+### Windows support boundary and optional autostart
+
+Windows 11 x64 core support covers the standalone CLI, local Runtime Host startup, builtin Pi RPC with the
+inline extensions above, and the embedded Dashboard. Provider authentication, the official `lark-cli`, and
+external Codex, Claude Code, or Pi executables remain separately installed dependencies; secret-bearing live
+channel/provider tests are intentionally outside the hosted Windows CI gate.
+
+An Administrator account can optionally start Larkin at that account's interactive logon with Task Scheduler.
+From an elevated PowerShell prompt, adjust the executable and working-directory paths first:
+
+```powershell
+$Exe = 'C:\Tools\Larkin\larkin.exe'
+$WorkDir = 'C:\Tools\Larkin'
+$Action = New-ScheduledTaskAction -Execute $Exe -Argument 'start' -WorkingDirectory $WorkDir
+$Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+Register-ScheduledTask -TaskName 'Larkin Runtime Host' -Action $Action -Trigger $Trigger `
+  -Description 'Start Larkin for this Administrator account at logon' -RunLevel Highest
+```
+
+This is an optional per-user Administrator-logon task, not SYSTEM boot support or a Windows service. Keep the
+account profile available because Larkin stores its state there. Release executables are currently unsigned;
+normal Windows security policy and SmartScreen decisions still apply.
 
 For supported Feishu cloud-document comments (`doc`, `docx`, `sheet`, and `file`), the safe default accepts only comments or replies that @ the Bot. Document comments never reuse IM `require`/`free` settings. An explicit platform-verified application-dimension Bot subscription accepts every supported comment event that Feishu actually delivers, whether or not it mentions the Bot. Larkin stores accepted comments as `kind=document_comment` canonical Inbox events and wakes the Bot's persistent Agent. Replies are bound back to the exact comment; whole-document comments use Feishu's top-level fallback. `larkin setup --comment-subscription application` makes the broad trigger surface explicit, creates the Bot subscription through the official `lark-cli` structured API, and then verifies it with the read-only platform status API. `--comment-subscription none` explicitly removes that application subscription and verifies removal. Until positive status verification, only @Bot comments enter the Inbox. Setup requests `docs:document.comment:create` for both in-thread replies and whole-document `create_v2` fallback, while retaining `drive:drive` for event/read support. `larkin agents` reports event readiness, reply-scope readiness, subscription mode/status/dimension, arrivals, and read failures.
 

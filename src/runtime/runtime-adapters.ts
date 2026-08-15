@@ -21,7 +21,6 @@ import { internalCommandSpec } from "../app/internal-command.js";
 import { piAgentDirectory } from "./pi-provider-config.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
-import { isWindows } from "../platform/secure-metadata.js";
 import {
   classifyRuntimePrerequisite,
   probeNativeRuntimeReadiness,
@@ -62,6 +61,7 @@ export interface NativeRuntimeAdapterDependencies {
   createPiSession?: (input: RuntimeSessionCreate) => Promise<PiSessionProcessLike>;
   piRpcClientOptions?: PiRpcClientOptions;
   piCommand?: string;
+  resolvePiProcessExtensionArgs?: typeof resolvePiProcessExtensionArgs;
   codexCommand?: string;
   codexModelOverride?: string;
   spawnCodexUpdate?: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike;
@@ -826,6 +826,27 @@ class PiRpcBackend implements PiSessionProcessLike {
   }
 }
 
+export function resolvePiProcessExtensionArgs(input: {
+  distribution: "builtin" | "external";
+  piCommand: string;
+  env: NodeJS.ProcessEnv;
+  platform: NodeJS.Platform;
+}, resolvers: {
+  subagents?: typeof resolvePiSubagentExtensionArg;
+  bashTimeout?: typeof resolvePiBashTimeoutExtensionArg;
+} = {}): string[] {
+  // Builtin factories are passed directly to Pi main on every platform. The platform
+  // field makes that invariant explicit and testable without changing process.platform.
+  if (input.distribution === "builtin") return [];
+  const resolverInput = { distribution: "external" as const, piCommand: input.piCommand, env: input.env };
+  const args: string[] = [];
+  const subagents = (resolvers.subagents ?? resolvePiSubagentExtensionArg)(resolverInput);
+  if (subagents) args.push("-e", subagents);
+  const bashTimeout = (resolvers.bashTimeout ?? resolvePiBashTimeoutExtensionArg)(resolverInput);
+  if (bashTimeout) args.push("-e", bashTimeout);
+  return args;
+}
+
 async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: NativeRuntimeAdapterDependencies,
   spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike): Promise<PiSessionProcessLike> {
   const stateRoot = input.stateDir ?? path.join(input.workspaceDir, ".larkin");
@@ -851,19 +872,12 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     mergedEnv.PI_CODING_AGENT_DIR = piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId);
     mergedEnv.PI_TELEMETRY = "0";
   }
-  const subagentExtension = builtin && isWindows ? null : resolvePiSubagentExtensionArg({
+  commandArgs.push(...(dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,
     env: mergedEnv,
-  });
-  if (subagentExtension) commandArgs.push("-e", subagentExtension);
-  // bash 60s 超时护栏（issue #55/#56）：与 pi-subagents 一起注入，两者工具名不冲突。
-  const bashTimeoutExtension = builtin && isWindows ? null : resolvePiBashTimeoutExtensionArg({
-    distribution: builtin ? "builtin" : "external",
-    piCommand: command,
-    env: mergedEnv,
-  });
-  if (bashTimeoutExtension) commandArgs.push("-e", bashTimeoutExtension);
+    platform: process.platform,
+  }));
   const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
     env: mergedEnv,

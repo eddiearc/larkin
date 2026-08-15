@@ -4,13 +4,33 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { spawnSync } from "node:child_process";
-import { test } from "bun:test";
+import { afterEach, test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { resolveAgentCliExecutable } from "../../../dist/agent/agent-cli-capabilities.mjs";
-import { classifyPiProviderError, createNativeRuntimeAdapter, createPiSessionManager, requirePiResumeSessionFile } from "../../../dist/runtime/runtime-adapters.mjs";
+import {
+  classifyPiProviderError,
+  createNativeRuntimeAdapter,
+  createPiSessionManager,
+  requirePiResumeSessionFile,
+  resolvePiProcessExtensionArgs,
+} from "../../../dist/runtime/runtime-adapters.mjs";
+
+const fakeProcesses = new Set();
+
+afterEach(() => {
+  for (const child of fakeProcesses) {
+    child.stdin.destroyed = true;
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+  fakeProcesses.clear();
+});
 
 class FakeProcess extends EventEmitter {
+  constructor() {
+    super();
+    fakeProcesses.add(this);
+  }
   stdout = new PassThrough();
   stderr = new PassThrough();
   writes = [];
@@ -392,48 +412,39 @@ test("Pi adapter maps prompt, steer and abort to its process backend", async () 
   assert.deepEqual(calls, [["prompt", "one"], ["steer", "two"], ["abort"]]);
 });
 
-test.each(["external", "builtin"])("%s Pi injects the pi-subagents bundle via -e when supported", async (distribution) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-subagents-${distribution}-`));
-  const child = new FakeProcess();
-  let launch;
-  try {
-    const input = create({
-      workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "default",
-      env: distribution === "builtin" ? { LARKIN_PI_DISTRIBUTION: "builtin", LARKIN_CONFIG_DIR: path.join(root, "config") } : {},
-    });
-    fs.mkdirSync(input.workspaceDir, { recursive: true });
-    const pending = createNativeRuntimeAdapter("pi", {
-      env: { LARKIN_PI_COMMAND: distribution === "external" ? "/fixture/external-pi" : undefined },
-      spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
-    }).createSession(input);
-    await new Promise((resolve) => setImmediate(resolve));
-    for (const request of child.writes.slice(0, 2)) {
-      const data = request.type === "get_state"
-        ? { sessionId: `session-${distribution}`, model: { provider: "fixture", id: "model" }, thinkingLevel: "off" }
-        : { models: [{ provider: "fixture", id: "model" }] };
-      child.stdout.write(`${JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data })}\n`);
-    }
-    await pending;
-    if (distribution === "builtin") {
-      // builtin must inject both pi-subagents and pi-bash-timeout (bash 60s guard).
-      const extPairs = launch.args
-        .map((arg, index) => (arg === "-e" ? [arg, launch.args[index + 1]] : null))
-        .filter((pair) => pair !== null);
-      const bundles = extPairs.map(([, value]) => value);
-      assert.ok(bundles.some((value) => /pi-subagents\.bundle\.js$/.test(value)), "must inject pi-subagents");
-      assert.ok(bundles.some((value) => /pi-bash-timeout\.bundle\.js$/.test(value)), "must inject pi-bash-timeout");
-    } else {
-      // external with a missing pi binary cannot probe a version → degrade, no -e.
-      assert.equal(launch.args.includes("-e"), false);
-    }
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+test.each(["win32", "linux"])("builtin Pi resolves no -e extension args on simulated %s", (platform) => {
+  let resolverCalls = 0;
+  const args = resolvePiProcessExtensionArgs({
+    distribution: "builtin", piCommand: "builtin-pi", env: {}, platform,
+  }, {
+    subagents: () => { resolverCalls += 1; return "/must/not/resolve-subagents.js"; },
+    bashTimeout: () => { resolverCalls += 1; return "/must/not/resolve-bash-timeout.js"; },
+  });
+  assert.deepEqual(args, []);
+  assert.equal(resolverCalls, 0, "builtin must not resolve file-based extensions");
+});
+
+test.each(["win32", "linux"])("external Pi retains both -e extension args on simulated %s", (platform) => {
+  const args = resolvePiProcessExtensionArgs({
+    distribution: "external", piCommand: "external-pi", env: {}, platform,
+  }, {
+    subagents: () => "/fixture/pi-subagents.bundle.js",
+    bashTimeout: () => "/fixture/pi-bash-timeout.bundle.js",
+  });
+  assert.deepEqual(args, [
+    "-e", "/fixture/pi-subagents.bundle.js",
+    "-e", "/fixture/pi-bash-timeout.bundle.js",
+  ]);
 });
 
 test.each(["external", "builtin"])("%s Pi launches one shared append standing-prompt path without replacement", async (distribution) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-single-prompt-${distribution}-`));
   const child = new FakeProcess();
+  child.kill = (signal) => {
+    child.killed.push(signal);
+    child.emit("exit", 0, null);
+    return true;
+  };
   let launch;
   try {
     const input = create({
@@ -446,8 +457,10 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     fs.mkdirSync(sessionDir, { recursive: true });
     const sessionFile = path.join(sessionDir, `${input.resumeSessionId}.jsonl`);
     fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
+    const piCommand = "/fixture/external-pi";
     const pending = createNativeRuntimeAdapter("pi", {
-      env: { LARKIN_PI_COMMAND: "/fixture/external-pi" },
+      env: { LARKIN_PI_COMMAND: piCommand },
+      resolvePiProcessExtensionArgs: () => [],
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
     await new Promise((resolve) => setImmediate(resolve));
@@ -466,13 +479,14 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
       ["--session", sessionFile]);
     const promptFile = launch.args[appendIndex + 1];
     assert.equal(fs.readFileSync(promptFile, "utf8"), "standing");
-    assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
     if (distribution === "external") {
-      assert.equal(launch.command, "/fixture/external-pi");
+      assert.equal(launch.command, piCommand);
       assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
       assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
     } else {
       assert.ok(launch.args.includes("__internal") && launch.args.includes("pi-rpc"));
+      assert.equal(launch.args.includes("-e"), false, "builtin extensions are passed inline by binary-entry");
       assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, "builtin");
       assert.equal(launch.options.env.PI_TELEMETRY, "0");
     }
@@ -837,40 +851,28 @@ test("Pi replaces only a provably zero-turn missing session and keeps meaningful
 
 test("Pi default runtime fails closed with an empty unauthenticated official agent directory", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-no-auth-"));
+  const child = new FakeProcess();
+  child.kill = () => { child.emit("exit", 0, null); return true; };
   try {
-    const agentDir = path.join(root, "pi-agent");
-    const workspaceDir = path.join(root, "workspace");
-    const piCommand = path.join(root, "pi");
-    fs.mkdirSync(agentDir, { recursive: true });
-    fs.mkdirSync(workspaceDir, { recursive: true });
-    fs.writeFileSync(piCommand, `#!/usr/bin/env bun
-import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log("0.82.0"); process.exit(0); }
-const lines = readline.createInterface({ input: process.stdin });
-lines.on("line", (line) => {
-  const request = JSON.parse(line);
-  const data = request.type === "get_available_models" ? { models: [] } : { model: null, thinkingLevel: "off" };
-  console.log(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data }));
-});
-`, { mode: 0o755 });
-    fs.chmodSync(piCommand, 0o755);
-    const moduleUrl = new URL("../../../dist/runtime/runtime-adapters.mjs", import.meta.url).href;
-    const script = `
-      import { createNativeRuntimeAdapter } from ${JSON.stringify(moduleUrl)};
-      const input = { agentId: "cli_test", workspaceDir: ${JSON.stringify(workspaceDir)}, stateDir: ${JSON.stringify(path.join(root, "state"))}, standingPrompt: { version: "v1", content: "standing", hash: "abc" }, model: "default" };
-      createNativeRuntimeAdapter("pi").createSession(input).then(() => process.exit(2), error => { console.error(error.message); process.exit(1); });
-    `;
-    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
-      encoding: "utf8",
-      env: {
-        HOME: path.join(root, "home"),
-        PATH: process.env.PATH || "",
-        PI_CODING_AGENT_DIR: agentDir,
-        LARKIN_PI_COMMAND: piCommand,
-      },
-    });
-    assert.equal(result.status, 1, result.stderr || result.stdout);
-    assert.match(result.stderr, /no authenticated available models.*will not create a fallback session/i);
+    const pending = createNativeRuntimeAdapter("pi", {
+      env: { LARKIN_PI_COMMAND: process.execPath },
+      resolvePiProcessExtensionArgs: () => [],
+      spawn: () => child,
+    }).createSession(create({
+      workspaceDir: path.join(root, "workspace"),
+      stateDir: path.join(root, "state"),
+      model: "default",
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const request of child.writes.slice(0, 2)) {
+      const data = request.type === "get_available_models"
+        ? { models: [] }
+        : { model: null, thinkingLevel: "off" };
+      child.stdout.write(`${JSON.stringify({
+        type: "response", id: request.id, command: request.type, success: true, data,
+      })}\n`);
+    }
+    await assert.rejects(pending, /no authenticated available models.*will not create a fallback session/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -10,6 +10,19 @@ import { HostReminderOrchestrator } from "../../../dist/agent/host-reminder-orch
 import { createRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
 
 const agent = { agentId: "cli_rem", name: "cli_rem", stateDir: "/state/cli_rem" };
+const deterministicProcessInspect = (pid) => ({ ok: true, dead: false, startToken: `test-process-${pid}` });
+const deterministicStateStore = (root, agentId) => createAgentStateStore(root, agentId, {
+  inspectProcess: deterministicProcessInspect,
+});
+
+async function waitFor(condition, label, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${label} did not settle within ${timeoutMs}ms`);
+}
 
 function fixture(reminders) {
   const deliveries = [], inbox = [];
@@ -65,9 +78,10 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   assert.strictEqual(f.inbox[0], f.deliveries[0], "the same target-complete envelope is persisted and delivered");
 });
 
-// Hosted Windows needed 7.3s under the serialized native gate; only the runner envelope is widened.
+// Native Windows exposed both slow process inspection and async ledger races. This test is not
+// about CIM/lock ownership, so it injects stable process identity and waits on durable states.
 test("due reminder and startup redelivery reach final Runtime input with the same durable dm target", {
-  timeout: 20_000,
+  timeout: 30_000,
 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-target-runtime-"));
   const agentId = "cli_reminderTargetA1";
@@ -75,7 +89,7 @@ test("due reminder and startup redelivery reach final Runtime input with the sam
   const reminder = { reminderId: "target-reminder", version: 1, ownerAgentId: agentId,
     fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "target", status: "scheduled" };
   const f = fixture([reminder]);
-  const store = createAgentStateStore(root, agentId);
+  const store = deterministicStateStore(root, agentId);
   const session = {
     sessionId: "reminder-target-session", listeners: new Set(), prompts: [], steers: [],
     subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); },
@@ -99,7 +113,10 @@ test("due reminder and startup redelivery reach final Runtime input with the sam
   try {
     await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
     orchestrator.handleFire({ agentId, reminderId: reminder.reminderId });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(() => session.prompts.length === 1
+      && store.readJson("runtimeDeliveries", { records: [] }).records
+        .some((record) => record.messageId === `rem_${reminder.reminderId}` && record.status === "accepted"),
+    "reminder Runtime acceptance");
     const persistedReminder = store.readNdjson("inbox")[0];
     assert.equal(persistedReminder.target, "dm:@system");
     assert.equal(delivered[0].target, persistedReminder.target);
@@ -107,7 +124,9 @@ test("due reminder and startup redelivery reach final Runtime input with the sam
     store.pollInbox({ target: "dm:@system", limit: 1 });
     session.emit({ type: "turn-start", turnId: "reminder-turn" });
     session.emit({ type: "turn-end", turnId: "reminder-turn" });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(() => store.readJson("runtimeDeliveries", { records: [] }).records
+      .some((record) => record.messageId === `rem_${reminder.reminderId}` && record.status === "consumed"),
+    "reminder Runtime consumption");
 
     store.appendNdjson("inbox", { message_id: "om_startup_orphan", target: "chat:oc_orphan", wake: true });
     await orchestrator.redeliverUnread(realAgent);
@@ -305,11 +324,13 @@ test("Inbox append failure prevents reminder and restart delivery", async () => 
   assert.deepEqual(f.deliveries, []);
 });
 
-test("orphan startup Inbox appends a durable redelivery envelope and one drain consumes its Runtime ledger", async () => {
+test("orphan startup Inbox appends a durable redelivery envelope and one drain consumes its Runtime ledger", {
+  timeout: 15_000,
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-redelivery-orphan-"));
   const agentId = "cli_orphanA1";
   const realAgent = { agentId, name: agentId, stateDir: path.join(root, "state", "agents", agentId) };
-  const store = createAgentStateStore(root, agentId);
+  const store = deterministicStateStore(root, agentId);
   const session = {
     sessionId: "orphan-session", listeners: new Set(), prompts: [], steers: [],
     subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); },
@@ -340,11 +361,13 @@ test("orphan startup Inbox appends a durable redelivery envelope and one drain c
   }
 });
 
-test("an existing pending Runtime delivery and its durable startup redelivery are both consumed by one drain", async () => {
+test("an existing pending Runtime delivery and its durable startup redelivery are both consumed by one drain", {
+  timeout: 15_000,
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-redelivery-pending-"));
   const agentId = "cli_pendingRedeliveryA1";
   const realAgent = { agentId, name: agentId, stateDir: path.join(root, "state", "agents", agentId) };
-  const store = createAgentStateStore(root, agentId);
+  const store = deterministicStateStore(root, agentId);
   const session = {
     sessionId: "pending-session", listeners: new Set(), prompts: [], steers: [],
     subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); },

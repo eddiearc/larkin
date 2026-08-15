@@ -440,6 +440,11 @@ test.each(["win32", "linux"])("external Pi retains both -e extension args on sim
 test.each(["external", "builtin"])("%s Pi launches one shared append standing-prompt path without replacement", async (distribution) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-single-prompt-${distribution}-`));
   const child = new FakeProcess();
+  child.kill = (signal) => {
+    child.killed.push(signal);
+    child.emit("exit", 0, null);
+    return true;
+  };
   let launch;
   try {
     const input = create({

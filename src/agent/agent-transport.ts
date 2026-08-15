@@ -121,11 +121,13 @@ export function createAgentTransport(env: Record<string, string | undefined> = p
     // —— legacy events/inbox characterization：从 host 写的 inbox 文件读入站正文（读后清空=已读）——
     //    必须严格对齐 agentApiEventsResponseSchema，否则 CLI 报 INVALID_JSON_RESPONSE，Claude 读不到消息。
     if (p.includes("/events") || p.includes("/inbox")) {
-      let envelopes: InboxEnvelope[] = [];
       try {
-        envelopes = stateStore.pollInbox<InboxEnvelope>().envelopes;
-      } catch { /* preserve legacy: malformed/unreadable inbox returns empty and is not cleared */ }
-      return { ok: true, status: 200, data: projectInboxEvents(envelopes) };
+        const envelopes = stateStore.pollInbox<InboxEnvelope>().envelopes;
+        return { ok: true, status: 200, data: projectInboxEvents(envelopes) };
+      } catch (error) {
+        return { ok: false, status: 409,
+          error: `Inbox consumption rejected; persisted rows were left unchanged: ${error instanceof Error ? error.message : String(error)}` };
+      }
     }
     // —— legacy history characterization：接飞书群历史 im +chat-messages-list ——
     //    需 bot 有 im:message:readonly；缺 scope 则优雅降级为空（不让 Claude 崩）。

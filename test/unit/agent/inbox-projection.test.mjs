@@ -18,27 +18,24 @@ test("local Inbox projection adds Feishu locators without mutating the canonical
   assert.equal("chat_id" in canonical, false);
 });
 
-test("inbox projection preserves DM, channel, and thread reply target formats", () => {
-  assert.equal(targetOfInboxEnvelope({ channel_type: "dm", channel_name: "cpeer" }), "dm:@cpeer");
-  assert.equal(targetOfInboxEnvelope({ channel_type: "channel", channel_name: "cgroup" }), "#cgroup");
-  assert.equal(targetOfInboxEnvelope({
-    channel_type: "thread", channel_name: "thread123456", parent_channel_type: "channel", parent_channel_name: "cgroup",
-  }), "#cgroup:thread12");
-  assert.equal(targetOfInboxEnvelope({
-    channel_type: "thread", channel_name: "topic987654", parent_channel_type: "dm", parent_channel_name: "cpeer",
-  }), "dm:@cpeer:topic987");
+test("inbox projection exposes only allowlisted canonical reply targets", () => {
+  assert.equal(targetOfInboxEnvelope({ chat_id: "oc_peer" }), "chat:oc_peer");
+  assert.equal(targetOfInboxEnvelope({ chat_id: "oc_group", thread_id: "omt_topic" }), "thread:oc_group:omt_topic");
+  assert.equal(targetOfInboxEnvelope({ target: "dm:@cpeer" }), null);
+  assert.equal(targetOfInboxEnvelope({ target: "#cgroup" }), null);
+  assert.equal(targetOfInboxEnvelope({ target: "runtime:system" }), null);
 });
 
 test("events projection retains the exact check response data shape", () => {
   const events = [
-    { message_id: "m1", seq: 4, channel_type: "channel", channel_name: "cold" },
-    { message_id: "m2", seq: 5, channel_type: "thread", channel_name: "abcdefghijk", parent_channel_type: "channel", parent_channel_name: "croom" },
+    { message_id: "m1", seq: 4, target: "chat:oc_old" },
+    { message_id: "m2", seq: 5, target: "thread:oc_room:omt_abcdefghijk" },
   ];
   assert.deepEqual(projectInboxEvents(events), {
     events,
     last_seen_msgId: "m2",
     last_seen_seq: 5,
-    reply_target: "#croom:abcdefgh",
+    reply_target: "thread:oc_room:omt_abcdefghijk",
     pending_notice_ids: [],
     wake_reason: null,
     has_more: false,
@@ -56,8 +53,8 @@ test("state store preserves read-then-clear semantics without following inbox sy
     const store = createAgentStateStore(root, "cli_inboxA1");
     store.clearNdjson("inbox");
     assert.equal(fs.existsSync(store.paths.inbox), false, "clearing a missing inbox must not create it");
-    store.appendNdjson("inbox", { message_id: "m1" });
-    store.appendNdjson("inbox", { message_id: "m2" });
+    store.appendNdjson("inbox", { message_id: "m1", chat_id: "oc_1" });
+    store.appendNdjson("inbox", { message_id: "m2", chat_id: "oc_1" });
     assert.deepEqual(store.readNdjson("inbox").map((event) => event.message_id), ["m1", "m2"]);
     store.clearNdjson("inbox");
     assert.deepEqual(store.readNdjson("inbox"), []);
@@ -75,6 +72,8 @@ test("production events route uses typed storage and projection without moving i
   const source = fs.readFileSync(path.join(ROOT, "src/agent/agent-transport.ts"), "utf8");
   assert.match(source, /stateStore\.pollInbox<InboxEnvelope>\(\)/);
   assert.match(source, /data: projectInboxEvents\(envelopes\)/);
+  assert.match(source, /Inbox consumption rejected; persisted rows were left unchanged/);
+  assert.doesNotMatch(source, /malformed\/unreadable inbox returns empty/);
   assert.match(source, /request: \(input: AgentTransportInput\) => handle\(input\)/);
   assert.match(source, /globalThis\.__LARKIN_AGENT_TRANSPORT/);
 });

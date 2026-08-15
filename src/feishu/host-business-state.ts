@@ -1,5 +1,5 @@
 import type { AgentStatePaths } from "../platform/root-layout.js";
-import { targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
+import { RUNTIME_REDELIVERY_TARGET, RUNTIME_REMINDER_TARGET } from "../agent/inbox-projection.js";
 import crypto from "node:crypto";
 import {
   createMessageEnvelope,
@@ -319,8 +319,9 @@ export interface InboundEnvelopeOptions {
 }
 
 export interface ReminderEnvelope {
+  kind: "reminder";
   message_id: string;
-  target: string;
+  target: typeof RUNTIME_REMINDER_TARGET;
   seq: number;
   sender_name: "定时提醒";
   sender_type: "system";
@@ -333,8 +334,9 @@ export interface ReminderEnvelope {
 }
 
 export interface RedeliveryEnvelope {
+  kind: "redelivery";
   message_id: string;
-  target: string;
+  target: typeof RUNTIME_REDELIVERY_TARGET;
   seq: number;
   sender_name: "系统";
   sender_type: "system";
@@ -432,6 +434,7 @@ export class HostEnvelopeProjector {
       `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
     ].filter((line): line is string => Boolean(line));
     const envelope = {
+      kind: "reminder" as const,
       message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}`,
       seq,
       sender_name: "定时提醒" as const,
@@ -443,12 +446,13 @@ export class HostEnvelopeProjector {
       thread_id: null,
       wake: true as const,
     };
-    return { ...envelope, target: targetKeyOfInboxEnvelope(envelope) };
+    return { ...envelope, target: RUNTIME_REMINDER_TARGET };
   }
 
   createRedeliveryEnvelope(agentId: string, wakeCount: number): RedeliveryEnvelope {
     const seq = this.nextSequence(agentId);
     const envelope = {
+      kind: "redelivery" as const,
       message_id: `redeliver_${this.randomHex(6)}`,
       seq,
       sender_name: "系统" as const,
@@ -459,7 +463,7 @@ export class HostEnvelopeProjector {
       timestamp: this.now().toISOString(),
       thread_id: null,
     };
-    return { ...envelope, target: targetKeyOfInboxEnvelope(envelope) };
+    return { ...envelope, target: RUNTIME_REDELIVERY_TARGET };
   }
 }
 

@@ -138,7 +138,7 @@ test("Inbox delivery preparation treats consumed Runtime ownership as final acro
   try {
     const { createAgentStateStore } = await import(moduleUrl);
     const store = createAgentStateStore(root, "cli_stateDeliveryA1");
-    const envelope = { message_id: "interaction_run_1", wake: true };
+    const envelope = { message_id: "interaction_run_1", kind: "interaction", chat_id: "oc_interaction", wake: true };
     assert.equal(store.prepareInboxDelivery(envelope), "appended");
     assert.equal(store.prepareInboxDelivery(envelope), "present");
     store.writeJson("runtimeDeliveries", { version: 1, records: [{ deliveryId: "d1", messageId: envelope.message_id, status: "accepted" }] });

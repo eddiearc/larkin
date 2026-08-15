@@ -16,8 +16,8 @@ interface StateStore {
 }
 function withCanonicalTarget<T extends object>(envelope: T): T & { target: string } {
   const input = envelope as InboxEnvelope;
-  if (typeof input.target === "string" && input.target) return envelope as T & { target: string };
-  return { ...envelope, target: targetKeyOfInboxEnvelope(input) };
+  const target = targetKeyOfInboxEnvelope(input);
+  return input.target === target ? envelope as T & { target: string } : { ...envelope, target };
 }
 
 interface ReminderStoreApi {

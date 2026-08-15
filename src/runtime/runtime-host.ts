@@ -846,6 +846,16 @@ export function createRuntimeHost(options: {
       const messageId = String(envelope.message_id || envelope.seq || crypto.randomUUID());
       const agent = managed.get(agentId);
       if (!agent) { telemetry?.delivery(agentId, messageId, "error"); throw new Error(`unknown runtime Agent: ${agentId}`); }
+      let target: string;
+      try {
+        target = targetKeyOfInboxEnvelope(envelope);
+      } catch (error) {
+        const reason = `Inbox target derivation failed: ${error instanceof Error ? error.message : String(error)}`;
+        const deliveryId = `invalid-target-${crypto.createHash("sha256").update(`${agentId}\0${messageId}`).digest("hex").slice(0, 24)}`;
+        telemetry?.delivery(agentId, messageId, "error");
+        emit({ type: "delivery", agentId, deliveryId, messageId, status: "error", reason });
+        return { status: "error", deliveryId, reason, retryable: false };
+      }
       reconcileExternalConsumption(agent);
       const existingId = agent.byMessage.get(messageId);
       if (existingId) {
@@ -872,9 +882,6 @@ export function createRuntimeHost(options: {
       }
       const deliveryId = crypto.randomUUID();
       const busy = agent.busy || agent.submitting;
-      const target = typeof envelope.target === "string" && envelope.target
-        ? envelope.target
-        : targetKeyOfInboxEnvelope(envelope);
       const input: RuntimeInput = { inputId: deliveryId, deliveryId, kind: busy ? "inbox_update" : "wake",
         text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId, target,
           ...(typeof envelope.wake_reason === "string" ? { wakeReason: envelope.wake_reason } : {}) }), attempt: 0 };

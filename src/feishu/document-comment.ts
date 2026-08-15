@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CommentEvent, CommentTarget, FetchedComment } from "@larksuite/channel";
+import { DOCUMENT_COMMENT_TARGET_PATTERN } from "../agent/inbox-projection.js";
 
 export const DOCUMENT_COMMENT_EVENT = "drive.notice.comment_add_v1";
 
@@ -59,7 +60,7 @@ export function documentCommentTarget(target: CommentTarget, commentId: string, 
 }
 
 export function parseDocumentCommentTarget(value: string): (CommentTarget & { commentId: string; topLevel: boolean }) | null {
-  const match = /^document-comment:(doc|docx|sheet|file):([A-Za-z0-9_-]+):([A-Za-z0-9_-]+):(in-thread|top-level)$/.exec(value);
+  const match = DOCUMENT_COMMENT_TARGET_PATTERN.exec(value);
   return match ? {
     fileType: match[1] as CommentTarget["fileType"], fileToken: match[2], commentId: match[3], topLevel: match[4] === "top-level",
   } : null;

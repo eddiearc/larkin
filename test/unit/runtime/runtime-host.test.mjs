@@ -4,10 +4,24 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
-import { createRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
+import { createRuntimeHost as createProductionRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
 import { RuntimePrerequisiteError } from "../../../dist/runtime/runtime-readiness.mjs";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
 import { ProcessingEyeOrchestrator } from "../../../dist/feishu/host-processing-eye.mjs";
+
+// Unrelated RuntimeHost scenarios use a producer-valid canonical chat locator. The dedicated
+// runtime-inbox-target contract invokes the unwrapped production host for rejection coverage.
+function createRuntimeHost(options) {
+  const host = createProductionRuntimeHost(options);
+  const deliver = host.deliver.bind(host);
+  host.deliver = (agentId, envelope) => {
+    const messageId = typeof envelope?.message_id === "string" ? envelope.message_id : "";
+    const alreadyLocatable = typeof envelope?.target === "string" || typeof envelope?.chat_id === "string"
+      || /^rem_[A-Za-z0-9_-]+$/.test(messageId) || /^redeliver_[A-Za-z0-9_-]+$/.test(messageId);
+    return deliver(agentId, alreadyLocatable ? envelope : { ...envelope, chat_id: "oc_runtime_host_fixture" });
+  };
+  return host;
+}
 
 class FakeSession {
   sessionId = "session-1";
@@ -275,7 +289,7 @@ test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary r
   await host.shutdown("test complete");
 });
 
-test("issue 122 old/base counterfactual retries a targetless notice while canonical poll makes the new path terminal", async () => {
+test("issue 122 injected former call shape retries a targetless notice while the corrected exact-target path is terminal", async () => {
   const run = async (oldProjection) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), oldProjection ? "larkin-issue122-old-" : "larkin-issue122-new-"));
     const agentId = oldProjection ? "cli_issue122OldA1" : "cli_issue122NewA1";
@@ -294,13 +308,13 @@ test("issue 122 old/base counterfactual retries a targetless notice while canoni
       await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
       const source = { message_id: oldProjection ? "rem_issue122_old" : "rem_issue122_new", channel_type: "dm", channel_name: "system", wake: true };
       store.appendNdjson("inbox", source);
-      assert.equal(store.readNdjson("inbox")[0].target, "dm:@system");
+      assert.equal(store.readNdjson("inbox")[0].target, "runtime:reminder");
       await host.deliver(agentId, source);
       if (oldProjection) {
-        assert.doesNotMatch(session.prompts[0].text, /Inbox changed for /, "base call shape produces a targetless final payload");
+        assert.doesNotMatch(session.prompts[0].text, /Inbox changed for /, "injected former call shape produces a targetless final payload");
       } else {
-        assert.match(session.prompts[0].text, /Inbox changed for dm:@system/, "new final payload names the exact poll target");
-        const polled = store.pollInbox({ target: "dm:@system", limit: 1 });
+        assert.match(session.prompts[0].text, /Inbox changed for runtime:reminder/, "new final payload names the exact poll target");
+        const polled = store.pollInbox({ target: "runtime:reminder", limit: 1 });
         assert.deepEqual(polled.envelopes.map((row) => row.message_id), [source.message_id]);
       }
       session.emit({ type: "turn-start", turnId: oldProjection ? "old-turn" : "new-turn" });
@@ -315,7 +329,7 @@ test("issue 122 old/base counterfactual retries a targetless notice while canoni
   };
   const oldResult = await run(true);
   const newResult = await run(false);
-  assert.equal(oldResult.prompts, 2, "old/base targetless notice leaves the durable row and retries at turn end");
+  assert.equal(oldResult.prompts, 2, "the injected former targetless call shape leaves the durable row and retries at turn end");
   assert.equal(oldResult.inbox.length, 1);
   assert.deepEqual(oldResult.statuses, ["accepted"]);
   assert.equal(newResult.prompts, 1, "exact-target durable poll prevents turn-end retry");
@@ -390,7 +404,7 @@ test("delivery ownership, dedupe and correlation survive recreation and reach co
   const adapter = { id: "codex", capabilities: {}, async createSession() { const session = new FakeSession(); session.sessionId = `session-${sessions.length + 1}`; sessions.push(session); return session; } };
   const config = { agentId, name: agentId, runtime: "codex", model: "gpt", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root };
   try {
-    store.appendNdjson("inbox", { message_id: "om_persist", content: "canonical" });
+    store.appendNdjson("inbox", { message_id: "om_persist", target: "chat:oc_persist", content: "canonical" });
     const host1 = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
     await host1.start([config]);
     const accepted = await host1.deliver(agentId, { message_id: "om_persist" });
@@ -545,7 +559,7 @@ test("a canonical drain that wins before the current deliver call atomically clo
   const host = createRuntimeHost({ adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
   try {
-    store.appendNdjson("inbox", { message_id: "om_drain_won", wake: true });
+    store.appendNdjson("inbox", { message_id: "om_drain_won", target: "chat:oc_drain_won", wake: true });
     store.drainInbox();
     await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
     const receipt = await host.deliver(agentId, { message_id: "om_drain_won", wake: true });

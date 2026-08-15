@@ -4,6 +4,7 @@ export interface InboxEnvelope {
   seq?: unknown;
   target?: unknown;
   target_seq?: unknown;
+  kind?: unknown;
   chat_id?: unknown;
   thread_id?: unknown;
   channel_type?: unknown;
@@ -13,15 +14,72 @@ export interface InboxEnvelope {
   [key: string]: unknown;
 }
 
-export function targetKeyOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string {
-  if (!envelope) return "runtime:unknown";
-  if (typeof envelope.target === "string" && envelope.target) return envelope.target;
-  if (typeof envelope.chat_id === "string" && envelope.chat_id) {
-    return typeof envelope.thread_id === "string" && envelope.thread_id
-      ? `thread:${envelope.chat_id}:${envelope.thread_id}`
-      : `chat:${envelope.chat_id}`;
+export const RUNTIME_REMINDER_TARGET = "runtime:reminder" as const;
+export const RUNTIME_REDELIVERY_TARGET = "runtime:redelivery" as const;
+export const DOCUMENT_COMMENT_TARGET_PATTERN = /^document-comment:(doc|docx|sheet|file):([A-Za-z0-9_-]+):([A-Za-z0-9_-]+):(in-thread|top-level)$/;
+
+const CHAT_ID_PATTERN = /^oc_[A-Za-z0-9_-]+$/;
+const THREAD_ID_PATTERN = /^omt_[A-Za-z0-9_-]+$/;
+const CHAT_TARGET_PATTERN = /^chat:(oc_[A-Za-z0-9_-]+)$/;
+const THREAD_TARGET_PATTERN = /^thread:(oc_[A-Za-z0-9_-]+):(omt_[A-Za-z0-9_-]+)$/;
+
+function internalTargetOfInboxEnvelope(envelope: InboxEnvelope): string | null {
+  const messageId = typeof envelope.message_id === "string" ? envelope.message_id : "";
+  const kindTarget = envelope.kind === "reminder" ? RUNTIME_REMINDER_TARGET
+    : envelope.kind === "redelivery" ? RUNTIME_REDELIVERY_TARGET : null;
+  const messageTarget = /^rem_[A-Za-z0-9_-]+$/.test(messageId) ? RUNTIME_REMINDER_TARGET
+    : /^redeliver_[A-Za-z0-9_-]+$/.test(messageId) ? RUNTIME_REDELIVERY_TARGET : null;
+  if (kindTarget && messageTarget && kindTarget !== messageTarget) {
+    throw new Error(`Inbox internal source mismatch: kind=${JSON.stringify(envelope.kind)} message_id=${JSON.stringify(messageId)}`);
   }
-  return targetOfInboxEnvelope(envelope) || "runtime:system";
+  return kindTarget ?? messageTarget;
+}
+
+export function isCanonicalInboxTarget(target: string): boolean {
+  return CHAT_TARGET_PATTERN.test(target)
+    || THREAD_TARGET_PATTERN.test(target)
+    || target === RUNTIME_REMINDER_TARGET
+    || target === RUNTIME_REDELIVERY_TARGET
+    || DOCUMENT_COMMENT_TARGET_PATTERN.test(target);
+}
+
+function invalidTarget(target: string): Error {
+  return new Error(`Invalid canonical Inbox target ${JSON.stringify(target)}; expected chat:<oc_...>, thread:<oc_...>:<omt_...>, runtime:reminder, runtime:redelivery, or a valid document-comment locator`);
+}
+
+export function targetKeyOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string {
+  if (!envelope) throw new Error("Inbox envelope is required to derive a canonical target");
+  const internalTarget = internalTargetOfInboxEnvelope(envelope);
+  if (typeof envelope.target === "string" && envelope.target.length > 0) {
+    if (!isCanonicalInboxTarget(envelope.target)) throw invalidTarget(envelope.target);
+    if ((envelope.target === RUNTIME_REMINDER_TARGET || envelope.target === RUNTIME_REDELIVERY_TARGET) && !internalTarget) {
+      throw new Error(`Inbox target ${envelope.target} requires matching reminder/redelivery kind or message_id convention`);
+    }
+    if (internalTarget && envelope.target !== internalTarget) {
+      throw new Error(`Inbox ${String(envelope.kind || envelope.message_id || "internal")} target must be ${internalTarget}, received ${JSON.stringify(envelope.target)}`);
+    }
+    if (envelope.kind === "document_comment" && !DOCUMENT_COMMENT_TARGET_PATTERN.test(envelope.target)) {
+      throw new Error(`Inbox document_comment requires a valid document-comment locator, received ${JSON.stringify(envelope.target)}`);
+    }
+    return envelope.target;
+  }
+  if (envelope.target !== undefined && envelope.target !== null && envelope.target !== "") {
+    throw invalidTarget(String(envelope.target));
+  }
+  const chatId = typeof envelope.chat_id === "string" ? envelope.chat_id : "";
+  const threadId = typeof envelope.thread_id === "string" ? envelope.thread_id : "";
+  if (threadId && (!THREAD_ID_PATTERN.test(threadId) || !CHAT_ID_PATTERN.test(chatId))) {
+    throw new Error(`Inbox thread locator requires full oc_ chat_id and omt_ thread_id; received chat_id=${JSON.stringify(chatId)} thread_id=${JSON.stringify(threadId)}`);
+  }
+  if (chatId) {
+    if (!CHAT_ID_PATTERN.test(chatId)) throw new Error(`Inbox chat locator requires a full oc_ chat_id; received ${JSON.stringify(chatId)}`);
+    return threadId ? `thread:${chatId}:${threadId}` : `chat:${chatId}`;
+  }
+  if (envelope.kind === "document_comment") {
+    throw new Error("Inbox document_comment requires an explicit valid document-comment locator");
+  }
+  if (internalTarget) return internalTarget;
+  throw new Error(`Inbox envelope has no canonical target locator (message_id=${JSON.stringify(envelope.message_id ?? null)}, kind=${JSON.stringify(envelope.kind ?? null)})`);
 }
 
 export interface AgentEventsProjection {
@@ -69,22 +127,10 @@ export function projectInboxEnvelope(
   };
 }
 
-/** Preserve the target/thread format consumed by the existing Agent CLI. */
+/** Return an allowlisted canonical target when the envelope is locatable. */
 export function targetOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string | null {
-  if (!envelope) return null;
-  if (envelope.kind === "document_comment") {
-    return typeof envelope.target === "string" && envelope.target ? envelope.target : null;
-  }
-  if (envelope.channel_type === "thread" && envelope.parent_channel_name && envelope.channel_name) {
-    const base = envelope.parent_channel_type === "dm"
-      ? `dm:@${String(envelope.parent_channel_name)}`
-      : `#${String(envelope.parent_channel_name)}`;
-    return `${base}:${String(envelope.channel_name).slice(0, 8)}`;
-  }
-  if (typeof envelope.channel_name !== "string" || !envelope.channel_name) return null;
-  return envelope.channel_type === "dm"
-    ? `dm:@${envelope.channel_name}`
-    : `#${envelope.channel_name}`;
+  try { return targetKeyOfInboxEnvelope(envelope); }
+  catch { return null; }
 }
 
 /** Project persisted inbox envelopes into the exact agentApi events response data shape. */
@@ -94,7 +140,7 @@ export function projectInboxEvents(envelopes: InboxEnvelope[]): AgentEventsProje
     events: envelopes,
     last_seen_msgId: last ? (last.message_id || null) : null,
     last_seen_seq: last ? (last.seq ?? null) : null,
-    reply_target: targetOfInboxEnvelope(last),
+    reply_target: last ? targetKeyOfInboxEnvelope(last) : null,
     pending_notice_ids: [],
     wake_reason: null,
     has_more: false,
@@ -108,9 +154,12 @@ export function projectInboxCheck(envelopes: InboxEnvelope[], onlyTarget?: strin
   pending_total: number;
   has_more: boolean;
 } {
+  if (onlyTarget && !isCanonicalInboxTarget(onlyTarget)) {
+    throw new Error(`Invalid canonical Inbox check target ${JSON.stringify(onlyTarget)}`);
+  }
   const byTarget = new Map<string, InboxEnvelope[]>();
   for (const envelope of envelopes) {
-    const target = typeof envelope.target === "string" && envelope.target ? envelope.target : targetKeyOfInboxEnvelope(envelope);
+    const target = targetKeyOfInboxEnvelope(envelope);
     if (onlyTarget && onlyTarget !== target) continue;
     const rows = byTarget.get(target) ?? [];
     rows.push(envelope);

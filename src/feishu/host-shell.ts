@@ -279,6 +279,19 @@ export function createHostShell({
     return store;
   };
   const hostState = new HostStateProjection(stateStore, log);
+  const recordInboundDeliveryFailure = (
+    agent: ConfiguredAgent,
+    code: "non_retryable_receipt" | "runtime_delivery_exception" | "runtime_delivery_event",
+  ): void => {
+    const at = new Date().toISOString();
+    const reason = "Inbound Runtime delivery failed non-retryably; durable Inbox/ledger state is retained for recovery.";
+    const nextAction = "Inspect the delivery/status error, correct the Runtime or canonical Inbox state, then restart to replay safely.";
+    hostState.updateStatus(agent, {
+      inboundDeliveryHealth: { state: "error", code, at, reason, nextAction },
+      runtimeReadiness: { runtime: agent.runtime, state: "incompatible", reason, nextAction },
+    });
+    hostState.recordStatusError(agent, `${reason} ${nextAction} code=${code}`);
+  };
   const agentStates = new Map<string, AgentStateRecord>();
   const saveAgentState = (record: AgentStateRecord): void => {
     try { record.store.writeJson("agentState", record.state); }
@@ -396,55 +409,71 @@ export function createHostShell({
     if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
     const telemetryMessageId = String(event.message_id || event.event_id || eventKey);
+    let canonicalInboxDurable = false;
     if (wake) telemetry?.beginMessage(agent.agentId, telemetryMessageId);
     if (event.event_id) inFlightEventIds.add(eventKey);
     try {
-      const receive = async (): Promise<Record<string, unknown>> => {
+      const receive = async (): Promise<Record<string, unknown> | null> => {
         const [names, signature] = await Promise.all([
           senderIdentity.ensureChatNames(agent, event.chat_id, 3_000),
           event._sender_is_bot ? Promise.resolve(null) : senderIdentity.ensureSenderSignature(agent, event.sender_id, 3_000),
         ]);
-        const envelope = envelopeProjector.projectInbound(agent, event, { anchorReply: wake, names, signature }) as unknown as Record<string, unknown>;
-        envelope.target = targetKeyOfInboxEnvelope({ ...envelope, chat_id: event.chat_id, thread_id: event.thread_id });
-        if (wake) envelope.wake = true;
-        const inboxEnvelope = projectInboxEnvelope(envelope, {
+        const projected = envelopeProjector.projectInbound(agent, event, { anchorReply: wake, names, signature }) as unknown as Record<string, unknown>;
+        projected.target = targetKeyOfInboxEnvelope({ ...projected, chat_id: event.chat_id, thread_id: event.thread_id });
+        if (wake) projected.wake = true;
+        const candidate = projectInboxEnvelope(projected, {
           chat_id: event.chat_id,
           thread_id: event.thread_id,
           ...(event.create_time !== undefined ? { create_time: String(event.create_time) } : {}),
           sender_id: event.sender_id,
-          content: String(envelope.content ?? event.content ?? ""),
+          content: String(projected.content ?? event.content ?? ""),
         });
-        try { stateStore(agent).appendNdjson("inbox", inboxEnvelope); }
+        let append: ReturnType<AgentStateStore["appendCanonicalInboxOnce"]>;
+        try { append = stateStore(agent).appendCanonicalInboxOnce(candidate); }
         catch (error) { throw new Error(`inbox 写失败: ${errorMessage(error)}`); }
-        // An event becomes permanently seen only after its canonical Inbox append
-        // is durable. Failures remain eligible for same-process redelivery.
+        canonicalInboxDurable = true;
+        // An event becomes permanently transport-seen only after the canonical
+        // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
-        hostState.appendConversation(agent, {
-          direction: "in", from: envelope.sender_name, senderType: envelope.sender_type,
-          target: targetFor(event).target, wake, text: event.content, messageId: envelope.message_id,
-          at: envelope.timestamp || new Date().toISOString(),
+        if (append.status === "duplicate_consumed") return null;
+        const inboxEnvelope = append.envelope;
+        if (append.status === "appended") hostState.appendConversation(agent, {
+          direction: "in", from: inboxEnvelope.sender_name, senderType: inboxEnvelope.sender_type,
+          target: String(inboxEnvelope.target || targetFor(event).target), wake, text: event.content, messageId: inboxEnvelope.message_id,
+          at: inboxEnvelope.timestamp || new Date().toISOString(),
         });
-        return envelope;
+        return inboxEnvelope as Record<string, unknown>;
       };
-      const envelope = wake && telemetry
+      const inboxEnvelope = wake && telemetry
         ? await telemetry.phase(telemetryMessageId, "feishu.receive", SpanKind.CONSUMER, receive)
         : await receive();
-      if (!wake) return;
-      const receipt = await runtimeHost.deliver(agent.agentId, envelope);
-      if (receipt.status === "accepted" || receipt.status === "duplicate" || receipt.status === "deferred") {
+      if (!wake || !inboxEnvelope) return;
+      const receipt = await runtimeHost.deliver(agent.agentId, inboxEnvelope);
+      if (receipt.status === "error") {
+        recordInboundDeliveryFailure(agent, "non_retryable_receipt");
         hostState.appendStatusLog(agent, "deliverLog", {
-          from: envelope.sender_name,
-          target: targetFor(event).target,
-          excerpt: safeConversationExcerpt(event.content, 180),
-          at: new Date().toISOString(),
-        }, 30);
-        if (envelope.sender_type === "human" || envelope.sender_type === "agent") processingEyes.add(agent, String(envelope.message_id || ""));
-        if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${envelope.seq}: ${receipt.reason}`);
+          at: new Date().toISOString(), status: "error",
+          reason: "non-retryable Runtime delivery error; durable recovery state retained",
+        }, 80);
+        return;
       }
+      hostState.appendStatusLog(agent, "deliverLog", {
+        from: inboxEnvelope.sender_name,
+        target: String(inboxEnvelope.target || targetFor(event).target),
+        excerpt: safeConversationExcerpt(event.content, 180),
+        at: new Date().toISOString(),
+      }, 30);
+      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") processingEyes.add(agent, String(inboxEnvelope.message_id || ""));
+      if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${inboxEnvelope.seq}: ${receipt.reason}`);
     } catch (error) {
       if (wake) telemetry?.delivery(agent.agentId, telemetryMessageId, "error");
-      log(`onFeishuMessage 异常 agent=${agent.name}: ${error instanceof Error ? error.stack || error.message : String(error)}`);
-      hostState.recordStatusError(agent, `onFeishuMessage: ${errorMessage(error)}`);
+      if (canonicalInboxDurable) {
+        log(`onFeishuMessage Runtime delivery failed agent=${agent.name}; canonical Inbox retained`);
+        recordInboundDeliveryFailure(agent, "runtime_delivery_exception");
+      } else {
+        log(`onFeishuMessage 异常 agent=${agent.name}: ${error instanceof Error ? error.stack || error.message : String(error)}`);
+        hostState.recordStatusError(agent, `onFeishuMessage: ${errorMessage(error)}`);
+      }
     } finally {
       if (event.event_id) inFlightEventIds.delete(eventKey);
     }
@@ -1212,9 +1241,13 @@ export function createHostShell({
       return;
     }
     if (message.type === "delivery") {
+      if (message.status === "error") recordInboundDeliveryFailure(agent, "runtime_delivery_event");
       hostState.appendStatusLog(agent, "deliverLog", {
         at: new Date().toISOString(), deliveryId: message.deliveryId, messageId: message.messageId,
-        status: message.status, ...(message.reason ? { reason: safeConversationExcerpt(message.reason, 120) } : {}),
+        status: message.status,
+        ...(message.status === "error"
+          ? { reason: "non-retryable Runtime delivery error; durable recovery state retained" }
+          : (message.reason ? { reason: safeConversationExcerpt(message.reason, 120) } : {})),
       }, 80);
       return;
     }
@@ -1236,7 +1269,8 @@ export function createHostShell({
         const readiness = providerAuthenticationFailureReadiness(agent.runtime as "codex" | "claude" | "pi", message.event.upstream?.provider);
         hostState.recordStatusError(agent, `auth: ${readiness.reason}; ${readiness.nextAction}`);
       } else {
-        hostState.recordStatusError(agent, `${message.event.errorCategory || "provider"}: ${message.event.message}${message.event.nextAction ? `; ${message.event.nextAction}` : ""}`);
+        const category = message.event.errorCategory || "provider";
+        hostState.recordStatusError(agent, `${category}: Runtime input failed ${message.event.retryable ? "retryably" : "non-retryably"}; inspect delivery health and Runtime/provider configuration`);
       }
     }
   };

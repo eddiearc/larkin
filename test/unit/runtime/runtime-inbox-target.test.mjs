@@ -179,6 +179,39 @@ test("persistence rejects legacy and malformed targets and leaves durable old ro
   }
 });
 
+test("issue 124 former split envelope fails while the exact persisted canonical object reaches Runtime", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue124-envelope-counterfactual-"));
+  const agentId = "cli_issue124CounterfactualA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  const canonical = { message_id: "om_issue124_counterfactual", target: "thread:oc_issue124:omt_issue124",
+    chat_id: "oc_issue124", thread_id: "omt_issue124", content: "canonical" };
+  try {
+    store.appendNdjson("inbox", canonical);
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: ".", stateDir: store.paths.root }]);
+    const formerRawEnvelope = { ...canonical };
+    delete formerRawEnvelope.chat_id;
+    const former = await host.deliver(agentId, formerRawEnvelope);
+    assert.equal(former.status, "error");
+    assert.match(former.reason, /thread locator requires nonempty chat_id/);
+    assert.equal(session.prompts.length, 0);
+    assert.deepEqual(store.readJson("runtimeDeliveries", { records: [] }).records, []);
+
+    const fixed = await host.deliver(agentId, canonical);
+    assert.equal(fixed.status, "accepted");
+    assert.equal(session.prompts.length, 1);
+    assert.match(session.prompts[0].text, /Inbox changed for thread:oc_issue124:omt_issue124/);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].messageId, canonical.message_id);
+  } finally {
+    await host.shutdown("issue124 counterfactual complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Runtime final inputs use exact targets and malformed deliveries fail closed before prompt or ledger acceptance", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-target-defense-"));
   const store = createAgentStateStore(root, "cli_targetDefenseA1", {
@@ -203,7 +236,10 @@ test("Runtime final inputs use exact targets and malformed deliveries fail close
   ];
   try {
     await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: ".", stateDir: store.paths.root }]);
-    for (const [envelope] of cases) assert.equal((await host.deliver(agentId, envelope)).status, "accepted");
+    for (const [envelope] of cases) {
+      store.appendNdjson("inbox", envelope);
+      assert.equal((await host.deliver(agentId, envelope)).status, "accepted");
+    }
 
     const finalInputs = [...session.prompts, ...session.steers];
     assert.equal(finalInputs.length, cases.length);
@@ -218,6 +254,7 @@ test("Runtime final inputs use exact targets and malformed deliveries fail close
       { message_id: "generic_runtime", target: "runtime:system" },
       { message_id: "empty_chat_runtime", target: "chat:" },
       { message_id: "empty_thread_runtime", target: "thread:" },
+      { message_id: "orphan_thread_runtime", thread_id: "omt_orphan" },
       { message_id: "rem_runtime_prefix_only" },
       { message_id: "om_runtime_kind_only", kind: "reminder" },
       { message_id: "om_runtime_target_only", target: RUNTIME_REMINDER_TARGET },

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { CommentEvent, CommentTarget, FetchedComment } from "@larksuite/channel";
-import { DOCUMENT_COMMENT_TARGET_PATTERN } from "../agent/inbox-projection.js";
 
 export const DOCUMENT_COMMENT_EVENT = "drive.notice.comment_add_v1";
+const DOCUMENT_COMMENT_TARGET_PATTERN = /^document-comment:(doc|docx|sheet|file):([A-Za-z0-9_-]+):([A-Za-z0-9_-]+):(in-thread|top-level)$/;
 
 export interface DocumentCommentSurface {
   resolveTarget(fileToken: string, fileType: string): Promise<CommentTarget | null>;

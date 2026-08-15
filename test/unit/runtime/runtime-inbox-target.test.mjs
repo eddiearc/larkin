@@ -30,23 +30,27 @@ class FakeSession {
 
 const canonicalDocumentTarget = "document-comment:docx:doxcnFile_1:comment_1:in-thread";
 
-test("canonical Inbox target derivation accepts only authoritative namespace partitions", () => {
+test("canonical Inbox target derivation validates namespace and source coherence, not platform ID grammar", () => {
   const valid = [
-    [{ target: "chat:oc_preserved_1" }, "chat:oc_preserved_1"],
-    [{ target: "chat:oc_preserved_1", chat_id: "oc_preserved_1", kind: "interaction" }, "chat:oc_preserved_1"],
-    [{ target: "thread:oc_chat_1:omt_thread_1" }, "thread:oc_chat_1:omt_thread_1"],
-    [{ target: "thread:oc_chat_1:omt_thread_1", chat_id: "oc_chat_1", thread_id: "omt_thread_1" }, "thread:oc_chat_1:omt_thread_1"],
+    [{ target: "chat:c123" }, "chat:c123"],
+    [{ target: "chat:房间/?!", chat_id: "房间/?!", kind: "interaction" }, "chat:房间/?!"],
+    [{ target: "thread:nonstandard suffix / 标点:✨" }, "thread:nonstandard suffix / 标点:✨"],
+    [{ target: "thread:房间:/?:主题/✨", chat_id: "房间:/?", thread_id: "主题/✨" }, "thread:房间:/?:主题/✨"],
     [{ target: canonicalDocumentTarget, kind: "document_comment" }, canonicalDocumentTarget],
-    [{ chat_id: "oc_chat_1", kind: "interaction" }, "chat:oc_chat_1"],
-    [{ chat_id: "oc_chat_1", thread_id: "omt_thread_1" }, "thread:oc_chat_1:omt_thread_1"],
-    [{ target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_current_1" }, RUNTIME_REMINDER_TARGET],
-    [{ target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_current_1" }, RUNTIME_REDELIVERY_TARGET],
+    [{ target: "document-comment:任意/?!::详细格式不在这里校验", kind: "document_comment" }, "document-comment:任意/?!::详细格式不在这里校验"],
+    [{ chat_id: "c123", kind: "interaction" }, "chat:c123"],
+    [{ chat_id: "群/聊:✨", thread_id: "话题?! / ü" }, "thread:群/聊:✨:话题?! / ü"],
+    [{ target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_标点 !?/✨" }, RUNTIME_REMINDER_TARGET],
+    [{ target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_标点 !?/✨" }, RUNTIME_REDELIVERY_TARGET],
   ];
   for (const [envelope, expected] of valid) {
     assert.equal(targetKeyOfInboxEnvelope(envelope), expected);
     assert.equal(isCanonicalInboxTarget(expected), true);
   }
 
+  for (const target of ["chat:", "thread:", "document-comment:", "dm:@system", "#c123", "runtime:system", "runtime:unknown", "runtime:other", "unknown:value"]) {
+    assert.equal(isCanonicalInboxTarget(target), false);
+  }
   for (const envelope of [
     null,
     undefined,
@@ -55,39 +59,41 @@ test("canonical Inbox target derivation accepts only authoritative namespace par
     { target: undefined },
     { target: null },
     { target: 7 },
+    { target: "chat:" },
+    { target: "thread:" },
+    { target: "document-comment:", kind: "document_comment" },
     { target: "dm:@system", message_id: "legacy_dm" },
     { target: "#c123", message_id: "legacy_alias" },
     { target: "runtime:system", message_id: "legacy_runtime" },
     { target: "runtime:unknown", message_id: "legacy_unknown" },
-    { target: "runtime:other", message_id: "malformed_runtime" },
-    { target: "chat:c123", message_id: "short_chat" },
-    { target: "thread:oc_chat_1:thread_1", message_id: "short_thread" },
-    { target: "document-comment:docx:file:comment:anywhere", kind: "document_comment" },
+    { target: "runtime:other", message_id: "unknown_runtime" },
     { message_id: "rem_prefix_only" },
+    { message_id: "rem_" },
     { kind: "reminder", message_id: "om_kind_only" },
     { target: RUNTIME_REMINDER_TARGET, message_id: "om_target_only" },
     { kind: "reminder", message_id: "rem_targetless_both" },
     { kind: "redelivery", message_id: "redeliver_targetless_both" },
-    { target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_with_chat", chat_id: "oc_conflict" },
-    { target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_with_thread", thread_id: "omt_conflict" },
-    { target: "chat:oc_expected", chat_id: "oc_different" },
-    { target: "chat:oc_expected", thread_id: "omt_forbidden" },
-    { target: "chat:oc_expected", kind: "document_comment" },
-    { target: "chat:oc_expected", kind: "reminder", message_id: "rem_internal_chat_target" },
-    { target: "thread:oc_expected:omt_expected", chat_id: "oc_different" },
-    { target: "thread:oc_expected:omt_expected", thread_id: "omt_different" },
-    { target: "thread:oc_expected:omt_expected", kind: "reminder", message_id: "rem_internal" },
+    { target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_" },
+    { target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_" },
+    { target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_with_chat", chat_id: "任意" },
+    { target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_with_thread", thread_id: "孤立线程" },
+    { target: "chat:expected", chat_id: "different" },
+    { target: "chat:expected", chat_id: "expected", thread_id: "forbidden" },
+    { target: "chat:expected", kind: "document_comment" },
+    { target: "chat:expected", kind: "reminder", message_id: "rem_internal_chat_target" },
+    { target: "thread:expected:pair", chat_id: "expected" },
+    { target: "thread:expected:pair", chat_id: "expected", thread_id: "different" },
+    { target: "thread:expected:pair", kind: "reminder", message_id: "rem_internal" },
     { target: canonicalDocumentTarget, message_id: "doc_without_kind" },
-    { target: canonicalDocumentTarget, kind: "document_comment", chat_id: "oc_forbidden" },
+    { target: canonicalDocumentTarget, kind: "document_comment", chat_id: "forbidden" },
     { target: canonicalDocumentTarget, kind: "document_comment", message_id: "redeliver_internal" },
     { kind: "document_comment", message_id: "doc_without_locator" },
-    { kind: "document_comment", message_id: "doc_with_chat", chat_id: "oc_forbidden" },
-    { message_id: "rem_prefix_chat", chat_id: "oc_conflict" },
-    { kind: "reminder", message_id: "om_kind_chat", chat_id: "oc_conflict" },
-    { kind: "reminder", message_id: "rem_internal_chat", chat_id: "oc_conflict" },
-    { kind: "redelivery", message_id: "redeliver_internal_thread", chat_id: "oc_conflict", thread_id: "omt_conflict" },
-    { chat_id: "c123", message_id: "display_alias" },
-    { chat_id: "oc_chat_1", thread_id: "thread_1", message_id: "bad_thread_locator" },
+    { kind: "document_comment", message_id: "doc_with_chat", chat_id: "forbidden" },
+    { message_id: "rem_prefix_chat", chat_id: "conflict" },
+    { kind: "reminder", message_id: "om_kind_chat", chat_id: "conflict" },
+    { kind: "reminder", message_id: "rem_internal_chat", chat_id: "conflict" },
+    { kind: "redelivery", message_id: "redeliver_internal_thread", chat_id: "conflict", thread_id: "thread" },
+    { thread_id: "thread-without-chat", message_id: "missing_pair" },
     { kind: "reminder", message_id: "redeliver_source_conflict", target: RUNTIME_REMINDER_TARGET },
   ]) assert.throws(() => targetKeyOfInboxEnvelope(envelope), /Inbox|canonical|target|locator|source/);
   assert.throws(() => projectInboxCheck([], "dm:@system"), /Invalid canonical Inbox check target/);
@@ -123,7 +129,7 @@ test("persistence rejects legacy and malformed targets and leaves durable old ro
     const store = createAgentStateStore(root, "cli_targetStoreA1", {
       inspectProcess: (pid) => ({ ok: true, dead: false, startToken: `test-${pid}` }),
     });
-    store.appendNdjson("inbox", { message_id: "om_valid_before_rejection", target: "chat:oc_valid" });
+    store.appendNdjson("inbox", { message_id: "om_valid_before_rejection", target: "chat:c123" });
     const inboxBeforeAppendRejection = fs.readFileSync(store.paths.inbox);
     const stateBeforeAppendRejection = fs.readFileSync(store.paths.inboxState);
     for (const envelope of [
@@ -188,12 +194,12 @@ test("Runtime final inputs use exact targets and malformed deliveries fail close
   host.subscribe((event) => events.push(event));
   const agentId = "cli_targetDefenseA1";
   const cases = [
-    [{ target: RUNTIME_REMINDER_TARGET, message_id: "rem_final", kind: "reminder" }, RUNTIME_REMINDER_TARGET],
-    [{ target: RUNTIME_REDELIVERY_TARGET, message_id: "redeliver_final", kind: "redelivery" }, RUNTIME_REDELIVERY_TARGET],
-    [{ message_id: "om_chat", chat_id: "oc_chat" }, "chat:oc_chat"],
-    [{ message_id: "om_thread", chat_id: "oc_chat", thread_id: "omt_thread" }, "thread:oc_chat:omt_thread"],
-    [{ message_id: "interaction_run", kind: "interaction", chat_id: "oc_interaction" }, "chat:oc_interaction"],
-    [{ message_id: "doc_comment_final", kind: "document_comment", target: canonicalDocumentTarget }, canonicalDocumentTarget],
+    [{ target: RUNTIME_REMINDER_TARGET, message_id: "rem_final!?✨", kind: "reminder" }, RUNTIME_REMINDER_TARGET],
+    [{ target: RUNTIME_REDELIVERY_TARGET, message_id: "redeliver_final!?✨", kind: "redelivery" }, RUNTIME_REDELIVERY_TARGET],
+    [{ message_id: "om_chat", chat_id: "c123" }, "chat:c123"],
+    [{ message_id: "om_thread", chat_id: "群/聊", thread_id: "主题:✨" }, "thread:群/聊:主题:✨"],
+    [{ message_id: "interaction_run", kind: "interaction", chat_id: "interaction?!" }, "chat:interaction?!"],
+    [{ message_id: "doc_comment_final", kind: "document_comment", target: "document-comment:unusual/✨!?" }, "document-comment:unusual/✨!?"],
   ];
   try {
     await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: ".", stateDir: store.paths.root }]);
@@ -210,7 +216,8 @@ test("Runtime final inputs use exact targets and malformed deliveries fail close
       { message_id: "unlocatable_runtime" },
       { message_id: "legacy_dm_runtime", target: "dm:@system" },
       { message_id: "generic_runtime", target: "runtime:system" },
-      { message_id: "malformed_chat_runtime", target: "chat:c_alias" },
+      { message_id: "empty_chat_runtime", target: "chat:" },
+      { message_id: "empty_thread_runtime", target: "thread:" },
       { message_id: "rem_runtime_prefix_only" },
       { message_id: "om_runtime_kind_only", kind: "reminder" },
       { message_id: "om_runtime_target_only", target: RUNTIME_REMINDER_TARGET },

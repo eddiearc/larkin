@@ -123,7 +123,13 @@ test("package version and explicit tag publication share one immutable combined-
     assert.match(workflow, new RegExp(`target: ${target}`));
   }
   assert.match(workflow, /gh release upload/);
-  assert.match(workflow, /gh release download/);
+  assert.doesNotMatch(workflow, /gh release download|--clobber/);
+  assert.match(workflow, /build:[\s\S]*github\.event_name != 'workflow_dispatch'/);
+  assert.match(workflow, /assemble-release:[\s\S]*always\(\)[\s\S]*needs\.build\.result == 'skipped'/);
+  assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
+  assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\/\$\{release_id\}\/assets\?per_page=100/);
+  assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\/assets\/\$\{asset_ids\[0\]\}/);
+  assert.match(workflow, /Expected exactly one uploaded draft asset named \$asset_name/);
   assert.match(workflow, /assemble-release:[\s\S]*bun scripts\/release\/assemble\.ts[\s\S]*actions\/upload-artifact@v4/);
   assert.match(workflow, /verify-windows-release:[\s\S]*runs-on: windows-latest/);
   assert.match(workflow, /verify-windows-release:[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*path: release-tooling[\s\S]*actions\/download-artifact@v4[\s\S]*Get-FileHash[\s\S]*release-tooling\/scripts\/release\/smoke\.ts" --release-dir artifacts\/release/);

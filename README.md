@@ -36,6 +36,10 @@ The rest of this document uses the short `larkin` form; it works as-is after `np
 
 Run `larkin --help` or `larkin config --help` for the available commands and configuration options. Local configuration is stored under `~/.larkin` by default; set `LARKIN_CONFIG_DIR` to use another directory.
 
+### Feishu message links
+
+Feishu clients do not reliably render Markdown links such as `[label](URL)` as clickable in text or Markdown messages. When a recipient must be able to open a link, keep the complete bare HTTPS URL visible, for example: Issue 115 — https://github.com/eddiearc/larkin/issues/115. A label may accompany it, but must not replace the bare URL. Larkin does not rewrite exact, verbatim, or user-authored message bodies to enforce this guidance.
+
 During setup, a new Agent is offered Pi first, followed by Codex and Claude Code. Pi can use an existing
 official `pi` installation or the official Pi runtime bundled in Larkin. The bundled option supports
 DeepSeek, Kimi/Moonshot, MiniMax, Zhipu/BigModel, and a custom OpenAI-compatible Base URL. Provider keys

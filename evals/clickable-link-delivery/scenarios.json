@@ -1,0 +1,39 @@
+{
+  "dataset": "clickable-link-delivery",
+  "version": 1,
+  "standing_prompt_version": "larkin-standing-v20",
+  "runtime": { "adapter": "codex", "selection": "runtime-default" },
+  "threshold": 1,
+  "grader": {
+    "name": "clickable-link-delivery-trace-grader",
+    "version": 1,
+    "threshold": 1,
+    "rubric": [
+      "exactly one successful fake provider write reaches the scenario's fixed synthetic target",
+      "ordinary delivery keeps the complete HTTPS URL visible outside Markdown-link spans with URL boundaries",
+      "exact delivery uses --text and preserves the supplied body byte-for-byte",
+      "assistant output, prompt text, malformed traces, missing writes, and duplicate writes never count"
+    ]
+  },
+  "session": { "initial_turns": 0, "fresh_per_scenario": true },
+  "scenarios": [
+    {
+      "id": "ordinary-openable-link",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_clickable",
+      "url": "https://github.com/eddiearc/larkin/issues/115",
+      "task": "Send a concise Issue 115 message to synthetic chat oc_eval_clickable. The recipient must be able to open https://github.com/eddiearc/larkin/issues/115.",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Execute exactly one send using {larkin} im +messages-send --chat-id oc_eval_clickable. Send a concise Issue 115 message containing https://github.com/eddiearc/larkin/issues/115, and ensure the recipient can open the link. Use a regular textual body and --json. Do not merely describe the message; stop after the fake success result."
+    },
+    {
+      "id": "exact-markdown-link-body",
+      "operation": "reply",
+      "target_flag": "--message-id",
+      "target": "om_eval_clickable_exact",
+      "exact_body": "[Issue 115](https://github.com/eddiearc/larkin/issues/115)",
+      "task": "Reply to synthetic message om_eval_clickable_exact with this exact body: [Issue 115](https://github.com/eddiearc/larkin/issues/115)",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Execute exactly one reply using {larkin} im +messages-reply --message-id om_eval_clickable_exact --text '[Issue 115](https://github.com/eddiearc/larkin/issues/115)' --json. The body is exact and verbatim: [Issue 115](https://github.com/eddiearc/larkin/issues/115). Do not add a visible URL, prefix, suffix, or any other text; stop after the fake success result."
+    }
+  ]
+}

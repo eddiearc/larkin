@@ -92,7 +92,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v19");
+  assert.equal(prompt.version, "larkin-standing-v20");
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
@@ -194,10 +194,17 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.doesNotMatch(prompt.content, /oc_eval_exact|om_eval_anchor|原文：“修复 A\/B”|收到：“A\/B”|引用：“抢到”|消息原文：“保持”/);
 });
 
-test("Codex, Claude and Pi receive the markdown-default standing contract", async () => {
+test("Codex, Claude and Pi receive the clickable-link and exact-content standing contracts", async () => {
   const standingPrompt = (runtime) => new ContextPromptBuilder().build({ agentId: "cli_test", runtime });
   const assertContract = (content) => {
     assert.match(content, /regular textual message bodies.*`--markdown`/i);
+    assert.match(content, /URL must be visible, clickable, or openable.*complete bare `https:\/\/\.\.\.` URL.*visible text/i);
+    assert.match(content, /Do not rely solely on `\[label\]\(URL\)`.*Feishu client rendering is unreliable/i);
+    assert.match(content, /label may also be included.*bare URL must remain present/i);
+    assert.match(content, /Never rewrite or normalize.*exact or verbatim user-supplied body.*existing exact-content paths.*authoritative.*unchanged/i);
+    assert.match(content, /exact text supplied directly.*body unchanged as one literal `--text` argument/i);
+    assert.match(content, /explicit exact or verbatim direct literal uses `--text`.*overrides.*markdown default/i);
+    assert.match(content, /tool-sourced exact or verbatim text.*deterministic native `--jq`.*`--content`/i);
     assert.match(content, /native `--text`.*logs.*code.*exact whitespace/i);
     assert.doesNotMatch(content, /rejected|--literal-text/i);
     assert.doesNotMatch(content, /use `--text` for brief single-line replies/i);

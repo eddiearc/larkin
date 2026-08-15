@@ -41,7 +41,7 @@ function correctionBoundaryIssue(scenario) {
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "agent-experience-v6" || value.version !== 6) throw new Error("eval dataset/version mismatch");
-  if (value.model?.standing_prompt_version !== "larkin-standing-v19") throw new Error("standing prompt version mismatch");
+  if (value.model?.standing_prompt_version !== "larkin-standing-v20") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
   if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 6 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");

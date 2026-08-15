@@ -16,7 +16,7 @@ import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } fr
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v19";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v20";
 
 /**
  * Agent 间协作唤醒引导（issue #75）：纯文本 @ 不会产生飞书 mention 事件，
@@ -145,7 +145,9 @@ export class ContextPromptBuilder {
       "Only a real Feishu `message_id` beginning with `om_` may be passed to `+messages-reply`; `rem_`, `redeliver_`, and every other synthetic ID must never be replied to. Send with a confirmed `chat_id` and never guess a chat id from a display name.",
       "Before every send/reply/card write, Larkin probes the exact chat or thread history with the current Bot identity. A nonzero `freshness_conflict` includes bounded unseen context and direct-acks that cursor; reconsider it, then retry the ordinary command. Larkin never saves the blocked message body as a draft.",
       "For regular textual message bodies, default to `--markdown`, including brief single-line replies, so Feishu renders Markdown structure instead of showing its markers literally.",
+      "When a URL must be visible, clickable, or openable by the recipient, include the complete bare `https://...` URL as visible text. Do not rely solely on `[label](URL)`, because Feishu client rendering is unreliable. A label may also be included, but the bare URL must remain present.",
       "Use native `--text` only when plain text or verbatim preservation is explicitly needed, such as logs, code, or exact whitespace. Both `--markdown` and `--text` remain supported in the Larkin Runtime.",
+      "Never rewrite or normalize an exact or verbatim user-supplied body to expose a URL; the existing exact-content paths remain authoritative and preserve the supplied body unchanged.",
       "For exact text supplied directly in the current instruction or Inbox event, pass the body unchanged as one literal `--text` argument. A direct literal must not use command substitution, backticks, `eval`, `echo`, or an unquoted variable; if it cannot be represented safely, stop and report the limitation instead of normalizing it.",
       "An explicit exact or verbatim direct literal uses `--text` and overrides the regular markdown default.",
       `For a common exact send with a confirmed chat id, use the complete schematic recipe \`${executable} im +messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json\`; replace each placeholder with the corresponding confirmed or exact literal value.`,

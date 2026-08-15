@@ -453,8 +453,9 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     fs.mkdirSync(sessionDir, { recursive: true });
     const sessionFile = path.join(sessionDir, `${input.resumeSessionId}.jsonl`);
     fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
+    const piCommand = process.platform === "win32" ? process.execPath : "/fixture/external-pi";
     const pending = createNativeRuntimeAdapter("pi", {
-      env: { LARKIN_PI_COMMAND: "/fixture/external-pi" },
+      env: { LARKIN_PI_COMMAND: piCommand },
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
     await new Promise((resolve) => setImmediate(resolve));
@@ -475,7 +476,7 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     assert.equal(fs.readFileSync(promptFile, "utf8"), "standing");
     if (process.platform !== "win32") assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
     if (distribution === "external") {
-      assert.equal(launch.command, "/fixture/external-pi");
+      assert.equal(launch.command, piCommand);
       assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
       assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
     } else {

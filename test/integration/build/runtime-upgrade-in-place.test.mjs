@@ -115,6 +115,29 @@ for (const fixtureName of FIXTURES) {
   }
 }
 
+test("startup rebuilds wake reason from the canonical Inbox row rather than stale Runtime text", { timeout: 10_000 }, async () => {
+  const canonicalReason = "canonical-upgrade-reason";
+  const { fixture, root, store } = materialize("v0.3.3-active-thread.json", (files) => {
+    files["feishu-inbox.ndjson"][0].wake_reason = canonicalReason;
+    files["runtime-deliveries.json"].records[0].input.text = `${STALE_NOTICE}; reason=stale-runtime-only-reason`;
+  });
+  const session = new CapturingSession();
+  const host = candidate(store, session, []);
+  try {
+    await host.start([{ agentId: fixture.agent_id, name: fixture.agent_id, runtime: "codex", model: "captured",
+      workspaceDir: path.join(root, "agents", fixture.agent_id), stateDir: store.paths.root }]);
+    assert.equal(session.prompts.length, 1);
+    assert.match(session.prompts[0].text, new RegExp(`reason=${canonicalReason}`));
+    assert.doesNotMatch(session.prompts[0].text, /stale-runtime-only-reason/);
+    const record = store.readJson("runtimeDeliveries", { records: [] }).records[0];
+    assert.equal(record.wakeReason, canonicalReason);
+    assert.equal(record.input.text, session.prompts[0].text);
+  } finally {
+    await host.shutdown("canonical wake reason upgrade complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("invalid or missing legacy canonical rows are quarantined visibly without target guessing", { timeout: 10_000 }, async () => {
   const cases = [
     ["missing", (files) => { files["feishu-inbox.ndjson"] = null; }],
@@ -123,6 +146,8 @@ test("invalid or missing legacy canonical rows are quarantined visibly without t
     ["conflicting-sequence", (files) => { files["inbox-state.json"].messages.om_upgrade_033.seq = 2; }],
     ["malformed-row-sequence", (files) => { files["feishu-inbox.ndjson"][0].target_seq = "one"; }],
     ["pending-row-marked-consumed", (files) => { files["inbox-state.json"].targets[TARGET].model_seen_seq = 1; }],
+    ["malformed-structured-target", (files) => { files["runtime-deliveries.json"].records[0].target = "dm:oc_unsafe_fallback"; }],
+    ["conflicting-wake-reason", (files) => { files["runtime-deliveries.json"].records[0].wakeReason = "stale runtime-only reason"; }],
     ["duplicate-message-id", (files) => { files["feishu-inbox.ndjson"].push(structuredClone(files["feishu-inbox.ndjson"][0])); }],
     ["syntactically-malformed", (files) => { files["feishu-inbox.ndjson"] = "syntactically-malformed"; }],
   ];

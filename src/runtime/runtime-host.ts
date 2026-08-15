@@ -108,10 +108,13 @@ export interface StagedRuntimeCandidate {
 const MAX_DELIVERIES = 2048;
 const now = (): string => new Date().toISOString();
 const isActiveDelivery = (status: DeliveryStatus): boolean => ["pending", "submitting", "accepted"].includes(status);
-type ReplayFailureCode = "canonical_inbox_row_missing" | "canonical_inbox_malformed" | "duplicate_message_id" | "inbox_state_conflict" | "delivery_target_conflict" | "structured_target_missing";
+type ReplayFailureCode = "canonical_inbox_row_missing" | "canonical_inbox_malformed" | "duplicate_message_id"
+  | "inbox_state_conflict" | "delivery_target_conflict" | "structured_target_invalid"
+  | "structured_target_missing" | "wake_reason_conflict";
 const REPLAY_FAILURE_CODES: ReadonlySet<string> = new Set<ReplayFailureCode>([
   "canonical_inbox_row_missing", "canonical_inbox_malformed", "duplicate_message_id",
-  "inbox_state_conflict", "delivery_target_conflict", "structured_target_missing",
+  "inbox_state_conflict", "delivery_target_conflict", "structured_target_invalid",
+  "structured_target_missing", "wake_reason_conflict",
 ]);
 
 function replayFailureReason(code: ReplayFailureCode): string {
@@ -268,7 +271,14 @@ export function createRuntimeHost(options: {
 
   /** Rebuild every submitted notice from canonical structured state, never persisted text. */
   const prepareRecordInput = (agent: ManagedAgent, record: DeliveryRecord, busy: boolean): RecordInputPreparation => {
-    let target = typeof record.target === "string" && isCanonicalInboxTarget(record.target) ? record.target : null;
+    if (record.target !== undefined && (typeof record.target !== "string" || !isCanonicalInboxTarget(record.target))) {
+      return { status: "error", code: "structured_target_invalid", reason: replayFailureReason("structured_target_invalid") };
+    }
+    if (record.wakeReason !== undefined && typeof record.wakeReason !== "string") {
+      return { status: "error", code: "wake_reason_conflict", reason: replayFailureReason("wake_reason_conflict") };
+    }
+    let target = typeof record.target === "string" ? record.target : null;
+    let wakeReason = typeof record.wakeReason === "string" ? record.wakeReason : undefined;
     if (agent.stateStore?.resolveInboxDeliverySource) {
       let source: InboxDeliverySourceResolution;
       try { source = agent.stateStore.resolveInboxDeliverySource(record.messageId); }
@@ -280,19 +290,26 @@ export function createRuntimeHost(options: {
       if (target && target !== source.target) {
         return { status: "error", code: "delivery_target_conflict", reason: replayFailureReason("delivery_target_conflict") };
       }
+      const canonicalWakeReason = typeof source.envelope.wake_reason === "string" ? source.envelope.wake_reason : undefined;
+      if (record.wakeReason !== undefined && wakeReason !== canonicalWakeReason) {
+        return { status: "error", code: "wake_reason_conflict", reason: replayFailureReason("wake_reason_conflict") };
+      }
       target = source.target;
+      wakeReason = canonicalWakeReason;
     }
     if (!target) return { status: "error", code: "structured_target_missing", reason: replayFailureReason("structured_target_missing") };
     const staleInput = record.input && typeof record.input === "object" ? record.input : null;
     const attempt = Number.isSafeInteger(staleInput?.attempt) && Number(staleInput?.attempt) >= 0 ? Number(staleInput!.attempt) : 0;
     const inputId = typeof staleInput?.inputId === "string" && staleInput.inputId ? staleInput.inputId : record.deliveryId;
     record.target = target;
+    if (wakeReason) record.wakeReason = wakeReason;
+    else delete record.wakeReason;
     record.input = {
       inputId,
       deliveryId: record.deliveryId,
       kind: busy ? "inbox_update" : "wake",
       text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId: record.deliveryId, target,
-        ...(record.wakeReason ? { wakeReason: record.wakeReason } : {}) }),
+        ...(wakeReason ? { wakeReason } : {}) }),
       attempt,
     };
     return { status: "ready", target };
@@ -987,7 +1004,8 @@ export function createRuntimeHost(options: {
         if (existing?.status === "error") {
           if (existing.target && existing.target !== target) return quarantineRecord(agent, existing, "delivery_target_conflict");
           existing.target = target;
-          if (typeof envelope.wake_reason === "string") existing.wakeReason = envelope.wake_reason;
+          if (typeof envelope.wake_reason === "string" && envelope.wake_reason) existing.wakeReason = envelope.wake_reason;
+          else delete existing.wakeReason;
           const priorAttempt = existing.input && Number.isSafeInteger(existing.input.attempt) ? existing.input.attempt : 0;
           existing.input = existing.input && typeof existing.input === "object"
             ? { ...existing.input, attempt: priorAttempt + 1 }

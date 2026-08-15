@@ -5,7 +5,7 @@ Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu (Lark). It p
 ## Requirements
 
 - A supported macOS, Linux, or Windows (x64) system
-- `lark-cli`
+- Official `@larksuite/cli >= 1.0.79` (`lark-cli`)
 - At least one supported agent runtime and its authentication
 - Bun 1.3.14 when running the npm package or building from source (standalone binaries bundle their own runtime)
 

@@ -21,6 +21,32 @@ export type OfficialLarkCliProbe =
   | { state: "outdated"; reason: string; nextAction: string }
   | { state: "conflict"; reason: string; nextAction: string };
 
+export type OfficialLarkCliConsentRequest =
+  | { action: "install"; command: string; state: "missing"; reason: string; nextAction: string }
+  | { action: "upgrade"; command: string; state: "outdated"; reason: string; nextAction: string };
+
+export interface OfficialLarkCliConsentCopy {
+  lines: string[];
+  question: string;
+}
+
+export function formatOfficialLarkCliConsent(request: OfficialLarkCliConsentRequest): OfficialLarkCliConsentCopy {
+  if (request.action === "upgrade") return {
+    lines: [
+      `[setup 0/5] 检测到官方 lark-cli 需要升级：${request.reason}`,
+      `将执行：${request.command}`,
+    ],
+    question: "是否升级？[y/N] ",
+  };
+  return {
+    lines: [
+      `[setup 0/5] ${request.reason}。Larkin 需要安装未修改的官方 lark-cli 作为 Feishu (Lark) 命令下游。`,
+      `将执行：${request.command}`,
+    ],
+    question: "是否安装？[y/N] ",
+  };
+}
+
 export interface OfficialLarkCliDependencies {
   spawn?: typeof spawnSync;
   shell?: string;
@@ -227,28 +253,36 @@ export function resolveOfficialLarkCli(dependencies: OfficialLarkCliDependencies
   return result.command;
 }
 
-export function installOfficialLarkCli(dependencies: OfficialLarkCliDependencies = {}): OfficialLarkCliCommand {
+export function installOfficialLarkCli(dependencies: OfficialLarkCliDependencies = {},
+  action: OfficialLarkCliConsentRequest["action"] = "install"): OfficialLarkCliCommand {
   const run = dependencies.spawn ?? spawnSync;
   const result = run("npm", ["install", "--global", `@larksuite/cli@${OFFICIAL_LARK_CLI_VERSION}`], {
     encoding: "utf8", env: dependencies.env ?? process.env, stdio: "inherit",
   }) as SpawnSyncReturns<string>;
-  if (result.status !== 0 || result.error) throw new Error(`官方 lark-cli 安装失败（exit=${result.status ?? "none"}）`);
+  if (result.status !== 0 || result.error) {
+    throw new Error(`官方 lark-cli ${action === "upgrade" ? "升级" : "安装"}失败（exit=${result.status ?? "none"}）`);
+  }
   invalidateOfficialLarkCliProbeCache();
   return resolveOfficialLarkCli(dependencies);
 }
 
 export async function ensureOfficialLarkCliForSetup(input: OfficialLarkCliDependencies & {
   interactive: boolean;
-  confirmInstall(command: string): boolean | Promise<boolean>;
-}): Promise<{ command: OfficialLarkCliCommand; installed: boolean }> {
+  confirmInstall(request: OfficialLarkCliConsentRequest): boolean | Promise<boolean>;
+}): Promise<{ command: OfficialLarkCliCommand; installed: boolean; setupAction?: OfficialLarkCliConsentRequest["action"] }> {
   const probe = probeOfficialLarkCli(input);
   if (probe.state === "ready") return { command: probe.command, installed: false };
   if (probe.state === "conflict") throw new Error(`${probe.reason}；${probe.nextAction}`);
   if (!input.interactive) {
     throw new Error(`${probe.reason}；非交互 setup 不会安装或升级依赖。请在终端运行 larkin setup，并确认：${OFFICIAL_LARK_CLI_INSTALL}`);
   }
-  if (!await input.confirmInstall(OFFICIAL_LARK_CLI_INSTALL)) {
-    throw new Error("未获得明确同意；没有安装官方 lark-cli，也没有写入 Agent 配置");
+  const request: OfficialLarkCliConsentRequest = probe.state === "outdated"
+    ? { action: "upgrade", command: OFFICIAL_LARK_CLI_INSTALL, state: probe.state,
+      reason: probe.reason, nextAction: probe.nextAction }
+    : { action: "install", command: OFFICIAL_LARK_CLI_INSTALL, state: probe.state,
+      reason: probe.reason, nextAction: probe.nextAction };
+  if (!await input.confirmInstall(request)) {
+    throw new Error(`未获得明确同意；没有${request.action === "upgrade" ? "升级" : "安装"}官方 lark-cli，也没有写入 Agent 配置`);
   }
-  return { command: installOfficialLarkCli(input), installed: true };
+  return { command: installOfficialLarkCli(input, request.action), installed: true, setupAction: request.action };
 }

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
+import { targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { SpanKind } from "@opentelemetry/api";
 import type { ContextPromptBuilder } from "../agent/context-prompt.js";
 import type {
@@ -871,9 +872,11 @@ export function createRuntimeHost(options: {
       }
       const deliveryId = crypto.randomUUID();
       const busy = agent.busy || agent.submitting;
+      const target = typeof envelope.target === "string" && envelope.target
+        ? envelope.target
+        : targetKeyOfInboxEnvelope(envelope);
       const input: RuntimeInput = { inputId: deliveryId, deliveryId, kind: busy ? "inbox_update" : "wake",
-        text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId,
-          ...(typeof envelope.target === "string" ? { target: envelope.target } : {}),
+        text: options.promptBuilder.buildInboxNotice({ busy, count: 1, deliveryId, target,
           ...(typeof envelope.wake_reason === "string" ? { wakeReason: envelope.wake_reason } : {}) }), attempt: 0 };
       const record: DeliveryRecord = { deliveryId, messageId, status: "pending", input, updatedAt: now() };
       agent.records.set(deliveryId, record); agent.byMessage.set(messageId, deliveryId); persist(agent);

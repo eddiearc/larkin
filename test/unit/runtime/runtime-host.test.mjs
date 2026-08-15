@@ -275,6 +275,78 @@ test("Runtime Host owns duplicate suppression, busy delivery and turn-boundary r
   await host.shutdown("test complete");
 });
 
+test("targetless Runtime delivery derives canonical dm, chat, thread, and unlocatable targets in final input", async () => {
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+  });
+  try {
+    const agentId = "cli_targetDefenseA1";
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
+    await host.deliver(agentId, { message_id: "rem_dm", channel_type: "dm", channel_name: "system" });
+    await host.deliver(agentId, { message_id: "om_chat", chat_id: "oc_chat" });
+    await host.deliver(agentId, { message_id: "om_thread", chat_id: "oc_chat", thread_id: "omt_thread" });
+    await host.deliver(agentId, { message_id: "runtime_unlocatable" });
+    const inputs = [...session.prompts, ...session.steers].map((input) => input.text);
+    assert.equal(inputs.length, 4);
+    for (const target of ["dm:@system", "chat:oc_chat", "thread:oc_chat:omt_thread", "runtime:system"]) {
+      assert.ok(inputs.some((text) => text.includes(`Inbox changed for ${target}`)), `final Runtime input names ${target}`);
+    }
+    assert.equal(inputs.some((text) => /Inbox changed \(/.test(text)), false, "no final notice is targetless");
+  } finally {
+    await host.shutdown("target derivation test complete");
+  }
+});
+
+test("issue 122 old/base counterfactual retries a targetless notice while canonical poll makes the new path terminal", async () => {
+  const run = async (oldProjection) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), oldProjection ? "larkin-issue122-old-" : "larkin-issue122-new-"));
+    const agentId = oldProjection ? "cli_issue122OldA1" : "cli_issue122NewA1";
+    const store = createAgentStateStore(root, agentId);
+    const session = new FakeSession();
+    const canonicalBuilder = new ContextPromptBuilder();
+    const promptBuilder = oldProjection ? {
+      build(input) { return canonicalBuilder.build(input); },
+      buildInboxNotice(input) { return canonicalBuilder.buildInboxNotice({ ...input, target: undefined }); },
+    } : canonicalBuilder;
+    const host = createRuntimeHost({
+      adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+      promptBuilder, stateStoreFor: () => store,
+    });
+    try {
+      await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+      const source = { message_id: oldProjection ? "rem_issue122_old" : "rem_issue122_new", channel_type: "dm", channel_name: "system", wake: true };
+      store.appendNdjson("inbox", source);
+      assert.equal(store.readNdjson("inbox")[0].target, "dm:@system");
+      await host.deliver(agentId, source);
+      if (oldProjection) {
+        assert.doesNotMatch(session.prompts[0].text, /Inbox changed for /, "base call shape produces a targetless final payload");
+      } else {
+        assert.match(session.prompts[0].text, /Inbox changed for dm:@system/, "new final payload names the exact poll target");
+        const polled = store.pollInbox({ target: "dm:@system", limit: 1 });
+        assert.deepEqual(polled.envelopes.map((row) => row.message_id), [source.message_id]);
+      }
+      session.emit({ type: "turn-start", turnId: oldProjection ? "old-turn" : "new-turn" });
+      session.emit({ type: "turn-end", turnId: oldProjection ? "old-turn" : "new-turn" });
+      await new Promise((resolve) => setImmediate(resolve));
+      return { prompts: session.prompts.length, inbox: store.readNdjson("inbox"),
+        statuses: store.readJson("runtimeDeliveries", { records: [] }).records.map((record) => record.status) };
+    } finally {
+      await host.shutdown("issue 122 counterfactual complete");
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const oldResult = await run(true);
+  const newResult = await run(false);
+  assert.equal(oldResult.prompts, 2, "old/base targetless notice leaves the durable row and retries at turn end");
+  assert.equal(oldResult.inbox.length, 1);
+  assert.deepEqual(oldResult.statuses, ["accepted"]);
+  assert.equal(newResult.prompts, 1, "exact-target durable poll prevents turn-end retry");
+  assert.deepEqual(newResult.inbox, []);
+  assert.deepEqual(newResult.statuses, ["consumed"]);
+});
+
 test("Codex compatibility recovery closes, updates once, recreates, and retries the owned delivery", async () => {
   const sessions = [];
   let recoveries = 0;

@@ -4,6 +4,7 @@ import type { HostAgent, HostEnvelopeProjector, ReminderEnvelope } from "../feis
 import { countWakeEnvelopes } from "../feishu/host-business-state.js";
 import * as defaultReminderStore from "./reminder-store.js";
 import type { ReminderRecord, ReminderStore } from "./reminder-store.js";
+import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 
 interface ReminderAgent extends HostAgent { stateDir?: string | null }
 interface ReminderDeliveryTarget {
@@ -13,6 +14,12 @@ interface StateStore {
   paths: AgentStatePaths;
   appendNdjson(key: "inbox", value: unknown): void;
 }
+function withCanonicalTarget<T extends object>(envelope: T): T & { target: string } {
+  const input = envelope as InboxEnvelope;
+  if (typeof input.target === "string" && input.target) return envelope as T & { target: string };
+  return { ...envelope, target: targetKeyOfInboxEnvelope(input) };
+}
+
 interface ReminderStoreApi {
   load(file: string): ReminderStore;
   mutate<T>(file: string, fn: (store: ReminderStore) => T): T;
@@ -96,7 +103,7 @@ export class HostReminderOrchestrator {
 
   private deliver(agent: ReminderAgent, reminder: ReminderRecord, overdueMs: number): void {
     const recurrence = reminder.repeat ? this.store.parseRepeat(reminder.repeat, reminder.tz) : null;
-    const envelope = this.options.envelopeProjector.createReminderEnvelope(
+    const envelope = withCanonicalTarget(this.options.envelopeProjector.createReminderEnvelope(
       agent.agentId,
       {
         reminderId: reminder.reminderId,
@@ -108,7 +115,7 @@ export class HostReminderOrchestrator {
       },
       overdueMs,
       reminder.repeat && recurrence && !("error" in recurrence) ? (recurrence.description || null) : null,
-    );
+    ));
     try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }
     catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
     if (this.options.deliveryTarget) void this.options.deliveryTarget.deliver(agent.agentId, envelope);
@@ -234,7 +241,7 @@ export class HostReminderOrchestrator {
       if (this.options.deliveryTarget) this.redelivered.add(agent.agentId);
       return;
     }
-    const envelope = existing ?? this.options.envelopeProjector.createRedeliveryEnvelope(agent.agentId, wakeCount);
+    const envelope = withCanonicalTarget(existing ?? this.options.envelopeProjector.createRedeliveryEnvelope(agent.agentId, wakeCount));
     if (!existing) {
       try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }
       catch (error) { this.log("启动补投 inbox 写失败", (error as Error).message); return; }

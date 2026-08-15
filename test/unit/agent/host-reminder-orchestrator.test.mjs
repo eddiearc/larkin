@@ -22,8 +22,8 @@ function fixture(reminders) {
     appendEvent() {},
   };
   const projector = {
-    createReminderEnvelope(_agentId, reminder) { return { message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true }; },
-    createRedeliveryEnvelope(_agentId, count) { return { message_id: `redeliver_${count}`, seq: 2 }; },
+    createReminderEnvelope(_agentId, reminder) { return { message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true, target: "dm:@system" }; },
+    createRedeliveryEnvelope(_agentId, count) { return { message_id: `redeliver_${count}`, seq: 2, target: "dm:@system" }; },
   };
   return { deliveries, inbox, state, api, projector };
 }
@@ -49,6 +49,9 @@ test("reminder schedules deduplicate unless forced", () => {
 test("due fire persists before delivery, updates record, then forces snapshot", () => {
   const reminder = { reminderId: "123456789", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "due", status: "scheduled" };
   const f = fixture([reminder]);
+  f.projector.createReminderEnvelope = (_agentId, value) => ({
+    message_id: `rem_${value.reminderId}`, seq: 1, wake: true, channel_type: "dm", channel_name: "system",
+  });
   const order = [];
   f.state.appendNdjson = (_key, value) => { order.push("persist"); f.inbox.push(value); };
   const target = { deliver(_agentId, envelope) { order.push("deliver"); f.deliveries.push(envelope); } };
@@ -57,15 +60,75 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   assert.deepEqual(order, ["persist", "deliver"]);
   assert.equal(reminder.status, "fired");
   assert.equal(reminder.version, 2);
+  assert.equal(f.inbox[0].target, "dm:@system");
+  assert.equal(f.deliveries[0].target, "dm:@system");
+  assert.strictEqual(f.inbox[0], f.deliveries[0], "the same target-complete envelope is persisted and delivered");
+});
+
+test("due reminder and startup redelivery reach final Runtime input with the same durable dm target", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-target-runtime-"));
+  const agentId = "cli_reminderTargetA1";
+  const realAgent = { agentId, name: agentId, stateDir: path.join(root, "state", "agents", agentId) };
+  const reminder = { reminderId: "target-reminder", version: 1, ownerAgentId: agentId,
+    fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "target", status: "scheduled" };
+  const f = fixture([reminder]);
+  const store = createAgentStateStore(root, agentId);
+  const session = {
+    sessionId: "reminder-target-session", listeners: new Set(), prompts: [], steers: [],
+    subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); },
+    emit(event) { for (const listener of this.listeners) listener(event); },
+    async prompt(input) { this.prompts.push(input); return { status: "accepted", inputId: input.inputId }; },
+    async busyInput(input) { this.steers.push(input); return { status: "accepted", inputId: input.inputId }; },
+    async cancel() {}, async close() {},
+  };
+  const host = createRuntimeHost({ adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  const delivered = [];
+  const projector = {
+    createReminderEnvelope(_id, value) { return { message_id: `rem_${value.reminderId}`, seq: 1, wake: true,
+      channel_type: "dm", channel_name: "system" }; },
+    createRedeliveryEnvelope() { return { message_id: "redeliver_target", seq: 2,
+      channel_type: "dm", channel_name: "system" }; },
+  };
+  const orchestrator = new HostReminderOrchestrator({ agents: [realAgent], stateStore: () => store,
+    envelopeProjector: projector, deliveryTarget: { deliver(id, envelope) { delivered.push(envelope); return host.deliver(id, envelope); } },
+    reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    orchestrator.handleFire({ agentId, reminderId: reminder.reminderId });
+    await new Promise((resolve) => setImmediate(resolve));
+    const persistedReminder = store.readNdjson("inbox")[0];
+    assert.equal(persistedReminder.target, "dm:@system");
+    assert.equal(delivered[0].target, persistedReminder.target);
+    assert.match(session.prompts[0].text, /Inbox changed for dm:@system/);
+    store.pollInbox({ target: "dm:@system", limit: 1 });
+    session.emit({ type: "turn-start", turnId: "reminder-turn" });
+    session.emit({ type: "turn-end", turnId: "reminder-turn" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    store.appendNdjson("inbox", { message_id: "om_startup_orphan", target: "chat:oc_orphan", wake: true });
+    await orchestrator.redeliverUnread(realAgent);
+    const persistedRedelivery = store.readNdjson("inbox").find((row) => row.message_id === "redeliver_target");
+    assert.equal(persistedRedelivery.target, "dm:@system");
+    assert.equal(delivered[1].target, persistedRedelivery.target);
+    assert.match(session.prompts[1].text, /Inbox changed for dm:@system/);
+  } finally {
+    await host.shutdown("reminder target test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("restart redelivery counts only wake=true and delivers once", async () => {
   const f = fixture([]);
+  f.projector.createRedeliveryEnvelope = (_agentId, count) => ({
+    message_id: `redeliver_${count}`, seq: 2, channel_type: "dm", channel_name: "system",
+  });
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector, deliveryTarget: { deliver(_id, envelope) { f.deliveries.push(envelope); } }, reminderStore: f.api, readFile: () => '{"wake":true}\n{"wake":false}\n{"wake":true}\n' });
   await orchestrator.redeliverUnread(agent);
   await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.deliveries, [{ message_id: "redeliver_2", seq: 2 }]);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_2", seq: 2 }]);
+  assert.deepEqual(f.deliveries, [{ message_id: "redeliver_2", seq: 2, channel_type: "dm", channel_name: "system", target: "dm:@system" }]);
+  assert.deepEqual(f.inbox, f.deliveries);
+  assert.strictEqual(f.inbox[0], f.deliveries[0], "new startup redelivery persists and delivers one target-complete object");
 });
 
 test("authoritative empty startup Inbox consumes redelivery without capturing a later inbound message", async () => {
@@ -112,8 +175,8 @@ test("transient startup Inbox read failure does not burn redelivery", async () =
   await orchestrator.redeliverUnread(agent);
   await orchestrator.redeliverUnread(agent);
   assert.equal(reads, 2);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2 }]);
-  assert.deepEqual(f.deliveries, [{ message_id: "redeliver_1", seq: 2 }]);
+  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2, target: "dm:@system" }]);
+  assert.deepEqual(f.deliveries, f.inbox);
 });
 
 test("malformed startup Inbox does not burn redelivery after the file is repaired", async () => {
@@ -126,8 +189,8 @@ test("malformed startup Inbox does not burn redelivery after the file is repaire
   inbox = `${JSON.stringify({ message_id: "om_after_repair", wake: true })}\n`;
   await orchestrator.redeliverUnread(agent);
   await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2 }]);
-  assert.deepEqual(f.deliveries, [{ message_id: "redeliver_1", seq: 2 }]);
+  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2, target: "dm:@system" }]);
+  assert.deepEqual(f.deliveries, f.inbox);
 });
 
 test("zero unread without a Runtime delivery target does not burn redelivery", async () => {
@@ -138,13 +201,13 @@ test("zero unread without a Runtime delivery target does not burn redelivery", a
   await orchestrator.redeliverUnread(agent);
   inbox = `${JSON.stringify({ message_id: "om_after_targetless_startup", wake: true })}\n`;
   await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2 }]);
+  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2, target: "dm:@system" }]);
 });
 
 test("restart redelivery reuses an existing canonical synthetic envelope instead of appending a duplicate", async () => {
   const f = fixture([]);
   const logs = [];
-  const existing = { message_id: "redeliver_existing", seq: 7, wake: true, content: "already durable" };
+  const existing = { message_id: "redeliver_existing", seq: 7, wake: true, content: "already durable", target: "chat:oc_canonical" };
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
     envelopeProjector: f.projector, deliveryTarget: { deliver(_agentId, envelope) { f.deliveries.push(envelope); } },
     reminderStore: f.api, log: (...parts) => logs.push(parts.join(" ")),
@@ -152,7 +215,20 @@ test("restart redelivery reuses an existing canonical synthetic envelope instead
   await orchestrator.redeliverUnread(agent);
   assert.deepEqual(f.inbox, []);
   assert.deepEqual(f.deliveries, [existing]);
+  assert.equal(f.deliveries[0].target, "chat:oc_canonical", "an existing canonical target is preserved without normalization");
   assert.match(logs.join("\n"), /滞留 wake 消息 1 条/, "existing redeliver_ rows are excluded from wakeCount");
+});
+
+test("restart redelivery normalizes only a legacy existing targetless row", async () => {
+  const f = fixture([]);
+  const legacy = { message_id: "redeliver_legacy", seq: 8, channel_type: "dm", channel_name: "system", content: "legacy" };
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
+    envelopeProjector: f.projector, deliveryTarget: { deliver(_agentId, envelope) { f.deliveries.push(envelope); } },
+    reminderStore: f.api, readFile: () => `${JSON.stringify(legacy)}\n` });
+  await orchestrator.redeliverUnread(agent);
+  assert.deepEqual(f.inbox, [], "an existing durable row is not appended again");
+  assert.deepEqual(f.deliveries, [{ ...legacy, target: "dm:@system" }]);
+  assert.equal("target" in legacy, false, "legacy disk value remains an immutable counterfactual fixture");
 });
 
 test("transient append failure does not burn the once-per-host redelivery opportunity", async () => {

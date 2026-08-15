@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const require = createRequire(import.meta.url);
-const { projectInboxEnvelope, projectInboxEvents, targetOfInboxEnvelope } = require(path.join(ROOT, "dist/agent/inbox-projection.cjs"));
+const { projectInboxEnvelope, projectInboxEvents, targetKeyOfInboxEnvelope, targetOfInboxEnvelope } = require(path.join(ROOT, "dist/agent/inbox-projection.cjs"));
 const { createAgentStateStore } = require(path.join(ROOT, "dist/agent/agent-state-store.cjs"));
 
 test("local Inbox projection adds Feishu locators without mutating the canonical envelope", () => {
@@ -27,6 +27,14 @@ test("inbox projection preserves DM, channel, and thread reply target formats", 
   assert.equal(targetOfInboxEnvelope({
     channel_type: "thread", channel_name: "topic987654", parent_channel_type: "dm", parent_channel_name: "cpeer",
   }), "dm:@cpeer:topic987");
+});
+
+test("canonical target keys cover target, dm, chat, thread, and unlocatable envelopes", () => {
+  assert.equal(targetKeyOfInboxEnvelope({ target: "chat:oc_preserved" }), "chat:oc_preserved");
+  assert.equal(targetKeyOfInboxEnvelope({ channel_type: "dm", channel_name: "system" }), "dm:@system");
+  assert.equal(targetKeyOfInboxEnvelope({ chat_id: "oc_chat" }), "chat:oc_chat");
+  assert.equal(targetKeyOfInboxEnvelope({ chat_id: "oc_chat", thread_id: "omt_thread" }), "thread:oc_chat:omt_thread");
+  assert.equal(targetKeyOfInboxEnvelope({ message_id: "unlocatable" }), "runtime:system");
 });
 
 test("events projection retains the exact check response data shape", () => {

@@ -15,9 +15,7 @@ export interface InboxEnvelope {
 
 export function targetKeyOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string {
   if (!envelope) return "runtime:unknown";
-  if (envelope.kind === "document_comment" && typeof envelope.target === "string" && envelope.target) {
-    return envelope.target;
-  }
+  if (typeof envelope.target === "string" && envelope.target) return envelope.target;
   if (typeof envelope.chat_id === "string" && envelope.chat_id) {
     return typeof envelope.thread_id === "string" && envelope.thread_id
       ? `thread:${envelope.chat_id}:${envelope.thread_id}`
@@ -77,15 +75,16 @@ export function targetOfInboxEnvelope(envelope: InboxEnvelope | null | undefined
   if (envelope.kind === "document_comment") {
     return typeof envelope.target === "string" && envelope.target ? envelope.target : null;
   }
-  if (envelope.channel_type === "thread" && envelope.parent_channel_name) {
+  if (envelope.channel_type === "thread" && envelope.parent_channel_name && envelope.channel_name) {
     const base = envelope.parent_channel_type === "dm"
       ? `dm:@${String(envelope.parent_channel_name)}`
       : `#${String(envelope.parent_channel_name)}`;
-    return `${base}:${String(envelope.channel_name || "").slice(0, 8)}`;
+    return `${base}:${String(envelope.channel_name).slice(0, 8)}`;
   }
+  if (typeof envelope.channel_name !== "string" || !envelope.channel_name) return null;
   return envelope.channel_type === "dm"
-    ? `dm:@${String(envelope.channel_name)}`
-    : `#${String(envelope.channel_name)}`;
+    ? `dm:@${envelope.channel_name}`
+    : `#${envelope.channel_name}`;
 }
 
 /** Project persisted inbox envelopes into the exact agentApi events response data shape. */

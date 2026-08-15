@@ -409,7 +409,10 @@ test("an existing pending Runtime delivery and its durable startup redelivery ar
   }
 });
 
-test("startup redelivery append shares the Inbox lock and cannot be erased by a concurrent drain", async () => {
+// Native Windows process startup can exceed Bun's default 5s test envelope; this is only a runner bound.
+test("startup redelivery append shares the Inbox lock and cannot be erased by a concurrent drain", {
+  timeout: 20_000,
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-redelivery-lock-"));
   const agentId = "cli_redeliveryLockA1";
   const store = createAgentStateStore(root, agentId);
@@ -434,7 +437,7 @@ await orchestrator.redeliverUnread(agent);
     const drained = store.drainInbox({ afterRead() {
       child = spawn(process.execPath, ["--input-type=module", "--eval", script], { env: { ...process.env,
         TEST_ROOT: root, TEST_AGENT: agentId, TEST_READY: ready, TEST_DELIVERED: delivered } });
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 10_000;
       while (!fs.existsSync(ready) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       assert.equal(fs.existsSync(ready), true, "child reached the locked append before drain released it");
     } });

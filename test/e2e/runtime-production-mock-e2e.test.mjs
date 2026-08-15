@@ -712,7 +712,7 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
         assert.doesNotMatch(JSON.stringify(failedStatus.runtimeReadiness) + JSON.stringify(failedStatus.recentErrors),
           /Users\/example|cc-switch-token|fixture-secret|unsafe raw action/);
 
-        const authRetry = await runtimeHost.deliver(agentId, { message_id: "om_pi_auth" });
+        const authRetry = await runtimeHost.deliver(agentId, { message_id: "om_pi_auth", chat_id: "oc_pi" });
         assert.equal(authRetry.status, "accepted");
         session.emit({ type: "turn-start", turnId: "pi-auth-aborted" });
         session.emit({ type: "activity", activity: "text" });

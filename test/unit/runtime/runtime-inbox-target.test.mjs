@@ -33,14 +33,14 @@ const canonicalDocumentTarget = "document-comment:docx:doxcnFile_1:comment_1:in-
 test("canonical Inbox target derivation accepts only authoritative namespace partitions", () => {
   const valid = [
     [{ target: "chat:oc_preserved_1" }, "chat:oc_preserved_1"],
+    [{ target: "chat:oc_preserved_1", chat_id: "oc_preserved_1", kind: "interaction" }, "chat:oc_preserved_1"],
     [{ target: "thread:oc_chat_1:omt_thread_1" }, "thread:oc_chat_1:omt_thread_1"],
+    [{ target: "thread:oc_chat_1:omt_thread_1", chat_id: "oc_chat_1", thread_id: "omt_thread_1" }, "thread:oc_chat_1:omt_thread_1"],
     [{ target: canonicalDocumentTarget, kind: "document_comment" }, canonicalDocumentTarget],
-    [{ chat_id: "oc_chat_1" }, "chat:oc_chat_1"],
+    [{ chat_id: "oc_chat_1", kind: "interaction" }, "chat:oc_chat_1"],
     [{ chat_id: "oc_chat_1", thread_id: "omt_thread_1" }, "thread:oc_chat_1:omt_thread_1"],
-    [{ message_id: "rem_legacy_shape" }, RUNTIME_REMINDER_TARGET],
-    [{ kind: "reminder", message_id: "internal_1" }, RUNTIME_REMINDER_TARGET],
-    [{ message_id: "redeliver_legacy_shape" }, RUNTIME_REDELIVERY_TARGET],
-    [{ kind: "redelivery", message_id: "internal_2" }, RUNTIME_REDELIVERY_TARGET],
+    [{ target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_current_1" }, RUNTIME_REMINDER_TARGET],
+    [{ target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_current_1" }, RUNTIME_REDELIVERY_TARGET],
   ];
   for (const [envelope, expected] of valid) {
     assert.equal(targetKeyOfInboxEnvelope(envelope), expected);
@@ -51,8 +51,11 @@ test("canonical Inbox target derivation accepts only authoritative namespace par
     null,
     undefined,
     { message_id: "unlocatable" },
+    { target: "" },
+    { target: undefined },
+    { target: null },
+    { target: 7 },
     { target: "dm:@system", message_id: "legacy_dm" },
-    { target: "dm:@c123", message_id: "legacy_dm_chat" },
     { target: "#c123", message_id: "legacy_alias" },
     { target: "runtime:system", message_id: "legacy_runtime" },
     { target: "runtime:unknown", message_id: "legacy_unknown" },
@@ -60,15 +63,33 @@ test("canonical Inbox target derivation accepts only authoritative namespace par
     { target: "chat:c123", message_id: "short_chat" },
     { target: "thread:oc_chat_1:thread_1", message_id: "short_thread" },
     { target: "document-comment:docx:file:comment:anywhere", kind: "document_comment" },
+    { message_id: "rem_prefix_only" },
+    { kind: "reminder", message_id: "om_kind_only" },
+    { target: RUNTIME_REMINDER_TARGET, message_id: "om_target_only" },
+    { kind: "reminder", message_id: "rem_targetless_both" },
+    { kind: "redelivery", message_id: "redeliver_targetless_both" },
+    { target: RUNTIME_REDELIVERY_TARGET, kind: "redelivery", message_id: "redeliver_with_chat", chat_id: "oc_conflict" },
+    { target: RUNTIME_REMINDER_TARGET, kind: "reminder", message_id: "rem_with_thread", thread_id: "omt_conflict" },
+    { target: "chat:oc_expected", chat_id: "oc_different" },
+    { target: "chat:oc_expected", thread_id: "omt_forbidden" },
+    { target: "chat:oc_expected", kind: "document_comment" },
+    { target: "chat:oc_expected", kind: "reminder", message_id: "rem_internal_chat_target" },
+    { target: "thread:oc_expected:omt_expected", chat_id: "oc_different" },
+    { target: "thread:oc_expected:omt_expected", thread_id: "omt_different" },
+    { target: "thread:oc_expected:omt_expected", kind: "reminder", message_id: "rem_internal" },
+    { target: canonicalDocumentTarget, message_id: "doc_without_kind" },
+    { target: canonicalDocumentTarget, kind: "document_comment", chat_id: "oc_forbidden" },
+    { target: canonicalDocumentTarget, kind: "document_comment", message_id: "redeliver_internal" },
+    { kind: "document_comment", message_id: "doc_without_locator" },
+    { kind: "document_comment", message_id: "doc_with_chat", chat_id: "oc_forbidden" },
+    { message_id: "rem_prefix_chat", chat_id: "oc_conflict" },
+    { kind: "reminder", message_id: "om_kind_chat", chat_id: "oc_conflict" },
+    { kind: "reminder", message_id: "rem_internal_chat", chat_id: "oc_conflict" },
+    { kind: "redelivery", message_id: "redeliver_internal_thread", chat_id: "oc_conflict", thread_id: "omt_conflict" },
     { chat_id: "c123", message_id: "display_alias" },
     { chat_id: "oc_chat_1", thread_id: "thread_1", message_id: "bad_thread_locator" },
-    { kind: "document_comment", message_id: "doc_without_locator" },
-    { target: "runtime:reminder", message_id: "om_unproven_internal" },
-    { target: "runtime:redelivery", kind: "interaction", message_id: "interaction_unproven_internal" },
-    { kind: "reminder", message_id: "redeliver_source_conflict" },
-    { kind: "reminder", message_id: "rem_wrong", target: "chat:oc_wrong" },
-    { message_id: "redeliver_wrong", target: "runtime:reminder" },
-  ]) assert.throws(() => targetKeyOfInboxEnvelope(envelope), /Inbox|canonical|target|locator/);
+    { kind: "reminder", message_id: "redeliver_source_conflict", target: RUNTIME_REMINDER_TARGET },
+  ]) assert.throws(() => targetKeyOfInboxEnvelope(envelope), /Inbox|canonical|target|locator|source/);
   assert.throws(() => projectInboxCheck([], "dm:@system"), /Invalid canonical Inbox check target/);
 });
 
@@ -110,6 +131,12 @@ test("persistence rejects legacy and malformed targets and leaves durable old ro
       { message_id: "legacy_runtime", target: "runtime:system" },
       { message_id: "legacy_unknown", target: "runtime:unknown" },
       { message_id: "unlocatable" },
+      { message_id: "rem_prefix_only" },
+      { kind: "reminder", message_id: "om_kind_only" },
+      { target: "runtime:reminder", message_id: "om_target_only" },
+      { kind: "redelivery", message_id: "redeliver_targetless" },
+      { target: "chat:oc_expected", chat_id: "oc_conflict" },
+      { target: canonicalDocumentTarget, message_id: "doc_without_kind" },
     ]) assert.throws(() => store.appendNdjson("inbox", envelope), /Inbox|canonical|target|locator/);
     assert.throws(() => store.appendInboxOnce({ message_id: "om_valid_before_rejection", target: "dm:@system" }), /Invalid canonical Inbox target/,
       "dedup must not bypass validation");
@@ -130,6 +157,7 @@ test("persistence rejects legacy and malformed targets and leaves durable old ro
     const oldRows = [
       { message_id: "legacy_dm_disk", target: "dm:@system" },
       { message_id: "legacy_runtime_disk", target: "runtime:system" },
+      { message_id: "redeliver_targetless_disk", kind: "redelivery" },
     ];
     const bytes = `${oldRows.map((row) => JSON.stringify(row)).join("\n")}\n`;
     fs.writeFileSync(store.paths.inbox, bytes, { mode: 0o600 });
@@ -160,8 +188,8 @@ test("Runtime final inputs use exact targets and malformed deliveries fail close
   host.subscribe((event) => events.push(event));
   const agentId = "cli_targetDefenseA1";
   const cases = [
-    [{ message_id: "rem_final", kind: "reminder" }, RUNTIME_REMINDER_TARGET],
-    [{ message_id: "redeliver_final", kind: "redelivery" }, RUNTIME_REDELIVERY_TARGET],
+    [{ target: RUNTIME_REMINDER_TARGET, message_id: "rem_final", kind: "reminder" }, RUNTIME_REMINDER_TARGET],
+    [{ target: RUNTIME_REDELIVERY_TARGET, message_id: "redeliver_final", kind: "redelivery" }, RUNTIME_REDELIVERY_TARGET],
     [{ message_id: "om_chat", chat_id: "oc_chat" }, "chat:oc_chat"],
     [{ message_id: "om_thread", chat_id: "oc_chat", thread_id: "omt_thread" }, "thread:oc_chat:omt_thread"],
     [{ message_id: "interaction_run", kind: "interaction", chat_id: "oc_interaction" }, "chat:oc_interaction"],
@@ -183,6 +211,14 @@ test("Runtime final inputs use exact targets and malformed deliveries fail close
       { message_id: "legacy_dm_runtime", target: "dm:@system" },
       { message_id: "generic_runtime", target: "runtime:system" },
       { message_id: "malformed_chat_runtime", target: "chat:c_alias" },
+      { message_id: "rem_runtime_prefix_only" },
+      { message_id: "om_runtime_kind_only", kind: "reminder" },
+      { message_id: "om_runtime_target_only", target: RUNTIME_REMINDER_TARGET },
+      { message_id: "redeliver_runtime_targetless", kind: "redelivery" },
+      { message_id: "om_runtime_chat_conflict", target: "chat:oc_expected", chat_id: "oc_different" },
+      { message_id: "rem_runtime_externalized", kind: "reminder", chat_id: "oc_conflict" },
+      { message_id: "doc_runtime_no_kind", target: canonicalDocumentTarget },
+      { message_id: "doc_runtime_with_chat", kind: "document_comment", target: canonicalDocumentTarget, chat_id: "oc_conflict" },
     ];
     const ledgerBeforeRejection = fs.readFileSync(store.paths.runtimeDeliveries);
     for (const invalid of invalidCases) {

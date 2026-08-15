@@ -25,14 +25,15 @@ const THREAD_TARGET_PATTERN = /^thread:(oc_[A-Za-z0-9_-]+):(omt_[A-Za-z0-9_-]+)$
 
 function internalTargetOfInboxEnvelope(envelope: InboxEnvelope): string | null {
   const messageId = typeof envelope.message_id === "string" ? envelope.message_id : "";
-  const kindTarget = envelope.kind === "reminder" ? RUNTIME_REMINDER_TARGET
-    : envelope.kind === "redelivery" ? RUNTIME_REDELIVERY_TARGET : null;
-  const messageTarget = /^rem_[A-Za-z0-9_-]+$/.test(messageId) ? RUNTIME_REMINDER_TARGET
-    : /^redeliver_[A-Za-z0-9_-]+$/.test(messageId) ? RUNTIME_REDELIVERY_TARGET : null;
-  if (kindTarget && messageTarget && kindTarget !== messageTarget) {
-    throw new Error(`Inbox internal source mismatch: kind=${JSON.stringify(envelope.kind)} message_id=${JSON.stringify(messageId)}`);
-  }
-  return kindTarget ?? messageTarget;
+  const reminderKind = envelope.kind === "reminder";
+  const redeliveryKind = envelope.kind === "redelivery";
+  const reminderId = /^rem_[A-Za-z0-9_-]+$/.test(messageId);
+  const redeliveryId = /^redeliver_[A-Za-z0-9_-]+$/.test(messageId);
+  const hasInternalMarker = reminderKind || redeliveryKind || reminderId || redeliveryId;
+  if (!hasInternalMarker) return null;
+  if (reminderKind && reminderId && !redeliveryKind && !redeliveryId) return RUNTIME_REMINDER_TARGET;
+  if (redeliveryKind && redeliveryId && !reminderKind && !reminderId) return RUNTIME_REDELIVERY_TARGET;
+  throw new Error(`Inbox internal source requires matching kind and message_id; received kind=${JSON.stringify(envelope.kind ?? null)} message_id=${JSON.stringify(envelope.message_id ?? null)}`);
 }
 
 export function isCanonicalInboxTarget(target: string): boolean {
@@ -47,38 +48,61 @@ function invalidTarget(target: string): Error {
   return new Error(`Invalid canonical Inbox target ${JSON.stringify(target)}; expected chat:<oc_...>, thread:<oc_...>:<omt_...>, runtime:reminder, runtime:redelivery, or a valid document-comment locator`);
 }
 
+function optionalLocator(envelope: InboxEnvelope, key: "chat_id" | "thread_id"): string {
+  const value = envelope[key];
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string") throw new Error(`Inbox ${key} must be a string when present; received ${JSON.stringify(value)}`);
+  return value;
+}
+
 export function targetKeyOfInboxEnvelope(envelope: InboxEnvelope | null | undefined): string {
   if (!envelope) throw new Error("Inbox envelope is required to derive a canonical target");
   const internalTarget = internalTargetOfInboxEnvelope(envelope);
-  if (typeof envelope.target === "string" && envelope.target.length > 0) {
-    if (!isCanonicalInboxTarget(envelope.target)) throw invalidTarget(envelope.target);
-    if ((envelope.target === RUNTIME_REMINDER_TARGET || envelope.target === RUNTIME_REDELIVERY_TARGET) && !internalTarget) {
-      throw new Error(`Inbox target ${envelope.target} requires matching reminder/redelivery kind or message_id convention`);
+  const chatId = optionalLocator(envelope, "chat_id");
+  const threadId = optionalLocator(envelope, "thread_id");
+  const hasExplicitTarget = Object.prototype.hasOwnProperty.call(envelope, "target");
+  if (hasExplicitTarget) {
+    if (typeof envelope.target !== "string" || envelope.target.length === 0) throw invalidTarget(String(envelope.target));
+    const target = envelope.target;
+    if (!isCanonicalInboxTarget(target)) throw invalidTarget(target);
+    const chatMatch = CHAT_TARGET_PATTERN.exec(target);
+    if (chatMatch) {
+      if (internalTarget || envelope.kind === "document_comment") throw new Error(`Inbox chat target conflicts with source kind/message_id`);
+      if (chatId && chatId !== chatMatch[1]) throw new Error(`Inbox chat target conflicts with chat_id=${JSON.stringify(chatId)}`);
+      if (threadId) throw new Error(`Inbox chat target cannot carry thread_id=${JSON.stringify(threadId)}`);
+      return target;
     }
-    if (internalTarget && envelope.target !== internalTarget) {
-      throw new Error(`Inbox ${String(envelope.kind || envelope.message_id || "internal")} target must be ${internalTarget}, received ${JSON.stringify(envelope.target)}`);
+    const threadMatch = THREAD_TARGET_PATTERN.exec(target);
+    if (threadMatch) {
+      if (internalTarget || envelope.kind === "document_comment") throw new Error(`Inbox thread target conflicts with source kind/message_id`);
+      if (chatId && chatId !== threadMatch[1]) throw new Error(`Inbox thread target conflicts with chat_id=${JSON.stringify(chatId)}`);
+      if (threadId && threadId !== threadMatch[2]) throw new Error(`Inbox thread target conflicts with thread_id=${JSON.stringify(threadId)}`);
+      return target;
     }
-    if (envelope.kind === "document_comment" && !DOCUMENT_COMMENT_TARGET_PATTERN.test(envelope.target)) {
-      throw new Error(`Inbox document_comment requires a valid document-comment locator, received ${JSON.stringify(envelope.target)}`);
+    if (target === RUNTIME_REMINDER_TARGET || target === RUNTIME_REDELIVERY_TARGET) {
+      if (chatId || threadId) throw new Error(`Inbox runtime target cannot carry chat_id/thread_id locators`);
+      if (internalTarget !== target) throw new Error(`Inbox target ${target} requires exact matching kind and message_id`);
+      return target;
     }
-    return envelope.target;
-  }
-  if (envelope.target !== undefined && envelope.target !== null && envelope.target !== "") {
-    throw invalidTarget(String(envelope.target));
-  }
-  const chatId = typeof envelope.chat_id === "string" ? envelope.chat_id : "";
-  const threadId = typeof envelope.thread_id === "string" ? envelope.thread_id : "";
-  if (threadId && (!THREAD_ID_PATTERN.test(threadId) || !CHAT_ID_PATTERN.test(chatId))) {
-    throw new Error(`Inbox thread locator requires full oc_ chat_id and omt_ thread_id; received chat_id=${JSON.stringify(chatId)} thread_id=${JSON.stringify(threadId)}`);
-  }
-  if (chatId) {
-    if (!CHAT_ID_PATTERN.test(chatId)) throw new Error(`Inbox chat locator requires a full oc_ chat_id; received ${JSON.stringify(chatId)}`);
-    return threadId ? `thread:${chatId}:${threadId}` : `chat:${chatId}`;
+    if (DOCUMENT_COMMENT_TARGET_PATTERN.test(target)) {
+      if (envelope.kind !== "document_comment" || internalTarget) throw new Error(`Inbox document-comment target requires kind=document_comment and no internal source`);
+      if (chatId || threadId) throw new Error(`Inbox document-comment target cannot carry chat_id/thread_id locators`);
+      return target;
+    }
+    throw invalidTarget(target);
   }
   if (envelope.kind === "document_comment") {
     throw new Error("Inbox document_comment requires an explicit valid document-comment locator");
   }
-  if (internalTarget) return internalTarget;
+  if (chatId || threadId) {
+    if (internalTarget) throw new Error(`Inbox internal source cannot be derived as a chat/thread target`);
+    if (threadId && (!THREAD_ID_PATTERN.test(threadId) || !CHAT_ID_PATTERN.test(chatId))) {
+      throw new Error(`Inbox thread locator requires full oc_ chat_id and omt_ thread_id; received chat_id=${JSON.stringify(chatId)} thread_id=${JSON.stringify(threadId)}`);
+    }
+    if (!CHAT_ID_PATTERN.test(chatId)) throw new Error(`Inbox chat locator requires a full oc_ chat_id; received ${JSON.stringify(chatId)}`);
+    return threadId ? `thread:${chatId}:${threadId}` : `chat:${chatId}`;
+  }
+  if (internalTarget) throw new Error(`Inbox internal source requires an explicit ${internalTarget} target`);
   throw new Error(`Inbox envelope has no canonical target locator (message_id=${JSON.stringify(envelope.message_id ?? null)}, kind=${JSON.stringify(envelope.kind ?? null)})`);
 }
 

@@ -156,7 +156,8 @@ test("appendInboxOnce remembers a stable provider id after the Inbox row is cons
   try {
     const { createAgentStateStore } = await import(moduleUrl);
     const store = createAgentStateStore(root, "cli_stateStableInboxA1");
-    const envelope = { message_id: "doc_comment_stable", target: "document-comment:docx:file:comment:in-thread" };
+    const envelope = { kind: "document_comment", message_id: "doc_comment_stable",
+      target: "document-comment:docx:file:comment:in-thread" };
     assert.equal(store.appendInboxOnce(envelope), true);
     store.pollInbox({ target: envelope.target, limit: 1 });
     assert.equal(store.readNdjson("inbox").length, 0);

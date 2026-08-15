@@ -35,8 +35,8 @@ function fixture(reminders) {
     appendEvent() {},
   };
   const projector = {
-    createReminderEnvelope(_agentId, reminder) { return { message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true, target: "runtime:reminder" }; },
-    createRedeliveryEnvelope(_agentId, count) { return { message_id: `redeliver_${count}`, seq: 2, target: "runtime:redelivery" }; },
+    createReminderEnvelope(_agentId, reminder) { return { kind: "reminder", message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true, target: "runtime:reminder" }; },
+    createRedeliveryEnvelope(_agentId, count) { return { kind: "redelivery", message_id: `redeliver_${count}`, seq: 2, target: "runtime:redelivery" }; },
   };
   return { deliveries, inbox, state, api, projector };
 }
@@ -63,7 +63,8 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   const reminder = { reminderId: "123456789", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "due", status: "scheduled" };
   const f = fixture([reminder]);
   f.projector.createReminderEnvelope = (_agentId, value) => ({
-    message_id: `rem_${value.reminderId}`, seq: 1, wake: true, channel_type: "dm", channel_name: "system",
+    kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1, wake: true, target: "runtime:reminder",
+    channel_type: "dm", channel_name: "system",
   });
   const order = [];
   f.state.appendNdjson = (_key, value) => { order.push("persist"); f.inbox.push(value); };
@@ -102,10 +103,10 @@ test("due reminder and startup redelivery reach final Runtime input with source-
     promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
   const delivered = [];
   const projector = {
-    createReminderEnvelope(_id, value) { return { message_id: `rem_${value.reminderId}`, seq: 1, wake: true,
-      channel_type: "dm", channel_name: "system" }; },
-    createRedeliveryEnvelope() { return { message_id: "redeliver_target", seq: 2,
-      channel_type: "dm", channel_name: "system" }; },
+    createReminderEnvelope(_id, value) { return { kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1, wake: true,
+      target: "runtime:reminder", channel_type: "dm", channel_name: "system" }; },
+    createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_target", seq: 2,
+      target: "runtime:redelivery", channel_type: "dm", channel_name: "system" }; },
   };
   const orchestrator = new HostReminderOrchestrator({ agents: [realAgent], stateStore: () => store,
     envelopeProjector: projector, deliveryTarget: { deliver(id, envelope) { delivered.push(envelope); return host.deliver(id, envelope); } },
@@ -143,12 +144,14 @@ test("due reminder and startup redelivery reach final Runtime input with source-
 test("restart redelivery counts only wake=true and delivers once", async () => {
   const f = fixture([]);
   f.projector.createRedeliveryEnvelope = (_agentId, count) => ({
-    message_id: `redeliver_${count}`, seq: 2, channel_type: "dm", channel_name: "system",
+    kind: "redelivery", message_id: `redeliver_${count}`, seq: 2, target: "runtime:redelivery",
+    channel_type: "dm", channel_name: "system",
   });
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector, deliveryTarget: { deliver(_id, envelope) { f.deliveries.push(envelope); } }, reminderStore: f.api, readFile: () => '{"wake":true}\n{"wake":false}\n{"wake":true}\n' });
   await orchestrator.redeliverUnread(agent);
   await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.deliveries, [{ message_id: "redeliver_2", seq: 2, channel_type: "dm", channel_name: "system", target: "runtime:redelivery" }]);
+  assert.deepEqual(f.deliveries, [{ kind: "redelivery", message_id: "redeliver_2", seq: 2,
+    target: "runtime:redelivery", channel_type: "dm", channel_name: "system" }]);
   assert.deepEqual(f.inbox, f.deliveries);
   assert.strictEqual(f.inbox[0], f.deliveries[0], "new startup redelivery persists and delivers one target-complete object");
 });
@@ -197,7 +200,7 @@ test("transient startup Inbox read failure does not burn redelivery", async () =
   await orchestrator.redeliverUnread(agent);
   await orchestrator.redeliverUnread(agent);
   assert.equal(reads, 2);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }]);
+  assert.deepEqual(f.inbox, [{ kind: "redelivery", message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }]);
   assert.deepEqual(f.deliveries, f.inbox);
 });
 
@@ -211,7 +214,7 @@ test("malformed startup Inbox does not burn redelivery after the file is repaire
   inbox = `${JSON.stringify({ message_id: "om_after_repair", wake: true })}\n`;
   await orchestrator.redeliverUnread(agent);
   await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }]);
+  assert.deepEqual(f.inbox, [{ kind: "redelivery", message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }]);
   assert.deepEqual(f.deliveries, f.inbox);
 });
 
@@ -223,13 +226,14 @@ test("zero unread without a Runtime delivery target does not burn redelivery", a
   await orchestrator.redeliverUnread(agent);
   inbox = `${JSON.stringify({ message_id: "om_after_targetless_startup", wake: true })}\n`;
   await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.inbox, [{ message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }]);
+  assert.deepEqual(f.inbox, [{ kind: "redelivery", message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }]);
 });
 
 test("restart redelivery reuses an existing canonical synthetic envelope instead of appending a duplicate", async () => {
   const f = fixture([]);
   const logs = [];
-  const existing = { message_id: "redeliver_existing", seq: 7, wake: true, content: "already durable", target: "runtime:redelivery" };
+  const existing = { kind: "redelivery", message_id: "redeliver_existing", seq: 7, wake: true,
+    content: "already durable", target: "runtime:redelivery" };
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
     envelopeProjector: f.projector, deliveryTarget: { deliver(_agentId, envelope) { f.deliveries.push(envelope); } },
     reminderStore: f.api, log: (...parts) => logs.push(parts.join(" ")),
@@ -241,16 +245,17 @@ test("restart redelivery reuses an existing canonical synthetic envelope instead
   assert.match(logs.join("\n"), /滞留 wake 消息 1 条/, "existing redeliver_ rows are excluded from wakeCount");
 });
 
-test("restart redelivery recognizes a targetless redelivery row by its authoritative message id", async () => {
+test("restart redelivery rejects a targetless old redelivery row without append or delivery", async () => {
   const f = fixture([]);
-  const legacy = { message_id: "redeliver_legacy", seq: 8, channel_type: "dm", channel_name: "system", content: "legacy" };
+  const oldRow = { message_id: "redeliver_old", seq: 8, channel_type: "dm", channel_name: "system", content: "old" };
+  const bytes = `${JSON.stringify(oldRow)}\n`;
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
     envelopeProjector: f.projector, deliveryTarget: { deliver(_agentId, envelope) { f.deliveries.push(envelope); } },
-    reminderStore: f.api, readFile: () => `${JSON.stringify(legacy)}\n` });
-  await orchestrator.redeliverUnread(agent);
-  assert.deepEqual(f.inbox, [], "an existing durable row is not appended again");
-  assert.deepEqual(f.deliveries, [{ ...legacy, target: "runtime:redelivery" }]);
-  assert.equal("target" in legacy, false, "legacy disk value remains an immutable counterfactual fixture");
+    reminderStore: f.api, readFile: () => bytes });
+  await assert.rejects(orchestrator.redeliverUnread(agent), /matching kind and message_id/);
+  assert.deepEqual(f.inbox, [], "invalid existing row causes no append");
+  assert.deepEqual(f.deliveries, [], "invalid existing row causes no Runtime delivery");
+  assert.equal(bytes, `${JSON.stringify(oldRow)}\n`, "the persisted fixture remains byte-for-byte unchanged");
 });
 
 test("transient append failure does not burn the once-per-host redelivery opportunity", async () => {
@@ -346,7 +351,8 @@ test("orphan startup Inbox appends a durable redelivery envelope and one drain c
     const orchestrator = new HostReminderOrchestrator({ agents: [realAgent], stateStore: () => store,
       envelopeProjector: {
         createReminderEnvelope() { throw new Error("unused"); },
-        createRedeliveryEnvelope() { return { message_id: "redeliver_orphan", seq: 9, wake: true, content: "drain" }; },
+        createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_orphan", seq: 9,
+          target: "runtime:redelivery", wake: true, content: "drain" }; },
       }, deliveryTarget: host, reminderStore: fixture([]).api });
     await orchestrator.redeliverUnread(realAgent);
     assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_orphan", "redeliver_orphan"]);
@@ -387,7 +393,8 @@ test("an existing pending Runtime delivery and its durable startup redelivery ar
     const orchestrator = new HostReminderOrchestrator({ agents: [realAgent], stateStore: () => store,
       envelopeProjector: {
         createReminderEnvelope() { throw new Error("unused"); },
-        createRedeliveryEnvelope() { return { message_id: "redeliver_existing_pending", seq: 10, wake: true, content: "drain" }; },
+        createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_existing_pending", seq: 10,
+          target: "runtime:redelivery", wake: true, content: "drain" }; },
       }, deliveryTarget: host, reminderStore: fixture([]).api });
     await orchestrator.redeliverUnread(realAgent);
     assert.equal(session.prompts.length, 1);
@@ -420,7 +427,7 @@ const agent={agentId:process.env.TEST_AGENT,name:process.env.TEST_AGENT,stateDir
 const wrapped={paths:store.paths,appendNdjson(key,value){fs.writeFileSync(process.env.TEST_READY,"ready");store.appendNdjson(key,value)}};
 const orchestrator=new HostReminderOrchestrator({agents:[agent],stateStore:()=>wrapped,envelopeProjector:{
  createReminderEnvelope(){throw new Error("unused")},
- createRedeliveryEnvelope(){return {message_id:"redeliver_lock",seq:11,wake:true}}
+ createRedeliveryEnvelope(){return {kind:"redelivery",message_id:"redeliver_lock",target:"runtime:redelivery",seq:11,wake:true}}
 },deliveryTarget:{deliver(_id,envelope){fs.writeFileSync(process.env.TEST_DELIVERED,JSON.stringify(envelope))}}});
 await orchestrator.redeliverUnread(agent);
 `;

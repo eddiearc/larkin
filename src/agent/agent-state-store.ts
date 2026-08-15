@@ -120,7 +120,7 @@ interface InboxSendIntent {
 interface InboxStateFile {
   version: 2;
   targets: Record<string, InboxTargetState>;
-  messages: Record<string, { target: string; seq: number }>;
+  messages: Record<string, { target: string; seq: number; kind?: string }>;
   drafts: Record<string, InboxDraft>;
   intents: Record<string, InboxSendIntent>;
 }
@@ -153,8 +153,10 @@ function normalizeInboxState(value: unknown): InboxStateFile {
   if (raw.messages && typeof raw.messages === "object" && !Array.isArray(raw.messages)) {
     for (const [messageId, candidate] of Object.entries(raw.messages)) {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
-      const row = candidate as { target?: unknown; seq?: unknown };
-      if (typeof row.target === "string" && row.target && validSequence(row.seq)) state.messages[messageId] = { target: row.target, seq: row.seq };
+      const row = candidate as { target?: unknown; seq?: unknown; kind?: unknown };
+      if (typeof row.target === "string" && row.target && validSequence(row.seq)) state.messages[messageId] = {
+        target: row.target, seq: row.seq, ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}),
+      };
     }
   }
   if (raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) {
@@ -475,7 +477,8 @@ export class AgentStateStore {
     const targetSeq = requested > current.latest_received_seq ? requested : current.latest_received_seq + 1;
     state.targets[target] = { ...current, latest_received_seq: targetSeq };
     if (typeof input.message_id === "string" && input.message_id) {
-      state.messages[input.message_id] = { target, seq: targetSeq };
+      state.messages[input.message_id] = { target, seq: targetSeq,
+        ...(typeof input.kind === "string" && input.kind ? { kind: input.kind } : {}) };
       const messageIds = Object.keys(state.messages);
       for (const stale of messageIds.slice(0, Math.max(0, messageIds.length - 2_048))) delete state.messages[stale];
     }
@@ -492,7 +495,8 @@ export class AgentStateStore {
         : existing?.target === target ? existing.seq : current.latest_received_seq + 1;
       current.latest_received_seq = Math.max(current.latest_received_seq, targetSeq);
       state.targets[target] = current;
-      if (typeof row.message_id === "string" && row.message_id) state.messages[row.message_id] = { target, seq: targetSeq };
+      if (typeof row.message_id === "string" && row.message_id) state.messages[row.message_id] = { target, seq: targetSeq,
+        ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}) };
       return { ...row, envelope_version: 2, target, target_seq: targetSeq };
     });
   }
@@ -732,8 +736,9 @@ export class AgentStateStore {
   resolveInboxMessageTarget(messageId: string): string | null {
     return this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      const known = state.messages[messageId]?.target;
-      if (known) return targetKeyOfInboxEnvelope({ message_id: messageId, target: known });
+      const known = state.messages[messageId];
+      if (known) return targetKeyOfInboxEnvelope({ message_id: messageId, target: known.target,
+        ...(known.kind ? { kind: known.kind } : {}) });
       const row = this.readNdjson<InboxEnvelope>("inbox").find((candidate) => candidate.message_id === messageId);
       return row ? targetKeyOfInboxEnvelope(row) : null;
     });

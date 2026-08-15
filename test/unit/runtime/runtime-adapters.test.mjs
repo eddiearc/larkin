@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { spawnSync } from "node:child_process";
 import { afterEach, test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { resolveAgentCliExecutable } from "../../../dist/agent/agent-cli-capabilities.mjs";
@@ -844,41 +843,29 @@ test("Pi replaces only a provably zero-turn missing session and keeps meaningful
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("Pi default runtime fails closed with an empty unauthenticated official agent directory", () => {
+test("Pi default runtime fails closed with an empty unauthenticated official agent directory", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-no-auth-"));
+  const child = new FakeProcess();
+  child.kill = () => { child.emit("exit", 0, null); return true; };
   try {
-    const moduleUrl = new URL("../../../dist/runtime/runtime-adapters.mjs", import.meta.url).href;
-    const fixture = path.join(root, "no-auth-fixture.mjs");
-    fs.writeFileSync(fixture, `
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
-import { createNativeRuntimeAdapter } from ${JSON.stringify(moduleUrl)};
-class FakeProcess extends EventEmitter {
-  stdout = new PassThrough();
-  stderr = new PassThrough();
-  writes = [];
-  stdin = { destroyed: false, write: (data, callback) => { this.writes.push(JSON.parse(data)); callback?.(); return true; } };
-  kill() { this.emit("exit", 0, null); return true; }
-}
-const child = new FakeProcess();
-const pending = createNativeRuntimeAdapter("pi", { piCommand: process.execPath, spawn: () => child }).createSession({
-  agentId: "cli_test",
-  workspaceDir: ${JSON.stringify(path.join(root, "workspace"))},
-  stateDir: ${JSON.stringify(path.join(root, "state"))},
-  standingPrompt: { version: "v1", content: "standing", hash: "abc" },
-  model: "default",
-});
-await new Promise((resolve) => setImmediate(resolve));
-for (const request of child.writes.slice(0, 2)) {
-  const data = request.type === "get_available_models" ? { models: [] } : { model: null, thinkingLevel: "off" };
-  child.stdout.write(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data }) + "\\n");
-}
-try { await pending; process.exit(2); }
-catch (error) { console.error(error.message); process.exit(1); }
-`);
-    const result = spawnSync(process.execPath, [fixture], { encoding: "utf8", timeout: 10_000 });
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error?.message);
-    assert.match(result.stderr, /no authenticated available models.*will not create a fallback session/i);
+    const pending = createNativeRuntimeAdapter("pi", {
+      env: { LARKIN_PI_COMMAND: process.execPath },
+      spawn: () => child,
+    }).createSession(create({
+      workspaceDir: path.join(root, "workspace"),
+      stateDir: path.join(root, "state"),
+      model: "default",
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const request of child.writes.slice(0, 2)) {
+      const data = request.type === "get_available_models"
+        ? { models: [] }
+        : { model: null, thinkingLevel: "off" };
+      child.stdout.write(`${JSON.stringify({
+        type: "response", id: request.id, command: request.type, success: true, data,
+      })}\n`);
+    }
+    await assert.rejects(pending, /no authenticated available models.*will not create a fallback session/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

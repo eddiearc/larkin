@@ -40,12 +40,13 @@ export type NormalizedRuntimeEvent =
   | { type: "session-init"; sessionId: string; model?: string; reasoningEffort?: string }
   | { type: "runtime-observation"; runtime: "pi"; distribution: "builtin" | "external";
       phase: "rpc_submit" | "rpc_accepted" | "compaction_start" | "compaction_end" | "retry_progress"
-        | "rpc_timeout" | "rpc_error" | "turn_start" | "first_output" | "tool_call" | "tool_result" | "completed" | "settled" }
+        | "rpc_timeout" | "rpc_error" | "turn_start" | "first_output" | "tool_call" | "tool_result" | "agent_end" | "completed" | "settled";
+      reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; inputId?: string; sessionId?: string }
   | { type: "turn-start"; turnId?: string }
   | { type: "activity"; activity: "thinking" | "text" | "tool" | "internal"; text?: string; name?: string }
   | { type: "turn-end"; sessionId?: string; turnId?: string }
   | { type: "input-error"; inputId?: string; retryable: boolean; willRetry?: boolean; message: string;
-      errorCategory?: "billing" | "quota" | "rate_limit" | "auth" | "provider"; nextAction?: string;
+      errorCategory?: "billing" | "quota" | "rate_limit" | "auth" | "context_window" | "provider"; nextAction?: string;
       upstream?: UpstreamProviderError }
   | { type: "configuration-error"; message: string }
   | { type: "error"; message: string }
@@ -75,6 +76,7 @@ export interface RuntimeSession {
   prompt(input: RuntimeInput): Promise<RuntimeInputResult>;
   busyInput(input: RuntimeInput): Promise<RuntimeInputResult>;
   cancel(reason: string): Promise<void>;
+  compact?(customInstructions?: string): Promise<unknown>;
   close(reason: string): Promise<void>;
   subscribe(listener: (event: NormalizedRuntimeEvent) => void): () => void;
 }

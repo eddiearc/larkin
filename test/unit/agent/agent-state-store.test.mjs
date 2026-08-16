@@ -178,6 +178,256 @@ test("canonical Inbox append returns the exact persisted shape and deduplicates 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("context-overflow rearm preserves Inbox bytes and delivery identities while changing only matching terminal records", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-recovery-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextRecoveryA1");
+    const messages = ["om_overflow_1", "om_overflow_2", "om_overflow_3", "om_overflow_4"];
+    for (const messageId of messages) store.appendNdjson("inbox", { message_id: messageId, chat_id: "oc_overflow", content: "synthetic" });
+    const records = messages.map((messageId, index) => ({ deliveryId: `delivery-overflow-${index}`, messageId,
+      status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window", input: { inputId: `input-${index}`, deliveryId: `delivery-overflow-${index}`, kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before" }));
+    records.push({ deliveryId: "delivery-unrelated", messageId: "om_terminal_unrelated", status: "error", errorCategory: "provider",
+      input: { inputId: "input-unrelated", deliveryId: "delivery-unrelated", kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before" });
+    store.writeJson("runtimeDeliveries", { version: 1, records });
+    const inboxBytes = fs.readFileSync(store.paths.inbox, "utf8");
+    const result = store.rearmContextOverflow();
+    assert.deepEqual(result, { rearmedCount: 4, remainingPendingCount: 4 });
+    assert.equal(fs.readFileSync(store.paths.inbox, "utf8"), inboxBytes);
+    const after = store.readJson("runtimeDeliveries", { records: [] });
+    assert.deepEqual(after.records.map((record) => [record.deliveryId, record.messageId, record.status]), [
+      ["delivery-overflow-0", "om_overflow_1", "pending"], ["delivery-overflow-1", "om_overflow_2", "pending"],
+      ["delivery-overflow-2", "om_overflow_3", "pending"], ["delivery-overflow-3", "om_overflow_4", "pending"],
+      ["delivery-unrelated", "om_terminal_unrelated", "error"],
+    ]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy context-overflow rearm covers eight Inbox rows across multiple targets and preserves stable identities", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-legacy-multi-target-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextLegacyMultiTargetA1");
+    const rows = [
+      { message_id: "om_legacy_chat_a", target: "chat:oc_legacy_a" },
+      { message_id: "om_legacy_chat_b", target: "chat:oc_legacy_b" },
+      { message_id: "om_legacy_thread_a", chat_id: "oc_legacy_a", thread_id: "omt_legacy_a" },
+      { message_id: "om_legacy_thread_b", chat_id: "oc_legacy_b", thread_id: "omt_legacy_b" },
+      { message_id: "om_legacy_doc_a", kind: "document_comment", target: "document-comment:docx_legacy_a:comment_a" },
+      { message_id: "om_legacy_doc_b", kind: "document_comment", target: "document-comment:docx_legacy_b:comment_b" },
+      { message_id: "rem_legacy_system", kind: "reminder", target: "runtime:reminder" },
+      { message_id: "redeliver_legacy_system", kind: "redelivery", target: "runtime:redelivery" },
+    ];
+    for (const row of rows) store.appendNdjson("inbox", { ...row, content: "synthetic" });
+    const records = rows.map((row, index) => ({ deliveryId: `legacy-delivery-${index}`, messageId: row.message_id,
+      status: "error", retryable: false,
+      reason: index < 6
+        ? "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again."
+        : "provider rejected the input because the context window was exceeded",
+      ...(index >= 6 ? { errorCategory: "context_window" } : {}),
+      input: { inputId: `legacy-input-${index}`, deliveryId: `legacy-delivery-${index}`, kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before" }));
+    store.writeJson("runtimeDeliveries", { version: 1, records });
+    const inboxBytes = fs.readFileSync(store.paths.inbox, "utf8");
+    assert.deepEqual(store.rearmContextOverflow(), { rearmedCount: 8, remainingPendingCount: 8 });
+    assert.equal(fs.readFileSync(store.paths.inbox, "utf8"), inboxBytes);
+    const after = store.readJson("runtimeDeliveries", { records: [] });
+    assert.deepEqual(after.records.map((record) => [record.messageId, record.deliveryId, record.input.inputId, record.status]),
+      rows.map((row, index) => [row.message_id, `legacy-delivery-${index}`, `legacy-input-${index}`, "pending"]));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy context-overflow rearm accepts the exact Codex reason but refuses ambiguous wording, retryable rows, and conflicting categories without mutation", async () => {
+  const cases = [
+    ["ambiguous", { status: "error", retryable: false, reason: "The context policy token limit may apply", errorCategory: "context_window" }],
+    ["projection-one-character", { status: "error", retryable: false, reason: "provider rejected the input because the context window was exceedeD", errorCategory: "context_window" }],
+    ["projection-ambiguous", { status: "error", retryable: false, reason: "provider rejected the input because context overflow happened", errorCategory: "context_window" }],
+    ["retryable", { status: "error", retryable: true, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again." }],
+    ["conflicting-category", { status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "quota" }],
+  ];
+  for (const [name, record] of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-state-context-legacy-${name}-`));
+    try {
+      const { createAgentStateStore } = await import(moduleUrl);
+      const store = createAgentStateStore(root, `cli_contextLegacy${name.replace(/-/g, "")}A1`);
+      const messageId = `om_legacy_${name}`;
+      store.appendNdjson("inbox", { message_id: messageId, target: `chat:oc_legacy_${name}`, content: "synthetic" });
+      const original = { version: 1, records: [{ deliveryId: `legacy-${name}-delivery`, messageId, input: {
+        inputId: `legacy-${name}-input`, deliveryId: `legacy-${name}-delivery`, kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before", ...record }] };
+      store.writeJson("runtimeDeliveries", original);
+      const inboxBefore = fs.readFileSync(store.paths.inbox, "utf8");
+      assert.throws(() => store.rearmContextOverflow(), (error) => error.code === (name === "retryable" ? "delivery_not_terminal" : "delivery_not_context_window"));
+      assert.equal(fs.readFileSync(store.paths.inbox, "utf8"), inboxBefore);
+      assert.deepEqual(store.readJson("runtimeDeliveries", {}), original);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("legacy context-overflow rearm refuses a missing retryable=false proof and leaves all state unchanged", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-legacy-missing-retryable-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextLegacyMissingRetryableA1");
+    const messageId = "om_legacy_missing_retryable";
+    store.appendNdjson("inbox", { message_id: messageId, target: "chat:oc_legacy_missing_retryable", content: "synthetic" });
+    const original = { version: 1, records: [{ deliveryId: "legacy-missing-retryable-delivery", messageId, status: "error",
+      reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", input: { inputId: "legacy-missing-retryable-input", deliveryId: "legacy-missing-retryable-delivery" }, updatedAt: "before" }] };
+    store.writeJson("runtimeDeliveries", original);
+    const inboxBefore = fs.readFileSync(store.paths.inbox, "utf8");
+    assert.throws(() => store.rearmContextOverflow(), (error) => error.code === "delivery_not_context_window");
+    assert.equal(fs.readFileSync(store.paths.inbox, "utf8"), inboxBefore);
+    assert.deepEqual(store.readJson("runtimeDeliveries", {}), original);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm fails closed when reason is missing even with explicit category", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-missing-reason-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextMissingReasonA1");
+    const messageId = "om_context_missing_reason";
+    store.appendNdjson("inbox", { message_id: messageId, target: "chat:oc_context_missing_reason", content: "synthetic" });
+    const original = { version: 1, records: [{ deliveryId: "d-context-missing-reason", messageId, status: "error",
+      errorCategory: "context_window", input: { inputId: "i-context-missing-reason", deliveryId: "d-context-missing-reason" }, updatedAt: "before" }] };
+    store.writeJson("runtimeDeliveries", original);
+    assert.throws(() => store.rearmContextOverflow(), (error) => error.code === "delivery_not_context_window");
+    assert.deepEqual(store.readJson("runtimeDeliveries", {}), original);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm refuses a mixed terminal backlog before mutating ledger or Inbox", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-refuse-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextRefusalA1");
+    store.appendNdjson("inbox", { message_id: "om_context_only", chat_id: "oc_context", content: "synthetic" });
+    store.appendNdjson("inbox", { message_id: "om_quota_error", chat_id: "oc_context", content: "synthetic" });
+    store.writeJson("runtimeDeliveries", { version: 1, records: [
+      { deliveryId: "d-context", messageId: "om_context_only", status: "error", errorCategory: "context_window", input: { inputId: "i-context", deliveryId: "d-context" }, updatedAt: "before" },
+      { deliveryId: "d-quota", messageId: "om_quota_error", status: "error", errorCategory: "quota", input: { inputId: "i-quota", deliveryId: "d-quota" }, updatedAt: "before" },
+    ] });
+    const before = fs.readFileSync(store.paths.inbox, "utf8");
+    assert.throws(() => store.rearmContextOverflow(), (error) => error.code === "delivery_not_context_window");
+    assert.equal(fs.readFileSync(store.paths.inbox, "utf8"), before);
+    assert.deepEqual(store.readJson("runtimeDeliveries", { records: [] }).records.map((record) => record.status), ["error", "error"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm rolls back deleted and mutated matching rows while preserving unrelated concurrent rows", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-rollback-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextRollbackA1");
+    const messages = ["om_context_rollback_a", "om_context_rollback_b"];
+    for (const messageId of messages) store.appendNdjson("inbox", { message_id: messageId, chat_id: "oc_context_rollback", content: "synthetic" });
+    const original = { version: 1, records: [
+      { deliveryId: "d-rollback-a", messageId: messages[0], status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window",
+        input: { inputId: "i-rollback-a", deliveryId: "d-rollback-a", kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before-a" },
+      { deliveryId: "d-rollback-b", messageId: messages[1], status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window",
+        input: { inputId: "i-rollback-b", deliveryId: "d-rollback-b", kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before-b" },
+      { deliveryId: "d-unrelated", messageId: "om_unrelated", status: "error", errorCategory: "provider",
+        input: { inputId: "i-unrelated", deliveryId: "d-unrelated", kind: "wake", text: "unrelated", attempt: 0 }, updatedAt: "before-unrelated" },
+    ] };
+    store.writeJson("runtimeDeliveries", original);
+    assert.throws(() => store.rearmContextOverflow(() => {
+      const current = store.readJson("runtimeDeliveries", {});
+      current.records = current.records.filter((record) => record.deliveryId !== "d-rollback-a");
+      current.records.find((record) => record.deliveryId === "d-rollback-b").status = "consumed";
+      current.records.push({ deliveryId: "d-concurrent", messageId: "om_concurrent", status: "pending",
+        input: { inputId: "i-concurrent", deliveryId: "d-concurrent" }, updatedAt: "concurrent" });
+      store.writeJson("runtimeDeliveries", current);
+      throw new Error("injected commit callback failure");
+    }), /injected commit callback failure/);
+    const after = store.readJson("runtimeDeliveries", {});
+    assert.deepEqual(after.records, [...original.records.slice(0, 2), original.records[2], {
+      deliveryId: "d-concurrent", messageId: "om_concurrent", status: "pending",
+      input: { inputId: "i-concurrent", deliveryId: "d-concurrent" }, updatedAt: "concurrent",
+    }], "rollback restores exact matching identities/state without losing an unrelated concurrent row");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm rejects a matching deliveryId collision with an unrelated ledger record", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-delivery-collision-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextDeliveryCollisionA1");
+    store.appendNdjson("inbox", { message_id: "om_context_collision", chat_id: "oc_context_collision", content: "synthetic" });
+    const before = { version: 1, records: [
+      { deliveryId: "d-collision", messageId: "om_context_collision", status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window", input: { inputId: "i-context-collision", deliveryId: "d-collision" }, updatedAt: "before" },
+      { deliveryId: "d-collision", messageId: "om_unrelated_collision", status: "error", errorCategory: "provider", input: { inputId: "i-unrelated-collision", deliveryId: "d-collision" }, updatedAt: "unrelated" },
+    ] };
+    store.writeJson("runtimeDeliveries", before);
+    assert.throws(() => store.rearmContextOverflow(), (error) => error.code === "delivery_duplicate");
+    assert.deepEqual(store.readJson("runtimeDeliveries", {}), before);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm preserves existing Inbox freshness boundaries and is not repeatable after rearm", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-freshness-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextFreshnessA1");
+    const messageId = "om_context_freshness";
+    store.appendNdjson("inbox", { message_id: messageId, chat_id: "oc_context_freshness", content: "synthetic", target_seq: 8 });
+    store.writeJson("inboxState", { version: 2, targets: { "chat:oc_context_freshness": { latest_received_seq: 8, model_seen_seq: 5 } }, messages: {
+      [messageId]: { target: "chat:oc_context_freshness", seq: 8 },
+    }, drafts: {}, intents: {} });
+    const freshness = { version: 1, cursors: { "chat:oc_context_freshness": { generation: "external", cursor: { seq: 5 } } } };
+    store.writeJson("freshnessState", freshness);
+    store.writeJson("runtimeDeliveries", { version: 1, records: [{ deliveryId: "d-freshness", messageId, status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window",
+      input: { inputId: "i-freshness", deliveryId: "d-freshness" }, updatedAt: "before" }] });
+    const inboxBefore = fs.readFileSync(store.paths.inbox, "utf8");
+    const inboxStateBefore = store.readJson("inboxState", {});
+    const freshnessBefore = store.readJson("freshnessState", {});
+    store.rearmContextOverflow();
+    assert.equal(fs.readFileSync(store.paths.inbox, "utf8"), inboxBefore);
+    assert.deepEqual(store.readJson("inboxState", {}), inboxStateBefore);
+    assert.deepEqual(store.readJson("freshnessState", {}), freshnessBefore);
+    assert.throws(() => store.rearmContextOverflow(), (error) => error.code === "delivery_not_terminal");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm restores the original ledger after a post-write persistence failure", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-persist-failure-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_contextPersistFailureA1");
+    store.appendNdjson("inbox", { message_id: "om_context_persist_failure", chat_id: "oc_context_persist", content: "synthetic" });
+    const original = { version: 1, records: [{ deliveryId: "d-persist", messageId: "om_context_persist_failure", status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window",
+      input: { inputId: "i-persist", deliveryId: "d-persist", kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before" }] };
+    store.writeJson("runtimeDeliveries", original);
+    const writeJson = store.writeJson.bind(store);
+    let failAfterWrite = true;
+    store.writeJson = (key, value) => {
+      writeJson(key, value);
+      if (key === "runtimeDeliveries" && failAfterWrite) { failAfterWrite = false; throw new Error("injected post-write persistence failure"); }
+    };
+    assert.throws(() => store.rearmContextOverflow(), /post-write persistence failure/);
+    assert.deepEqual(store.readJson("runtimeDeliveries", {}), original);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("context-overflow rearm refuses missing, mismatched, or duplicate stable identities without mutation", async () => {
+  const cases = [
+    ["missing-input", { deliveryId: "d-identity", messageId: "om_identity", status: "error", errorCategory: "context_window", input: { deliveryId: "d-identity" } }],
+    ["mismatched-delivery", { deliveryId: "d-identity", messageId: "om_identity", status: "error", errorCategory: "context_window", input: { inputId: "i-identity", deliveryId: "other" } }],
+    ["duplicate-input", { deliveryId: "d-identity", messageId: "om_identity", status: "error", errorCategory: "context_window", input: { inputId: "i-shared", deliveryId: "d-identity" } }],
+  ];
+  for (const [name, record] of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-state-context-${name}-`));
+    try {
+      const { createAgentStateStore } = await import(moduleUrl);
+      const store = createAgentStateStore(root, `cli_context${name.replace(/-/g, "")}A1`);
+      store.appendNdjson("inbox", { message_id: "om_identity", chat_id: "oc_identity", content: "synthetic" });
+      const records = name === "duplicate-input" ? [record, { ...record, deliveryId: "d-identity-2", messageId: "om_identity_2", input: { inputId: "i-shared", deliveryId: "d-identity-2" } }] : [record];
+      if (name === "duplicate-input") store.appendNdjson("inbox", { message_id: "om_identity_2", chat_id: "oc_identity", content: "synthetic" });
+      store.writeJson("runtimeDeliveries", { version: 1, records });
+      const before = store.readJson("runtimeDeliveries", {});
+      assert.throws(() => store.rearmContextOverflow(), /identity/);
+      assert.deepEqual(store.readJson("runtimeDeliveries", {}), before);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-stable-inbox-id-"));
   try {

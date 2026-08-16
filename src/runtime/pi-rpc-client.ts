@@ -20,6 +20,7 @@ interface PendingRequest {
   timer?: NodeJS.Timeout;
   startedAt: number;
   absoluteDeadlineAt?: number;
+  failClientOnTimeout?: boolean;
   resolve(value: unknown): void;
   reject(error: Error): void;
 }
@@ -29,14 +30,14 @@ export interface PiRpcClientOptions {
   inputTimeoutMs?: number;
   inputProgressTimeoutMs?: number;
   inputMaxTimeoutMs?: number;
-  maxFrameBytes?: number;
   maxStderrBytes?: number;
   shutdownGraceMs?: number;
+  compactTimeoutMs?: number;
 }
 
 type RpcObject = Record<string, any>;
 
-/** A strict, bounded LF-delimited client for Pi's public RPC protocol. */
+/** A strict LF-delimited client for Pi's public RPC protocol. */
 export class PiRpcClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly eventListeners = new Set<(event: RpcObject) => void>();
@@ -45,9 +46,10 @@ export class PiRpcClient {
   private readonly inputTimeoutMs: number;
   private readonly inputProgressTimeoutMs: number;
   private readonly inputMaxTimeoutMs: number;
-  private readonly maxFrameBytes: number;
   private readonly maxStderrBytes: number;
   private readonly shutdownGraceMs: number;
+  private readonly compactTimeoutMs: number;
+  private readonly expiredRequestIds = new Set<string>();
   private stdoutBuffer = Buffer.alloc(0);
   private stderrBuffer = Buffer.alloc(0);
   private exited = false;
@@ -62,9 +64,10 @@ export class PiRpcClient {
     this.inputMaxTimeoutMs = options.inputMaxTimeoutMs ?? 600_000;
     if (this.requestTimeoutMs <= 0 || this.inputTimeoutMs <= 0 || this.inputProgressTimeoutMs <= 0
       || this.inputMaxTimeoutMs < this.inputTimeoutMs) throw new Error("Pi RPC timeout options are invalid");
-    this.maxFrameBytes = options.maxFrameBytes ?? 1024 * 1024;
     this.maxStderrBytes = options.maxStderrBytes ?? 64 * 1024;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
+    this.compactTimeoutMs = options.compactTimeoutMs ?? 120_000;
+    if (this.compactTimeoutMs <= 0) throw new Error("Pi compact timeout must be positive");
     process.stdout?.on("data", (chunk) => this.consume(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
     process.stdout?.on("end", () => {
       if (this.stdoutBuffer.length) this.protocolFailure("unterminated final frame");
@@ -94,18 +97,30 @@ export class PiRpcClient {
   }
 
   request<T = unknown>(command: string, fields: Record<string, unknown> = {}): Promise<T> {
+    const input = isInputCommand(command);
+    return this.requestInternal<T>(command, fields, input ? this.inputTimeoutMs : this.requestTimeoutMs,
+      input ? Date.now() + this.inputMaxTimeoutMs : undefined, true);
+  }
+
+  /** Send the documented compact RPC with a Larkin-owned absolute deadline. */
+  requestCompact<T = unknown>(customInstructions?: string): Promise<T> {
+    const startedAt = Date.now();
+    return this.requestInternal<T>("compact", customInstructions === undefined ? {} : { customInstructions },
+      this.compactTimeoutMs, startedAt + this.compactTimeoutMs, false);
+  }
+
+  private requestInternal<T>(command: string, fields: Record<string, unknown>, timeoutMs: number,
+    absoluteDeadlineAt: number | undefined, failClientOnTimeout: boolean): Promise<T> {
     if (this.failed) return Promise.reject(this.failed);
     const id = `larkin-${++this.nextId}`;
     return new Promise<T>((resolve, reject) => {
       const startedAt = Date.now();
-      const input = isInputCommand(command);
       const pending: PendingRequest = {
-        command, startedAt,
-        ...(input ? { absoluteDeadlineAt: startedAt + this.inputMaxTimeoutMs } : {}),
-        resolve: resolve as (value: unknown) => void, reject,
+        command, startedAt, ...(absoluteDeadlineAt !== undefined ? { absoluteDeadlineAt } : {}),
+        failClientOnTimeout, resolve: resolve as (value: unknown) => void, reject,
       };
       this.pending.set(id, pending);
-      this.armTimeout(id, pending, input ? this.inputTimeoutMs : this.requestTimeoutMs);
+      this.armTimeout(id, pending, timeoutMs);
       try {
         if (!this.process.stdin || this.process.stdin.destroyed) throw new Error("stdin is unavailable");
         this.process.stdin.write(`${JSON.stringify({ id, type: command, ...fields })}\n`, (error) => {
@@ -132,14 +147,7 @@ export class PiRpcClient {
     this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
     while (true) {
       const newline = this.stdoutBuffer.indexOf(0x0a);
-      if (newline < 0) {
-        if (this.stdoutBuffer.length > this.maxFrameBytes) this.protocolFailure(`frame exceeds ${this.maxFrameBytes} bytes`);
-        return;
-      }
-      if (newline > this.maxFrameBytes) {
-        this.protocolFailure(`frame exceeds ${this.maxFrameBytes} bytes`);
-        return;
-      }
+      if (newline < 0) return;
       let frame = this.stdoutBuffer.subarray(0, newline);
       this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
       if (frame.at(-1) === 0x0d) frame = frame.subarray(0, -1);
@@ -161,7 +169,10 @@ export class PiRpcClient {
   private dispatch(message: RpcObject): void {
     if (message.type === "response" && typeof message.id === "string") {
       const pending = this.pending.get(message.id);
-      if (!pending) { this.protocolFailure(`unexpected response id ${message.id}`); return; }
+      if (!pending) {
+        if (this.expiredRequestIds.delete(message.id)) return;
+        this.protocolFailure(`unexpected response id ${message.id}`); return;
+      }
       this.pending.delete(message.id);
       if (pending.timer) clearTimeout(pending.timer);
       if (message.command !== pending.command) {
@@ -193,12 +204,22 @@ export class PiRpcClient {
       if (!this.pending.has(id)) return;
       const elapsed = Date.now() - pending.startedAt;
       const absolute = pending.absoluteDeadlineAt !== undefined && Date.now() >= pending.absoluteDeadlineAt;
-      const error = isInputCommand(pending.command)
-        ? new Error(absolute
-          ? `Pi RPC ${pending.command} preflight timed out at absolute ${this.inputMaxTimeoutMs}ms limit`
-          : `Pi RPC ${pending.command} preflight timed out after ${elapsed}ms without progress`)
-        : new Error(`Pi RPC ${pending.command} timed out after ${this.requestTimeoutMs}ms`);
-      this.fail(error, true);
+      this.pending.delete(id);
+      this.expiredRequestIds.add(id);
+      while (this.expiredRequestIds.size > 256) {
+        const oldest = this.expiredRequestIds.values().next().value as string | undefined;
+        if (!oldest) break;
+        this.expiredRequestIds.delete(oldest);
+      }
+      const error = pending.command === "compact"
+        ? new Error(`Pi RPC compact timed out at absolute compact deadline ${elapsed}ms`)
+        : isInputCommand(pending.command)
+          ? new Error(absolute
+            ? `Pi RPC ${pending.command} preflight timed out at absolute ${this.inputMaxTimeoutMs}ms limit`
+            : `Pi RPC ${pending.command} preflight timed out after ${elapsed}ms without progress`)
+          : new Error(`Pi RPC ${pending.command} timed out after ${this.requestTimeoutMs}ms`);
+      pending.reject(error);
+      if (pending.failClientOnTimeout !== false) this.fail(error, true);
     }, delay);
     pending.timer.unref?.();
   }

@@ -82,7 +82,8 @@ Examples:
 
 Credentials, internal paths, serverId, activeAgent, and raw config are never exposed here.`,
   session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>]
-Atomically replace one idle, zero-backlog Agent Runtime session through authenticated local control.`,
+       larkin session recover --agent <App ID> --reason context-overflow --json [--wait-ready <seconds>]
+Reset replaces one idle, zero-backlog Runtime session. Recover is an explicit operator-only context-window recovery that preserves and replays canonical Inbox deliveries.`,
   "pi-auth": `Usage: larkin pi-auth status [--agent <App ID>] [--json]
        larkin pi-auth logout <provider> [--agent <App ID>]
 Show non-sensitive official Pi credential metadata or remove one target provider credential.`,
@@ -135,6 +136,7 @@ Usage: larkin <command>
   chats            List known chats; use free/strict <oc_id> to configure mention requirements
   config           Inspect effective config/source, edit mention inheritance, or explicitly apply runtime changes
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
+  session recover  Explicitly recover a context-overflowed session and replay retained Inbox deliveries
   pi-auth          Show non-sensitive built-in Pi auth status or logout one provider
   comment reply    Reply to the exact cloud-document comment bound by a polled Inbox message
   telemetry        Inspect, export, import, or flush the durable OpenTelemetry trace queue

@@ -19,9 +19,17 @@ export interface SessionResetResponse {
   runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
   readyForFreshScenario: boolean; inboundObserved: false; readiness?: RuntimeReadiness;
 }
+export interface SessionRecoveryResponse {
+  ok: boolean; agentId: string; code?: string; error?: string;
+  recoveryCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
+  runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+  rearmedCount: number; replayStatus: "scheduled" | "pending" | "consumed" | "not_started";
+  remainingPendingCount: number; readyForFreshScenario: boolean; inboundObserved: false; readiness?: RuntimeReadiness;
+}
 interface SessionResetControlRequest { operation: "session-reset"; agentId: string; authorization: string; waitReadyMs?: number }
-type AgentControlRequest = AgentUpsertRequest | SessionResetControlRequest;
-type AgentControlPayload = Omit<AgentUpsertRequest, "authorization"> | Omit<SessionResetControlRequest, "authorization">;
+interface SessionRecoveryControlRequest { operation: "session-recover"; agentId: string; authorization: string; reason: "context-overflow"; waitReadyMs?: number }
+type AgentControlRequest = AgentUpsertRequest | SessionResetControlRequest | SessionRecoveryControlRequest;
+type AgentControlPayload = Omit<AgentUpsertRequest, "authorization"> | Omit<SessionResetControlRequest, "authorization"> | Omit<SessionRecoveryControlRequest, "authorization">;
 
 interface ProcessBinding { pid: number; processStartToken: string }
 interface SocketBinding { device: string; inode: string; owner: string; changeTimeNs: string }
@@ -44,6 +52,49 @@ const AGENT_ID = /^cli_[A-Za-z0-9]+$/;
 const OPERATION_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const AUTHORIZATION = /^[A-Za-z0-9_-]{43,128}$/;
 const UNIX_SOCKET_PATH_MAX_BYTES = process.platform === "darwin" ? 103 : 107;
+
+function recoveryErrorText(code: string | undefined): string {
+  switch (code) {
+    case "unknown_agent": return "unknown Agent";
+    case "agent_busy": return "Agent is not idle";
+    case "channel_unavailable": return "Runtime channel is unavailable";
+    case "channel_reconnecting": return "Runtime channel is reconnecting";
+    case "runtime_unavailable": return "Runtime readiness is unavailable";
+    case "recovery_unavailable": return "context-overflow recovery is unavailable";
+    case "recovery_staged_not_committed": return "context-overflow recovery was staged but not committed";
+    case "state_persistence_failed": return "context-overflow recovery committed but state persistence failed";
+    case "recovery_timeout": return "context-overflow recovery committed but readiness did not converge";
+    case "recovery_refused": return "context-overflow recovery was refused";
+    default: return "context-overflow recovery failed";
+  }
+}
+
+function sanitizeRecoveryReadiness(value: unknown): RuntimeReadiness | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<RuntimeReadiness>;
+  if (!["codex", "claude", "pi"].includes(String(candidate.runtime))
+      || !["missing", "unauthenticated", "unavailable", "incompatible", "ready"].includes(String(candidate.state))) return undefined;
+  const runtime = candidate.runtime as RuntimeReadiness["runtime"];
+  const state = candidate.state as RuntimeReadiness["state"];
+  return { runtime, state,
+    ...(state === "ready" ? {} : { reason: `Runtime readiness is ${state}.`, nextAction: "Inspect Runtime/provider configuration, then retry." }) };
+}
+
+function sanitizeSessionRecoveryResponse(response: SessionRecoveryResponse, agentId: string): SessionRecoveryResponse {
+  const code = typeof response.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(response.code) ? response.code : undefined;
+  return {
+    ok: response.ok === true, agentId, ...(code ? { code } : {}),
+    ...(code || response.error ? { error: recoveryErrorText(code) } : {}),
+    recoveryCommitted: response.recoveryCommitted === true, generationChanged: response.generationChanged === true,
+    sessionChanged: response.sessionChanged === true, turns: 0, runtimeReady: response.runtimeReady === true,
+    channelConnected: response.channelConnected === true, reconnecting: response.reconnecting === true,
+    pendingCount: Math.max(0, Number(response.pendingCount) || 0), rearmedCount: Math.max(0, Number(response.rearmedCount) || 0),
+    replayStatus: ["scheduled", "pending", "consumed", "not_started"].includes(response.replayStatus) ? response.replayStatus : "not_started",
+    remainingPendingCount: Math.max(0, Number(response.remainingPendingCount) || 0),
+    readyForFreshScenario: response.readyForFreshScenario === true, inboundObserved: false,
+    ...(sanitizeRecoveryReadiness(response.readiness) ? { readiness: sanitizeRecoveryReadiness(response.readiness) } : {}),
+  };
+}
 
 function socketPathsFit(root: string): boolean {
   if (isWindows) return true; // Windows named-pipe socket paths use a much larger limit
@@ -118,18 +169,28 @@ function removeLegacyResetLedger(larkinHome: string): void {
 }
 
 function parseRequest(line: string): AgentControlRequest {
-  const value = JSON.parse(line) as Partial<AgentUpsertRequest & SessionResetControlRequest>;
+  const value = JSON.parse(line) as Record<string, unknown>;
   if (!AGENT_ID.test(String(value.agentId || "")) || !AUTHORIZATION.test(String(value.authorization || ""))) {
     throw new Error("invalid agent control request");
   }
   if (value.operation === "session-reset") {
-    if (value.waitReadyMs !== undefined && (!Number.isSafeInteger(value.waitReadyMs) || value.waitReadyMs < 0 || value.waitReadyMs > 300_000)) {
+    if (value.waitReadyMs !== undefined && (typeof value.waitReadyMs !== "number" || !Number.isSafeInteger(value.waitReadyMs) || value.waitReadyMs < 0 || value.waitReadyMs > 300_000)) {
       throw new Error("invalid session reset waitReadyMs");
     }
     if (Object.keys(value).some((key) => !["agentId", "authorization", "operation", "waitReadyMs"].includes(key))) {
       throw new Error("session reset control request 包含未知字段");
     }
-    return value as SessionResetControlRequest;
+    return value as unknown as SessionResetControlRequest;
+  }
+  if (value.operation === "session-recover") {
+    if (value.reason !== "context-overflow") throw new Error("session recovery requires reason=context-overflow");
+    if (value.waitReadyMs !== undefined && (typeof value.waitReadyMs !== "number" || !Number.isSafeInteger(value.waitReadyMs) || value.waitReadyMs < 0 || value.waitReadyMs > 300_000)) {
+      throw new Error("invalid session recovery waitReadyMs");
+    }
+    if (Object.keys(value).some((key) => !["agentId", "authorization", "operation", "reason", "waitReadyMs"].includes(key))) {
+      throw new Error("session recovery control request 包含未知字段");
+    }
+    return value as unknown as SessionRecoveryControlRequest;
   }
   if (value.operation !== undefined || !OPERATION_ID.test(String(value.operationId || ""))) {
     throw new Error("invalid agent upsert request");
@@ -140,7 +201,7 @@ function parseRequest(line: string): AgentControlRequest {
   if (Object.keys(value).some((key) => !["operationId", "agentId", "authorization"].includes(key))) {
     throw new Error("agent control request 包含未知字段");
   }
-  return value as AgentUpsertRequest;
+  return value as unknown as AgentUpsertRequest;
 }
 
 function atomicWritePrivateJson(file: string, value: unknown): void {
@@ -511,12 +572,14 @@ export function createAgentControlServer({
   authorityToken,
   upsert,
   resetSession,
+  recoverSession,
   maxRememberedOperations = 256,
 }: {
   larkinHome: string;
   authorityToken: string;
   upsert(request: AgentUpsertOperation): Promise<void>;
   resetSession?(request: { agentId: string; waitReadyMs: number }): Promise<SessionResetResponse>;
+  recoverSession?(request: { agentId: string; reason: "context-overflow"; waitReadyMs: number }): Promise<SessionRecoveryResponse>;
   maxRememberedOperations?: number;
 }): { start(): Promise<void>; close(): Promise<void> } {
   let socket = "";
@@ -525,6 +588,7 @@ export function createAgentControlServer({
   const completed = new Map<string, AgentUpsertResponse>();
   const inFlight = new Map<string, { agentId: string; response: Promise<AgentUpsertResponse> }>();
   const resetInFlight = new Map<string, Promise<SessionResetResponse>>();
+  const recoveryInFlight = new Map<string, Promise<SessionRecoveryResponse>>();
   const agentQueues = new Map<string, Promise<unknown>>();
   const upsertConflict = (operationId: string, agentId: string): AgentUpsertResponse => ({
     ok: false, operationId, agentId, code: "operation_conflict", error: "operationId 已绑定其他 Agent 或操作",
@@ -576,6 +640,49 @@ export function createAgentControlServer({
               return;
             }
             if ("operation" in request) {
+              if (request.operation === "session-recover") {
+                const recoveryRequest = request;
+                let operation = recoveryInFlight.get(recoveryRequest.agentId);
+                if (!operation) {
+                  const executeRecovery = async (): Promise<SessionRecoveryResponse> => {
+                    try {
+                      if (!recoverSession) throw new Error("session recovery control unavailable");
+                      const result = await recoverSession({ agentId: recoveryRequest.agentId, reason: recoveryRequest.reason,
+                        waitReadyMs: recoveryRequest.waitReadyMs ?? 30_000 });
+                      return sanitizeSessionRecoveryResponse(result, recoveryRequest.agentId);
+                    } catch (error) {
+                      const code = typeof (error as { code?: unknown }).code === "string"
+                        ? String((error as { code: string }).code)
+                        : error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable"
+                          ? "runtime_unavailable" : "recovery_refused";
+                      const projection = error as Partial<Pick<SessionRecoveryResponse,
+                        "turns" | "runtimeReady" | "channelConnected" | "reconnecting" | "pendingCount" | "rearmedCount" | "remainingPendingCount">>;
+                      return { ok: false, agentId: recoveryRequest.agentId, code,
+                        error: recoveryErrorText(code), recoveryCommitted: false,
+                        generationChanged: false, sessionChanged: false, turns: Math.max(0, Number(projection.turns) || 0),
+                        runtimeReady: projection.runtimeReady === true, channelConnected: projection.channelConnected === true,
+                        reconnecting: projection.reconnecting === true, pendingCount: Math.max(0, Number(projection.pendingCount) || 0),
+                        rearmedCount: Math.max(0, Number(projection.rearmedCount) || 0), replayStatus: "not_started",
+                        remainingPendingCount: Math.max(0, Number(projection.remainingPendingCount) || 0),
+                        readyForFreshScenario: false, inboundObserved: false,
+                        ...(error instanceof RuntimePrerequisiteError ? { readiness: sanitizeRecoveryReadiness(error.readiness) } : {}) };
+                    }
+                  };
+                  const prior = agentQueues.get(recoveryRequest.agentId) ?? Promise.resolve();
+                  const executing = prior.catch(() => {}).then(executeRecovery);
+                  let queued: Promise<SessionRecoveryResponse>;
+                  queued = executing.finally(() => {
+                    if (agentQueues.get(recoveryRequest.agentId) === queued) agentQueues.delete(recoveryRequest.agentId);
+                    if (recoveryInFlight.get(recoveryRequest.agentId) === queued) recoveryInFlight.delete(recoveryRequest.agentId);
+                  });
+                  agentQueues.set(recoveryRequest.agentId, queued);
+                  recoveryInFlight.set(recoveryRequest.agentId, queued);
+                  operation = queued;
+                }
+                const response = await operation;
+                connection.end(`${JSON.stringify(response)}\n`);
+                return;
+              }
               const resetRequest = request;
               let operation = resetInFlight.get(resetRequest.agentId);
               if (!operation) {
@@ -792,6 +899,23 @@ export async function requestSessionReset({
   return requestAgentControl<SessionResetResponse>({
     larkinHome, timeoutMs: Math.max(1_000, waitReadyMs + 1_000),
     request: { operation: "session-reset", agentId, waitReadyMs },
+  });
+}
+
+export async function requestSessionRecovery({
+  larkinHome,
+  agentId,
+  reason = "context-overflow",
+  waitReadyMs = 30_000,
+}: {
+  larkinHome: string;
+  agentId: string;
+  reason?: "context-overflow";
+  waitReadyMs?: number;
+}): Promise<SessionRecoveryResponse> {
+  return requestAgentControl<SessionRecoveryResponse>({
+    larkinHome, timeoutMs: Math.max(1_000, waitReadyMs + 1_000),
+    request: { operation: "session-recover", agentId, reason, waitReadyMs },
   });
 }
 

@@ -22,7 +22,7 @@ import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
-import type { RuntimeHost, RuntimeHostEvent } from "../runtime/runtime-host.js";
+import type { RuntimeHost, RuntimeHostEvent, RuntimeSessionRecoveryResult } from "../runtime/runtime-host.js";
 import { providerAuthenticationFailureReadiness, RuntimePrerequisiteError } from "../runtime/runtime-readiness.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
 import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
@@ -114,6 +114,13 @@ export interface HostShell {
     resetCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
     runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
     readyForFreshScenario: boolean; inboundObserved: false;
+    code?: string; error?: string;
+  }>;
+  recoverSession(agentId: string, reason: "context-overflow", waitReadyMs?: number): Promise<{
+    recoveryCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
+    runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+    rearmedCount: number; replayStatus: "scheduled" | "pending" | "consumed" | "not_started";
+    remainingPendingCount: number; readyForFreshScenario: boolean; inboundObserved: false;
     code?: string; error?: string;
   }>;
   start(): Promise<void>;
@@ -1254,7 +1261,8 @@ export function createHostShell({
     if (message.type === "session") {
       const record = agentStates.get(agent.agentId);
       if (record && record.state.sessions[message.runtime] !== message.sessionId) {
-        record.state.sessions[message.runtime] = message.sessionId;
+        if (message.sessionId) record.state.sessions[message.runtime] = message.sessionId;
+        else delete record.state.sessions[message.runtime];
         saveAgentState(record);
         log(`持久化 agent=${agent.name} runtime=${message.runtime} sessionId=${message.sessionId}`);
       }
@@ -1391,6 +1399,68 @@ export function createHostShell({
         error: contaminated ? "reset committed but the fresh scenario was contaminated by a turn or Inbox arrival"
           : unavailable ? "reset committed but Runtime/channel readiness is unavailable"
             : "reset committed but readiness did not converge before timeout" };
+    },
+    async recoverSession(agentId, reason, waitReadyMs = 30_000): Promise<{
+      recoveryCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
+      runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
+      rearmedCount: number; replayStatus: "scheduled" | "pending" | "consumed" | "not_started";
+      remainingPendingCount: number; readyForFreshScenario: boolean; inboundObserved: false;
+      code?: string; error?: string;
+    }> {
+      const agent = agents.find((candidate) => candidate.agentId === agentId);
+      if (!agent) throw Object.assign(new Error(`未知 Agent: ${agentId}`), { code: "unknown_agent" });
+      if (reason !== "context-overflow") throw Object.assign(new Error("unsupported recovery reason"), { code: "recovery_refused" });
+      if (!runtimeHost.recoverSession) throw Object.assign(new Error("Runtime session recovery 尚未就绪"), { code: "recovery_unavailable" });
+      const connectionState = (status = hostState.readStatus(agent)): { channelConnected: boolean; reconnecting: boolean } => {
+        const connectedAt = Date.parse(String(status.connectedAt || ""));
+        const channelConnected = Number.isFinite(connectedAt) && connectedAt >= Date.parse(daemonStartedAt) - 1000;
+        return { channelConnected, reconnecting: isChannelReconnecting(status) };
+      };
+      const readinessProjection = (): { turns: number; runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number } => {
+        const status = hostState.readStatus(agent);
+        const turns = status.session && typeof status.session === "object"
+          ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
+        const runtimeReady = Boolean(status.runtimeReadiness && typeof status.runtimeReadiness === "object"
+          && (status.runtimeReadiness as { state?: unknown }).state === "ready");
+        const pendingCount = stateStore(agent).withInboxTransaction(() => stateStore(agent).readNdjson("inbox").length);
+        return { turns, runtimeReady, ...connectionState(status), pendingCount };
+      };
+      const initialProjection = readinessProjection();
+      if (!initialProjection.channelConnected) throw Object.assign(new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable", ...initialProjection });
+      if (initialProjection.reconnecting) throw Object.assign(new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting", ...initialProjection });
+      let recovery: RuntimeSessionRecoveryResult;
+      try { recovery = await runtimeHost.recoverSession(agentId, reason); }
+      catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), readinessProjection());
+      }
+      const record = agentStates.get(agentId);
+      try {
+        if (record) {
+          if (recovery.sessionId) record.state.sessions[agent.runtime] = recovery.sessionId;
+          else delete record.state.sessions[agent.runtime];
+          record.store.writeJson("agentState", record.state);
+        }
+      } catch (error) {
+        const projection = readinessProjection();
+        return { recoveryCommitted: true, generationChanged: recovery.generationChanged, sessionChanged: recovery.sessionChanged,
+          ...projection, rearmedCount: recovery.rearmedCount, replayStatus: "pending", remainingPendingCount: projection.pendingCount,
+          readyForFreshScenario: false, inboundObserved: false, code: "state_persistence_failed",
+          error: "recovery committed but Agent session state persistence failed" };
+      }
+      const deadline = Date.now() + Math.max(0, waitReadyMs);
+      let projection = readinessProjection();
+      do {
+        projection = readinessProjection();
+        if (projection.turns === 0 && projection.runtimeReady && projection.channelConnected && !projection.reconnecting) break;
+        if (Date.now() >= deadline) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+      } while (true);
+      const replayStatus = projection.pendingCount === 0 ? "consumed" : "pending";
+      const ready = projection.turns === 0 && projection.runtimeReady && projection.channelConnected && !projection.reconnecting;
+      return { recoveryCommitted: true, generationChanged: recovery.generationChanged, sessionChanged: recovery.sessionChanged,
+        ...projection, rearmedCount: recovery.rearmedCount, replayStatus, remainingPendingCount: projection.pendingCount,
+        readyForFreshScenario: ready, inboundObserved: false,
+        ...(!ready ? { code: "recovery_timeout", error: "recovery committed but Runtime/channel readiness did not converge before timeout" } : {}) };
     },
     async start(): Promise<void> {
       try {

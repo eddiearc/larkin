@@ -18,6 +18,7 @@ import {
 import {
   HOLD_DRIVER_BASENAME,
   HOLD_HOST_COMMAND_TOKEN,
+  HOLD_ACTION_LEASE_BASENAME,
   HOLD_READY_MAX_AGE_MS,
   HOLD_TRACE_BASENAME,
   HOLD_TEMP_ROOT_PREFIX,
@@ -405,7 +406,7 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     assert.throws(() => runProviderWithLiveHoldReady(
       claim.targetRoot,
       agentId,
-      (actionGuard) => { actionGuard(); barrierProviderCalls += 1; },
+      () => { barrierProviderCalls += 1; },
       {
         stage: "post-final-barrier",
         afterFinalValidation: () => fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
@@ -421,6 +422,45 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
       pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: connectedAt,
     })}\n`, { mode: 0o600 });
+
+    let validProviderCalls = 0;
+    runProviderWithLiveHoldReady(claim.targetRoot, agentId, () => { validProviderCalls += 1; }, { stage: "valid-lease" });
+    assert.equal(validProviderCalls, 1, "a current immutable lease must invoke the provider exactly once");
+
+    let expiredProviderCalls = 0;
+    assert.throws(() => runProviderWithLiveHoldReady(
+      claim.targetRoot,
+      agentId,
+      () => { expiredProviderCalls += 1; },
+      {
+        stage: "expired-lease",
+        afterFinalValidation: () => {
+          const leaseFile = path.join(claim.targetRoot, HOLD_ACTION_LEASE_BASENAME);
+          const expired = JSON.parse(fs.readFileSync(leaseFile, "utf8"));
+          expired.expiresAt = new Date(Date.now() - 1).toISOString();
+          writeJson(leaseFile, expired);
+        },
+      },
+    ), /expired-lease blocked.*expired/);
+    assert.equal(expiredProviderCalls, 0, "an expired lease must not invoke the provider");
+
+    let mismatchedProviderCalls = 0;
+    assert.throws(() => runProviderWithLiveHoldReady(
+      claim.targetRoot,
+      agentId,
+      () => { mismatchedProviderCalls += 1; },
+      {
+        stage: "mismatched-lease",
+        afterFinalValidation: () => {
+          const leaseFile = path.join(claim.targetRoot, HOLD_ACTION_LEASE_BASENAME);
+          const mismatched = JSON.parse(fs.readFileSync(leaseFile, "utf8"));
+          mismatched.nonce = "mismatched-lease-token";
+          writeJson(leaseFile, mismatched);
+        },
+      },
+    ), /mismatched-lease blocked.*does not match/);
+    assert.equal(mismatchedProviderCalls, 0, "a mismatched lease token must not invoke the provider");
+    fs.rmSync(path.join(claim.targetRoot, HOLD_ACTION_LEASE_BASENAME), { force: true });
 
     const wrong = JSON.parse(fs.readFileSync(claim.readyFile, "utf8"));
     wrong.processStartToken = "wrong-start-token";

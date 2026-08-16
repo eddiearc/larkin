@@ -112,7 +112,7 @@ test.skipIf(!WRITE)("dedicated Feishu chat holds a stale Bot send, then polls an
   };
   const markerCount = (payload, marker) => JSON.stringify(payload).split(marker).length - 1;
   const provider = (stage, operation) => runProviderWithLiveHoldReady(
-    configDir, agentId, (actionGuard) => { actionGuard(); return operation(); }, { stage },
+    configDir, agentId, operation, { stage },
   );
 
   // Fail before poll/drain or either external send when message-history scopes

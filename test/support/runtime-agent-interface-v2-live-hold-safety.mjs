@@ -339,14 +339,47 @@ export function validateLiveHoldHostReady(configDir, agentId, { nowMs = Date.now
   return { ready, status, inspected, daemon, boundary };
 }
 
+function sameLeaseEpoch(left, right) {
+  return left?.schema === right?.schema
+    && left?.version === right?.version
+    && left?.nonce === right?.nonce
+    && left?.ownerPid === right?.ownerPid
+    && left?.issuedAt === right?.issuedAt
+    && left?.expiresAt === right?.expiresAt
+    && left?.proofPath === right?.proofPath
+    && left?.daemon?.pid === right?.daemon?.pid
+    && left?.daemon?.processStartToken === right?.daemon?.processStartToken
+    && left?.daemon?.startedAt === right?.daemon?.startedAt
+    && left?.ready?.processStartToken === right?.ready?.processStartToken
+    && left?.ready?.boundaryAt === right?.ready?.boundaryAt;
+}
+
+export function executeProviderWithLiveHoldLease({ configDir, agentId, leaseToken, providerOperation, validate = validateLiveHoldHostReady }) {
+  if (!leaseToken || typeof providerOperation !== "function") throw new Error("provider executor requires an immutable lease token and operation");
+  const now = Date.now();
+  if (leaseToken.proofPath !== actionLeaseFile(configDir)
+      || Date.parse(String(leaseToken.expiresAt || "")) <= now) throw new Error("provider action lease is expired or bound to another proof path");
+  const currentLease = readActionLease(configDir);
+  if (Date.parse(String(currentLease?.expiresAt || "")) <= now) throw new Error("provider action lease is expired");
+  if (!sameLeaseEpoch(currentLease, leaseToken)) throw new Error("provider action lease token does not match the immutable lease");
+  const current = validate(configDir, agentId);
+  if (current.ready.processStartToken !== leaseToken.ready.processStartToken
+      || current.ready.boundaryAt !== leaseToken.ready.boundaryAt
+      || current.daemon.pid !== leaseToken.daemon.pid
+      || current.daemon.processStartToken !== leaseToken.daemon.processStartToken
+      || current.daemon.startedAt !== leaseToken.daemon.startedAt) {
+    throw new Error("provider action lease epoch is no longer current");
+  }
+  return providerOperation();
+}
+
 export function runProviderWithLiveHoldReady(
   configDir,
   agentId,
-  providerRunner,
+  providerOperation,
   { stage = "provider command", validate = validateLiveHoldHostReady, afterFinalValidation } = {},
 ) {
   let lease;
-  let actionChecked = false;
   const acquireLease = (proof) => {
     const file = actionLeaseFile(configDir);
     const now = Date.now();
@@ -357,6 +390,7 @@ export function runProviderWithLiveHoldReady(
       ownerPid: process.pid,
       issuedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + HOLD_READY_MAX_AGE_MS).toISOString(),
+      proofPath: file,
       daemon: {
         pid: proof.daemon.pid,
         processStartToken: proof.daemon.processStartToken,
@@ -394,24 +428,18 @@ export function runProviderWithLiveHoldReady(
       throw new Error("live hold-host epoch changed before provider action");
     }
     afterFinalValidation?.();
-    const actionGuard = () => {
-      const current = validate(configDir, agentId);
-      const currentLease = readActionLease(configDir);
-      if (!currentLease || currentLease.nonce !== lease.nonce || Date.parse(String(currentLease.expiresAt || "")) <= Date.now()) {
-        throw new Error("live hold-host action lease expired or changed");
-      }
-      if (current.ready.processStartToken !== lease.ready.processStartToken
-          || current.ready.boundaryAt !== lease.ready.boundaryAt
-          || current.daemon.pid !== lease.daemon.pid
-          || current.daemon.processStartToken !== lease.daemon.processStartToken
-          || current.daemon.startedAt !== lease.daemon.startedAt) {
-        throw new Error("live hold-host epoch changed before provider side effect");
-      }
-      actionChecked = true;
-    };
-    const result = providerRunner(actionGuard);
-    if (!actionChecked) throw new Error(`${stage} must invoke the immutable action guard immediately before its provider side effect`);
-    return result;
+    const immutableLeaseToken = Object.freeze({
+      ...lease,
+      daemon: Object.freeze({ ...lease.daemon }),
+      ready: Object.freeze({ ...lease.ready }),
+    });
+    return executeProviderWithLiveHoldLease({
+      configDir,
+      agentId,
+      leaseToken: immutableLeaseToken,
+      providerOperation,
+      validate,
+    });
   }
   catch (error) {
     throw new Error(`${stage} blocked because live hold-host proof failed: ${error instanceof Error ? error.message : String(error)}`);

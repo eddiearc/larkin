@@ -19,6 +19,7 @@ import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
 import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
@@ -918,6 +919,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ? piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId)
     : path.join(stateRoot, "pi-agent");
   prepareOwnedPiDirectory(ownedPiDirectory);
+  traceProcessBoundary(mergedEnv, "pi-rpc:child-env", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childEnvConfigDir: mergedEnv.LARKIN_CONFIG_DIR || null, childEnvHome: mergedEnv.HOME || null });
   const runtimeDir = path.join(stateRoot, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const promptFile = path.join(runtimeDir, "pi-standing-prompt.md");
@@ -952,6 +954,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     env: mergedEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  traceProcessBoundary(mergedEnv, "pi-rpc:child-spawned", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childPid: (child as unknown as { pid?: number }).pid ?? null });
   const client = new PiRpcClient(child, dependencies.piRpcClientOptions);
   try {
     const [state, available] = await Promise.all([

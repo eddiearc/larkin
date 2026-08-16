@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
 
@@ -12,6 +13,8 @@ export interface RuntimeReadiness {
   version?: string;
   reason?: string;
   nextAction?: string;
+  /** Set only when a HostShell status projection records this observation. */
+  observedAt?: string;
 }
 
 function safeProviderLabel(value: unknown): string | null {
@@ -108,6 +111,7 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       assertBuiltinPiAgentDirectory(piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId));
       return { runtime: "pi", state: "ready", executable: process.execPath, version: `official-pi ${BUNDLED_PI_VERSION} (bundled)` };
     } catch (error) {
+      traceProcessBoundary(env, "readiness:builtin-pi-failure", { configDir: env.LARKIN_CONFIG_DIR, agentId: options.agentId, targetDir: options.agentId && env.LARKIN_CONFIG_DIR ? piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId) : undefined, error });
       return { runtime: "pi", state: "unauthenticated", reason: error instanceof Error ? error.message : String(error),
         nextAction: "重新运行 larkin setup，选择内置 Pi 并配置有效 API Key。" };
     }

@@ -21,6 +21,7 @@ import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
 import { assertBuiltinPiAgentDirectory, piAgentDirectory } from "../runtime/pi-provider-config.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 interface RuntimeModel {
   id: string;
@@ -444,6 +445,7 @@ if (!key) {
 const selectedKey = key as string;
 const agent = config.agents[selectedKey];
 if (kind === "pi-distribution") {
+  traceProcessBoundary(process.env, "agent-config:pi-distribution-loaded", { configDir, agentId: selectedKey, targetDir: piAgentDirectory(configDir, selectedKey), requested: value || "show", importExternalProfile });
   const requested = value || "show";
   if (importExternalProfile && requested !== "builtin") die("--import-external-profile 只允许与 builtin 一起使用");
   if (requested === "show") {
@@ -464,6 +466,7 @@ if (kind === "pi-distribution") {
     const result = larkinConfig.mutateConfig(process.env, { kind: "set-agent-pi-distribution", agentId: selectedKey, distribution: requested as "builtin" | "external" }, { kind: "user" }, {
       snapshotFile: snapshotFile as string, ...(importExternalProfile ? { importExternalProfile: true } : {}),
     });
+    traceProcessBoundary(process.env, "agent-config:pi-distribution-persisted", { configDir, agentId: selectedKey, targetDir: piAgentDirectory(configDir, selectedKey), requested, applyState: result.applyState });
     say(JSON.stringify({ ok: true, agentId: selectedKey, piDistribution: requested, revision: result.revision, applyState: result.applyState }));
   } catch (error) {
     if (importExternalProfile) die("Pi external profile import failed; no secret or private path was disclosed");

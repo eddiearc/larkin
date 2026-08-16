@@ -7,6 +7,7 @@ import { createNativeRuntimeAdapter } from "../runtime/runtime-adapters.js";
 import { createRuntimeHost, type RuntimeHost } from "../runtime/runtime-host.js";
 import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../platform/config.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { createAgentControlServer } from "./local-control.js";
 import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
@@ -99,6 +100,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
   });
   if (!env.LARKIN_HOME || !env.LARKIN_CONFIG_DIR) throw new Error("LARKIN_HOME/LARKIN_CONFIG_DIR required");
   if (!env.LARKIN_CONTROL_AUTHORIZATION) throw new Error("LARKIN_CONTROL_AUTHORIZATION required");
+  const loaded = loadConfig(env);
+  for (const agent of Object.values(loaded.config.agents)) traceProcessBoundary(env, "daemon:config-loaded", { configDir: loaded.configDir, agentId: agent.agentId, targetDir: path.join(loaded.configDir, "providers", "pi", agent.agentId) });
   controlServer = createAgentControlServer({
     larkinHome: env.LARKIN_HOME,
     authorityToken: env.LARKIN_CONTROL_AUTHORIZATION,
@@ -118,7 +121,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
     },
   });
   await controlServer.start();
-  await markConfigAppliedAfterRuntimeReady(env, hostShell.agents, hostShell.start());
+  for (const agent of hostShell.agents) traceProcessBoundary(env, "daemon:before-runtime-ready", { configDir: loaded.configDir, agentId: agent.agentId, targetDir: path.join(loaded.configDir, "providers", "pi", agent.agentId) });
+  const runtimeStart = hostShell.start().catch((error) => {
+    for (const agent of hostShell.agents) traceProcessBoundary(env, "daemon:runtime-ready-failure", { configDir: loaded.configDir, agentId: agent.agentId, targetDir: path.join(loaded.configDir, "providers", "pi", agent.agentId), error });
+    throw error;
+  });
+  await markConfigAppliedAfterRuntimeReady(env, hostShell.agents, runtimeStart);
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {

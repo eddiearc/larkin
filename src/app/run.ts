@@ -82,6 +82,7 @@ export async function stopDashboardWithinBound(
 }
 
 export async function main(): Promise<void> {
+  process.env.LARKIN_DAEMON_EPOCH ||= new Date().toISOString();
   const argv = process.argv.slice(2);
   const { configDir, file: configFile, config } = larkinConfig.loadConfig(process.env);
   for (const agent of Object.values(config.agents)) traceProcessBoundary(process.env, "supervisor:config-loaded", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId) });

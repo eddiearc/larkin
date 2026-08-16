@@ -12,6 +12,7 @@ const daemon = {
   pid: 42,
   startedAt: "2026-07-29T01:00:00.000Z",
   agents: ["cli_ready"],
+  processStartToken: "fixture-daemon-start-token",
 };
 
 test("agent readiness requires the current owned daemon, ready Runtime, connected channel, and no reconnect", () => {
@@ -23,7 +24,8 @@ test("agent readiness requires the current owned daemon, ready Runtime, connecte
       connectedVia: "channel",
       inboundVerifiedAt: "2026-07-29T01:00:02.000Z",
       reconnectingAt: null,
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:01.000Z" },
+      session: { id: "current-session", startedAt: "2026-07-29T01:00:01.000Z" },
     },
   });
   assert.deepEqual(ready, {
@@ -69,11 +71,32 @@ test("stale channels, unready Runtimes, foreign daemons, and active reconnects s
   }
 });
 
+test("stale ready is rejected until the current daemon observes Runtime readiness", () => {
+  const stale = projectAgentReadiness({ agentId: "cli_ready", daemon, status: {
+    connectedAt: "2026-07-29T01:00:01.000Z", connectedVia: "channel",
+    runtimeReadiness: { state: "ready", observedAt: "2026-07-29T00:59:59.000Z" },
+  }});
+  assert.equal(stale.readiness.runtime_ready, false);
+  assert.equal(stale.ready, false);
+  const current = projectAgentReadiness({ agentId: "cli_ready", daemon, status: {
+    connectedAt: "2026-07-29T01:00:01.000Z", connectedVia: "channel",
+    runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:00.001Z" },
+    session: { id: "current-session", startedAt: "2026-07-29T01:00:00.001Z" },
+  }});
+  assert.equal(current.readiness.runtime_ready, true);
+  const nextEpoch = projectAgentReadiness({ agentId: "cli_ready", daemon: {
+    ...daemon, startedAt: "2026-07-29T01:01:00.000Z", processStartToken: "next-daemon-start-token",
+  }, status: { connectedAt: "2026-07-29T01:01:01.000Z", connectedVia: "channel",
+    runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:59.999Z" } } });
+  assert.equal(nextEpoch.readiness.runtime_ready, false, "a prior daemon observation cannot satisfy a new epoch");
+});
+
 test("a newer current connection clears older reconnect markers", () => {
   const status = {
     connectedAt: "2026-07-29T01:00:04.000Z",
     connectedVia: "channel",
-    runtimeReadiness: { state: "ready" },
+    runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:04.000Z" },
+    session: { id: "current-session", startedAt: "2026-07-29T01:00:04.000Z" },
     reconnectingAt: "2026-07-29T01:00:03.000Z",
     reconnectedAt: "2026-07-29T01:00:02.000Z",
   };

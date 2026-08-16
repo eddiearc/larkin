@@ -10,6 +10,7 @@ export const HOLD_DRIVER_BASENAME = "runtime-agent-interface-v2-hold-host.mjs";
 export const HOLD_HOST_COMMAND_TOKEN = "app/runtime-process.mjs";
 export const HOLD_TEMP_ROOT_PREFIX = "larkin-runtime-interface-v2-hold-";
 export const HOLD_READY_BASENAME = "runtime-interface-v2-hold-host-ready.json";
+export const HOLD_TRACE_BASENAME = "runtime-interface-v2-hold-host-boundary.ndjson";
 export const HOLD_SENTINEL_BASENAME = ".runtime-interface-v2-hold-host-root.json";
 export const HOLD_READY_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host-ready";
 export const HOLD_SENTINEL_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host-root";
@@ -223,10 +224,10 @@ function assertFresh(value, nowMs, label) {
   return observed;
 }
 
-export function readyProofFor(claim, { agentId, identity, connectedAt }) {
+export function readyProofFor(claim, { agentId, identity, connectedAt, daemonStartedAt = connectedAt, boundaryAt = connectedAt }) {
   return {
     schema: HOLD_READY_SCHEMA,
-    version: 1,
+    version: 2,
     ready: true,
     pid: identity.pid,
     processStartToken: identity.processStartToken,
@@ -239,6 +240,8 @@ export function readyProofFor(claim, { agentId, identity, connectedAt }) {
       sentinelNonce: claim.sentinel.nonce,
     },
     connectedAt,
+    daemonStartedAt,
+    boundaryAt,
     agentCount: 1,
     runtimeDelivery: "always-deferred",
   };
@@ -252,7 +255,7 @@ export function validateLiveHoldHostReady(configDir, agentId, { nowMs = Date.now
   const sentinelFile = path.join(targetRoot, HOLD_SENTINEL_BASENAME);
   const ready = readPrivateJson(readyFile, "hold-host ready proof");
   const sentinel = readPrivateJson(sentinelFile, "hold-host root sentinel");
-  if (ready.schema !== HOLD_READY_SCHEMA || ready.version !== 1 || ready.ready !== true
+  if (ready.schema !== HOLD_READY_SCHEMA || ready.version !== 2 || ready.ready !== true
       || ready.agentId !== agentId || ready.targetRoot !== targetRoot
       || ready.agentCount !== 1 || ready.runtimeDelivery !== "always-deferred"
       || ready.commandToken !== HOLD_HOST_COMMAND_TOKEN || ready.driverCommandToken !== HOLD_DRIVER_BASENAME) {
@@ -284,19 +287,37 @@ export function validateLiveHoldHostReady(configDir, agentId, { nowMs = Date.now
   const daemon = readPrivateJson(path.join(targetRoot, "daemon-status.json"), "hold-host daemon status");
   if (daemon.pid !== pid || daemon.processStartToken !== ready.processStartToken
       || daemon.commandToken !== HOLD_HOST_COMMAND_TOKEN
-      || !Array.isArray(daemon.agents) || daemon.agents.length !== 1 || daemon.agents[0] !== agentId) {
+      || !Array.isArray(daemon.agents) || daemon.agents.length !== 1 || daemon.agents[0] !== agentId
+      || daemon.startedAt !== ready.daemonStartedAt) {
     throw new Error("hold-host daemon status does not match ready proof");
   }
-  const status = readPrivateJson(path.join(targetRoot, "state", "agents", agentId, "status.json"), "hold-host channel status");
+  const daemonStarted = assertFresh(daemon.startedAt, nowMs, "hold-host current daemon startedAt");
+  const readyDaemonStarted = assertFresh(ready.daemonStartedAt, nowMs, "hold-host ready daemon epoch");
+  if (readyDaemonStarted !== daemonStarted) throw new Error("hold-host daemon epoch changed");
+  const statusFile = path.join(targetRoot, "state", "agents", agentId, "status.json");
+  const status = readPrivateJson(statusFile, "hold-host channel status");
   const statusConnected = assertFresh(status.connectedAt, nowMs, "hold-host current channel connectedAt");
+  const readinessObserved = assertFresh(status.runtimeReadiness?.observedAt, nowMs, "hold-host current Runtime readiness observedAt");
+  const sessionStarted = assertFresh(status.session?.startedAt, nowMs, "hold-host current session startedAt");
   const readyConnected = Date.parse(ready.connectedAt);
-  if (status.connectedVia !== "channel" || statusConnected < readyConnected || status.reconnectingAt) {
-    throw new Error("hold-host channel is not currently connected and fresh");
+  if (status.connectedVia !== "channel" || statusConnected < daemonStarted || readinessObserved < daemonStarted
+      || sessionStarted < daemonStarted || statusConnected < readyConnected || status.reconnectingAt
+      || fs.statSync(statusFile).mtimeMs < daemonStarted) {
+    throw new Error("hold-host channel, Runtime, session, or status boundary is not current");
   }
+  if (status.runtimeReadiness?.state !== "ready") throw new Error("hold-host Runtime readiness is not ready");
+  const traceFile = path.join(targetRoot, HOLD_TRACE_BASENAME);
+  const traceStat = fs.lstatSync(traceFile);
+  if (!traceStat.isFile() || traceStat.isSymbolicLink() || (traceStat.mode & 0o777) !== 0o600) throw new Error("hold-host trace boundary is unsafe");
+  const boundary = fs.readFileSync(traceFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((entry) =>
+    entry.phase === "hold-host:ready-boundary" && entry.pid === pid && Date.parse(String(entry.at || "")) >= daemonStarted);
+  if (!boundary) throw new Error("hold-host log-or-trace boundary is missing or stale");
+  assertFresh(ready.boundaryAt, nowMs, "hold-host ready boundary");
+  if (Date.parse(String(ready.boundaryAt)) < daemonStarted) throw new Error("hold-host ready boundary predates daemon epoch");
   const channelFailed = (Array.isArray(status.recentErrors) ? status.recentErrors : []).some((entry) =>
     entry?.text === "channel ws 连接错误" && Date.parse(String(entry.at || "")) >= statusConnected);
   if (channelFailed) throw new Error("hold-host channel reported a websocket error after connecting");
-  return { ready, status, inspected };
+  return { ready, status, inspected, daemon, boundary };
 }
 
 export function runProviderWithLiveHoldReady(
@@ -305,7 +326,12 @@ export function runProviderWithLiveHoldReady(
   providerRunner,
   { stage = "provider command", validate = validateLiveHoldHostReady } = {},
 ) {
-  try { validate(configDir, agentId); }
+  try {
+    validate(configDir, agentId);
+    // The first proof authorizes the stage; the second is deliberately adjacent
+    // to the provider call so epoch/status changes cannot pass a stale preflight.
+    validate(configDir, agentId);
+  }
   catch (error) {
     throw new Error(`${stage} blocked because live hold-host proof failed: ${error instanceof Error ? error.message : String(error)}`);
   }

@@ -28,7 +28,7 @@ import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDoc
 import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
-import { isChannelReconnecting } from "../app/agent-readiness.js";
+import { isChannelReconnecting, isRuntimeReadinessCurrent } from "../app/agent-readiness.js";
 import {
   documentCommentMessageId,
   documentCommentNoticeType,
@@ -286,6 +286,11 @@ export function createHostShell({
     return store;
   };
   const hostState = new HostStateProjection(stateStore, log);
+  const markRuntimeTransition = (agent: ConfiguredAgent, reason: string): void => {
+    hostState.updateStatus(agent, {
+      runtimeReadiness: { runtime: agent.runtime, state: "unavailable", reason, nextAction: "Wait for the current daemon epoch to publish Runtime readiness.", observedAt: new Date().toISOString() },
+    });
+  };
   const recordInboundDeliveryFailure = (
     agent: ConfiguredAgent,
     code: "non_retryable_receipt" | "runtime_delivery_exception" | "runtime_delivery_event",
@@ -1349,8 +1354,13 @@ export function createHostShell({
         const status = hostState.readStatus(agent);
         const turns = status.session && typeof status.session === "object"
           ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
-        const runtimeReady = Boolean(status.runtimeReadiness && typeof status.runtimeReadiness === "object"
-          && (status.runtimeReadiness as { state?: unknown }).state === "ready");
+        const sessionStartedAt = status.session && typeof status.session === "object"
+          ? Date.parse(String((status.session as { startedAt?: unknown }).startedAt || "")) : Number.NaN;
+        const sessionCurrent = Number.isFinite(sessionStartedAt) && sessionStartedAt >= Date.parse(daemonStartedAt);
+        const runtimeReady = sessionCurrent && isRuntimeReadinessCurrent(
+          status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string } | undefined,
+          daemonStartedAt,
+        );
         const pendingCount = stateStore(agent).withInboxTransaction(() => stateStore(agent).readNdjson("inbox").length);
         return { turns, runtimeReady, ...connectionState(status), pendingCount };
       };
@@ -1359,6 +1369,7 @@ export function createHostShell({
         new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable", ...initialProjection });
       if (initialProjection.reconnecting) throw Object.assign(
         new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting", ...initialProjection });
+      markRuntimeTransition(agent, "Runtime session reset in progress");
       let reset;
       try { reset = await runtimeHost.resetSession(agentId); }
       catch (error) {
@@ -1371,10 +1382,16 @@ export function createHostShell({
           else delete record.state.sessions[agent.runtime];
           record.store.writeJson("agentState", record.state);
         }
-        if (!reset.sessionId) hostState.updateStatus(agent, {
-          session: { runtime: agent.runtime, id: null, launchId: null, startedAt: new Date().toISOString(),
-            lastSeenAt: null, lastTurnAt: null, turns: 0 }, runtimeReadiness: { runtime: agent.runtime, state: "ready" },
-        });
+        if (!reset.sessionId) {
+          const observedAt = new Date().toISOString();
+          hostState.updateStatus(agent, {
+            session: { runtime: agent.runtime, id: null, launchId: null, startedAt: observedAt,
+              lastSeenAt: null, lastTurnAt: null, turns: 0 },
+            runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt },
+          });
+        } else if (reset.runtimeReady) {
+          hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt: new Date().toISOString() } });
+        }
       } catch (error) {
         const projection = readinessProjection();
         return { resetCommitted: true, generationChanged: reset.generationChanged, sessionChanged: reset.sessionChanged,
@@ -1422,18 +1439,27 @@ export function createHostShell({
         const status = hostState.readStatus(agent);
         const turns = status.session && typeof status.session === "object"
           ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
-        const runtimeReady = Boolean(status.runtimeReadiness && typeof status.runtimeReadiness === "object"
-          && (status.runtimeReadiness as { state?: unknown }).state === "ready");
+        const sessionStartedAt = status.session && typeof status.session === "object"
+          ? Date.parse(String((status.session as { startedAt?: unknown }).startedAt || "")) : Number.NaN;
+        const sessionCurrent = Number.isFinite(sessionStartedAt) && sessionStartedAt >= Date.parse(daemonStartedAt);
+        const runtimeReady = sessionCurrent && isRuntimeReadinessCurrent(
+          status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string } | undefined,
+          daemonStartedAt,
+        );
         const pendingCount = stateStore(agent).withInboxTransaction(() => stateStore(agent).readNdjson("inbox").length);
         return { turns, runtimeReady, ...connectionState(status), pendingCount };
       };
       const initialProjection = readinessProjection();
       if (!initialProjection.channelConnected) throw Object.assign(new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable", ...initialProjection });
       if (initialProjection.reconnecting) throw Object.assign(new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting", ...initialProjection });
+      markRuntimeTransition(agent, "Runtime session recovery in progress");
       let recovery: RuntimeSessionRecoveryResult;
       try { recovery = await runtimeHost.recoverSession(agentId, reason); }
       catch (error) {
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), readinessProjection());
+      }
+      if (recovery.runtimeReady) {
+        hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt: new Date().toISOString() } });
       }
       const record = agentStates.get(agentId);
       try {
@@ -1467,6 +1493,7 @@ export function createHostShell({
     async start(): Promise<void> {
       try {
         fs.mkdirSync(larkinHome, { recursive: true });
+        for (const agent of agents) markRuntimeTransition(agent, "Current daemon epoch starting");
         fs.writeFileSync(path.join(larkinHome, "daemon-status.json"), JSON.stringify({
           ...currentProcessMetadata(processCommandToken("daemon", "app/runtime-process.mjs")), pid: process.pid, startedAt: daemonStartedAt,
           agents: agents.map((agent) => agent.agentId),

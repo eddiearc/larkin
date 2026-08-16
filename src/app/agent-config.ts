@@ -86,8 +86,8 @@ interface StatusRecord extends AgentReadinessStatus {
   droughtReconnectAt?: string | null;
   droughtReconnectAbandonedAt?: string | null;
   recentErrors?: Array<{ message?: string; error?: string; [key: string]: unknown }>;
-  session?: { runtime?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
-  runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready"; executable?: string; version?: string; reason?: string; nextAction?: string };
+  session?: { runtime?: string; id?: string | null; startedAt?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
+  runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string; executable?: string; version?: string; reason?: string; nextAction?: string };
 }
 
 function safeDocumentCommentCapabilities(configDir: string, profile: string): {

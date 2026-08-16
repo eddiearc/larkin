@@ -7,12 +7,30 @@ export interface AgentReadinessStatus {
   inboundVerifiedAt?: string;
   reconnectingAt?: string | null;
   reconnectedAt?: string | null;
-  runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready" };
+  runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string };
+  session?: { startedAt?: string; id?: string | null; [key: string]: unknown };
 }
 
 function timestamp(value: unknown): number | null {
   const parsed = Date.parse(String(value || ""));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function isRuntimeReadinessCurrent(
+  readiness: AgentReadinessStatus["runtimeReadiness"] | null | undefined,
+  daemonStartedAt: unknown,
+): boolean {
+  if (readiness?.state !== "ready") return false;
+  const observedAt = timestamp(readiness.observedAt);
+  const epoch = timestamp(daemonStartedAt);
+  return observedAt !== null && epoch !== null && observedAt >= epoch;
+}
+
+export function isCurrentOwnedDaemon(daemon: OwnedProcessRecord | null | undefined): boolean {
+  return daemon?.state === "owned"
+    && Number(daemon.pid) > 0
+    && typeof daemon.processStartToken === "string" && daemon.processStartToken.length > 0
+    && timestamp(daemon.startedAt) !== null;
 }
 
 export function isChannelReconnecting(status?: AgentReadinessStatus | null): boolean {
@@ -38,9 +56,11 @@ export function projectAgentReadiness(input: {
   channel: { connected_at: string | null; connected_via: string | null; inbound_verified_at: string | null };
 } {
   const status = input.status ?? null;
-  const daemonOwned = daemonHasAgent(input.daemon, input.agentId);
+  const daemonOwned = isCurrentOwnedDaemon(input.daemon) && daemonHasAgent(input.daemon, input.agentId);
   const daemonStartedAt = timestamp(input.daemon.startedAt);
   const connectedAt = timestamp(status?.connectedAt);
+  const sessionStartedAt = timestamp(status?.session?.startedAt);
+  const sessionCurrent = daemonStartedAt !== null && sessionStartedAt !== null && sessionStartedAt >= daemonStartedAt;
   const channelConnected = daemonOwned
     && status?.connectedVia === "channel"
     && daemonStartedAt !== null
@@ -48,7 +68,7 @@ export function projectAgentReadiness(input: {
     && connectedAt >= daemonStartedAt;
   const readiness = {
     daemon_owned: daemonOwned,
-    runtime_ready: status?.runtimeReadiness?.state === "ready",
+    runtime_ready: daemonOwned && sessionCurrent && isRuntimeReadinessCurrent(status?.runtimeReadiness, input.daemon.startedAt),
     channel_connected: channelConnected,
     channel_not_reconnecting: !isChannelReconnecting(status),
   };

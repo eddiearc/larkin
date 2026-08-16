@@ -401,7 +401,8 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       connectedVia: "channel",
       inboundVerifiedAt: "2026-07-29T01:00:02.000Z",
       reconnectingAt: null,
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:01.000Z" },
+      session: { id: "fixture-session", startedAt: "2026-07-29T01:00:01.000Z" },
     });
     const run = (...args) => spawnSync(process.execPath, [ENTRY, "agents", ...args], {
       cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
@@ -418,7 +419,8 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       connectedVia: "channel",
       reconnectingAt: "2026-07-29T01:00:03.000Z",
       reconnectedAt: "2026-07-29T01:00:02.000Z",
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:01.000Z" },
+      session: { id: "fixture-session", startedAt: "2026-07-29T01:00:01.000Z" },
     });
     const reconnecting = JSON.parse(run("--json").stdout).agents[0];
     assert.equal(reconnecting.ready, false);
@@ -432,7 +434,8 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       connectedVia: "channel",
       reconnectingAt: "2026-07-29T01:00:03.000Z",
       reconnectedAt: "2026-07-29T01:00:02.000Z",
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:04.000Z" },
+      session: { id: "fixture-session", startedAt: "2026-07-29T01:00:04.000Z" },
     });
     const reconnected = JSON.parse(run("--json").stdout).agents[0];
     assert.equal(reconnected.ready, true);

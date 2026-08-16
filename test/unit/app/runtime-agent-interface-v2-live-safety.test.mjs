@@ -19,6 +19,7 @@ import {
   HOLD_DRIVER_BASENAME,
   HOLD_HOST_COMMAND_TOKEN,
   HOLD_READY_MAX_AGE_MS,
+  HOLD_TRACE_BASENAME,
   HOLD_TEMP_ROOT_PREFIX,
   claimHoldHostRoot,
   cleanupClaimedHoldHostRoot,
@@ -347,11 +348,16 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       agents: { [agentId]: { runtime: "codex", model: "fixture" } },
     });
     writePrivateJson(path.join(claim.targetRoot, "daemon-status.json"), {
-      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId],
+      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: connectedAt,
     });
     writeJson(path.join(claim.targetRoot, "state", "agents", agentId, "status.json"), {
       connectedVia: "channel", connectedAt, reconnectingAt: null,
+      runtimeReadiness: { state: "ready", observedAt: connectedAt },
+      session: { id: "fixture-session", startedAt: connectedAt },
     });
+    const traceFile = path.join(claim.targetRoot, HOLD_TRACE_BASENAME);
+    fs.writeFileSync(traceFile, "", { mode: 0o600 });
+    fs.writeFileSync(traceFile, `${JSON.stringify({ at: connectedAt, epoch: connectedAt, pid: child.pid, ppid: process.pid, phase: "hold-host:ready-boundary" })}\n`, { mode: 0o600 });
     const identity = { pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN };
     writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt }));
     const validated = validateLiveHoldHostReady(claim.targetRoot, agentId);
@@ -367,6 +373,8 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       connectedVia: "channel",
       connectedAt,
       reconnectingAt: null,
+      runtimeReadiness: { state: "ready", observedAt: connectedAt },
+      session: { id: "fixture-session", startedAt: connectedAt },
       recentErrors: [
         { at: connectedAt, text: "larkApi POST reactions: hold-host blocked" },
         { at: connectedAt, text: "channel ws 连接错误" },
@@ -375,10 +383,22 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId), /websocket error/);
     writeJson(path.join(claim.targetRoot, "state", "agents", agentId, "status.json"), {
       connectedVia: "channel", connectedAt, reconnectingAt: null,
+      runtimeReadiness: { state: "ready", observedAt: connectedAt },
+      session: { id: "fixture-session", startedAt: connectedAt },
       recentErrors: [{ at: connectedAt, text: "larkApi POST reactions: hold-host blocked" }],
     });
     assert.doesNotThrow(() => validateLiveHoldHostReady(claim.targetRoot, agentId),
       "expected blocked processing-eye errors must not look like a channel failure");
+    let validationCount = 0;
+    let providerCallsBeforeBoundaryChange = 0;
+    assert.throws(() => runProviderWithLiveHoldReady(
+      claim.targetRoot,
+      agentId,
+      () => { providerCallsBeforeBoundaryChange += 1; },
+      { stage: "epoch-change", validate: () => { validationCount += 1; if (validationCount === 2) throw new Error("daemon epoch changed"); } },
+    ), /epoch-change blocked.*daemon epoch changed/);
+    assert.equal(validationCount, 2, "provider action must be preceded by an immediate second proof");
+    assert.equal(providerCallsBeforeBoundaryChange, 0);
 
     const wrong = JSON.parse(fs.readFileSync(claim.readyFile, "utf8"));
     wrong.processStartToken = "wrong-start-token";

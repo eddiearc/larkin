@@ -73,7 +73,7 @@ async function run() {
     for (const agentId of AGENTS) {
       const staleFile = statusFor(agentId);
       fs.mkdirSync(path.dirname(staleFile), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(staleFile, JSON.stringify({ runtimeReadiness: { runtime: "pi", state: "incompatible", reason: "stale fixture" }, session: { runtime: "pi", id: "stale-session", startedAt: staleStatusAt.toISOString() } }), { mode: 0o600 });
+      fs.writeFileSync(staleFile, JSON.stringify({ runtimeReadiness: { runtime: "pi", state: "ready", observedAt: staleStatusAt.toISOString(), reason: "stale fixture" }, session: { runtime: "pi", id: "stale-session", startedAt: staleStatusAt.toISOString() } }), { mode: 0o600 });
       fs.utimesSync(staleFile, staleStatusAt, staleStatusAt);
     }
     let logs = "";
@@ -126,14 +126,18 @@ async function run() {
     assert.equal(fs.existsSync(path.join(providerDir, "settings.json")), true);
     for (const agentId of AGENTS) assert.equal(fs.existsSync(path.join(config, `${agentId}.migration.snapshot.json`)), true, "retained migration snapshot must not trigger startup rollback");
     const trace = traceDump().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    assert.equal(trace.some((entry) => entry.phase === "agent-config:pi-distribution-persisted" && entry.target?.exists === true), true);
+    assert.equal(trace.some((entry) => entry.phase === "agent-config:pi-distribution-persisted"
+      && entry.pathRoles?.some((role) => role.role === "provider-target" && role.exists === true)), true);
     for (const agentId of AGENTS) for (const phase of ["supervisor:config-loaded", "supervisor:daemon-env-prepared", "daemon:config-loaded", "daemon:before-runtime-ready", "pi-rpc:child-env"]) {
       const entry = trace.find((candidate) => candidate.phase === phase && candidate.agentId === agentId);
       assert.ok(entry, `missing process-boundary trace phase ${phase} agent=${agentId}`);
       if (phase === "pi-rpc:child-env") assert.equal(entry.pid, daemonStatus.pid, `Pi child environment must be resolved by the current daemon for ${agentId}: entry=${JSON.stringify(entry)} daemon=${JSON.stringify(daemonStatus)}`);
-      assert.equal(entry.configDir, config);
-      assert.equal(entry.target?.path, path.join(config, "providers", "pi", agentId));
-      assert.equal(entry.target?.exists, true, `${phase} must see the imported provider directory for ${agentId}`);
+      const target = entry.pathRoles?.find((role) => role.role === "provider-target");
+      assert.equal(target?.exists, true, `${phase} must see the imported provider directory for ${agentId}`);
+      assert.equal(Object.hasOwn(entry, "cwd"), false);
+      assert.equal(Object.hasOwn(entry, "configDir"), false);
+      assert.equal(Object.hasOwn(entry, "target"), false);
+      assert.equal(JSON.stringify(entry).includes(config), false, "trace must not contain raw config paths");
     }
     assert.equal(trace.some((entry) => entry.phase === "readiness:builtin-pi-failure"), false, "readiness must not lose the provider directory");
   } finally { await new Promise((r) => provider.close(r)); fs.rmSync(temp, { recursive: true, force: true }); }

@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { resolveRuntimeExecutable } from "./runtime-readiness.js";
 import { mergeOwnedPiSettings, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
+import { attestedPiRuntimeArtifactNames, PI_RUNTIME_ARTIFACT_MANIFEST } from "./pi-artifact-provenance.js";
 
 const AGENT_ID = /^cli_[A-Za-z0-9]+$/;
 const FILES = ["auth.json", "models.json", "settings.json"] as const;
@@ -41,7 +42,6 @@ export interface PiProfileMigrationPlan {
 }
 
 const TARGET_LOCK_SUFFIX = ".larkin-pi-import.lock";
-const LARKIN_CREATED_TARGET_ENTRIES = new Set([".larkin-official-pi-package", "models-store.json", "npm"]);
 function hash(bytes: Buffer): string { return crypto.createHash("sha256").update(bytes).digest("hex"); }
 function targetLockFile(state: PiProfileMigrationState): string { return path.join(path.dirname(state.targetDir), `${state.agentId}${TARGET_LOCK_SUFFIX}`); }
 function acquireTargetLock(state: PiProfileMigrationState): void {
@@ -381,9 +381,13 @@ export function rollbackPiProfileMigration(state: PiProfileMigrationState): void
   }
   if (!state.targetDirExisted) {
     const entries = fs.readdirSync(state.targetDir).filter((name) => !FILES.includes(name as FileName) && !name.startsWith(".larkin-pi-import-"));
-    const unknown = entries.filter((name) => !LARKIN_CREATED_TARGET_ENTRIES.has(name));
-    if (unknown.length === 0) {
-      for (const name of entries) {
+    const attested = attestedPiRuntimeArtifactNames(state.targetDir);
+    const removable = entries.filter((name) => attested.has(name) || name === PI_RUNTIME_ARTIFACT_MANIFEST);
+    const unknown = entries.filter((name) => !removable.includes(name));
+    // An allowed name is not provenance. Recursive cleanup is permitted only when
+    // every surviving artifact is identity-attested by the runtime-owned manifest.
+    if (unknown.length === 0 && (entries.length === 0 || (attested.size > 0 && removable.includes(PI_RUNTIME_ARTIFACT_MANIFEST)))) {
+      for (const name of removable) {
         const artifact = path.join(state.targetDir, name);
         const artifactStat = fs.lstatSync(artifact);
         if (artifactStat.isSymbolicLink()) throw new Error("Pi provider rollback artifact is a symlink");

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const migration = await import(pathToFileURL(path.join(ROOT, "dist/runtime/pi-profile-migration.mjs")).href);
+const provenance = await import(pathToFileURL(path.join(ROOT, "dist/runtime/pi-artifact-provenance.mjs")).href);
 
 function fixture({ target = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-profile-migration-"));
@@ -136,12 +137,26 @@ test("reverse rollback removes only startup-created official Pi artifacts from a
   try {
     const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
     migration.applyPiProfileMigration(plan);
+    const boundary = Date.now();
     fs.mkdirSync(path.join(f.targetDir, ".larkin-official-pi-package", "theme"), { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(f.targetDir, ".larkin-official-pi-package", "package.json"), "{}\n", { mode: 0o600 });
     fs.writeFileSync(path.join(f.targetDir, "models-store.json"), "{}\n", { mode: 0o600 });
     fs.mkdirSync(path.join(f.targetDir, "npm"), { mode: 0o700 });
+    provenance.recordPiRuntimeArtifactProvenance(f.targetDir, new Set(), boundary);
     migration.rollbackPiProfileMigration(plan.state);
     assert.equal(fs.existsSync(f.targetDir), false);
+  } finally { clean(f); }
+});
+
+test("preserves user-created allowed-name artifacts without runtime provenance", () => {
+  const f = fixture();
+  try {
+    const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
+    migration.applyPiProfileMigration(plan);
+    fs.writeFileSync(path.join(f.targetDir, "models-store.json"), "user-created\n", { mode: 0o600 });
+    migration.rollbackPiProfileMigration(plan.state);
+    assert.equal(fs.existsSync(path.join(f.targetDir, "models-store.json")), true);
+    assert.equal(fs.readFileSync(path.join(f.targetDir, "models-store.json"), "utf8"), "user-created\n");
   } finally { clean(f); }
 });
 

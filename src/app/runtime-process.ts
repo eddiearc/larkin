@@ -65,6 +65,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
     channelPackage = await import(pathToFileURL(path.resolve(env.LARKIN_TEST_CHANNEL_MODULE)).href) as HostShellOptions["channelPackage"];
   }
   const adapters = new Map<string, ReturnType<typeof createNativeRuntimeAdapter>>();
+  env.LARKIN_DAEMON_EPOCH ||= new Date().toISOString();
   const runtimeHost = overrides.runtimeHost ?? createRuntimeHost({
     promptBuilder: new ContextPromptBuilder(),
     stateStoreFor(agentId) {

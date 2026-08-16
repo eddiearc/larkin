@@ -8,6 +8,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { readJson, readProcessState } from "../platform/process-state.js";
+import { isRuntimeReadinessCurrent } from "../app/agent-readiness.js";
 import { isAllowedDashboardAvatarUrl } from "./dashboard-avatar.js";
 import { collectWorkspaceEntry as collectTypedWorkspaceEntry } from "./dashboard-workspace.js";
 import { buildFingerprint, packageVersion } from "../platform/build-info.js";
@@ -485,7 +486,7 @@ export type PiStatusModelResolver = {
   resolve(input: { agentDir?: string; agentId: string; cwd: string }): Promise<PiContextCatalogModel[]>;
 };
 
-async function collectAgentStatus(a: DashboardAgent, configDir: string, piModelResolver?: PiStatusModelResolver) {
+async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonStartedAt: unknown, piModelResolver?: PiStatusModelResolver) {
   const dir = a.stateDir;
   const botIdentity = readJson(path.join(dir, "bot-identity.json"), null) as JsonRecord | null;
   const status = readJson(path.join(dir, "status.json"), {}) as JsonRecord;
@@ -529,6 +530,14 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, piModelR
 
   // 本 agent 专属时间线：三路历史合并按时间倒序，不是全局一条汇总——每个 agent 只看自己的故事。
   const { recentErrors, lastActivity, lastDeliver, feed } = projectStatusTimeline(status);
+  const statusReadiness = status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string; [key: string]: unknown } | undefined;
+  const sessionStartedAt = finiteTime(status.session?.startedAt);
+  const daemonEpoch = finiteTime(daemonStartedAt);
+  const sessionCurrent = sessionStartedAt !== null && daemonEpoch !== null && sessionStartedAt >= daemonEpoch;
+  const runtimeReadiness = sessionCurrent && isRuntimeReadinessCurrent(statusReadiness, daemonStartedAt)
+    || statusReadiness?.state !== "ready"
+    ? statusReadiness || null
+    : { ...statusReadiness, state: "unavailable", reason: "Runtime readiness evidence is stale for the current daemon epoch." };
 
   // 提醒：不只给数量，给完整列表——待触发按最近到期优先排前面，已触发/已取消按最近的排在后面。
   const pendingReminders = reminders.filter((r) => r.status === "scheduled" || r.status === "pending")
@@ -547,7 +556,7 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, piModelR
     runtime: a.runtime,
     model: status.session?.runtime === a.runtime && status.session?.model ? String(status.session.model) : a.model,
     effort: status.session?.runtime === a.runtime && status.session?.reasoningEffort ? String(status.session.reasoningEffort) : a.effort || null,
-    runtimeReadiness: status.runtimeReadiness || null,
+    runtimeReadiness,
     credentialReady: fs.existsSync(path.join(configDir, "bots", `${a.feishuProfile}.json`)),
     bot: botIdentity ? {
       name: botIdentity.name,
@@ -598,7 +607,7 @@ export async function collectStatus(options: { piModelResolver?: PiStatusModelRe
     uptimeSec: daemonStatus?.startedAt ? ageSec(daemonStatus.startedAt) : null,
     agents: Array.isArray(daemonStatus?.agents) ? daemonStatus.agents.filter((id): id is string => typeof id === "string") : [],
   };
-  const statuses = (await Promise.all(agents.map((a) => collectAgentStatus(a, configDir, options.piModelResolver)))).map((agent) => {
+  const statuses = (await Promise.all(agents.map((a) => collectAgentStatus(a, configDir, daemon.startedAt, options.piModelResolver)))).map((agent) => {
     return { ...agent, ...projectAgentHealth(agent, daemon) };
   });
   return {

@@ -19,6 +19,7 @@ import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
 import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
+import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
@@ -919,6 +920,8 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ? piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId)
     : path.join(stateRoot, "pi-agent");
   prepareOwnedPiDirectory(ownedPiDirectory);
+  const artifactEntriesBeforeSpawn = new Set(fs.readdirSync(ownedPiDirectory));
+  const artifactSpawnBoundary = Date.now();
   traceProcessBoundary(mergedEnv, "pi-rpc:child-env", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childEnvConfigDir: mergedEnv.LARKIN_CONFIG_DIR || null, childEnvHome: mergedEnv.HOME || null });
   const runtimeDir = path.join(stateRoot, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
@@ -989,6 +992,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
       throw new Error(`Pi model fallback refused: requested ${requestedModel} is not in Pi's available models${availableText ? ` (${availableText})` : ""}`);
     }
     if (requestedEffort && state.thinkingLevel !== requestedEffort) throw new Error(`Pi thinking level ${requestedEffort} was not accepted by effective model ${effectiveModel || "unknown"}`);
+    recordPiRuntimeArtifactProvenance(ownedPiDirectory, artifactEntriesBeforeSpawn, artifactSpawnBoundary);
     return new PiRpcBackend(client, state);
   } catch (error) {
     await client.close();

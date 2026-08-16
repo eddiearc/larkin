@@ -61,7 +61,7 @@ test("owned Pi directory is 0700, current-user owned, and never a symlink", () =
 test("Pi executable version parsing rejects spoofed suffixes and extra tokens", () => {
   assert.equal(parsePiExecutableVersion("0.84.1\n"), "0.84.1");
   assert.equal(parsePiExecutableVersion("pi-coding-agent version v0.84.1\n"), "0.84.1");
-  for (const output of ["0.84.1-beta", "0.84.1 dirty", "pi 0.84.1 extra", "0.84.1\nattacker", "v0.84.1"]) {
+  for (const output of ["0.84.1-beta", "0.84.1 dirty", "0.84.1 extra", "pi 0.84.1 extra", "0.84.1\nattacker", "v0.84.1", "0x84x1", "0-84-1"]) {
     assert.throws(() => parsePiExecutableVersion(output), /exactly|version/i);
   }
 });

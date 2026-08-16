@@ -234,7 +234,7 @@ const { configDir, file, config } = loaded;
 if (!fs.existsSync(file)) die("未找到 Larkin 配置，请运行 larkin setup");
 const snapshotFile = parsedValues.get("--snapshot");
 if (kind === "pi-distribution" && value === "rollback") {
-  if (!snapshotFile || positionals.length !== 1) die("用法: larkin pi-distribution rollback --snapshot <private-file>");
+  if (!snapshotFile || flagAgent || positionals.length !== 1) die("用法: larkin pi-distribution rollback --snapshot <private-file>");
   try {
     const result = larkinConfig.rollbackConfig(process.env, snapshotFile as string);
     say(JSON.stringify({ ok: true, rolledBackAgent: result.agentId, revision: result.revision }));

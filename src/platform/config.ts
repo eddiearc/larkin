@@ -358,25 +358,83 @@ export function runtimeConfigSignature(config: HydratedConfig, agentId: string):
 
 function applyStateFile(configDir: string): string { return path.join(configDir, "config-apply-state.json"); }
 
+function validateApplyState(value: unknown): ConfigApplyFile {
+  if (!isPlainObject(value) || value.version !== 1 || typeof value.persistedRevision !== "string" || !isPlainObject(value.agents)) {
+    throw new Error("config apply state 无效");
+  }
+  const agents: Record<string, RuntimeApplyRecord> = {};
+  for (const [agentId, record] of Object.entries(value.agents)) {
+    if (!APP_ID.test(agentId) || !isPlainObject(record) || typeof record.persistedSignature !== "string"
+        || (record.appliedSignature !== null && typeof record.appliedSignature !== "string")) throw new Error("config apply state Agent 记录无效");
+    agents[agentId] = { persistedSignature: record.persistedSignature, appliedSignature: record.appliedSignature as string | null };
+  }
+  return { version: 1, persistedRevision: value.persistedRevision, agents };
+}
+
 function readApplyFile(configDir: string): ConfigApplyFile {
   const file = applyStateFile(configDir);
-  try {
-    const bytes = readPrivateFile(file, configDir, 256 * 1024, "config apply state");
-    if (bytes === null) return { version: 1, persistedRevision: "unknown", agents: {} };
-    const value = JSON.parse(bytes.toString("utf8")) as Partial<ConfigApplyFile>;
-    if (value.version !== 1 || typeof value.persistedRevision !== "string" || !isPlainObject(value.agents)) throw new Error("config apply state 无效");
-    const agents: Record<string, RuntimeApplyRecord> = {};
-    for (const [agentId, record] of Object.entries(value.agents)) {
-      if (!APP_ID.test(agentId) || !isPlainObject(record) || typeof record.persistedSignature !== "string"
-          || (record.appliedSignature !== null && typeof record.appliedSignature !== "string")) throw new Error("config apply state Agent 记录无效");
-      agents[agentId] = { persistedSignature: record.persistedSignature, appliedSignature: record.appliedSignature as string | null };
-    }
-    return { version: 1, persistedRevision: value.persistedRevision, agents };
-  } catch (error) { throw error; }
+  const bytes = readPrivateFile(file, configDir, 256 * 1024, "config apply state");
+  if (bytes === null) return { version: 1, persistedRevision: "unknown", agents: {} };
+  try { return validateApplyState(JSON.parse(bytes.toString("utf8"))); }
+  catch (error) { throw error; }
 }
 
 function writeApplyFile(configDir: string, value: ConfigApplyFile): void {
   atomicWriteConfig(applyStateFile(configDir), value);
+}
+
+interface ConfigRollbackJournal {
+  version: 1;
+  targetAgentId: string;
+  expectedAfterRevision: string;
+  beforeRevision: string;
+  beforeConfigBytes: string;
+  beforeApplyState: ConfigApplyFile;
+}
+
+function rollbackJournalFile(root: string): string { return path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE); }
+
+function restoreTargetApplyState(root: string, targetAgentId: string, beforeRevision: string, before: ConfigApplyFile): void {
+  const current = readApplyFile(root);
+  const agents = { ...current.agents };
+  if (before.agents[targetAgentId]) agents[targetAgentId] = { ...before.agents[targetAgentId] };
+  else delete agents[targetAgentId];
+  writeApplyFile(root, { version: 1, persistedRevision: beforeRevision, agents });
+}
+
+function recoverRollbackJournal(root: string): void {
+  const file = rollbackJournalFile(root);
+  let bytes: Buffer | null;
+  try { bytes = readPrivateFile(file, root, CONFIG_LIMIT_BYTES, "config rollback journal"); }
+  catch (error) { throw error; }
+  if (bytes === null) return;
+  let journal: Partial<ConfigRollbackJournal>;
+  try { journal = JSON.parse(bytes.toString("utf8")) as Partial<ConfigRollbackJournal>; }
+  catch { throw new Error("config rollback journal is invalid"); }
+  if (journal.version !== 1 || typeof journal.targetAgentId !== "string" || !APP_ID.test(journal.targetAgentId)
+      || typeof journal.expectedAfterRevision !== "string" || typeof journal.beforeRevision !== "string"
+      || typeof journal.beforeConfigBytes !== "string" || !isPlainObject(journal.beforeApplyState)) {
+    throw new Error("config rollback journal is invalid");
+  }
+  const beforeBytes = Buffer.from(journal.beforeConfigBytes, "base64");
+  if (beforeBytes.length === 0 || revision(beforeBytes) !== journal.beforeRevision) throw new Error("config rollback journal is invalid");
+  const beforeRaw = JSON.parse(beforeBytes.toString("utf8"));
+  normalizeConfig(beforeRaw, root);
+  validateApplyState(journal.beforeApplyState);
+  const current = readConfigFile(path.join(root, "config.json"), root);
+  const currentRevision = revision(current.bytes);
+  if (currentRevision === journal.expectedAfterRevision) {
+    atomicWriteBytes(path.join(root, "config.json"), beforeBytes);
+    restoreTargetApplyState(root, journal.targetAgentId, journal.beforeRevision, journal.beforeApplyState as ConfigApplyFile);
+  } else if (currentRevision === journal.beforeRevision) {
+    // The config replacement may have reached disk before apply-state restoration.
+    // Finish that phase before deleting the journal so recovery is complete.
+    restoreTargetApplyState(root, journal.targetAgentId, journal.beforeRevision, journal.beforeApplyState as ConfigApplyFile);
+  } else {
+    throw new Error("config rollback journal conflicts with the current configuration");
+  }
+  fs.unlinkSync(file);
+  fsyncDirectoryOf(file);
 }
 
 export function configApplyState(env: Env, config: HydratedConfig): Record<string, unknown> {
@@ -446,6 +504,7 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     assertModel(mutation.runtime, mutation.model || "default");
     agent.runtime = mutation.runtime;
     agent.model = mutation.model || "default";
+    if (mutation.runtime !== "pi") delete agent.piDistribution;
     delete agent.effort;
   } else if (mutation.kind === "set-agent-model") {
     if (!mutation.model.trim()) throw new Error("model 不能为空");
@@ -540,8 +599,44 @@ function reclaimStaleLock(file: string, snapshot: NonNullable<ReturnType<typeof 
   }
 }
 
+function isKnownSystemSymlink(current: string): boolean {
+  return current === "/tmp" || current === "/var" || current === "/private/tmp" || current === "/private/var"
+    || current === "/var/folders" || /^\/var\/folders\/[^/]+$/.test(current)
+    || current === "/private/var/folders" || /^\/private\/var\/folders\/[^/]+$/.test(current);
+}
+
+function assertNoSymlinkAncestors(target: string): void {
+  const resolved = path.resolve(target);
+  const root = path.parse(resolved).root;
+  let current = root;
+  for (const part of path.relative(root, resolved).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(current); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (stat.isSymbolicLink() && !isKnownSystemSymlink(current)) throw new Error("config path contains a symlink ancestor");
+    if (!stat.isDirectory() && !stat.isSymbolicLink()) throw new Error("config path ancestor is not a directory");
+  }
+}
+
+function assertConfigRoot(root: string): void {
+  const stat = fs.lstatSync(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("config root is unsafe");
+  if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o700) throw new Error("config root must be 0700");
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("config root owner is unsafe");
+}
+
 function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
+  assertNoSymlinkAncestors(layout.root);
   fs.mkdirSync(layout.root, { recursive: true, mode: 0o700 });
+  const rootStat = fs.lstatSync(layout.root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("config root is unsafe");
+  if (typeof process.getuid === "function" && rootStat.uid !== process.getuid()) throw new Error("config root owner is unsafe");
+  if (process.platform !== "win32" && (rootStat.mode & 0o777) !== 0o700) fs.chmodSync(layout.root, 0o700);
+  assertConfigRoot(layout.root);
   const lock = `${layout.configFile}.lock`;
   const owner = currentLockRecord();
   let acquired = false;
@@ -550,6 +645,7 @@ function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
       const fd = fs.openSync(lock, "wx", 0o600);
       try { fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`); fs.fsyncSync(fd); }
       finally { fs.closeSync(fd); }
+      fsyncDirectoryOf(lock);
       acquired = true;
       break;
     }
@@ -561,33 +657,53 @@ function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
     }
   }
   if (!acquired) throw new Error("配置正被其他进程修改，请稍后重试");
-  try { return action(); }
-  finally {
+  try {
+    recoverRollbackJournal(layout.root);
+    return action();
+  } finally {
     const current = readLockRecord(lock);
     if (current?.record?.nonce === owner.nonce && current.record.pid === owner.pid) {
-      try { fs.unlinkSync(lock); } catch { /* best effort */ }
+      try { fs.unlinkSync(lock); fsyncDirectoryOf(lock); } catch { /* best effort */ }
     }
   }
 }
 
 interface ConfigSnapshot {
-  version: 1;
+  version: 2;
   targetAgentId: string;
   beforeRevision: string;
   afterRevision: string;
   afterSignature: string;
   beforeConfig: unknown;
+  beforeConfigBytes: string;
   beforeApplyState: ConfigApplyFile;
 }
 
-function assertSnapshotPath(file: string): void {
-  const parent = path.dirname(path.resolve(file));
+const CONFIG_ROLLBACK_JOURNAL_FILE = ".config-rollback-journal.json";
+
+function assertSnapshotPath(file: string, root: string, forbidden: readonly string[] = []): void {
+  const resolvedRoot = path.resolve(root);
+  const resolvedFile = path.resolve(file);
+  if (forbidden.some((candidate) => resolvedFile === path.resolve(candidate))) throw new Error("config snapshot path is reserved");
+  assertNoSymlinkAncestors(resolvedRoot);
+  assertNoSymlinkAncestors(path.dirname(resolvedFile));
+  const rootStat = fs.lstatSync(resolvedRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("config root is unsafe");
+  if (process.platform !== "win32" && (rootStat.mode & 0o777) !== 0o700) throw new Error("config root must be 0700");
+  if (typeof process.getuid === "function" && rootStat.uid !== process.getuid()) throw new Error("config root owner is unsafe");
+  const parent = path.dirname(resolvedFile);
+  const rootReal = fs.realpathSync(resolvedRoot);
+  const parentReal = fs.realpathSync(parent);
+  const relative = path.relative(rootReal, parentReal);
+  if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new Error("config snapshot parent must be inside the canonical config root");
+  }
   const parentStat = fs.lstatSync(parent);
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("config snapshot parent is unsafe");
   if (process.platform !== "win32" && (parentStat.mode & 0o777) !== 0o700) throw new Error("config snapshot parent must be 0700");
   if (typeof process.getuid === "function" && parentStat.uid !== process.getuid()) throw new Error("config snapshot parent owner is unsafe");
   try {
-    const stat = fs.lstatSync(file);
+    const stat = fs.lstatSync(resolvedFile);
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("config snapshot path is unsafe");
     if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600) throw new Error("config snapshot must be 0600");
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("config snapshot owner is unsafe");
@@ -596,29 +712,35 @@ function assertSnapshotPath(file: string): void {
   }
 }
 
-function writeConfigSnapshot(file: string, snapshot: ConfigSnapshot): void {
-  assertSnapshotPath(file);
+function writeConfigSnapshot(file: string, root: string, snapshot: ConfigSnapshot): void {
+  assertSnapshotPath(file, root, [path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE), path.join(root, "config.json"), path.join(root, "config-apply-state.json")]);
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
   try { fs.writeFileSync(fd, `${JSON.stringify(snapshot, null, 2)}\n`); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
-  try { fs.renameSync(temporary, file); fs.chmodSync(file, 0o600); }
+  try { fs.renameSync(temporary, file); fs.chmodSync(file, 0o600); fsyncDirectoryOf(file); }
   catch (error) { try { fs.unlinkSync(temporary); } catch { /* best effort */ } throw error; }
 }
 
-function readConfigSnapshot(file: string): ConfigSnapshot {
-  assertSnapshotPath(file);
+function readConfigSnapshot(file: string, root: string): ConfigSnapshot {
+  assertSnapshotPath(file, root, [path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE), path.join(root, "config.json"), path.join(root, "config-apply-state.json")]);
   const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ConfigSnapshot>;
-  if (parsed.version !== 1 || typeof parsed.targetAgentId !== "string" || !APP_ID.test(parsed.targetAgentId)
+  if (parsed.version !== 2 || typeof parsed.targetAgentId !== "string" || !APP_ID.test(parsed.targetAgentId)
       || typeof parsed.beforeRevision !== "string" || typeof parsed.afterRevision !== "string"
-      || typeof parsed.afterSignature !== "string" || !parsed.beforeConfig || !isPlainObject(parsed.beforeApplyState)) {
+      || typeof parsed.afterSignature !== "string" || !parsed.beforeConfig || typeof parsed.beforeConfigBytes !== "string"
+      || !isPlainObject(parsed.beforeApplyState)) {
     throw new Error("config snapshot is invalid");
   }
+  const beforeBytes = Buffer.from(parsed.beforeConfigBytes, "base64");
+  if (beforeBytes.length === 0 || revision(beforeBytes) !== parsed.beforeRevision) throw new Error("config snapshot before revision is invalid");
+  let beforeRaw: unknown;
+  try { beforeRaw = JSON.parse(beforeBytes.toString("utf8")); } catch { throw new Error("config snapshot before config is invalid"); }
+  if (JSON.stringify(beforeRaw) !== JSON.stringify(parsed.beforeConfig)) throw new Error("config snapshot before config does not match bytes");
+  validateApplyState(parsed.beforeApplyState);
   return parsed as ConfigSnapshot;
 }
 
-function atomicWriteConfig(file: string, value: unknown): Buffer {
-  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+function atomicWriteBytes(file: string, bytes: Buffer): Buffer {
   if (bytes.length > CONFIG_LIMIT_BYTES) throw new Error(`配置文件超过 ${CONFIG_LIMIT_BYTES} bytes`);
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
@@ -629,6 +751,10 @@ function atomicWriteConfig(file: string, value: unknown): Buffer {
     fsyncDirectoryOf(file);
   } catch (error) { try { fs.unlinkSync(temporary); } catch { /* best effort */ } throw error; }
   return bytes;
+}
+
+function atomicWriteConfig(file: string, value: unknown): Buffer {
+  return atomicWriteBytes(file, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8"));
 }
 
 export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority, options: { snapshotFile?: string } = {}): ConfigMutationResult {
@@ -649,9 +775,10 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
       : (() => { try { return readApplyFile(layout.root); } catch { return { version: 1 as const, persistedRevision: "unknown", agents: {} }; } })();
     if (options.snapshotFile) {
       if (changed.affectedAgentIds.length !== 1 || !changed.agentId) throw new Error("config snapshot requires exactly one Agent mutation");
-      writeConfigSnapshot(options.snapshotFile, {
-        version: 1, targetAgentId: changed.agentId, beforeRevision: revision(current.bytes), afterRevision: nextRevision,
-        afterSignature: agentSignature(config, changed.agentId), beforeConfig: current.raw, beforeApplyState,
+      writeConfigSnapshot(options.snapshotFile, layout.root, {
+        version: 2, targetAgentId: changed.agentId, beforeRevision: revision(current.bytes), afterRevision: nextRevision,
+        afterSignature: agentSignature(config, changed.agentId), beforeConfig: current.raw,
+        beforeConfigBytes: current.bytes.toString("base64"), beforeApplyState,
       });
     }
     atomicWriteConfig(layout.configFile, stored);
@@ -684,15 +811,25 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
 export function rollbackConfig(env: Env, snapshotFile: string): { revision: string; agentId: string } {
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   return withConfigLock(layout, () => {
-    const snapshot = readConfigSnapshot(snapshotFile);
+    const snapshot = readConfigSnapshot(snapshotFile, layout.root);
+    const beforeBytes = Buffer.from(snapshot.beforeConfigBytes, "base64");
+    const beforeRaw = JSON.parse(beforeBytes.toString("utf8"));
+    normalizeConfig(beforeRaw, layout.root);
     const current = readConfigFile(layout.configFile, layout.root);
     const currentConfig = current.raw === null ? null : normalizeConfig(current.raw, layout.root);
     if (!currentConfig || revision(current.bytes) !== snapshot.afterRevision
         || agentSignature(currentConfig, snapshot.targetAgentId) !== snapshot.afterSignature) {
       throw new Error("config changed after the snapshot; refusing rollback");
     }
-    const bytes = atomicWriteConfig(layout.configFile, snapshot.beforeConfig);
-    writeApplyFile(layout.root, snapshot.beforeApplyState);
+    const journal: ConfigRollbackJournal = {
+      version: 1, targetAgentId: snapshot.targetAgentId, expectedAfterRevision: snapshot.afterRevision,
+      beforeRevision: snapshot.beforeRevision, beforeConfigBytes: snapshot.beforeConfigBytes, beforeApplyState: snapshot.beforeApplyState,
+    };
+    atomicWriteConfig(rollbackJournalFile(layout.root), journal);
+    const bytes = atomicWriteBytes(layout.configFile, beforeBytes);
+    restoreTargetApplyState(layout.root, snapshot.targetAgentId, snapshot.beforeRevision, snapshot.beforeApplyState);
+    fs.unlinkSync(rollbackJournalFile(layout.root));
+    fsyncDirectoryOf(rollbackJournalFile(layout.root));
     return { revision: revision(bytes), agentId: snapshot.targetAgentId };
   });
 }

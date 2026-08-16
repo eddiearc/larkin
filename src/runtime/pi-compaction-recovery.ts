@@ -215,7 +215,8 @@ export function parsePiExecutableVersion(output: string): typeof BUNDLED_PI_VERS
   if (lines.length !== 1) throw new Error("Pi executable version output must contain exactly one version line");
   const line = lines[0];
   // Pi's bare version is canonical; permit only the fixed official display prefix.
-  if (!new RegExp(`^(?:${BUNDLED_PI_VERSION}|pi(?:-coding-agent)?(?:\\s+version)?\\s+v?${BUNDLED_PI_VERSION})$`, "i").test(line)) {
+  const escapedVersion = BUNDLED_PI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`^(?:${escapedVersion}|pi(?:-coding-agent)?(?:\\s+version)?\\s+v?${escapedVersion})$`, "i").test(line)) {
     throw new Error(`Pi executable version must be exactly ${BUNDLED_PI_VERSION}`);
   }
   return BUNDLED_PI_VERSION;

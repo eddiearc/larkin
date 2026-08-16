@@ -68,6 +68,15 @@ test("Pi distribution snapshot rejects symlink and insecure paths without changi
     }, { kind: "user" }, { snapshotFile: link }), /unsafe|symlink/i);
     assert.deepEqual(fs.readFileSync(file), before);
     fs.unlinkSync(link);
+    const realParent = path.join(root, "real-snapshot-parent");
+    const ancestorLink = path.join(root, "snapshot-parent-link");
+    fs.mkdirSync(realParent, { mode: 0o700 });
+    fs.symlinkSync(realParent, ancestorLink);
+    assert.throws(() => configApi.mutateConfig(env, {
+      kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin",
+    }, { kind: "user" }, { snapshotFile: path.join(ancestorLink, "snapshot.json") }), /symlink|ancestor/i);
+    fs.unlinkSync(ancestorLink);
+    fs.rmSync(realParent, { recursive: true, force: true });
     fs.mkdirSync(insecure, { mode: 0o755 });
     if (process.platform !== "win32") fs.chmodSync(insecure, 0o755);
     assert.throws(() => configApi.mutateConfig(env, {
@@ -88,6 +97,91 @@ test("rollback refuses a post-snapshot configuration change", () => {
     configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin" }, { kind: "user" }, { snapshotFile: snapshot });
     fs.appendFileSync(file, "\n");
     assert.throws(() => configApi.rollbackConfig(env, snapshot), /changed after the snapshot/i);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("snapshot rollback rejects tampered payloads and destinations outside the config root", () => {
+  const { root, file } = fixture();
+  const env = { LARKIN_CONFIG_DIR: root };
+  const snapshot = path.join(root, "pi-distribution.snapshot.json");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-snapshot-outside-"));
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.agents[APP].runtime = "pi";
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    const before = fs.readFileSync(file);
+    assert.throws(() => configApi.mutateConfig(env, {
+      kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin",
+    }, { kind: "user" }, { snapshotFile: path.join(outside, "snapshot.json") }), /canonical config root|inside/i);
+    assert.deepEqual(fs.readFileSync(file), before);
+    configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin" }, { kind: "user" }, { snapshotFile: snapshot });
+    const tampered = JSON.parse(fs.readFileSync(snapshot, "utf8"));
+    tampered.beforeConfig = { version: 4, serverId: "forged", mentionPolicy: "require", activeAgent: APP, agents: {} };
+    fs.writeFileSync(snapshot, `${JSON.stringify(tampered, null, 2)}\n`, { mode: 0o600 });
+    assert.throws(() => configApi.rollbackConfig(env, snapshot), /does not match|invalid/i);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).agents[APP].piDistribution, "builtin");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("rollback restores only the target Agent apply state", () => {
+  const { root, file } = fixture();
+  const env = { LARKIN_CONFIG_DIR: root };
+  const snapshot = path.join(root, "pi-distribution.snapshot.json");
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.version = 4; stored.mentionPolicy = "require"; stored.agents[APP].runtime = "pi";
+    delete stored.agents[APP].noMentionChats; delete stored.agents[OTHER].noMentionChats;
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    const changed = configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin" }, { kind: "user" }, { snapshotFile: snapshot });
+    const current = configApi.loadConfig(env).config;
+    configApi.markConfigApplied(env, OTHER, configApi.runtimeConfigSignature(current, OTHER));
+    configApi.rollbackConfig(env, snapshot);
+    const apply = configApi.configApplyState(env, configApi.loadConfig(env).config);
+    assert.equal(apply.agents[OTHER].applyState, "applied");
+    assert.equal(apply.agents[APP].applyState, "unknown");
+    assert.notEqual(changed.revision, configApi.loadConfig(env).revision);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("rollback journal recovery completes apply-state restoration after config replacement", () => {
+  const { root, file } = fixture();
+  const env = { LARKIN_CONFIG_DIR: root };
+  const snapshot = path.join(root, "pi-distribution.snapshot.json");
+  const journalFile = path.join(root, ".config-rollback-journal.json");
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.version = 4; stored.mentionPolicy = "require"; stored.agents[APP].runtime = "pi";
+    delete stored.agents[APP].noMentionChats; delete stored.agents[OTHER].noMentionChats;
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin" }, { kind: "user" }, { snapshotFile: snapshot });
+    const current = configApi.loadConfig(env).config;
+    configApi.markConfigApplied(env, APP, configApi.runtimeConfigSignature(current, APP));
+    const payload = JSON.parse(fs.readFileSync(snapshot, "utf8"));
+    fs.writeFileSync(journalFile, `${JSON.stringify({
+      version: 1, targetAgentId: APP, expectedAfterRevision: payload.afterRevision,
+      beforeRevision: payload.beforeRevision, beforeConfigBytes: payload.beforeConfigBytes,
+      beforeApplyState: payload.beforeApplyState,
+    })}\n`, { mode: 0o600 });
+    fs.writeFileSync(file, Buffer.from(payload.beforeConfigBytes, "base64"), { mode: 0o600 });
+    assert.throws(() => configApi.rollbackConfig(env, snapshot), /changed after the snapshot/i);
+    const restored = configApi.configApplyState(env, configApi.loadConfig(env).config);
+    assert.equal(restored.agents[APP].applyState, "unknown");
+    assert.equal(fs.existsSync(journalFile), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("switching a Pi Agent to a non-Pi runtime removes piDistribution before persistence", () => {
+  const { root, file } = fixture();
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.version = 4;
+    stored.mentionPolicy = "require";
+    stored.agents[APP] = { runtime: "pi", model: "default", piDistribution: "builtin" };
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    configApi.mutateConfig({ LARKIN_CONFIG_DIR: root }, { kind: "set-agent-runtime", agentId: APP, runtime: "codex", model: "default" }, { kind: "user" });
+    const after = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(after.agents[APP].runtime, "codex");
+    assert.equal(Object.hasOwn(after.agents[APP], "piDistribution"), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -35,6 +35,7 @@ import {
 import {
   assertEffectivePiCompactionSettings,
   assertNoProjectPiCompactionOverride,
+  parsePiExecutableVersion,
   prepareOwnedPiDirectory,
   readOwnedPiSettings,
   verifyPiCapabilities,
@@ -934,7 +935,9 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
   const commandArgs = [...(builtinSpec?.args ?? []), ...args];
   const reportedVersion = productionSpawn && !builtin
-    ? String(spawnSync(command, ["--version"], { cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000 }).stdout || "").trim()
+    ? parsePiExecutableVersion(String(spawnSync(command, ["--version"], {
+      cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000,
+    }).stdout || ""))
     : "0.83.0";
   mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
   if (builtin) mergedEnv.PI_TELEMETRY = "0";

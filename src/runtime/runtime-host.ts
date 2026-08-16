@@ -74,6 +74,7 @@ interface ManagedAgent {
   stateStore?: DeliveryStateStore;
   compactionBreaker?: PiCompactionBreaker;
   compactionMachines: Map<string, PiCompactionRecoveryMachine>;
+  compactionRecoveryInFlight: Set<string>;
   piOverflowCompactionFailed: Set<string>;
   readiness: RuntimeReadiness | null;
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
@@ -482,17 +483,19 @@ export function createRuntimeHost(options: {
 
   const resultFor = (agent: ManagedAgent, record: DeliveryRecord, result: RuntimeInputResult): DeliveryReceipt => {
     if (result.status === "accepted") {
-      delete record.reason;
+      if (record.errorCategory !== "context_window") {
+        delete record.reason;
+        delete record.errorCategory;
+      }
       delete record.retryable;
-      delete record.errorCategory;
       const finalRecord = setRecord(agent, record, "accepted");
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId, status: "accepted" });
       return { status: "accepted", deliveryId: record.deliveryId };
     }
-    delete record.errorCategory;
+    if (record.errorCategory !== "context_window") delete record.errorCategory;
     const retryable = result.status === "deferred" || result.retryable;
-    record.reason = result.reason;
+    if (record.errorCategory !== "context_window") record.reason = result.reason;
     record.retryable = retryable;
     const finalRecord = setRecord(agent, record, retryable ? "pending" : "error");
     if (finalRecord.status === "consumed") return { status: "accepted", deliveryId: record.deliveryId };
@@ -535,9 +538,11 @@ export function createRuntimeHost(options: {
     } catch (error) {
       if (!busy) agent.busy = false;
       const reason = error instanceof Error ? error.message : String(error);
-      record.reason = reason;
+      if (record.errorCategory !== "context_window") {
+        record.reason = reason;
+        delete record.errorCategory;
+      }
       record.retryable = true;
-      delete record.errorCategory;
       setRecord(agent, record, "pending");
       emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId, messageId: record.messageId, status: "deferred", reason });
       return { status: "deferred", deliveryId: record.deliveryId, reason };
@@ -669,21 +674,25 @@ export function createRuntimeHost(options: {
           machine.retrySubmitted();
           record.status = "pending";
           record.retryable = true;
-          record.reason = "Pi manual compaction succeeded; retrying the same delivery input";
           record.updatedAt = now();
           persist(agent);
           queueMicrotask(() => { if (!agent.stopped) void submit(agent, record, false); });
         } else if (action === "fresh_session_fallback") {
           agent.busy = false;
           agent.turnInProgress = false;
-          if (record.status !== "error") {
-            record.reason = machine.recordSnapshot.fallbackReason || "Pi compaction recovery fallback";
+          const recoveryReason = machine.recordSnapshot.fallbackReason || "Pi compaction recovery fallback";
+          // Delivery proof must remain the exact provider-classified context error.
+          // Generic Pi recovery text belongs only in the breaker and logs.
+          if (record.errorCategory === "context_window" && typeof record.reason === "string") {
             record.retryable = false;
-            record.errorCategory = "context_window";
             setRecord(agent, record, "error");
+            if (!agent.compactionRecoveryInFlight.has(key)) {
+              agent.compactionRecoveryInFlight.add(key);
+              void recoverContextOverflowInternal(agent.config.agentId, key, recoveryReason, key)
+                .catch((error) => log("Pi context fallback failed", String(error)))
+                .finally(() => agent.compactionRecoveryInFlight.delete(key));
+            }
           }
-          void recoverContextOverflowInternal(agent.config.agentId, key, machine.recordSnapshot.fallbackReason || "Pi compaction recovery fallback", key)
-            .catch((error) => log("Pi context fallback failed", String(error)));
         }
       },
     });
@@ -715,6 +724,7 @@ export function createRuntimeHost(options: {
   };
 
   const recoverStalePiCompaction = async (agent: ManagedAgent): Promise<void> => {
+    if (!agent.stateStore) return;
     const breaker = agent.compactionBreaker;
     if (!breaker) return;
     const stale = breaker.listNonTerminal().find((candidate) => candidate.state !== "native_succeeded");
@@ -726,14 +736,14 @@ export function createRuntimeHost(options: {
     const record = [...agent.records.values()].find((candidate) => candidate.deliveryId === stale.deliveryId
       || candidate.input.inputId === stale.inputId);
     if (!record) return;
-    record.reason = stale.fallbackReason || "Pi compaction recovery resumed after restart";
+    const recoveryReason = stale.fallbackReason || "Pi compaction recovery resumed after restart";
+    if (record.errorCategory !== "context_window" || typeof record.reason !== "string") return;
     record.retryable = false;
-    record.errorCategory = "context_window";
     setRecord(agent, record, "error");
-    breaker.forceFallback(stale.key, record.reason);
+    breaker.forceFallback(stale.key, recoveryReason);
     agent.busy = false;
     agent.turnInProgress = false;
-    await recoverContextOverflowInternal(agent.config.agentId, stale.key, record.reason, stale.key);
+    await recoverContextOverflowInternal(agent.config.agentId, stale.key, recoveryReason, stale.key);
   };
 
   const observe = (agent: ManagedAgent, session: RuntimeSession, event: NormalizedRuntimeEvent): void => {
@@ -825,8 +835,13 @@ export function createRuntimeHost(options: {
         if (agent.piOverflowCompactionFailed.has(record.input.inputId)) {
           agent.busy = false;
           agent.turnInProgress = false;
-          void recoverContextOverflowInternal(agent.config.agentId, `${record.deliveryId}:${record.input.inputId}`, "native Pi overflow compaction failed", `${record.deliveryId}:${record.input.inputId}`)
-            .catch((error) => log("Pi native compaction fallback failed", String(error)));
+          const recoveryKey = `${record.deliveryId}:${record.input.inputId}`;
+          if (!agent.compactionRecoveryInFlight.has(recoveryKey)) {
+            agent.compactionRecoveryInFlight.add(recoveryKey);
+            void recoverContextOverflowInternal(agent.config.agentId, recoveryKey, "native Pi overflow compaction failed", recoveryKey)
+              .catch((error) => log("Pi native compaction fallback failed", String(error)))
+              .finally(() => agent.compactionRecoveryInFlight.delete(recoveryKey));
+          }
           return;
         }
         // Pi emits this terminal error only after agent_settled; release the
@@ -987,8 +1002,7 @@ export function createRuntimeHost(options: {
       agent.disabledReason = null;
       for (const candidate of agent.records.values()) {
         if (!messageIds.includes(candidate.messageId)) continue;
-        candidate.status = "pending"; candidate.retryable = true;
-        candidate.reason = "context-window recovery rearmed the retained Inbox delivery"; candidate.updatedAt = now();
+        candidate.status = "pending"; candidate.retryable = true; candidate.updatedAt = now();
       }
     };
     try {
@@ -1298,7 +1312,6 @@ export function createRuntimeHost(options: {
             if (!messageIds.includes(record.messageId)) continue;
             record.status = "pending";
             record.retryable = true;
-            record.reason = "context-window recovery rearmed the retained Inbox delivery";
             record.updatedAt = now();
           }
         });
@@ -1370,11 +1383,11 @@ export function createRuntimeHost(options: {
           generation: 0, poller: null, retryTimer: null, recreateAttempts: 0,
           stabilityTimer: null, recreateReason: null, stopped: false, disabledReason: null,
           configurationRecovery: null, stateStore,
-          compactionBreaker: config.runtime === "pi"
+          compactionBreaker: config.runtime === "pi" && stateStore
             ? new PiCompactionBreaker(config.stateDir ?? path.join(config.workspaceDir, ".larkin", "agents", config.agentId), {
-              withLock: stateStore ? <T>(operation: () => T): T => stateStore.withInboxTransaction(operation) : undefined,
+              withLock: <T>(operation: () => T): T => stateStore.withInboxTransaction(operation),
             }) : undefined,
-          compactionMachines: new Map(), piOverflowCompactionFailed: new Set(), readiness: null,
+          compactionMachines: new Map(), compactionRecoveryInFlight: new Set(), piOverflowCompactionFailed: new Set(), readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];

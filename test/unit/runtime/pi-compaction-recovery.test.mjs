@@ -15,6 +15,7 @@ import {
   isPiNativeCompactionRequired,
   PiCompactionBreaker,
   PiCompactionRecoveryMachine,
+  parsePiExecutableVersion,
   verifyPiCapabilities,
 } from "../../../dist/runtime/pi-compaction-recovery.mjs";
 
@@ -51,8 +52,18 @@ test("owned Pi directory is 0700, current-user owned, and never a symlink", () =
   const linked = path.join(root, "linked-parent");
   fs.symlinkSync(outside, linked);
   assert.throws(() => prepareOwnedPiDirectory(path.join(linked, "agent")), /unsafe|symlink/i);
+  const linkedRoot = path.join(root, "linked-root"); fs.symlinkSync(outside, linkedRoot);
+  assert.throws(() => ensureOwnedPiAgentDirectory(linkedRoot, "cli_linkedA1"), /unsafe|symlink/i);
   fs.rmSync(outside, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("Pi executable version parsing rejects spoofed suffixes and extra tokens", () => {
+  assert.equal(parsePiExecutableVersion("0.83.0\n"), "0.83.0");
+  assert.equal(parsePiExecutableVersion("pi-coding-agent version v0.83.0\n"), "0.83.0");
+  for (const output of ["0.83.0-beta", "0.83.0 dirty", "pi 0.83.0 extra", "0.83.0\nattacker", "v0.83.0"]) {
+    assert.throws(() => parsePiExecutableVersion(output), /exactly|version/i);
+  }
 });
 
 test("external capability guard fails closed and accepts only the required Pi protocol", () => {
@@ -80,18 +91,33 @@ test("external capability guard fails closed and accepts only the required Pi pr
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /boolean/i);
+  assert.throws(() => verifyPiCapabilities({
+    distribution: "external", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, trustedProtocol: true,
+  }), /external|trusted|unproven/i);
+  assert.doesNotThrow(() => verifyPiCapabilities({
+    distribution: "builtin", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, trustedProtocol: true,
+  }));
+});
+
+test("breaker refuses operations without an explicit canonical lock", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-breaker-no-lock-"));
+  const breaker = new PiCompactionBreaker(root);
+  assert.throws(() => breaker.get("missing"), /canonical Agent state lock/i);
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("durable breaker writes atomically and reloads ambiguous attempts without resending", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-breaker-"));
-  const breaker = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:00.000Z" });
+  const breaker = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:00.000Z", withLock: (operation) => operation() });
   const key = "delivery-1:input-1";
   breaker.transition(key, {
     messageId: "message-1", deliveryId: "delivery-1", inputId: "input-1", sessionGeneration: 3,
   }, "eligible");
   breaker.transition(key, {}, "settled_for_manual");
   breaker.transition(key, { compactDeadlineAt: "2026-01-01T00:00:01.000Z" }, "manual_sent");
-  const loaded = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:02.000Z" });
+  const loaded = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:02.000Z", withLock: (operation) => operation() });
   assert.equal(loaded.get(key).state, "manual_sent");
   assert.equal(loaded.get(key).manualAttempt, 1);
   assert.throws(() => loaded.transition(key, {}, "manual_sent"), /invalid|duplicate|attempt/i);

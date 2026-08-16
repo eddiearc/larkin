@@ -128,6 +128,17 @@ test("Pi RPC compact uses one absolute deadline and ignores a late response with
   await client.close();
 });
 
+test("Pi RPC late-response tombstones stay bounded by strict FIFO eviction", async () => {
+  const child = new FakeProcess();
+  const client = new PiRpcClient(child, { compactTimeoutMs: 1 });
+  const requests = Array.from({ length: 400 }, () => client.requestCompact());
+  await Promise.allSettled(requests);
+  assert.equal(client.expiredRequestIds.size, 256);
+  const ids = [...client.expiredRequestIds];
+  assert.equal(ids.length, 256);
+  assert.equal(ids[0], child.writes[child.writes.length - 256].id);
+});
+
 test("Pi RPC failure and close share one shutdown promise that escalates a stubborn child", async () => {
   const child = new StubbornProcess();
   const client = new PiRpcClient(child, { requestTimeoutMs: 5, shutdownGraceMs: 5 });

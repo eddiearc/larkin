@@ -11,6 +11,7 @@ import { ContextPromptBuilder } from "../../dist/agent/context-prompt.mjs";
 import { createTelemetryRuntime } from "../../dist/platform/telemetry-tracing.mjs";
 import { TelemetrySpool } from "../../dist/platform/telemetry-spool.mjs";
 import { createNativeRuntimeAdapter } from "../../dist/runtime/runtime-adapters.mjs";
+import { PiCompactionBreaker } from "../../dist/runtime/pi-compaction-recovery.mjs";
 import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 
 class PreflightPiProcess extends EventEmitter {
@@ -157,6 +158,129 @@ test("production-shaped Pi RPC Mock proves native retry lifecycle is correlated 
     assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "consumed");
   } finally {
     await host.shutdown("native retry mock complete").catch(() => {}); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+class RecoveryPiProcess extends EventEmitter {
+  stdout = new PassThrough(); stderr = new PassThrough(); killed = [];
+  promptCount = 0; compactCount = 0; turnCount = 0; replyCount = 0;
+  constructor(index, scenario, onSuccessfulTurn) { super(); this.index = index; this.scenario = scenario; this.onSuccessfulTurn = onSuccessfulTurn; this.sessionId = `recovery-session-${scenario}-${index}`; }
+  stdin = { destroyed: false, write: (line, callback) => {
+    const request = JSON.parse(line); callback?.();
+    if (request.type === "get_state") return this.respond(request, { sessionId: this.sessionId,
+      model: { provider: "fixture", id: "fixture-model", contextWindow: 272000 }, thinkingLevel: "off", autoCompactionEnabled: true });
+    if (request.type === "get_available_models") return this.respond(request, { models: [{ provider: "fixture", id: "fixture-model" }] });
+    if (request.type === "compact") {
+      this.compactCount += 1; this.respond(request);
+      return setTimeout(() => this.event({ type: "compaction_end", reason: "manual", aborted: false, willRetry: false,
+        result: { summary: "MANUAL_SUMMARY" } }), 2);
+    }
+    if (request.type !== "prompt") return true;
+    this.promptCount += 1; this.respond(request);
+    setTimeout(() => { this.turnCount += 1; this.event({ type: "turn_start", turnIndex: this.turnCount }); }, 2);
+    setTimeout(() => this.emitTurn(), 4);
+    return true;
+  }, end() {} };
+  respond(request, data) { queueMicrotask(() => this.stdout.write(`${JSON.stringify({ id: request.id, type: "response", command: request.type,
+    success: true, ...(data === undefined ? {} : { data }) })}\n`)); }
+  emitTurn() {
+    const nativeFailure = this.scenario === "native-failure" && this.index === 0;
+    const manualSecond = this.scenario === "manual-second" && this.index === 1;
+    const manualInitial = this.scenario === "manual-second" && this.index === 0;
+    if (nativeFailure) {
+      this.event({ type: "compaction_start", reason: "overflow" });
+      this.event({ type: "compaction_end", reason: "overflow", aborted: true, willRetry: false });
+    }
+    const overflow = nativeFailure || manualInitial || manualSecond;
+    this.replyCount += 1;
+    if (!overflow) this.onSuccessfulTurn?.();
+    this.event({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: overflow ? "error" : "stop",
+      ...(overflow ? { errorMessage: "Your input exceeds the context window of this model. Please adjust your input and try again." } : {}) }] });
+    setTimeout(() => this.event({ type: "agent_settled" }), 2);
+  }
+  event(value) { this.stdout.write(`${JSON.stringify(value)}\n`); }
+  kill(signal) { this.killed.push(signal); queueMicrotask(() => this.emit("exit", null, signal)); return true; }
+}
+
+function recoveryHost(root, scenario, sessions, store, target = `chat:oc_${scenario}`) {
+  const workspaceDir = path.join(root, "workspace"); fs.mkdirSync(workspaceDir, { recursive: true });
+  const native = createNativeRuntimeAdapter("pi", { env: { LARKIN_PI_DISTRIBUTION: "builtin" }, spawn: () => {
+    const child = new RecoveryPiProcess(sessions.length, scenario, () => store.pollInbox({ target })); sessions.push(child); return child;
+  }, piRpcClientOptions: { requestTimeoutMs: 50, inputTimeoutMs: 100, inputProgressTimeoutMs: 100, inputMaxTimeoutMs: 500 } });
+  const adapter = { id: native.id, capabilities: native.capabilities, probe: async () => ({ runtime: "pi", state: "ready" }),
+    createSession: (input) => native.createSession(input) };
+  return createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+    assertOfficialCliReady: () => {}, retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 1 } });
+}
+
+async function waitUntil(read, label, timeoutMs = 1500) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) { if (read()) return; await new Promise((resolve) => setTimeout(resolve, 5)); }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+async function runRecoveryScenario(scenario, expectedSessions, expectedCompacts, expectedPrompts = expectedSessions,
+  expectedTurns = expectedPrompts, expectedReplies = expectedPrompts) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-${scenario}-e2e-`));
+  const agentId = `cli_${scenario.replace(/[^A-Za-z0-9]/g, "")}A1`; const messageId = `om_${scenario}`;
+  const target = `chat:oc_${scenario}`; const stateDir = path.join(root, "state", "agents", agentId);
+  const store = createAgentStateStore(root, agentId); const sessions = []; const host = recoveryHost(root, scenario, sessions, store);
+  const envelope = { message_id: messageId, target, content: `recovery ${scenario}`, wake: true };
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "pi", model: "default", piDistribution: "builtin",
+      workspaceDir: path.join(root, "workspace"), stateDir }]);
+    store.prepareInboxDelivery(envelope);
+    const receipt = await host.deliver(agentId, envelope); assert.equal(receipt.status, "accepted");
+    try { await waitUntil(() => sessions.length >= expectedSessions
+      && sessions.reduce((count, session) => count + session.replyCount, 0) >= expectedReplies, "fresh recovery session"); }
+    catch (error) { throw new Error(`${error.message}; sessions=${JSON.stringify(sessions.map((session) => ({ id: session.sessionId, prompt: session.promptCount, compact: session.compactCount, turns: session.turnCount, replies: session.replyCount })))}; records=${JSON.stringify(store.readJson("runtimeDeliveries", { records: [] }).records)}`); }
+    store.pollInbox({ target }); await new Promise((resolve) => setImmediate(resolve));
+    const delivery = store.readJson("runtimeDeliveries", { records: [] }).records.find((record) => record.messageId === messageId);
+    assert.equal(delivery.status, "consumed");
+    assert.equal(sessions[0].sessionId.startsWith("recovery-session-"), true);
+    assert.equal(new Set(sessions.map((session) => session.sessionId)).size, expectedSessions);
+    assert.equal(sessions.reduce((count, session) => count + session.promptCount, 0), expectedPrompts);
+    assert.equal(sessions.reduce((count, session) => count + session.compactCount, 0), expectedCompacts);
+    assert.equal(sessions.reduce((count, session) => count + session.turnCount, 0), expectedTurns);
+    assert.equal(sessions.reduce((count, session) => count + session.replyCount, 0), expectedReplies);
+  } finally { await host.shutdown("recovery scenario complete").catch(() => {}); fs.rmSync(root, { recursive: true, force: true }); }
+}
+
+test("production RuntimeHost RPC events native compaction failure perform one canonical fresh-session fallback", async () => {
+  await runRecoveryScenario("native-failure", 2, 0);
+});
+
+test("production RuntimeHost RPC events manual success plus exact second overflow fallback once without duplicate delivery", async () => {
+  await runRecoveryScenario("manual-second", 2, 1, 3, 3, 3);
+});
+
+test("production RuntimeHost restart table deterministically falls back durable manual/native states without compact", async () => {
+  for (const state of ["manual_sent", "manual_ambiguous", "native_failed"]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-restart-${state}-e2e-`));
+    const agentId = `cli_restart${state.replace(/[^A-Za-z0-9]/g, "")}A1`; const messageId = `om_restart_${state}`;
+    const deliveryId = `delivery_restart_${state}`; const inputId = `input_restart_${state}`; const target = `chat:oc_restart_${state}`;
+    const stateDir = path.join(root, "state", "agents", agentId); const store = createAgentStateStore(root, agentId); const sessions = [];
+    const breaker = new PiCompactionBreaker(stateDir, { withLock: (operation) => store.withInboxTransaction(operation) });
+    const record = { key: `${deliveryId}:${inputId}`, messageId, deliveryId, inputId, sessionGeneration: 1, state,
+      manualAttempt: state === "native_failed" ? 0 : 1, compactSentAt: null, compactDeadlineAt: null, compactFinishedAt: null,
+      retrySubmittedAt: null, fallbackReason: "restart fixture", updatedAt: new Date().toISOString() };
+    try {
+      store.appendNdjson("inbox", { message_id: messageId, target, content: `restart ${state}`, wake: true });
+      store.writeJson("runtimeDeliveries", { version: 1, records: [{ deliveryId, messageId, status: "error", retryable: false, errorCategory: "context_window",
+        input: { inputId, deliveryId, kind: "wake", text: `restart ${state}`, attempt: 1 }, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", updatedAt: new Date().toISOString() }] });
+      breaker.save(record);
+      const host = recoveryHost(root, "restart", sessions, store, target);
+      await host.start([{ agentId, name: agentId, runtime: "pi", model: "default", piDistribution: "builtin",
+        workspaceDir: path.join(root, "workspace"), stateDir }]);
+      await waitUntil(() => sessions.length >= 2 && sessions.at(-1).promptCount > 0, `${state} restart fallback`);
+      store.pollInbox({ target }); await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(sessions.reduce((count, session) => count + session.compactCount, 0), 0);
+      assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "consumed");
+      const durable = JSON.parse(fs.readFileSync(path.join(stateDir, "piCompactionRecovery.json"), "utf8"));
+      assert.ok(["fallback_committed", "closed"].includes(durable.records[0].state));
+      assert.equal(new Set(sessions.map((session) => session.sessionId)).size, 2);
+      await host.shutdown(`restart ${state} complete`);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   }
 });
 

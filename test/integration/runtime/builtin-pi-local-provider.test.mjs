@@ -81,7 +81,7 @@ async function exerciseBuiltinPiTurn(binaryEntryPath, prefix, compiled = false) 
     const adapter = createNativeRuntimeAdapter("pi", { env });
     const readiness = await adapter.probe({ agentId, workspaceDir, stateDir, env });
     assert.equal(readiness.state, "ready");
-    assert.match(readiness.version, /official-pi 0\.84\.1 \(bundled\)/);
+    assert.match(readiness.version, /official-pi 0\.84\.2 \(bundled\)/);
     const session = await adapter.createSession({
       agentId, workspaceDir, stateDir, model: "larkin-custom/fixture-model", standingPrompt: {
         version: "fixture", content: "Reply concisely.", hash: "fixture",
@@ -139,7 +139,7 @@ test("bundled official Pi completes a controlled turn against a local OpenAI-com
   await exerciseBuiltinPiTurn(path.join(ROOT, "dist", "app", "binary-entry.mjs"), "larkin-builtin-pi-turn-");
 });
 
-test("an external-shaped Pi 0.84.1 session resumes under bundled Pi with only a local provider", { timeout: 30_000 }, async () => {
+test("an external-shaped Pi 0.84.2 session resumes under bundled Pi with only a local provider", { timeout: 30_000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-external-to-builtin-resume-"));
   const agentId = "cli_crossDistributionA1";
   const entry = path.join(ROOT, "dist", "app", "binary-entry.mjs");
@@ -171,10 +171,10 @@ test("an external-shaped Pi 0.84.1 session resumes under bundled Pi with only a 
       apiKey: "cross-distribution-fixture-key", model: "fixture-model",
     }).commit();
     const providerDir = path.join(temp, "providers", "pi", agentId);
-    const wrapper = path.join(temp, "pi-0.84.1-external-fixture");
+    const wrapper = path.join(temp, "pi-0.84.2-external-fixture");
     fs.writeFileSync(wrapper, `#!${process.execPath}
 import { spawn } from "node:child_process";
-if (process.argv.includes("--version")) { console.log("0.84.1"); process.exit(0); }
+if (process.argv.includes("--version")) { console.log("0.84.2"); process.exit(0); }
 const incoming = process.argv.slice(2); const args = [];
 for (let index = 0; index < incoming.length; index += 1) {
   if (incoming[index] === "-e") { index += 1; continue; }

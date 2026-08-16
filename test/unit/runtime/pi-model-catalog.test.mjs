@@ -89,11 +89,11 @@ test("production graph pins official Pi and exposes it only through the shared R
   const inlineExtensions = fs.readFileSync(path.join(ROOT, "src/runtime/pi-inline-extensions.ts"), "utf8");
   const bundledPi = JSON.parse(fs.readFileSync(path.join(ROOT, "node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
   const rpcTypes = fs.readFileSync(path.join(ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts"), "utf8");
-  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "0.84.1");
+  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "0.84.2");
   assert.equal(bundledPi.name, "@earendil-works/pi-coding-agent");
-  assert.equal(bundledPi.version, "0.84.1");
+  assert.equal(bundledPi.version, "0.84.2");
   for (const dependency of ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-client", "@earendil-works/pi-protocol", "@earendil-works/pi-tui"]) {
-    assert.match(String(bundledPi.dependencies[dependency]), /^\^0\.84\.1$/);
+    assert.match(String(bundledPi.dependencies[dependency]), /^\^0\.84\.2$/);
   }
   assert.match(rpcTypes, /type: "prompt"/);
   assert.match(rpcTypes, /type: "get_state"/);

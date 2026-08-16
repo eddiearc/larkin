@@ -4,7 +4,7 @@ import path from "node:path";
 import { isWindows, secureWindowsDirectoryAcl } from "../platform/secure-metadata.js";
 
 export type PiDistribution = "external" | "builtin";
-export const BUNDLED_PI_VERSION = "0.84.1";
+export const BUNDLED_PI_VERSION = "0.84.2";
 export type PiProviderPresetId = "deepseek" | "kimi" | "minimax" | "zhipu" | "openai" | "anthropic"
   | "gemini" | "groq" | "cerebras" | "xai" | "fireworks" | "together" | "mistral"
   | "openrouter" | "kimi-coding" | "qwen-cn" | "opencode-go" | "ant-ling" | "nvidia"

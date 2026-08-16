@@ -5,7 +5,7 @@
     "": {
       "name": "larkin",
       "dependencies": {
-        "@earendil-works/pi-coding-agent": "0.84.1",
+        "@earendil-works/pi-coding-agent": "0.84.2",
         "@larksuite/channel": "^0.4.0",
         "@opentelemetry/api": "^1.9.1",
         "@opentelemetry/resources": "^2.10.0",
@@ -125,7 +125,7 @@
 
     "@earendil-works/pi-client": ["@earendil-works/pi-client@0.84.2", "https://registry.npmmirror.com/@earendil-works/pi-client/-/pi-client-0.84.2.tgz", { "dependencies": { "@earendil-works/pi-protocol": "^0.84.2" } }, "sha512-/RFSPhD/bZbpOp1oJj+UneSUFSgZhWxzcSENUY+8+8xhoBrWXMYI2t77XNx4Yf+c8YK2qTHquForhNcelYpXvg=="],
 
-    "@earendil-works/pi-coding-agent": ["@earendil-works/pi-coding-agent@0.84.1", "https://registry.npmmirror.com/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.84.1.tgz", { "dependencies": { "@earendil-works/pi-agent-core": "^0.84.1", "@earendil-works/pi-ai": "^0.84.1", "@earendil-works/pi-client": "^0.84.1", "@earendil-works/pi-protocol": "^0.84.1", "@earendil-works/pi-tui": "^0.84.1", "@silvia-odwyer/photon-node": "0.3.4", "chalk": "5.6.2", "cross-spawn": "7.0.6", "diff": "8.0.4", "glob": "13.0.6", "grok-mermaid": "0.2.2", "highlight.js": "10.7.3", "hosted-git-info": "9.0.3", "ignore": "7.0.5", "jiti": "2.7.0", "minimatch": "10.2.5", "proper-lockfile": "4.1.2", "semver": "7.8.0", "typebox": "1.3.7", "undici": "8.9.0", "yaml": "2.9.0" }, "optionalDependencies": { "@mariozechner/clipboard": "0.3.9" }, "bin": { "pi": "dist/cli.js" } }, "sha512-ncAqFrG+iybuPGOhMiZoEHkEzTpJgz3guYD32pD+M7ucc0WeHmauP6wa7qwP8V/KWvsZDVNa5XGsdZ7fkC7w7A=="],
+    "@earendil-works/pi-coding-agent": ["@earendil-works/pi-coding-agent@0.84.2", "https://registry.npmmirror.com/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.84.2.tgz", { "dependencies": { "@earendil-works/pi-agent-core": "^0.84.2", "@earendil-works/pi-ai": "^0.84.2", "@earendil-works/pi-client": "^0.84.2", "@earendil-works/pi-protocol": "^0.84.2", "@earendil-works/pi-tui": "^0.84.2", "@silvia-odwyer/photon-node": "0.3.4", "chalk": "5.6.2", "cross-spawn": "7.0.6", "diff": "8.0.4", "glob": "13.0.6", "grok-mermaid": "0.2.2", "highlight.js": "10.7.3", "hosted-git-info": "9.0.3", "ignore": "7.0.5", "jiti": "2.7.0", "minimatch": "10.2.5", "proper-lockfile": "4.1.2", "semver": "7.8.0", "typebox": "1.3.7", "undici": "8.9.0", "yaml": "2.9.0" }, "optionalDependencies": { "@mariozechner/clipboard": "0.3.9" }, "bin": { "pi": "dist/cli.js" } }, "sha512-l4E+B7hgXKWddRo8bC/eSue2aWZjEgJ9xIpf5p0Og+lq8a2TArCwJ0HCoCPCgaBP/tN4zbYH/wOwvx9pJpeLCA=="],
 
     "@earendil-works/pi-protocol": ["@earendil-works/pi-protocol@0.84.2", "https://registry.npmmirror.com/@earendil-works/pi-protocol/-/pi-protocol-0.84.2.tgz", { "dependencies": { "typebox": "1.3.7" } }, "sha512-jbBh03fkeckWEroHpcZBr4w5/Ibat8WwdXFlXHivYQImrQNFtLpDeL0t1cku4hmK0q3pceIRQHkw4fwbM4YILQ=="],
 

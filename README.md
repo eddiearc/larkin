@@ -91,6 +91,10 @@ During setup, a new Agent is offered Pi first, followed by Codex and Claude Code
 
 Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage Pi auth. The builtin Pi runtime loads Larkin's two supported extensions inline: background subagents and the 60-second foreground bash timeout guard are enabled without writing extension files or arguments. A compatible external Pi installation keeps the existing explicit `-e` extension path.
 
+The bundled Pi identity is pinned to `@earendil-works/pi-coding-agent@0.84.1` in both `package.json` and `bun.lock`. Larkin launches it through the official RPC entrypoint and verifies the real RPC state/event handshake, compaction capability contract, and persisted session file before claiming readiness. The integration smoke test completes a provider turn, closes the process, and resumes the same session file; missing resume data fails closed instead of creating a fresh session.
+
+For a controlled per-Agent switch, use `larkin pi-distribution show --agent <App ID>`, then provide a private snapshot destination for the atomic mutation: `larkin pi-distribution builtin --agent <App ID> --snapshot <private-file>`. Roll back only when the snapshot CAS still matches with `larkin pi-distribution rollback --snapshot <private-file>`. The command changes only `piDistribution`, is serialized by the config lock, rejects unsafe snapshot paths, and never deletes sessions, Inbox data, credentials, or provider state.
+
 <details>
 <summary>Windows support and optional autostart</summary>
 

@@ -53,6 +53,7 @@ export type ConfigMutation =
   | { kind: "set-agent-mention"; agentId: string; value: MentionPolicyOverride }
   | { kind: "set-chat-mention"; agentId: string; chatId: string; value: MentionPolicyOverride }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
+  | { kind: "set-agent-pi-distribution"; agentId: string; distribution: "builtin" | "external" }
   | { kind: "set-agent-model"; agentId: string; model: string }
   | { kind: "set-agent-effort"; agentId: string; effort: string | null };
 
@@ -436,7 +437,11 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     agent.noMentionChats = Object.entries(policies).filter(([, value]) => value === "free").map(([chatId]) => chatId);
     return { scope: "chat", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
   }
-  if (mutation.kind === "set-agent-runtime") {
+  if (mutation.kind === "set-agent-pi-distribution") {
+    if (agent.runtime !== "pi") throw new Error(`Agent ${mutation.agentId} 不是 Pi runtime`);
+    if (mutation.distribution !== "builtin" && mutation.distribution !== "external") throw new Error("Pi distribution 只允许 builtin/external");
+    agent.piDistribution = mutation.distribution;
+  } else if (mutation.kind === "set-agent-runtime") {
     if (!loadRuntimeModels()[mutation.runtime]) throw new Error(`未知 runtime：${mutation.runtime}`);
     assertModel(mutation.runtime, mutation.model || "default");
     agent.runtime = mutation.runtime;
@@ -565,6 +570,53 @@ function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
   }
 }
 
+interface ConfigSnapshot {
+  version: 1;
+  targetAgentId: string;
+  beforeRevision: string;
+  afterRevision: string;
+  afterSignature: string;
+  beforeConfig: unknown;
+  beforeApplyState: ConfigApplyFile;
+}
+
+function assertSnapshotPath(file: string): void {
+  const parent = path.dirname(path.resolve(file));
+  const parentStat = fs.lstatSync(parent);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("config snapshot parent is unsafe");
+  if (process.platform !== "win32" && (parentStat.mode & 0o777) !== 0o700) throw new Error("config snapshot parent must be 0700");
+  if (typeof process.getuid === "function" && parentStat.uid !== process.getuid()) throw new Error("config snapshot parent owner is unsafe");
+  try {
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("config snapshot path is unsafe");
+    if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600) throw new Error("config snapshot must be 0600");
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("config snapshot owner is unsafe");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function writeConfigSnapshot(file: string, snapshot: ConfigSnapshot): void {
+  assertSnapshotPath(file);
+  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try { fs.writeFileSync(fd, `${JSON.stringify(snapshot, null, 2)}\n`); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  try { fs.renameSync(temporary, file); fs.chmodSync(file, 0o600); }
+  catch (error) { try { fs.unlinkSync(temporary); } catch { /* best effort */ } throw error; }
+}
+
+function readConfigSnapshot(file: string): ConfigSnapshot {
+  assertSnapshotPath(file);
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ConfigSnapshot>;
+  if (parsed.version !== 1 || typeof parsed.targetAgentId !== "string" || !APP_ID.test(parsed.targetAgentId)
+      || typeof parsed.beforeRevision !== "string" || typeof parsed.afterRevision !== "string"
+      || typeof parsed.afterSignature !== "string" || !parsed.beforeConfig || !isPlainObject(parsed.beforeApplyState)) {
+    throw new Error("config snapshot is invalid");
+  }
+  return parsed as ConfigSnapshot;
+}
+
 function atomicWriteConfig(file: string, value: unknown): Buffer {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
   if (bytes.length > CONFIG_LIMIT_BYTES) throw new Error(`配置文件超过 ${CONFIG_LIMIT_BYTES} bytes`);
@@ -579,7 +631,7 @@ function atomicWriteConfig(file: string, value: unknown): Buffer {
   return bytes;
 }
 
-export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority): ConfigMutationResult {
+export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority, options: { snapshotFile?: string } = {}): ConfigMutationResult {
   assertAuthority(authority, mutation);
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   return withConfigLock(layout, () => {
@@ -590,8 +642,19 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
     const changed = applyMutation(config, mutation);
     const stored = toStored(config);
     normalizeConfig(stored, layout.root);
-    const bytes = atomicWriteConfig(layout.configFile, stored);
+    const bytes = Buffer.from(`${JSON.stringify(stored, null, 2)}\n`, "utf8");
     const nextRevision = revision(bytes);
+    const beforeApplyState = options.snapshotFile
+      ? readApplyFile(layout.root)
+      : (() => { try { return readApplyFile(layout.root); } catch { return { version: 1 as const, persistedRevision: "unknown", agents: {} }; } })();
+    if (options.snapshotFile) {
+      if (changed.affectedAgentIds.length !== 1 || !changed.agentId) throw new Error("config snapshot requires exactly one Agent mutation");
+      writeConfigSnapshot(options.snapshotFile, {
+        version: 1, targetAgentId: changed.agentId, beforeRevision: revision(current.bytes), afterRevision: nextRevision,
+        afterSignature: agentSignature(config, changed.agentId), beforeConfig: current.raw, beforeApplyState,
+      });
+    }
+    atomicWriteConfig(layout.configFile, stored);
     let fullyApplied = changed.affectedAgentIds.length === 0;
     try {
       const applyState = readApplyFile(layout.root);
@@ -618,6 +681,22 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
   });
 }
 
+export function rollbackConfig(env: Env, snapshotFile: string): { revision: string; agentId: string } {
+  const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
+  return withConfigLock(layout, () => {
+    const snapshot = readConfigSnapshot(snapshotFile);
+    const current = readConfigFile(layout.configFile, layout.root);
+    const currentConfig = current.raw === null ? null : normalizeConfig(current.raw, layout.root);
+    if (!currentConfig || revision(current.bytes) !== snapshot.afterRevision
+        || agentSignature(currentConfig, snapshot.targetAgentId) !== snapshot.afterSignature) {
+      throw new Error("config changed after the snapshot; refusing rollback");
+    }
+    const bytes = atomicWriteConfig(layout.configFile, snapshot.beforeConfig);
+    writeApplyFile(layout.root, snapshot.beforeApplyState);
+    return { revision: revision(bytes), agentId: snapshot.targetAgentId };
+  });
+}
+
 export function commitSetupConfig(env: Env, expectedRevision: string, nextStored: unknown): { revision: string; config: HydratedConfig } {
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   return withConfigLock(layout, () => {
@@ -632,7 +711,7 @@ export function commitSetupConfig(env: Env, expectedRevision: string, nextStored
 export function safeConfigView(config: HydratedConfig, onlyAgentId?: string, chatId?: string, applyState?: Record<string, unknown>): Record<string, unknown> {
   const entries = onlyAgentId ? [[onlyAgentId, config.agents[onlyAgentId]]] as const : Object.entries(config.agents);
   const agents = entries.filter((entry): entry is readonly [string, HydratedAgent] => Boolean(entry[1])).map(([agentId, agent]) => ({
-    agentId, runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
+    agentId, runtime: agent.runtime, model: agent.model, piDistribution: agent.piDistribution ?? (agent.runtime === "pi" ? "external" : null), effort: agent.effort ?? null,
     mention: {
       override: agent.mentionPolicy ?? "inherit",
       effective: agent.mentionPolicy ?? config.mentionPolicy,

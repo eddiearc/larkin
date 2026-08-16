@@ -35,6 +35,7 @@ const routes: Record<string, Route> = {
   model: ["agent-config", "model"],
   runtime: ["agent-config", "runtime"],
   effort: ["agent-config", "effort"],
+  "pi-distribution": ["agent-config", "pi-distribution"],
   chats: ["agent-config", "chats"],
   config: ["agent-config", "config"],
   session: ["session-cli"],
@@ -63,6 +64,9 @@ List every configured Agent and its current local status. Use --json for daemon/
 Show or change an Agent model.`,
   runtime: `Usage: larkin runtime [<runtime>] [--agent <App ID>] [--model <model>]
 Show or change an Agent runtime.`,
+  "pi-distribution": `Usage: larkin pi-distribution [show|builtin|external] [--agent <App ID>] [--snapshot <private-file>]
+       larkin pi-distribution rollback --snapshot <private-file>
+Show or change one Pi Agent distribution with config-lock CAS and rollback support.`,
   effort: `Usage: larkin effort [<level>|clear|default] [--agent <App ID>]
 Show or change an Agent reasoning effort; clear/default restores the Runtime default.`,
   chats: `Usage: larkin chats [--agent <App ID>]

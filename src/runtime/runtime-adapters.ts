@@ -18,7 +18,7 @@ import type {
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
-import { piAgentDirectory } from "./pi-provider-config.js";
+import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
@@ -938,7 +938,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ? parsePiExecutableVersion(String(spawnSync(command, ["--version"], {
       cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000,
     }).stdout || ""))
-    : "0.83.0";
+    : BUNDLED_PI_VERSION;
   mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
   if (builtin) mergedEnv.PI_TELEMETRY = "0";
   commandArgs.push(...(dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({

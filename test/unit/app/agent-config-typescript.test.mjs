@@ -173,6 +173,30 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("Pi distribution CLI performs a locked snapshot mutation and rollback", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-distribution-cli-"));
+  const app = "cli_piDistributionA1";
+  const snapshot = path.join(temp, "pi-distribution.snapshot.json");
+  try {
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-pi-distribution", mentionPolicy: "require", activeAgent: app,
+      agents: { [app]: { runtime: "pi", model: "default", piDistribution: "external" } },
+    })}\n`, { mode: 0o600 });
+    const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
+    });
+    const shown = run("pi-distribution", "show", "--agent", app);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.equal(JSON.parse(shown.stdout).piDistribution, "external");
+    const changed = run("pi-distribution", "builtin", "--agent", app, "--snapshot", snapshot);
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "builtin");
+    const rollback = run("pi-distribution", "rollback", "--snapshot", snapshot);
+    assert.equal(rollback.status, 0, rollback.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "external");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("TypeScript agent-config bridge preserves listing, fail-closed selection, and chats writes", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-agent-config-ts-"));
   try {

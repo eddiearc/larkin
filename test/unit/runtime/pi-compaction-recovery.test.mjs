@@ -59,16 +59,16 @@ test("owned Pi directory is 0700, current-user owned, and never a symlink", () =
 });
 
 test("Pi executable version parsing rejects spoofed suffixes and extra tokens", () => {
-  assert.equal(parsePiExecutableVersion("0.83.0\n"), "0.83.0");
-  assert.equal(parsePiExecutableVersion("pi-coding-agent version v0.83.0\n"), "0.83.0");
-  for (const output of ["0.83.0-beta", "0.83.0 dirty", "pi 0.83.0 extra", "0.83.0\nattacker", "v0.83.0"]) {
+  assert.equal(parsePiExecutableVersion("0.84.1\n"), "0.84.1");
+  assert.equal(parsePiExecutableVersion("pi-coding-agent version v0.84.1\n"), "0.84.1");
+  for (const output of ["0.84.1-beta", "0.84.1 dirty", "pi 0.84.1 extra", "0.84.1\nattacker", "v0.84.1"]) {
     assert.throws(() => parsePiExecutableVersion(output), /exactly|version/i);
   }
 });
 
 test("external capability guard fails closed and accepts only the required Pi protocol", () => {
   assert.doesNotThrow(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.1", contextWindow: 272_000, autoCompactionEnabled: true,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }));
@@ -78,25 +78,25 @@ test("external capability guard fails closed and accepts only the required Pi pr
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /version|capabilit/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 128_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.1", contextWindow: 128_000, autoCompactionEnabled: true,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /context/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.1", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true,
   }), /unproven|reserve|event/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000,
+    distribution: "external", version: "0.84.1", contextWindow: 272_000,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /boolean/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.1", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
   }), /external|trusted|unproven/i);
   assert.doesNotThrow(() => verifyPiCapabilities({
-    distribution: "builtin", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    distribution: "builtin", version: "0.84.1", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
   }));
 });

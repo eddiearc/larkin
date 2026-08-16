@@ -84,14 +84,14 @@
     "test:live:agent-cli-routing-codex": "bun run build && LARKIN_RUN_AGENT_CLI_ROUTING_CODEX_LIVE=1 bun test --max-concurrency 1 test/live/agent-cli-routing-codex-live.test.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.83.0",
-    "@tintinweb/pi-subagents": "0.14.3",
+    "@earendil-works/pi-coding-agent": "0.84.1",
     "@larksuite/channel": "^0.4.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/resources": "^2.10.0",
     "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@radix-ui/react-dialog": "^1.1.21",
+    "@tintinweb/pi-subagents": "0.14.3",
     "lucide-react": "^1.26.0",
     "proper-lockfile": "4.1.2",
     "qrcode-terminal": "^0.12.0",

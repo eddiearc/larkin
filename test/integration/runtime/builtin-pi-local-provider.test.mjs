@@ -81,7 +81,7 @@ async function exerciseBuiltinPiTurn(binaryEntryPath, prefix, compiled = false) 
     const adapter = createNativeRuntimeAdapter("pi", { env });
     const readiness = await adapter.probe({ agentId, workspaceDir, stateDir, env });
     assert.equal(readiness.state, "ready");
-    assert.match(readiness.version, /official-pi 0\.83\.0 \(bundled\)/);
+    assert.match(readiness.version, /official-pi 0\.84\.1 \(bundled\)/);
     const session = await adapter.createSession({
       agentId, workspaceDir, stateDir, model: "larkin-custom/fixture-model", standingPrompt: {
         version: "fixture", content: "Reply concisely.", hash: "fixture",
@@ -99,11 +99,36 @@ async function exerciseBuiltinPiTurn(binaryEntryPath, prefix, compiled = false) 
     assert.deepEqual(await session.prompt({ inputId: "controlled-turn", kind: "user", text: "Reply exactly LARKIN_READY", attempt: 1 }),
       { status: "accepted", inputId: "controlled-turn" });
     await terminal;
+    const resumedSessionId = session.sessionId;
+    assert.equal(typeof resumedSessionId, "string", "a real Pi turn must establish a resumable session id");
+    const sessionFiles = fs.readdirSync(path.join(stateDir, "runtime", "pi-sessions"));
+    assert.equal(sessionFiles.length, 1, "the first turn must persist exactly one Pi session file");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, "runtime", "pi-sessions", sessionFiles[0]), "utf8").split("\n", 1)[0]).id, resumedSessionId);
     await session.close("test complete");
+    const resumed = await adapter.createSession({
+      agentId, workspaceDir, stateDir, model: "larkin-custom/fixture-model", resumeSessionId: resumedSessionId,
+      standingPrompt: { version: "fixture", content: "Reply concisely.", hash: "fixture" }, env,
+    });
+    assert.equal(resumed.sessionId, resumedSessionId, "bundled Pi must resume the existing session rather than create a new one");
+    const resumedEvents = [];
+    const resumedTerminal = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for resumed bundled Pi turn: ${JSON.stringify(resumedEvents)}`)), 15_000);
+      resumed.subscribe((event) => {
+        resumedEvents.push(event);
+        if (event.type === "turn-end") { clearTimeout(timer); resolve(); }
+        if (event.type === "error") { clearTimeout(timer); reject(new Error(event.message)); }
+      });
+    });
+    assert.deepEqual(await resumed.prompt({ inputId: "resumed-turn", kind: "user", text: "Reply exactly LARKIN_READY again", attempt: 1 }),
+      { status: "accepted", inputId: "resumed-turn" });
+    await resumedTerminal;
+    await resumed.close("test complete");
     assert.equal(observedAuthorization, "Bearer fixture-provider-key");
     assert.equal(observedModel, "fixture-model");
     assert.equal(events.some((event) => event.type === "activity" && event.text?.includes("LARKIN_READY")), true);
+    assert.equal(resumedEvents.some((event) => event.type === "activity" && event.text?.includes("LARKIN_READY")), true);
     assert.equal(events.some((event) => event.type === "turn-end"), true);
+    assert.equal(resumedEvents.some((event) => event.type === "turn-end"), true);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(temp, { recursive: true, force: true });

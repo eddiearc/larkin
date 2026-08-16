@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
 
 export const PI_CONTEXT_WINDOW = 272_000;
 export const COMPACTION_RESERVE_TOKENS = 40_800;
@@ -209,15 +210,15 @@ export function readOwnedPiSettings(directory: string): EffectivePiSettings {
   return { compaction: { enabled, reserveTokens: values.reserveTokens, keepRecentTokens: values.keepRecentTokens } };
 }
 
-export function parsePiExecutableVersion(output: string): "0.83.0" {
+export function parsePiExecutableVersion(output: string): typeof BUNDLED_PI_VERSION {
   const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length !== 1) throw new Error("Pi executable version output must contain exactly one version line");
   const line = lines[0];
   // Pi's bare version is canonical; permit only the fixed official display prefix.
-  if (!/^(?:0\.83\.0|pi(?:-coding-agent)?(?:\s+version)?\s+v?0\.83\.0)$/i.test(line)) {
-    throw new Error("Pi executable version must be exactly 0.83.0");
+  if (!new RegExp(`^(?:${BUNDLED_PI_VERSION}|pi(?:-coding-agent)?(?:\\s+version)?\\s+v?${BUNDLED_PI_VERSION})$`, "i").test(line)) {
+    throw new Error(`Pi executable version must be exactly ${BUNDLED_PI_VERSION}`);
   }
-  return "0.83.0";
+  return BUNDLED_PI_VERSION;
 }
 
 export interface PiCapabilityProbe {
@@ -234,7 +235,7 @@ export interface PiCapabilityProbe {
 }
 
 export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
-  if (capabilities.version !== "0.83.0") throw new Error("trusted Pi version 0.83.0 is required");
+  if (capabilities.version !== BUNDLED_PI_VERSION) throw new Error(`trusted Pi version ${BUNDLED_PI_VERSION} is required`);
   if (capabilities.distribution === "external" && capabilities.trustedProtocol === true) {
     throw new Error("external Pi cannot use the bundled trusted protocol bypass");
   }

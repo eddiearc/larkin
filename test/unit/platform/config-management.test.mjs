@@ -28,6 +28,69 @@ function fixture() {
   return { root, file };
 }
 
+test("Pi distribution mutation is locked, snapshotted, and atomically rollbackable", () => {
+  const { root, file } = fixture();
+  const env = { LARKIN_CONFIG_DIR: root };
+  const snapshot = path.join(root, "pi-distribution.snapshot.json");
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.agents[APP].runtime = "pi";
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    const before = fs.readFileSync(file);
+    const result = configApi.mutateConfig(env, {
+      kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin",
+    }, { kind: "user" }, { snapshotFile: snapshot });
+    assert.equal(result.config.agents[APP].piDistribution, "builtin");
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).agents[APP].piDistribution, "builtin");
+    assert.equal(fs.statSync(snapshot).mode & 0o777, 0o600);
+    const rollback = configApi.rollbackConfig(env, snapshot);
+    assert.equal(rollback.agentId, APP);
+    assert.deepEqual(fs.readFileSync(file), before);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).agents[APP].piDistribution, undefined);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Pi distribution snapshot rejects symlink and insecure paths without changing config", () => {
+  const { root, file } = fixture();
+  const env = { LARKIN_CONFIG_DIR: root };
+  const outside = path.join(os.tmpdir(), `larkin-snapshot-target-${process.pid}`);
+  const link = path.join(root, "snapshot-link.json");
+  const insecure = path.join(root, "insecure");
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.agents[APP].runtime = "pi";
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(outside, "do-not-touch\n", { mode: 0o600 });
+    fs.symlinkSync(outside, link);
+    const before = fs.readFileSync(file);
+    assert.throws(() => configApi.mutateConfig(env, {
+      kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin",
+    }, { kind: "user" }, { snapshotFile: link }), /unsafe|symlink/i);
+    assert.deepEqual(fs.readFileSync(file), before);
+    fs.unlinkSync(link);
+    fs.mkdirSync(insecure, { mode: 0o755 });
+    if (process.platform !== "win32") fs.chmodSync(insecure, 0o755);
+    assert.throws(() => configApi.mutateConfig(env, {
+      kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin",
+    }, { kind: "user" }, { snapshotFile: path.join(insecure, "snapshot.json") }), /0700|unsafe/i);
+    assert.deepEqual(fs.readFileSync(file), before);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); try { fs.unlinkSync(outside); } catch {} }
+});
+
+test("rollback refuses a post-snapshot configuration change", () => {
+  const { root, file } = fixture();
+  const env = { LARKIN_CONFIG_DIR: root };
+  const snapshot = path.join(root, "pi-distribution.snapshot.json");
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.agents[APP].runtime = "pi";
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId: APP, distribution: "builtin" }, { kind: "user" }, { snapshotFile: snapshot });
+    fs.appendFileSync(file, "\n");
+    assert.throws(() => configApi.rollbackConfig(env, snapshot), /changed after the snapshot/i);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("v3 loads as a v4 view and legacy noMentionChats becomes an Agent x chat override", () => {
   const { root } = fixture();
   try {

@@ -136,16 +136,16 @@ const die = (message: string): never => {
   process.exit(1);
 };
 
-if (!kind || !["agents", "model", "runtime", "effort", "chats", "config"].includes(kind)) {
-  die("用法: larkin agents | larkin config <show|mention|apply> | larkin model [<id>] | larkin runtime [<id>] [--model <id>] | larkin effort [<level>|clear] | larkin chats [free|strict <oc_id>]");
+if (!kind || !["agents", "model", "runtime", "effort", "pi-distribution", "chats", "config"].includes(kind)) {
+  die("用法: larkin agents | larkin config <show|mention|apply> | larkin model [<id>] | larkin runtime [<id>] [--model <id>] | larkin pi-distribution [show|builtin|external] | larkin effort [<level>|clear] | larkin chats [free|strict <oc_id>]");
 }
 
 const allowedValueFlags: Record<string, ReadonlySet<string>> = {
   agents: new Set(), model: new Set(["--agent"]), runtime: new Set(["--agent", "--model"]),
-  effort: new Set(["--agent"]), chats: new Set(["--agent"]), config: new Set(["--agent", "--chat"]),
+  effort: new Set(["--agent"]), "pi-distribution": new Set(["--agent", "--snapshot"]), chats: new Set(["--agent"]), config: new Set(["--agent", "--chat"]),
 };
 const allowedBooleanFlags: Record<string, ReadonlySet<string>> = {
-  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), chats: new Set(), config: new Set(["--json"]),
+  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), "pi-distribution": new Set(), chats: new Set(), config: new Set(["--json"]),
 };
 const parsedValues = new Map<string, string>();
 const parsedBooleans = new Set<string>();
@@ -195,6 +195,9 @@ if (kind === "agents") {
 } else if (kind === "effort") {
   assertOnlyFlags(["--agent"]);
   if (positionals.length > 1) die("用法: larkin effort [<level>|clear|default] [--agent <App ID>]");
+} else if (kind === "pi-distribution") {
+  assertOnlyFlags(["--agent", "--snapshot"]);
+  if (positionals.length > 1) die("用法: larkin pi-distribution [show|builtin|external] [--agent <App ID>] [--snapshot <private-file>]");
 } else if (kind === "chats") {
   assertOnlyFlags(["--agent"]);
   if (![0, 2].includes(positionals.length)) die("用法: larkin chats [free|strict <oc_id>] [--agent <App ID>]");
@@ -229,6 +232,15 @@ const loaded = (() => {
 })();
 const { configDir, file, config } = loaded;
 if (!fs.existsSync(file)) die("未找到 Larkin 配置，请运行 larkin setup");
+const snapshotFile = parsedValues.get("--snapshot");
+if (kind === "pi-distribution" && value === "rollback") {
+  if (!snapshotFile || positionals.length !== 1) die("用法: larkin pi-distribution rollback --snapshot <private-file>");
+  try {
+    const result = larkinConfig.rollbackConfig(process.env, snapshotFile as string);
+    say(JSON.stringify({ ok: true, rolledBackAgent: result.agentId, revision: result.revision }));
+  } catch (error) { die(`回滚失败：${error instanceof Error ? error.message : String(error)}`); }
+  process.exit(0);
+}
 
 if (kind === "agents") {
   const list = Object.values(config.agents || {});
@@ -428,6 +440,21 @@ if (!key) {
 }
 const selectedKey = key as string;
 const agent = config.agents[selectedKey];
+if (kind === "pi-distribution") {
+  const requested = value || "show";
+  if (requested === "show") {
+    say(JSON.stringify({ agentId: selectedKey, runtime: agent.runtime, piDistribution: agent.piDistribution ?? "external" }));
+    process.exit(0);
+  }
+  if (requested !== "builtin" && requested !== "external") die("Pi distribution 只允许 show/builtin/external");
+  if (agent.runtime !== "pi") die(`Agent ${selectedKey} 不是 Pi runtime`);
+  if (!snapshotFile) die("修改 Pi distribution 必须提供 --snapshot <private-file>");
+  try {
+    const result = larkinConfig.mutateConfig(process.env, { kind: "set-agent-pi-distribution", agentId: selectedKey, distribution: requested as "builtin" | "external" }, { kind: "user" }, { snapshotFile: snapshotFile as string });
+    say(JSON.stringify({ ok: true, agentId: selectedKey, piDistribution: requested, revision: result.revision, applyState: result.applyState }));
+  } catch (error) { die(`Pi distribution 修改失败：${error instanceof Error ? error.message : String(error)}`); }
+  process.exit(0);
+}
 const catalog = larkinConfig.loadRuntimeModels();
 if ((["model", "effort"].includes(kind || "") && agent.runtime === "codex") || (kind === "runtime" && value === "codex")) {
   try {

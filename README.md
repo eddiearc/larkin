@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/larkin-hero.svg" width="100%" alt="Larkin connecting Codex, Claude Code, and Pi agent runtimes to Feishu with a local dashboard and message surfaces.">
+  <img src="./assets/readme/larkin-github-cover.png" width="100%" alt="Larkin connecting Codex, Claude Code, and Pi agent runtimes to Feishu with a local dashboard and message surfaces.">
 </p>
 
 <p align="center">

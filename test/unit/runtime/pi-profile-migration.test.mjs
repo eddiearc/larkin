@@ -131,7 +131,7 @@ test("rejects tampered rollback bytes before touching the target", () => {
   } finally { clean(f); }
 });
 
-test("refuses target tampering during rollback", () => {
+test("refuses target content or mode tampering during rollback", () => {
   const f = fixture();
   try {
     const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
@@ -139,5 +139,13 @@ test("refuses target tampering during rollback", () => {
     fs.appendFileSync(path.join(f.targetDir, "models.json"), "tampered");
     assert.throws(() => migration.rollbackPiProfileMigration(plan.state), /changed/);
     assert.equal(fs.existsSync(f.targetDir), true);
+
+    const second = fixture();
+    try {
+      const secondPlan = migration.preparePiProfileMigration(second.env, second.config, second.agent);
+      migration.applyPiProfileMigration(secondPlan);
+      fs.chmodSync(path.join(second.targetDir, "models.json"), 0o644);
+      assert.throws(() => migration.rollbackPiProfileMigration(secondPlan.state), /changed/);
+    } finally { clean(second); }
   } finally { clean(f); }
 });

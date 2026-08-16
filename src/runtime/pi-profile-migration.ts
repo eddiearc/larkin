@@ -276,7 +276,7 @@ function assertPrior(state: PiProfileMigrationState): void {
   for (const name of FILES) {
     const current = currentFileState(path.join(state.targetDir, name));
     const prior = state.priorFiles[name];
-    if (current.present !== prior.present || (current.present && current.sha256 !== prior.sha256)) throw new Error("Pi provider target rollback is incomplete or conflicted");
+    if (current.present !== prior.present || (current.present && (current.sha256 !== prior.sha256 || current.bytes !== prior.bytes || current.mode !== prior.mode))) throw new Error("Pi provider target rollback is incomplete or conflicted");
   }
 }
 function restoreFile(file: string, prior: FileState): void {
@@ -294,8 +294,19 @@ export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
   const parent = path.dirname(plan.state.targetDir); assertNoSymlinkAncestors(parent); fs.mkdirSync(parent, { recursive: true, mode: 0o700 }); fs.chmodSync(parent, 0o700);
   const existing = assertDirectory(plan.state.targetDir, "Pi provider target", false);
   if (existing && (existing.mode & 0o777) !== 0o700) throw new Error("Pi provider target must be 0700");
-  if (!existing) { fs.mkdirSync(plan.state.targetDir, { mode: 0o700 }); fs.chmodSync(plan.state.targetDir, 0o700); }
-  for (const name of FILES) atomicPrivateWrite(path.join(plan.state.targetDir, name), plan.sourceBytes[name]);
+  if (!existing) {
+    try { fs.mkdirSync(plan.state.targetDir, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Pi provider target changed; refusing migration"); throw error; }
+    fs.chmodSync(plan.state.targetDir, 0o700);
+  }
+  for (const name of FILES) {
+    const current = currentFileState(path.join(plan.state.targetDir, name));
+    const prior = plan.state.priorFiles[name];
+    if (current.present !== prior.present || (current.present && (current.sha256 !== prior.sha256 || current.bytes !== prior.bytes || current.mode !== prior.mode))) {
+      throw new Error("Pi provider target changed; refusing migration");
+    }
+    atomicPrivateWrite(path.join(plan.state.targetDir, name), plan.sourceBytes[name]);
+  }
   for (const name of FILES) if (currentFileState(path.join(plan.state.targetDir, name)).sha256 !== plan.state.afterFiles[name].sha256) throw new Error("Pi provider import verification failed");
   fsyncDirectory(plan.state.targetDir);
 }
@@ -314,14 +325,14 @@ export function rollbackPiProfileMigration(state: PiProfileMigrationState): void
     const current = currentFileState(path.join(state.targetDir, name));
     const prior = state.priorFiles[name];
     const expected = state.afterFiles[name];
-    const isPrior = current.present === prior.present && (!current.present || current.sha256 === prior.sha256);
-    const isExpected = current.present && current.sha256 === expected.sha256;
+    const isPrior = current.present === prior.present && (!current.present || (current.sha256 === prior.sha256 && current.bytes === prior.bytes && current.mode === prior.mode));
+    const isExpected = current.present && current.sha256 === expected.sha256 && current.bytes === expected.bytes && current.mode === 0o600;
     if (!isPrior && !isExpected) throw new Error("Pi provider target changed; refusing migration rollback");
   }
   for (const name of FILES) {
     const current = currentFileState(path.join(state.targetDir, name));
     const prior = state.priorFiles[name];
-    const isPrior = current.present === prior.present && (!current.present || current.sha256 === prior.sha256);
+    const isPrior = current.present === prior.present && (!current.present || (current.sha256 === prior.sha256 && current.bytes === prior.bytes && current.mode === prior.mode));
     if (!isPrior) restoreFile(path.join(state.targetDir, name), prior);
   }
   if (!state.targetDirExisted) {

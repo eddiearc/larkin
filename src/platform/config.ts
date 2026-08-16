@@ -265,23 +265,38 @@ export function assertPrivateConfigMetadata(metadata: { regularFile: boolean; ui
   if (!exactMode(metadata, 0o600)) throw new Error(`${label} 权限必须是 0600`);
 }
 
-function readPrivateFile(file: string, root: string, limit: number, label: string): Buffer | null {
+function readBoundedPrivateFile(file: string, limit: number, label: string): Buffer {
   let fd: number | null = null;
   try {
-    const rootReal = fs.realpathSync(root);
-    const parentReal = fs.realpathSync(path.dirname(file));
-    if (parentReal !== rootReal) throw new Error(`${label} 必须位于 canonical config root 内`);
+    const initial = fs.lstatSync(file);
+    if (initial.isSymbolicLink()) throw new Error(`${label} 不允许 symlink`);
+    if (!initial.isFile()) throw new Error(`${label} 必须是普通文件`);
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    const stat = fs.fstatSync(fd);
-    assertPrivateConfigMetadata({ regularFile: stat.isFile(), uid: stat.uid, mode: stat.mode }, label);
-    if (stat.size > limit) throw new Error(`${label} 超过 ${limit} bytes`);
-    return fs.readFileSync(fd);
+    const before = fs.fstatSync(fd);
+    assertPrivateConfigMetadata({ regularFile: before.isFile(), uid: before.uid, mode: before.mode }, label);
+    if (before.nlink !== 1) throw new Error(`${label} 必须是未共享的普通文件`);
+    if (before.size > limit) throw new Error(`${label} 超过 ${limit} bytes`);
+    const bytes = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.nlink !== before.nlink
+        || after.uid !== before.uid || after.gid !== before.gid || after.mode !== before.mode) throw new Error(`${label} 读取期间发生变化`);
+    return bytes;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`${label} 不允许 symlink`);
     throw error;
   } finally {
     if (fd !== null) fs.closeSync(fd);
+  }
+}
+function readPrivateFile(file: string, root: string, limit: number, label: string): Buffer | null {
+  try {
+    const rootReal = fs.realpathSync(root);
+    const parentReal = fs.realpathSync(path.dirname(file));
+    if (parentReal !== rootReal) throw new Error(`${label} 必须位于 canonical config root 内`);
+    return readBoundedPrivateFile(file, limit, label);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
 }
 
@@ -784,9 +799,7 @@ function writeConfigSnapshot(file: string, root: string, snapshot: ConfigSnapsho
 
 function readConfigSnapshot(file: string, root: string): ConfigSnapshot {
   assertSnapshotPath(file, root, [path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE), path.join(root, "config.json"), path.join(root, "config-apply-state.json")]);
-  const snapshotStat = fs.lstatSync(file);
-  if (snapshotStat.size > PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES) throw new Error("config snapshot is too large");
-  const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ConfigSnapshot>;
+  const parsed = JSON.parse(readBoundedPrivateFile(file, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES, "config snapshot").toString("utf8")) as Partial<ConfigSnapshot>;
   if (parsed.version !== 2 || typeof parsed.targetAgentId !== "string" || !APP_ID.test(parsed.targetAgentId)
       || typeof parsed.beforeRevision !== "string" || typeof parsed.afterRevision !== "string"
       || typeof parsed.afterSignature !== "string" || !parsed.beforeConfig || typeof parsed.beforeConfigBytes !== "string"

@@ -391,14 +391,36 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       "expected blocked processing-eye errors must not look like a channel failure");
     let validationCount = 0;
     let providerCallsBeforeBoundaryChange = 0;
+    const stableProof = validateLiveHoldHostReady(claim.targetRoot, agentId);
     assert.throws(() => runProviderWithLiveHoldReady(
       claim.targetRoot,
       agentId,
       () => { providerCallsBeforeBoundaryChange += 1; },
-      { stage: "epoch-change", validate: () => { validationCount += 1; if (validationCount === 2) throw new Error("daemon epoch changed"); } },
+      { stage: "epoch-change", validate: () => { validationCount += 1; if (validationCount === 2) throw new Error("daemon epoch changed"); return stableProof; } },
     ), /epoch-change blocked.*daemon epoch changed/);
     assert.equal(validationCount, 2, "provider action must be preceded by an immediate second proof");
     assert.equal(providerCallsBeforeBoundaryChange, 0);
+
+    let barrierProviderCalls = 0;
+    assert.throws(() => runProviderWithLiveHoldReady(
+      claim.targetRoot,
+      agentId,
+      (actionGuard) => { actionGuard(); barrierProviderCalls += 1; },
+      {
+        stage: "post-final-barrier",
+        afterFinalValidation: () => fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
+          pid: child.pid,
+          processStartToken: "epoch-mutated-after-final-check",
+          commandToken: HOLD_HOST_COMMAND_TOKEN,
+          agents: [agentId],
+          startedAt: new Date(Date.parse(connectedAt) + 1_000).toISOString(),
+        })}\n`, { mode: 0o600 }),
+      },
+    ), /post-final-barrier blocked.*(?:process identity|epoch changed|daemon status)/);
+    assert.equal(barrierProviderCalls, 0, "provider side effect must remain zero after a post-final-check epoch mutation");
+    fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
+      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: connectedAt,
+    })}\n`, { mode: 0o600 });
 
     const wrong = JSON.parse(fs.readFileSync(claim.readyFile, "utf8"));
     wrong.processStartToken = "wrong-start-token";

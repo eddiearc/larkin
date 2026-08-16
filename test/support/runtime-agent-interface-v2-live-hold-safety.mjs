@@ -12,6 +12,7 @@ export const HOLD_TEMP_ROOT_PREFIX = "larkin-runtime-interface-v2-hold-";
 export const HOLD_READY_BASENAME = "runtime-interface-v2-hold-host-ready.json";
 export const HOLD_TRACE_BASENAME = "runtime-interface-v2-hold-host-boundary.ndjson";
 export const HOLD_SENTINEL_BASENAME = ".runtime-interface-v2-hold-host-root.json";
+export const HOLD_ACTION_LEASE_BASENAME = ".runtime-interface-v2-hold-host-action-lease.json";
 export const HOLD_READY_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host-ready";
 export const HOLD_SENTINEL_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host-root";
 export const HOLD_READY_MAX_AGE_MS = 120_000;
@@ -210,8 +211,26 @@ function assertSentinel(claim) {
   return sentinel;
 }
 
+function actionLeaseFile(configDir) { return path.join(configDir, HOLD_ACTION_LEASE_BASENAME); }
+
+function readActionLease(configDir) {
+  try { return readPrivateJson(actionLeaseFile(configDir), "hold-host action lease"); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+function assertNoActiveActionLease(configDir) {
+  const lease = readActionLease(configDir);
+  if (!lease) return;
+  const expiresAt = Date.parse(String(lease.expiresAt || ""));
+  const ownerPid = Number(lease.ownerPid);
+  const ownerLive = Number.isInteger(ownerPid) && ownerPid > 0 && inspectProcess(ownerPid)?.ok === true;
+  if (ownerLive && Number.isFinite(expiresAt) && expiresAt > Date.now()) throw new Error("hold-host action lease is active; refusing root cleanup");
+  fs.rmSync(actionLeaseFile(configDir), { force: true });
+}
+
 export function cleanupClaimedHoldHostRoot(claim) {
   assertSentinel(claim);
+  assertNoActiveActionLease(claim.targetRoot);
   fs.rmSync(claim.targetRoot, { recursive: true, force: false, maxRetries: 2 });
   if (fs.existsSync(claim.targetRoot)) throw new Error("hold-host root cleanup left the root present");
 }
@@ -324,16 +343,83 @@ export function runProviderWithLiveHoldReady(
   configDir,
   agentId,
   providerRunner,
-  { stage = "provider command", validate = validateLiveHoldHostReady } = {},
+  { stage = "provider command", validate = validateLiveHoldHostReady, afterFinalValidation } = {},
 ) {
+  let lease;
+  let actionChecked = false;
+  const acquireLease = (proof) => {
+    const file = actionLeaseFile(configDir);
+    const now = Date.now();
+    const value = {
+      schema: "larkin.runtime-agent-interface-v2.action-lease",
+      version: 1,
+      nonce: crypto.randomUUID(),
+      ownerPid: process.pid,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + HOLD_READY_MAX_AGE_MS).toISOString(),
+      daemon: {
+        pid: proof.daemon.pid,
+        processStartToken: proof.daemon.processStartToken,
+        startedAt: proof.daemon.startedAt,
+      },
+      ready: {
+        processStartToken: proof.ready.processStartToken,
+        boundaryAt: proof.ready.boundaryAt,
+      },
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { writePrivateJson(file, value); return value; }
+      catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const existing = readActionLease(configDir);
+        const expiresAt = Date.parse(String(existing?.expiresAt || ""));
+        const ownerPid = Number(existing?.ownerPid);
+        const ownerLive = Number.isInteger(ownerPid) && ownerPid > 0 && inspectProcess(ownerPid)?.ok === true;
+        if (ownerLive && Number.isFinite(expiresAt) && expiresAt > now) throw new Error("another provider action lease is active");
+        fs.rmSync(file, { force: true });
+      }
+    }
+    throw new Error("could not acquire provider action lease");
+  };
   try {
-    validate(configDir, agentId);
-    // The first proof authorizes the stage; the second is deliberately adjacent
-    // to the provider call so epoch/status changes cannot pass a stale preflight.
-    validate(configDir, agentId);
+    const initial = validate(configDir, agentId);
+    lease = acquireLease(initial);
+    // The proof is bound to the immutable lease; this is not a second loose poll.
+    const final = validate(configDir, agentId);
+    if (final.ready.processStartToken !== lease.ready.processStartToken
+        || final.ready.boundaryAt !== lease.ready.boundaryAt
+        || final.daemon.pid !== lease.daemon.pid
+        || final.daemon.processStartToken !== lease.daemon.processStartToken
+        || final.daemon.startedAt !== lease.daemon.startedAt) {
+      throw new Error("live hold-host epoch changed before provider action");
+    }
+    afterFinalValidation?.();
+    const actionGuard = () => {
+      const current = validate(configDir, agentId);
+      const currentLease = readActionLease(configDir);
+      if (!currentLease || currentLease.nonce !== lease.nonce || Date.parse(String(currentLease.expiresAt || "")) <= Date.now()) {
+        throw new Error("live hold-host action lease expired or changed");
+      }
+      if (current.ready.processStartToken !== lease.ready.processStartToken
+          || current.ready.boundaryAt !== lease.ready.boundaryAt
+          || current.daemon.pid !== lease.daemon.pid
+          || current.daemon.processStartToken !== lease.daemon.processStartToken
+          || current.daemon.startedAt !== lease.daemon.startedAt) {
+        throw new Error("live hold-host epoch changed before provider side effect");
+      }
+      actionChecked = true;
+    };
+    const result = providerRunner(actionGuard);
+    if (!actionChecked) throw new Error(`${stage} must invoke the immutable action guard immediately before its provider side effect`);
+    return result;
   }
   catch (error) {
     throw new Error(`${stage} blocked because live hold-host proof failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return providerRunner();
+  finally {
+    if (lease) {
+      const current = readActionLease(configDir);
+      if (current?.nonce === lease.nonce && current.ownerPid === process.pid) fs.rmSync(actionLeaseFile(configDir), { force: true });
+    }
+  }
 }

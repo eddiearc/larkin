@@ -269,6 +269,12 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
       },
     };
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
+    const staleStateDir = path.join(temp, "state", "agents", first);
+    fs.mkdirSync(staleStateDir, { recursive: true });
+    fs.writeFileSync(path.join(staleStateDir, "status.json"), JSON.stringify({
+      runtimeReadiness: { state: "ready", observedAt: "2026-08-15T00:00:00.000Z", executable: "/tmp/pi", version: "0.84.2" },
+      session: { runtime: "codex", startedAt: "2026-08-15T00:00:00.000Z" },
+    }));
     const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], {
       cwd: ROOT,
       encoding: "utf8",
@@ -281,6 +287,8 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
     assert.match(agents.stdout, /cli_configA1 \[active\]/);
     assert.match(agents.stdout, /cli_configB2/);
     assert.match(agents.stdout, /入站=本次运行尚未收到消息验证/);
+    assert.match(agents.stdout, /runtime readiness=unavailable：ready 证据不属于当前 owned daemon epoch 或当前 session/);
+    assert.doesNotMatch(agents.stdout, /runtime readiness=ready/);
 
     const agentsJson = run("agents", "--json");
     assert.equal(agentsJson.status, 0, agentsJson.stderr);

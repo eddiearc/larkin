@@ -330,11 +330,19 @@ if (kind === "agents") {
       && !!status?.inboundVerifiedAt
       && Date.parse(status.inboundVerifiedAt) >= Date.parse(String(daemon.startedAt || 0));
     const commentDiagnostic = projectDocumentCommentDiagnostic(commentCapability, status);
+    const projectedReadiness = projectAgentReadiness({ agentId: agent.agentId, daemon, status });
     say(`  ${agent.name}${agent.name === config.activeAgent ? " [active]" : ""}`);
     const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
     const effectiveEffort = status?.session?.runtime === agent.runtime && status.session.reasoningEffort ? status.session.reasoningEffort : agent.effort;
     say(`    runtime=${agent.runtime}  model=${effectiveModel}${effectiveModel !== agent.model ? `  stored=${agent.model}` : ""}${effectiveEffort ? `  effort=${effectiveEffort}` : ""}`);
-    if (status?.runtimeReadiness) say(`    runtime readiness=${status.runtimeReadiness.state || "incompatible"}${status.runtimeReadiness.reason ? `：${status.runtimeReadiness.reason}` : ""}${status.runtimeReadiness.nextAction ? `；下一步：${status.runtimeReadiness.nextAction}` : ""}`);
+    if (status?.runtimeReadiness) {
+      const current = projectedReadiness.readiness.runtime_ready;
+      const state = status.runtimeReadiness.state === "ready" && !current ? "unavailable" : status.runtimeReadiness.state || "incompatible";
+      const staleReason = status.runtimeReadiness.state === "ready" && !current
+        ? "：ready 证据不属于当前 owned daemon epoch 或当前 session，已拒绝展示为 ready"
+        : status.runtimeReadiness.reason ? `：${status.runtimeReadiness.reason}` : "";
+      say(`    runtime readiness=${state}${staleReason}${status.runtimeReadiness.nextAction ? `；下一步：${status.runtimeReadiness.nextAction}` : ""}`);
+    }
     if (status?.runtimeReadiness?.executable) say(`    runtime executable=${status.runtimeReadiness.executable}${status.runtimeReadiness.version ? `  version=${status.runtimeReadiness.version}` : ""}`);
     say(`    bot=${bot ? `${bot.name}(${bot.open_id})` : "（未连接过，无身份缓存）"}`);
     const reconnecting = connected && isChannelReconnecting(status);

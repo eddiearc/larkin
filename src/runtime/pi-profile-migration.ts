@@ -41,6 +41,7 @@ export interface PiProfileMigrationPlan {
 }
 
 const TARGET_LOCK_SUFFIX = ".larkin-pi-import.lock";
+const LARKIN_CREATED_TARGET_ENTRIES = new Set([".larkin-official-pi-package", "models-store.json", "npm"]);
 function hash(bytes: Buffer): string { return crypto.createHash("sha256").update(bytes).digest("hex"); }
 function targetLockFile(state: PiProfileMigrationState): string { return path.join(path.dirname(state.targetDir), `${state.agentId}${TARGET_LOCK_SUFFIX}`); }
 function acquireTargetLock(state: PiProfileMigrationState): void {
@@ -380,7 +381,16 @@ export function rollbackPiProfileMigration(state: PiProfileMigrationState): void
   }
   if (!state.targetDirExisted) {
     const entries = fs.readdirSync(state.targetDir).filter((name) => !FILES.includes(name as FileName) && !name.startsWith(".larkin-pi-import-"));
-    if (entries.length === 0) { fs.rmdirSync(state.targetDir); }
+    const unknown = entries.filter((name) => !LARKIN_CREATED_TARGET_ENTRIES.has(name));
+    if (unknown.length === 0) {
+      for (const name of entries) {
+        const artifact = path.join(state.targetDir, name);
+        const artifactStat = fs.lstatSync(artifact);
+        if (artifactStat.isSymbolicLink()) throw new Error("Pi provider rollback artifact is a symlink");
+        fs.rmSync(artifact, { recursive: artifactStat.isDirectory(), force: true });
+      }
+      fs.rmdirSync(state.targetDir);
+    }
   } else fs.chmodSync(state.targetDir, state.targetDirMode);
   if (state.targetDirExisted) assertPrior(state);
   fsyncDirectory(path.dirname(state.targetDir));

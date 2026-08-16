@@ -36,7 +36,7 @@ exit 0
 
 async function run() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-migrated-builtin-standalone-"));
-  const config = path.join(temp, "config"); const bin = path.join(temp, "bin"); const events = path.join(config, "events.ndjson");
+  const config = path.join(temp, ".larkin"); const bin = path.join(temp, "bin"); const events = path.join(config, "events.ndjson");
   const release = path.join(temp, "release"); fs.mkdirSync(config, { mode: 0o700 }); fs.mkdirSync(bin, { mode: 0o700 }); fs.writeFileSync(events, ""); writeOfficialLarkCli(temp, bin);
   let requests = 0; const provider = http.createServer((req, res) => { req.resume(); req.on("end", () => { requests += 1; res.writeHead(200, { "content-type": "text/event-stream" }); res.end('data: {"id":"fixture","object":"chat.completion.chunk","created":1,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"MIGRATED_READY"},"finish_reason":null}]}\n\ndata: {"id":"fixture","object":"chat.completion.chunk","created":1,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n'); }); });
   await new Promise((r, j) => { provider.once("error", j); provider.listen(0, "127.0.0.1", r); });
@@ -55,7 +55,9 @@ async function run() {
     const baseEnv = { ...process.env, HOME: temp, PATH: `${bin}:/usr/bin:/bin`, LARKIN_CONFIG_DIR: config, LARKIN_HOME: config, PI_CODING_AGENT_DIR: external, LARKIN_FEISHU_EVENT_FILE: events, LARKIN_DASHBOARD_PORT: String(await freePort()), PI_TELEMETRY: "0" };
     const imported = spawnSync(process.execPath, [path.join(ROOT, "dist/app/agent-config.mjs"), "pi-distribution", "builtin", "--agent", AGENT, "--snapshot", path.join(config, "migration.snapshot.json"), "--import-external-profile"], { cwd: ROOT, env: baseEnv, encoding: "utf8", timeout: 30_000 });
     checked(imported, "import external Pi profile");
-    const env = baseEnv;
+    const env = { ...baseEnv };
+    delete env.LARKIN_CONFIG_DIR;
+    delete env.LARKIN_HOME;
     const statusFile = path.join(config, "state", "agents", AGENT, "status.json");
     const deliveryFile = path.join(config, "state", "agents", AGENT, "runtime-deliveries.json");
     let logs = "";
@@ -75,7 +77,11 @@ async function run() {
     fs.appendFileSync(events, `${JSON.stringify({ chat_id: "oc_fixture", chat_type: "p2p", sender_id: "ou_fixture", message_id: "om_migrated_2", event_id: "evt_migrated_2", content: "local fixture resumed turn", create_time: "1787000000001", thread_id: null, _mentioned_bot: true, _mention_all: false, _sender_is_bot: false })}\n`);
     await waitFor(() => requests >= 2 && JSON.parse(fs.readFileSync(deliveryFile, "utf8")).records.some((r) => r.messageId === "om_migrated_2" && ["accepted", "submitting", "pending"].includes(r.status)), "resumed local provider turn");
     await stop(service);
+    assert.equal(fs.existsSync(providerDir), true, "launchd-style restart must retain the imported per-Agent directory");
+    assert.equal(fs.statSync(providerDir).mode & 0o777, 0o700);
+    assert.equal(fs.existsSync(path.join(providerDir, "settings.json")), true);
+    assert.equal(fs.existsSync(path.join(config, "migration.snapshot.json")), true, "retained migration snapshot must not trigger startup rollback");
   } finally { await new Promise((r) => provider.close(r)); fs.rmSync(temp, { recursive: true, force: true }); }
 }
 
-test.skipIf(!ENABLED)("migrated external Pi profile runs the actual standalone bundled Pi through RPC, local turns, and session resume", { timeout: 300_000 }, run);
+test.skipIf(!ENABLED)("migrated external Pi profile survives a launchd-style standalone start through RPC, local turns, and session resume", { timeout: 300_000 }, run);

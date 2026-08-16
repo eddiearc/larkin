@@ -131,6 +131,20 @@ test("rejects tampered rollback bytes before touching the target", () => {
   } finally { clean(f); }
 });
 
+test("reverse rollback removes only startup-created official Pi artifacts from an absent target", () => {
+  const f = fixture();
+  try {
+    const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
+    migration.applyPiProfileMigration(plan);
+    fs.mkdirSync(path.join(f.targetDir, ".larkin-official-pi-package", "theme"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(f.targetDir, ".larkin-official-pi-package", "package.json"), "{}\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(f.targetDir, "models-store.json"), "{}\n", { mode: 0o600 });
+    fs.mkdirSync(path.join(f.targetDir, "npm"), { mode: 0o700 });
+    migration.rollbackPiProfileMigration(plan.state);
+    assert.equal(fs.existsSync(f.targetDir), false);
+  } finally { clean(f); }
+});
+
 test("refuses target content or mode tampering during rollback", () => {
   const f = fixture();
   try {

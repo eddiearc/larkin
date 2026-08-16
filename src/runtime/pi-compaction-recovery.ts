@@ -166,6 +166,21 @@ export function prepareOwnedPiDirectory(directory: string): string {
   return directory;
 }
 
+export function mergeOwnedPiSettings(value: unknown): Record<string, unknown> {
+  if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
+    throw new Error("Pi owned settings are invalid");
+  }
+  const object = (value || {}) as Record<string, unknown>;
+  const existing = object.compaction;
+  if (existing !== undefined && (!existing || typeof existing !== "object" || Array.isArray(existing))) {
+    throw new Error("Pi owned compaction settings are invalid");
+  }
+  return { ...object, compaction: {
+    ...(existing as Record<string, unknown> | undefined), enabled: true,
+    reserveTokens: COMPACTION_RESERVE_TOKENS, keepRecentTokens: COMPACTION_KEEP_RECENT_TOKENS,
+  } };
+}
+
 export function writeOwnedPiSettings(directory: string): void {
   ensureDirectoryChain(path.dirname(directory));
   ensureDirectory(directory);
@@ -176,15 +191,14 @@ export function writeOwnedPiSettings(directory: string): void {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  let value: unknown;
+  try { value = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Pi owned settings are invalid");
+  }
   const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify({
-      compaction: {
-        enabled: true,
-        reserveTokens: COMPACTION_RESERVE_TOKENS,
-        keepRecentTokens: COMPACTION_KEEP_RECENT_TOKENS,
-      },
-    }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(temporary, `${JSON.stringify(mergeOwnedPiSettings(value), null, 2)}\n`, { flag: "wx", mode: 0o600 });
     fs.renameSync(temporary, file);
     fs.chmodSync(file, 0o600);
   } finally {

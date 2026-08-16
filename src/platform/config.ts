@@ -6,6 +6,14 @@ import { TargetRootLayout, resolveConfigDir as resolveRootConfigDir } from "./ro
 import { exactMode, fsyncDirectoryOf } from "./secure-metadata.js";
 import { CURRENT_RUNTIME_MODELS, type RuntimeModels } from "../runtime/runtime-model-catalog.js";
 import processInspect from "./process-inspect.cjs";
+import {
+  applyPiProfileMigration,
+  preparePiProfileMigration,
+  rollbackPiProfileMigration,
+  validatePiProfileMigrationState,
+  type PiProfileMigrationPlan,
+  type PiProfileMigrationState,
+} from "../runtime/pi-profile-migration.js";
 
 type Env = Record<string, string | undefined>;
 type Obj = Record<string, unknown>;
@@ -84,6 +92,7 @@ const PI_MODEL = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._:@+-]+)?$/;
 const CODEX_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CLAUDE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,127}$/;
 const CONFIG_LIMIT_BYTES = 1024 * 1024;
+const PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES = 64 * 1024 * 1024;
 const LOCK_RETRIES = 200;
 const MALFORMED_LOCK_GRACE_MS = 5_000;
 let runtimeModels: RuntimeModels | undefined;
@@ -390,9 +399,25 @@ interface ConfigRollbackJournal {
   beforeRevision: string;
   beforeConfigBytes: string;
   beforeApplyState: ConfigApplyFile;
+  migration?: PiProfileMigrationState;
+}
+
+interface ConfigMigrationJournal {
+  version: 1;
+  phase: "forward";
+  targetAgentId: string;
+  beforeRevision: string;
+  expectedAfterRevision: string;
+  migration: PiProfileMigrationState;
 }
 
 function rollbackJournalFile(root: string): string { return path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE); }
+function migrationJournalFile(root: string): string { return path.join(root, ".pi-profile-migration-journal.json"); }
+function assertMigrationTarget(root: string, agentId: string, migration: PiProfileMigrationState): void {
+  if (migration.agentId !== agentId || path.resolve(migration.targetDir) !== path.join(path.resolve(root), "providers", "pi", agentId)) {
+    throw new Error("Pi profile migration target is invalid");
+  }
+}
 
 function restoreTargetApplyState(root: string, targetAgentId: string, beforeRevision: string, before: ConfigApplyFile): void {
   const current = readApplyFile(root);
@@ -405,7 +430,7 @@ function restoreTargetApplyState(root: string, targetAgentId: string, beforeRevi
 function recoverRollbackJournal(root: string): void {
   const file = rollbackJournalFile(root);
   let bytes: Buffer | null;
-  try { bytes = readPrivateFile(file, root, CONFIG_LIMIT_BYTES, "config rollback journal"); }
+  try { bytes = readPrivateFile(file, root, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES, "config rollback journal"); }
   catch (error) { throw error; }
   if (bytes === null) return;
   let journal: Partial<ConfigRollbackJournal>;
@@ -421,9 +446,11 @@ function recoverRollbackJournal(root: string): void {
   const beforeRaw = JSON.parse(beforeBytes.toString("utf8"));
   normalizeConfig(beforeRaw, root);
   validateApplyState(journal.beforeApplyState);
+  if (journal.migration !== undefined) { validatePiProfileMigrationState(journal.migration); assertMigrationTarget(root, journal.targetAgentId, journal.migration); }
   const current = readConfigFile(path.join(root, "config.json"), root);
   const currentRevision = revision(current.bytes);
   if (currentRevision === journal.expectedAfterRevision) {
+    if (journal.migration) rollbackPiProfileMigration(journal.migration);
     atomicWriteBytes(path.join(root, "config.json"), beforeBytes);
     restoreTargetApplyState(root, journal.targetAgentId, journal.beforeRevision, journal.beforeApplyState as ConfigApplyFile);
   } else if (currentRevision === journal.beforeRevision) {
@@ -435,6 +462,40 @@ function recoverRollbackJournal(root: string): void {
   }
   fs.unlinkSync(file);
   fsyncDirectoryOf(file);
+}
+
+function recoverMigrationJournal(root: string): void {
+  const file = migrationJournalFile(root);
+  const bytes = readPrivateFile(file, root, CONFIG_LIMIT_BYTES * 2, "Pi profile migration journal");
+  if (bytes === null) return;
+  let journal: Partial<ConfigMigrationJournal>;
+  try { journal = JSON.parse(bytes.toString("utf8")) as Partial<ConfigMigrationJournal>; }
+  catch { throw new Error("Pi profile migration journal is invalid"); }
+  if (journal.version !== 1 || journal.phase !== "forward" || typeof journal.targetAgentId !== "string"
+      || typeof journal.beforeRevision !== "string" || typeof journal.expectedAfterRevision !== "string" || !journal.migration) {
+    throw new Error("Pi profile migration journal is invalid");
+  }
+  validatePiProfileMigrationState(journal.migration);
+  assertMigrationTarget(root, journal.targetAgentId, journal.migration);
+  const current = readConfigFile(path.join(root, "config.json"), root);
+  const currentRevision = revision(current.bytes);
+  if (currentRevision === journal.beforeRevision) {
+    // Forward import did not publish config. The migration helper restores only
+    // files still matching its expected post-import hashes.
+    try { rollbackPiProfileMigration(journal.migration); }
+    catch (error) { throw new Error(`Pi profile migration recovery refused: ${error instanceof Error ? error.message : String(error)}`); }
+  } else if (currentRevision === journal.expectedAfterRevision) {
+    // Config won the race; verify the provider target before finalizing.
+    const migration = journal.migration;
+    for (const name of ["auth.json", "models.json", "settings.json"] as const) {
+      const fileState = JSON.parse(JSON.stringify(migration.afterFiles[name])) as { sha256?: string };
+      const currentFile = fs.lstatSync(path.join(migration.targetDir, name));
+      if (!currentFile.isFile() || currentFile.isSymbolicLink()) throw new Error("Pi profile migration recovery target is unsafe");
+      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(path.join(migration.targetDir, name))).digest("hex");
+      if (currentHash !== fileState.sha256) throw new Error("Pi profile migration recovery target is incomplete");
+    }
+  } else throw new Error("Pi profile migration journal conflicts with the current configuration");
+  fs.unlinkSync(file); fsyncDirectoryOf(file);
 }
 
 export function configApplyState(env: Env, config: HydratedConfig): Record<string, unknown> {
@@ -658,6 +719,7 @@ function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
   }
   if (!acquired) throw new Error("配置正被其他进程修改，请稍后重试");
   try {
+    recoverMigrationJournal(layout.root);
     recoverRollbackJournal(layout.root);
     return action();
   } finally {
@@ -677,6 +739,7 @@ interface ConfigSnapshot {
   beforeConfig: unknown;
   beforeConfigBytes: string;
   beforeApplyState: ConfigApplyFile;
+  migration?: PiProfileMigrationState;
 }
 
 const CONFIG_ROLLBACK_JOURNAL_FILE = ".config-rollback-journal.json";
@@ -737,11 +800,15 @@ function readConfigSnapshot(file: string, root: string): ConfigSnapshot {
   try { beforeRaw = JSON.parse(beforeBytes.toString("utf8")); } catch { throw new Error("config snapshot before config is invalid"); }
   if (JSON.stringify(beforeRaw) !== JSON.stringify(parsed.beforeConfig)) throw new Error("config snapshot before config does not match bytes");
   validateApplyState(parsed.beforeApplyState);
+  if (parsed.migration !== undefined) {
+    validatePiProfileMigrationState(parsed.migration);
+    assertMigrationTarget(root, parsed.targetAgentId, parsed.migration);
+  }
   return parsed as ConfigSnapshot;
 }
 
-function atomicWriteBytes(file: string, bytes: Buffer): Buffer {
-  if (bytes.length > CONFIG_LIMIT_BYTES) throw new Error(`配置文件超过 ${CONFIG_LIMIT_BYTES} bytes`);
+function atomicWriteBytes(file: string, bytes: Buffer, limit = CONFIG_LIMIT_BYTES): Buffer {
+  if (bytes.length > limit) throw new Error(`${limit === CONFIG_LIMIT_BYTES ? "配置文件" : "配置事务文件"}超过 ${limit} bytes`);
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
   try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
@@ -753,11 +820,13 @@ function atomicWriteBytes(file: string, bytes: Buffer): Buffer {
   return bytes;
 }
 
-function atomicWriteConfig(file: string, value: unknown): Buffer {
-  return atomicWriteBytes(file, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8"));
+function atomicWriteConfig(file: string, value: unknown, limit = CONFIG_LIMIT_BYTES): Buffer {
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+  if (bytes.length > limit) throw new Error(`${limit === CONFIG_LIMIT_BYTES ? "配置文件" : "配置事务文件"}超过 ${limit} bytes`);
+  return atomicWriteBytes(file, bytes, limit);
 }
 
-export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority, options: { snapshotFile?: string } = {}): ConfigMutationResult {
+export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority, options: { snapshotFile?: string; importExternalProfile?: boolean } = {}): ConfigMutationResult {
   assertAuthority(authority, mutation);
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   return withConfigLock(layout, () => {
@@ -765,6 +834,12 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
     if (current.raw === null) throw new Error(`没找到配置 ${layout.configFile}，先跑 larkin setup`);
     const config = normalizeConfig(current.raw, layout.root);
     const priorSignatures = Object.fromEntries(Object.keys(config.agents).map((agentId) => [agentId, agentSignature(config, agentId)]));
+    if (options.importExternalProfile && (mutation.kind !== "set-agent-pi-distribution" || mutation.distribution !== "builtin")) {
+      throw new Error("external Pi profile import is only valid for builtin Pi distribution");
+    }
+    const migrationPlan = options.importExternalProfile && mutation.kind === "set-agent-pi-distribution"
+      ? preparePiProfileMigration(env, layout.root, mutation.agentId)
+      : undefined;
     const changed = applyMutation(config, mutation);
     const stored = toStored(config);
     normalizeConfig(stored, layout.root);
@@ -779,7 +854,15 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
         version: 2, targetAgentId: changed.agentId, beforeRevision: revision(current.bytes), afterRevision: nextRevision,
         afterSignature: agentSignature(config, changed.agentId), beforeConfig: current.raw,
         beforeConfigBytes: current.bytes.toString("base64"), beforeApplyState,
+        ...(migrationPlan ? { migration: migrationPlan.state } : {}),
       });
+    }
+    if (migrationPlan) {
+      atomicWriteConfig(migrationJournalFile(layout.root), {
+        version: 1, phase: "forward", targetAgentId: changed.agentId, beforeRevision: revision(current.bytes),
+        expectedAfterRevision: nextRevision, migration: migrationPlan.state,
+      });
+      applyPiProfileMigration(migrationPlan);
     }
     atomicWriteConfig(layout.configFile, stored);
     let fullyApplied = changed.affectedAgentIds.length === 0;
@@ -800,6 +883,10 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
       }
       writeApplyFile(layout.root, applyState);
     } catch { fullyApplied = false; /* Config persistence remains authoritative. */ }
+    if (migrationPlan) {
+      try { fs.unlinkSync(migrationJournalFile(layout.root)); fsyncDirectoryOf(migrationJournalFile(layout.root)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
     return {
       revision: nextRevision, previousRevision: revision(current.bytes), changedScope: changed.scope,
       ...(changed.agentId ? { agentId: changed.agentId } : {}), persisted: true,
@@ -824,8 +911,10 @@ export function rollbackConfig(env: Env, snapshotFile: string): { revision: stri
     const journal: ConfigRollbackJournal = {
       version: 1, targetAgentId: snapshot.targetAgentId, expectedAfterRevision: snapshot.afterRevision,
       beforeRevision: snapshot.beforeRevision, beforeConfigBytes: snapshot.beforeConfigBytes, beforeApplyState: snapshot.beforeApplyState,
+      ...(snapshot.migration ? { migration: snapshot.migration } : {}),
     };
-    atomicWriteConfig(rollbackJournalFile(layout.root), journal);
+    atomicWriteConfig(rollbackJournalFile(layout.root), journal, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES);
+    if (snapshot.migration) rollbackPiProfileMigration(snapshot.migration);
     const bytes = atomicWriteBytes(layout.configFile, beforeBytes);
     restoreTargetApplyState(layout.root, snapshot.targetAgentId, snapshot.beforeRevision, snapshot.beforeApplyState);
     fs.unlinkSync(rollbackJournalFile(layout.root));

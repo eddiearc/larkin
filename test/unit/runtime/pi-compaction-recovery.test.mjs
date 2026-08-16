@@ -11,6 +11,7 @@ import {
   assertEffectivePiCompactionSettings,
   ensureOwnedPiAgentDirectory,
   prepareOwnedPiDirectory,
+  mergeOwnedPiSettings,
   hasProjectPiCompactionOverride,
   isPiNativeCompactionRequired,
   PiCompactionBreaker,
@@ -32,6 +33,13 @@ test("Pi policy uses the exact effective settings and strict threshold boundary"
   assert.throws(() => assertEffectivePiCompactionSettings({
     contextWindow: 272_000, compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
   }), /reserveTokens/i);
+});
+
+test("Pi owned settings merge preserves unrelated external settings while owning compaction", () => {
+  const merged = mergeOwnedPiSettings({ theme: "dark", packages: { enabled: true }, compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 2 } });
+  assert.equal(merged.theme, "dark");
+  assert.deepEqual(merged.packages, { enabled: true });
+  assert.deepEqual(merged.compaction, { enabled: true, reserveTokens: 40_800, keepRecentTokens: 20_000 });
 });
 
 test("project compaction/context overrides are refused before Pi starts", () => {

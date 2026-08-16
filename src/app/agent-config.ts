@@ -20,6 +20,7 @@ import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
+import { assertBuiltinPiAgentDirectory, piAgentDirectory } from "../runtime/pi-provider-config.js";
 
 interface RuntimeModel {
   id: string;
@@ -63,7 +64,7 @@ interface ConfigModule {
   loadRuntimeModels(): Record<string, RuntimeModel[]>;
   toStored(config: HydratedConfig, configDir: string): unknown;
   defaultModelFor(runtime: string): string;
-  mutateConfig(env: NodeJS.ProcessEnv, mutation: ConfigMutation, authority: { kind: "user" } | { kind: "agent"; agentId: string }): {
+  mutateConfig(env: NodeJS.ProcessEnv, mutation: ConfigMutation, authority: { kind: "user" } | { kind: "agent"; agentId: string }, options?: { snapshotFile?: string; importExternalProfile?: boolean }): {
     revision: string; changedScope: string; persisted: true; applyState: "applied" | "saved_not_applied";
   };
   configApplyState(env: NodeJS.ProcessEnv, config: HydratedConfig): Record<string, unknown>;
@@ -145,7 +146,7 @@ const allowedValueFlags: Record<string, ReadonlySet<string>> = {
   effort: new Set(["--agent"]), "pi-distribution": new Set(["--agent", "--snapshot"]), chats: new Set(["--agent"]), config: new Set(["--agent", "--chat"]),
 };
 const allowedBooleanFlags: Record<string, ReadonlySet<string>> = {
-  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), "pi-distribution": new Set(), chats: new Set(), config: new Set(["--json"]),
+  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), "pi-distribution": new Set(["--import-external-profile"]), chats: new Set(), config: new Set(["--json"]),
 };
 const parsedValues = new Map<string, string>();
 const parsedBooleans = new Set<string>();
@@ -171,6 +172,7 @@ const flagAgent = parsedValues.get("--agent");
 const flagModel = parsedValues.get("--model");
 const flagChat = parsedValues.get("--chat");
 const flagJson = parsedBooleans.has("--json");
+const importExternalProfile = parsedBooleans.has("--import-external-profile");
 const value = positionals[0];
 
 function assertOnlyFlags(valueFlags: readonly string[], booleanFlags: readonly string[] = []): void {
@@ -196,7 +198,7 @@ if (kind === "agents") {
   assertOnlyFlags(["--agent"]);
   if (positionals.length > 1) die("用法: larkin effort [<level>|clear|default] [--agent <App ID>]");
 } else if (kind === "pi-distribution") {
-  assertOnlyFlags(["--agent", "--snapshot"]);
+  assertOnlyFlags(["--agent", "--snapshot"], ["--import-external-profile"]);
   if (positionals.length > 1) die("用法: larkin pi-distribution [show|builtin|external] [--agent <App ID>] [--snapshot <private-file>]");
 } else if (kind === "chats") {
   assertOnlyFlags(["--agent"]);
@@ -234,6 +236,7 @@ const { configDir, file, config } = loaded;
 if (!fs.existsSync(file)) die("未找到 Larkin 配置，请运行 larkin setup");
 const snapshotFile = parsedValues.get("--snapshot");
 if (kind === "pi-distribution" && value === "rollback") {
+  if (importExternalProfile) die("--import-external-profile 只允许与 builtin 一起使用");
   if (!snapshotFile || flagAgent || positionals.length !== 1) die("用法: larkin pi-distribution rollback --snapshot <private-file>");
   try {
     const result = larkinConfig.rollbackConfig(process.env, snapshotFile as string);
@@ -442,6 +445,7 @@ const selectedKey = key as string;
 const agent = config.agents[selectedKey];
 if (kind === "pi-distribution") {
   const requested = value || "show";
+  if (importExternalProfile && requested !== "builtin") die("--import-external-profile 只允许与 builtin 一起使用");
   if (requested === "show") {
     say(JSON.stringify({ agentId: selectedKey, runtime: agent.runtime, piDistribution: agent.piDistribution ?? "external" }));
     process.exit(0);
@@ -449,10 +453,22 @@ if (kind === "pi-distribution") {
   if (requested !== "builtin" && requested !== "external") die("Pi distribution 只允许 show/builtin/external");
   if (agent.runtime !== "pi") die(`Agent ${selectedKey} 不是 Pi runtime`);
   if (!snapshotFile) die("修改 Pi distribution 必须提供 --snapshot <private-file>");
+  if (requested === "builtin" && !importExternalProfile) {
+    try {
+      assertBuiltinPiAgentDirectory(piAgentDirectory(configDir, selectedKey));
+    } catch {
+      die("内置 Pi provider 尚未为该 Agent 配置；请先运行 larkin setup 完成内置 Pi provider 配置，或使用 --import-external-profile");
+    }
+  }
   try {
-    const result = larkinConfig.mutateConfig(process.env, { kind: "set-agent-pi-distribution", agentId: selectedKey, distribution: requested as "builtin" | "external" }, { kind: "user" }, { snapshotFile: snapshotFile as string });
+    const result = larkinConfig.mutateConfig(process.env, { kind: "set-agent-pi-distribution", agentId: selectedKey, distribution: requested as "builtin" | "external" }, { kind: "user" }, {
+      snapshotFile: snapshotFile as string, ...(importExternalProfile ? { importExternalProfile: true } : {}),
+    });
     say(JSON.stringify({ ok: true, agentId: selectedKey, piDistribution: requested, revision: result.revision, applyState: result.applyState }));
-  } catch (error) { die(`Pi distribution 修改失败：${error instanceof Error ? error.message : String(error)}`); }
+  } catch (error) {
+    if (importExternalProfile) die("Pi external profile import failed; no secret or private path was disclosed");
+    die(`Pi distribution 修改失败：${error instanceof Error ? error.message : String(error)}`);
+  }
   process.exit(0);
 }
 const catalog = larkinConfig.loadRuntimeModels();

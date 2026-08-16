@@ -13,6 +13,22 @@ const CONFIG_MODULE = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const APP = "cli_configPolicyA1";
 const OTHER = "cli_configPolicyB2";
 
+function profileImportFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-config-profile-import-"));
+  const app = "cli_profileImportConfigA1";
+  const source = path.join(root, "external", "agent");
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(source, { recursive: true, mode: 0o755 }); fs.mkdirSync(bin, { mode: 0o700 });
+  fs.writeFileSync(path.join(bin, "pi"), `#!${process.execPath}\nconsole.log("0.84.2")\n`, { mode: 0o700 });
+  fs.writeFileSync(path.join(source, "auth.json"), JSON.stringify({ fixture: { key: "PRIVATE" } }) + "\n", { mode: 0o600 });
+  fs.writeFileSync(path.join(source, "models.json"), JSON.stringify({ providers: {} }) + "\n", { mode: 0o644 });
+  fs.writeFileSync(path.join(source, "settings.json"), JSON.stringify({ theme: "dark" }) + "\n", { mode: 0o644 });
+  const file = path.join(root, "config.json");
+  fs.writeFileSync(file, `${JSON.stringify({ version: 4, serverId: "server-profile-import", mentionPolicy: "require", activeAgent: app,
+    agents: { [app]: { runtime: "pi", model: "fixture/model", piDistribution: "external" } } })}\n`, { mode: 0o600 });
+  return { root, app, file, source, bin, env: { LARKIN_CONFIG_DIR: root, HOME: root, PATH: `${bin}:/usr/bin:/bin`, PI_CODING_AGENT_DIR: source } };
+}
+
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-config-management-"));
   const file = path.join(root, "config.json");
@@ -48,6 +64,31 @@ test("Pi distribution mutation is locked, snapshotted, and atomically rollbackab
     assert.deepEqual(fs.readFileSync(file), before);
     assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).agents[APP].piDistribution, undefined);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Pi profile import recovery rolls back a partial target before the next config mutation", () => {
+  const f = profileImportFixture();
+  const snapshot = path.join(f.root, "pi-distribution.snapshot.json");
+  const target = path.join(f.root, "providers", "pi", f.app);
+  const journal = path.join(f.root, ".pi-profile-migration-journal.json");
+  try {
+    const before = fs.readFileSync(f.file);
+    const changed = configApi.mutateConfig(f.env, { kind: "set-agent-pi-distribution", agentId: f.app, distribution: "builtin" }, { kind: "user" }, {
+      snapshotFile: snapshot, importExternalProfile: true,
+    });
+    const payload = JSON.parse(fs.readFileSync(snapshot, "utf8"));
+    fs.unlinkSync(path.join(target, "settings.json"));
+    fs.writeFileSync(f.file, before, { mode: 0o600 });
+    fs.writeFileSync(journal, `${JSON.stringify({ version: 1, phase: "forward", targetAgentId: f.app,
+      beforeRevision: payload.beforeRevision, expectedAfterRevision: payload.afterRevision, migration: payload.migration })}\n`, { mode: 0o600 });
+    configApi.mutateConfig(f.env, { kind: "set-global-mention", value: "free" }, { kind: "user" });
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(fs.existsSync(journal), false);
+    const recovered = JSON.parse(fs.readFileSync(f.file, "utf8"));
+    assert.equal(recovered.mentionPolicy, "free");
+    assert.equal(recovered.agents[f.app].piDistribution, "external");
+    assert.equal(changed.config.agents[f.app].piDistribution, "builtin");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("Pi distribution snapshot rejects symlink and insecure paths without changing config", () => {

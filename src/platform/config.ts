@@ -904,9 +904,9 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
       writeApplyFile(layout.root, applyState);
     } catch { fullyApplied = false; /* Config persistence remains authoritative. */ }
     if (migrationPlan) {
+      releasePiProfileMigrationLock(migrationPlan.state);
       try { fs.unlinkSync(migrationJournalFile(layout.root)); fsyncDirectoryOf(migrationJournalFile(layout.root)); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      releasePiProfileMigrationLock(migrationPlan.state);
     }
     return {
       revision: nextRevision, previousRevision: revision(current.bytes), changedScope: changed.scope,

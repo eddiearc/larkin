@@ -27,6 +27,9 @@ export interface PiProfileMigrationState {
   targetDir: string;
   targetDirExisted: boolean;
   targetDirMode: number;
+  targetDirDevice?: number;
+  targetDirInode?: number;
+  targetEntries: string[];
   priorFiles: Record<FileName, FileState>;
   afterFiles: Record<FileName, FileState>;
 }
@@ -163,15 +166,16 @@ function mergeSettings(bytes: Buffer): Buffer {
   try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("external Pi settings.json is invalid"); }
   return Buffer.from(`${JSON.stringify(mergeOwnedPiSettings(value), null, 2)}\n`);
 }
-function targetPrior(directory: string): { stat: fs.Stats | null; files: Record<FileName, FileState> } {
+function targetPrior(directory: string): { stat: fs.Stats | null; entries: string[]; files: Record<FileName, FileState> } {
   const stat = assertDirectory(directory, "Pi provider target", false);
   if (stat && (stat.mode & 0o777) !== 0o700) throw new Error("Pi provider target must be 0700");
+  const entries = stat ? fs.readdirSync(directory).sort() : [];
   const files = Object.fromEntries(FILES.map((name) => {
     const file = readRegular(path.join(directory, name), `Pi provider target ${name}`, false);
     if (file && file.mode !== 0o600) throw new Error("Pi provider target files must be 0600");
     return [name, safeState(file, true)];
   })) as Record<FileName, FileState>;
-  return { stat, files };
+  return { stat, entries, files };
 }
 
 export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: string, agentId: string): PiProfileMigrationPlan {
@@ -200,6 +204,7 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
       sourceCommand: String(env.LARKIN_PI_COMMAND || "pi"), sourceExecutable,
       sourceFiles: Object.fromEntries(FILES.map((name) => [name, safeState(sourceFiles[name], false)])) as Record<FileName, FileState>,
       targetDir, targetDirExisted: Boolean(target.stat), targetDirMode: target.stat ? target.stat.mode & 0o777 : 0o700,
+      ...(target.stat ? { targetDirDevice: target.stat.dev, targetDirInode: target.stat.ino } : {}), targetEntries: target.entries,
       priorFiles: target.files, afterFiles },
     sourceBytes: { "auth.json": sourceFiles["auth.json"].bytes, "models.json": sourceFiles["models.json"].bytes,
       "settings.json": imported["settings.json"] },
@@ -217,7 +222,9 @@ export function validatePiProfileMigrationState(value: unknown): asserts value i
       || typeof state.sourceExecutable.sha256 !== "string" || !Number.isSafeInteger(state.sourceExecutable.bytes)
       || state.sourceExecutable.bytes < 0 || !Number.isInteger(state.sourceExecutable.mode)
       || typeof state.targetDir !== "string" || typeof state.targetDirExisted !== "boolean"
-      || !Number.isInteger(state.targetDirMode) || !state.sourceFiles || !state.priorFiles || !state.afterFiles) throw new Error("Pi profile migration state is invalid");
+      || !Number.isInteger(state.targetDirMode) || (state.targetDirExisted && (!Number.isSafeInteger(state.targetDirDevice) || !Number.isSafeInteger(state.targetDirInode)))
+      || !Array.isArray(state.targetEntries) || state.targetEntries.some((entry) => typeof entry !== "string" || !entry || entry === "." || entry === ".." || entry.includes("/"))
+      || !state.sourceFiles || !state.priorFiles || !state.afterFiles) throw new Error("Pi profile migration state is invalid");
   const collections: Array<{ files: Record<string, unknown>; prior: boolean }> = [
     { files: state.sourceFiles as Record<string, unknown>, prior: false },
     { files: state.priorFiles as Record<string, unknown>, prior: true },
@@ -277,6 +284,9 @@ export function assertPiProfileMigrationAfterState(state: PiProfileMigrationStat
   validatePiProfileMigrationState(state);
   const target = assertDirectory(state.targetDir, "Pi provider target");
   if ((target!.mode & 0o777) !== 0o700) throw new Error("Pi provider migration target is unsafe");
+  if (state.targetDirExisted && (target!.dev !== state.targetDirDevice || target!.ino !== state.targetDirInode)) throw new Error("Pi provider migration target changed");
+  const expectedEntries = [...new Set([...state.targetEntries, ...FILES])].sort();
+  if (JSON.stringify(fs.readdirSync(state.targetDir).sort()) !== JSON.stringify(expectedEntries)) throw new Error("Pi provider migration target entries changed");
   for (const name of FILES) {
     const current = currentFileState(path.join(state.targetDir, name));
     const expected = state.afterFiles[name];
@@ -289,6 +299,8 @@ function assertTargetUnchanged(state: PiProfileMigrationState): void {
   const target = assertDirectory(state.targetDir, "Pi provider target", false);
   if (Boolean(target) !== state.targetDirExisted) throw new Error("Pi provider target changed; refusing migration");
   if (target && ((target.mode & 0o777) !== state.targetDirMode)) throw new Error("Pi provider target changed; refusing migration");
+  if (target && state.targetDirExisted && (target.dev !== state.targetDirDevice || target.ino !== state.targetDirInode)) throw new Error("Pi provider target changed; refusing migration");
+  if (target && JSON.stringify(fs.readdirSync(state.targetDir).sort()) !== JSON.stringify(state.targetEntries)) throw new Error("Pi provider target entries changed; refusing migration");
   for (const name of FILES) {
     const current = currentFileState(path.join(state.targetDir, name));
     const prior = state.priorFiles[name];
@@ -298,6 +310,10 @@ function assertTargetUnchanged(state: PiProfileMigrationState): void {
   }
 }
 function assertPrior(state: PiProfileMigrationState): void {
+  const target = assertDirectory(state.targetDir, "Pi provider target");
+  if ((target!.mode & 0o777) !== state.targetDirMode) throw new Error("Pi provider target rollback directory changed");
+  if (state.targetDirExisted && (target!.dev !== state.targetDirDevice || target!.ino !== state.targetDirInode)) throw new Error("Pi provider target rollback directory changed");
+  if (JSON.stringify(fs.readdirSync(state.targetDir).sort()) !== JSON.stringify(state.targetEntries)) throw new Error("Pi provider target rollback entries changed");
   for (const name of FILES) {
     const current = currentFileState(path.join(state.targetDir, name));
     const prior = state.priorFiles[name];
@@ -345,6 +361,7 @@ export function rollbackPiProfileMigration(state: PiProfileMigrationState): void
   const target = assertDirectory(state.targetDir, "Pi provider target", false);
   if (!target) {
     if (state.targetDirExisted) throw new Error("Pi provider target disappeared during rollback");
+    releasePiProfileMigrationLock(state);
     return;
   }
   for (const name of FILES) {

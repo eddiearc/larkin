@@ -69,17 +69,40 @@ test("preserves prior target and unrelated files on reverse rollback", () => {
   } finally { clean(f); }
 });
 
-test("rejects source symlinks and source tampering without writing a target", () => {
+test("rejects source symlinks, hardlinks, and source tampering without writing a target", () => {
   const f = fixture();
   try {
     fs.renameSync(path.join(f.source, "models.json"), path.join(f.source, "models.real.json"));
     fs.symlinkSync(path.join(f.source, "models.real.json"), path.join(f.source, "models.json"));
     assert.throws(() => migration.preparePiProfileMigration(f.env, f.config, f.agent), /unsafe/);
     fs.unlinkSync(path.join(f.source, "models.json")); fs.renameSync(path.join(f.source, "models.real.json"), path.join(f.source, "models.json"));
+    const hardlink = path.join(f.root, "models-hardlink");
+    fs.linkSync(path.join(f.source, "models.json"), hardlink); fs.unlinkSync(path.join(f.source, "models.json")); fs.linkSync(hardlink, path.join(f.source, "models.json"));
+    assert.throws(() => migration.preparePiProfileMigration(f.env, f.config, f.agent), /unsafe/);
+    fs.unlinkSync(path.join(f.source, "models.json")); fs.renameSync(hardlink, path.join(f.source, "models.json"));
     const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
     fs.appendFileSync(path.join(f.source, "settings.json"), "tampered");
     assert.throws(() => migration.applyPiProfileMigration(plan), /changed/);
     assert.equal(fs.existsSync(f.targetDir), false);
+  } finally { clean(f); }
+});
+
+test("rechecks the executable and target preexistence before writing", () => {
+  const f = fixture();
+  try {
+    const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
+    fs.appendFileSync(path.join(f.root, "bin", "pi"), "\n");
+    assert.throws(() => migration.applyPiProfileMigration(plan), /executable.*changed/);
+    assert.equal(fs.existsSync(f.targetDir), false);
+
+    const second = fixture();
+    try {
+      const secondPlan = migration.preparePiProfileMigration(second.env, second.config, second.agent);
+      fs.mkdirSync(path.dirname(second.targetDir), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(second.targetDir, { recursive: true, mode: 0o700 });
+      assert.throws(() => migration.applyPiProfileMigration(secondPlan), /target changed/);
+      assert.equal(fs.readdirSync(second.targetDir).length, 0);
+    } finally { clean(second); }
   } finally { clean(f); }
 });
 

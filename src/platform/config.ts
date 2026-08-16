@@ -8,6 +8,7 @@ import { CURRENT_RUNTIME_MODELS, type RuntimeModels } from "../runtime/runtime-m
 import processInspect from "./process-inspect.cjs";
 import {
   applyPiProfileMigration,
+  assertPiProfileMigrationAfterState,
   preparePiProfileMigration,
   rollbackPiProfileMigration,
   validatePiProfileMigrationState,
@@ -466,7 +467,7 @@ function recoverRollbackJournal(root: string): void {
 
 function recoverMigrationJournal(root: string): void {
   const file = migrationJournalFile(root);
-  const bytes = readPrivateFile(file, root, CONFIG_LIMIT_BYTES * 2, "Pi profile migration journal");
+  const bytes = readPrivateFile(file, root, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES, "Pi profile migration journal");
   if (bytes === null) return;
   let journal: Partial<ConfigMigrationJournal>;
   try { journal = JSON.parse(bytes.toString("utf8")) as Partial<ConfigMigrationJournal>; }
@@ -487,13 +488,7 @@ function recoverMigrationJournal(root: string): void {
   } else if (currentRevision === journal.expectedAfterRevision) {
     // Config won the race; verify the provider target before finalizing.
     const migration = journal.migration;
-    for (const name of ["auth.json", "models.json", "settings.json"] as const) {
-      const fileState = JSON.parse(JSON.stringify(migration.afterFiles[name])) as { sha256?: string };
-      const currentFile = fs.lstatSync(path.join(migration.targetDir, name));
-      if (!currentFile.isFile() || currentFile.isSymbolicLink()) throw new Error("Pi profile migration recovery target is unsafe");
-      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(path.join(migration.targetDir, name))).digest("hex");
-      if (currentHash !== fileState.sha256) throw new Error("Pi profile migration recovery target is incomplete");
-    }
+    assertPiProfileMigrationAfterState(migration);
   } else throw new Error("Pi profile migration journal conflicts with the current configuration");
   fs.unlinkSync(file); fsyncDirectoryOf(file);
 }
@@ -767,7 +762,7 @@ function assertSnapshotPath(file: string, root: string, forbidden: readonly stri
   if (typeof process.getuid === "function" && parentStat.uid !== process.getuid()) throw new Error("config snapshot parent owner is unsafe");
   try {
     const stat = fs.lstatSync(resolvedFile);
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("config snapshot path is unsafe");
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) throw new Error("config snapshot path is unsafe");
     if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600) throw new Error("config snapshot must be 0600");
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("config snapshot owner is unsafe");
   } catch (error) {
@@ -777,9 +772,11 @@ function assertSnapshotPath(file: string, root: string, forbidden: readonly stri
 
 function writeConfigSnapshot(file: string, root: string, snapshot: ConfigSnapshot): void {
   assertSnapshotPath(file, root, [path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE), path.join(root, "config.json"), path.join(root, "config-apply-state.json")]);
+  const bytes = Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  if (bytes.length > PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES) throw new Error("config snapshot is too large");
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
-  try { fs.writeFileSync(fd, `${JSON.stringify(snapshot, null, 2)}\n`); fs.fsyncSync(fd); }
+  try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
   try { fs.renameSync(temporary, file); fs.chmodSync(file, 0o600); fsyncDirectoryOf(file); }
   catch (error) { try { fs.unlinkSync(temporary); } catch { /* best effort */ } throw error; }
@@ -787,6 +784,8 @@ function writeConfigSnapshot(file: string, root: string, snapshot: ConfigSnapsho
 
 function readConfigSnapshot(file: string, root: string): ConfigSnapshot {
   assertSnapshotPath(file, root, [path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE), path.join(root, "config.json"), path.join(root, "config-apply-state.json")]);
+  const snapshotStat = fs.lstatSync(file);
+  if (snapshotStat.size > PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES) throw new Error("config snapshot is too large");
   const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ConfigSnapshot>;
   if (parsed.version !== 2 || typeof parsed.targetAgentId !== "string" || !APP_ID.test(parsed.targetAgentId)
       || typeof parsed.beforeRevision !== "string" || typeof parsed.afterRevision !== "string"
@@ -861,7 +860,7 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
       atomicWriteConfig(migrationJournalFile(layout.root), {
         version: 1, phase: "forward", targetAgentId: changed.agentId, beforeRevision: revision(current.bytes),
         expectedAfterRevision: nextRevision, migration: migrationPlan.state,
-      });
+      }, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES);
       applyPiProfileMigration(migrationPlan);
     }
     atomicWriteConfig(layout.configFile, stored);

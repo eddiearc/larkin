@@ -402,11 +402,12 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     assert.equal(validationCount, 2, "provider action must be preceded by an immediate second proof");
     assert.equal(providerCallsBeforeBoundaryChange, 0);
 
+    const barrierOutput = path.join(claim.targetRoot, "fake-provider-post-final-output.json");
     let barrierProviderCalls = 0;
     assert.throws(() => runProviderWithLiveHoldReady(
       claim.targetRoot,
       agentId,
-      () => { barrierProviderCalls += 1; },
+      () => { barrierProviderCalls += 1; writePrivateJson(barrierOutput, { record: "post-final" }); },
       {
         stage: "post-final-barrier",
         afterFinalValidation: () => fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
@@ -419,19 +420,26 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       },
     ), /post-final-barrier blocked.*(?:process identity|epoch changed|daemon status)/);
     assert.equal(barrierProviderCalls, 0, "provider side effect must remain zero after a post-final-check epoch mutation");
+    assert.equal(fs.existsSync(barrierOutput), false, "post-final epoch mutation must leave fake provider output absent");
     fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
       pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: connectedAt,
     })}\n`, { mode: 0o600 });
 
+    const validOutput = path.join(claim.targetRoot, "fake-provider-valid-output.json");
     let validProviderCalls = 0;
-    runProviderWithLiveHoldReady(claim.targetRoot, agentId, () => { validProviderCalls += 1; }, { stage: "valid-lease" });
+    runProviderWithLiveHoldReady(claim.targetRoot, agentId, () => {
+      validProviderCalls += 1;
+      writePrivateJson(validOutput, { record: "valid", invocation: validProviderCalls });
+    }, { stage: "valid-lease" });
     assert.equal(validProviderCalls, 1, "a current immutable lease must invoke the provider exactly once");
+    assert.deepEqual(JSON.parse(fs.readFileSync(validOutput, "utf8")), { record: "valid", invocation: 1 });
 
+    const expiredOutput = path.join(claim.targetRoot, "fake-provider-expired-output.json");
     let expiredProviderCalls = 0;
     assert.throws(() => runProviderWithLiveHoldReady(
       claim.targetRoot,
       agentId,
-      () => { expiredProviderCalls += 1; },
+      () => { expiredProviderCalls += 1; writePrivateJson(expiredOutput, { record: "expired" }); },
       {
         stage: "expired-lease",
         afterFinalValidation: () => {
@@ -443,12 +451,14 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       },
     ), /expired-lease blocked.*expired/);
     assert.equal(expiredProviderCalls, 0, "an expired lease must not invoke the provider");
+    assert.equal(fs.existsSync(expiredOutput), false, "an expired lease must leave fake provider output absent");
 
+    const mismatchedOutput = path.join(claim.targetRoot, "fake-provider-mismatched-output.json");
     let mismatchedProviderCalls = 0;
     assert.throws(() => runProviderWithLiveHoldReady(
       claim.targetRoot,
       agentId,
-      () => { mismatchedProviderCalls += 1; },
+      () => { mismatchedProviderCalls += 1; writePrivateJson(mismatchedOutput, { record: "mismatched" }); },
       {
         stage: "mismatched-lease",
         afterFinalValidation: () => {
@@ -460,6 +470,7 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       },
     ), /mismatched-lease blocked.*does not match/);
     assert.equal(mismatchedProviderCalls, 0, "a mismatched lease token must not invoke the provider");
+    assert.equal(fs.existsSync(mismatchedOutput), false, "a mismatched lease token must leave fake provider output absent");
     fs.rmSync(path.join(claim.targetRoot, HOLD_ACTION_LEASE_BASENAME), { force: true });
 
     const wrong = JSON.parse(fs.readFileSync(claim.readyFile, "utf8"));

@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+  <title id="title">Larkin local runtime host</title>
+  <desc id="desc">A project-native hero showing Codex, Claude Code, and Pi connecting through Larkin to Feishu, reminders, interactive messages, and a local dashboard.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#07111f"/>
+      <stop offset="100%" stop-color="#0c1730"/>
+    </linearGradient>
+    <radialGradient id="glow-cyan" cx="0" cy="0" r="1">
+      <stop offset="0%" stop-color="#00b8d9" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#00b8d9" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-blue" cx="0" cy="0" r="1">
+      <stop offset="0%" stop-color="#1456f0" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#1456f0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#11284f"/>
+      <stop offset="100%" stop-color="#0e1f3f"/>
+    </linearGradient>
+    <linearGradient id="pill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#11203f"/>
+      <stop offset="100%" stop-color="#0b1528"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#ffffff" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="400" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="400" rx="28" fill="url(#grid)"/>
+  <circle cx="140" cy="60" r="230" fill="url(#glow-cyan)"/>
+  <circle cx="1080" cy="52" r="260" fill="url(#glow-blue)"/>
+  <circle cx="1010" cy="340" r="220" fill="url(#glow-cyan)" opacity="0.45"/>
+
+  <g id="title-block" transform="translate(56 56)" fill="#f7fbff" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif">
+    <text x="0" y="0" font-size="16" font-weight="700" letter-spacing="3.4" fill="#8fb7d8">LOCAL RUNTIME HOST</text>
+    <text x="0" y="80" font-size="76" font-weight="800" letter-spacing="-1.8">Larkin</text>
+    <text x="0" y="128" font-size="30" font-weight="600" fill="#d9e8ff">Connect Codex, Claude Code, and Pi</text>
+    <text x="0" y="166" font-size="30" font-weight="600" fill="#d9e8ff">to Feishu with one local host.</text>
+    <text x="0" y="210" font-size="20" font-weight="500" fill="#9cb4cf">Persistent sessions · reminders · interactive messages · local dashboard</text>
+
+    <g transform="translate(0 238)" font-size="18" font-weight="700" fill="#ecf4ff">
+      <rect x="0" y="0" width="138" height="38" rx="19" fill="#0f1b33" stroke="#223556"/>
+      <text x="69" y="24" text-anchor="middle">npm package</text>
+      <rect x="150" y="0" width="176" height="38" rx="19" fill="#0f1b33" stroke="#223556"/>
+      <text x="238" y="24" text-anchor="middle">standalone binaries</text>
+      <rect x="338" y="0" width="150" height="38" rx="19" fill="#0f1b33" stroke="#223556"/>
+      <text x="413" y="24" text-anchor="middle">Bun 1.3.14</text>
+    </g>
+
+    <g transform="translate(0 292)">
+      <rect x="0" y="0" width="408" height="48" rx="14" fill="#07111f" stroke="#244068"/>
+      <text x="18" y="31" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#8ff0ff">npx larkin@latest setup</text>
+      <text x="240" y="31" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#8fb7d8">→ start → status</text>
+    </g>
+  </g>
+
+  <g id="project-proof" transform="translate(706 50)" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif">
+    <rect x="0" y="0" width="444" height="300" rx="26" fill="#0b162b" fill-opacity="0.92" stroke="#2a3f63"/>
+    <text x="24" y="34" font-size="16" font-weight="700" letter-spacing="2.6" fill="#8fb7d8">RUNTIME GRAPH</text>
+
+    <g fill="#eff6ff" font-size="17" font-weight="700">
+      <rect x="24" y="74" width="120" height="44" rx="22" fill="url(#pill)" stroke="#264267"/>
+      <text x="84" y="101" text-anchor="middle">Codex</text>
+
+      <rect x="24" y="136" width="120" height="44" rx="22" fill="url(#pill)" stroke="#264267"/>
+      <text x="84" y="163" text-anchor="middle">Claude Code</text>
+
+      <rect x="24" y="198" width="120" height="44" rx="22" fill="url(#pill)" stroke="#264267"/>
+      <text x="84" y="225" text-anchor="middle">Pi</text>
+    </g>
+
+    <g stroke-linecap="round" fill="#eff6ff">
+      <path d="M144 96 C 196 96, 220 118, 252 132" stroke="#00b8d9" stroke-opacity="0.76" stroke-width="3"/>
+      <path d="M144 158 C 196 158, 220 154, 252 150" stroke="#1456f0" stroke-opacity="0.76" stroke-width="3"/>
+      <path d="M144 220 C 196 220, 220 186, 252 168" stroke="#a3402c" stroke-opacity="0.72" stroke-width="3"/>
+      <path d="M322 150 C 338 150, 352 122, 328 108" stroke="#00b8d9" stroke-opacity="0.42" stroke-width="3"/>
+      <path d="M322 150 C 338 150, 352 156, 328 156" stroke="#1456f0" stroke-opacity="0.42" stroke-width="3"/>
+      <path d="M322 150 C 338 150, 352 192, 328 214" stroke="#a3402c" stroke-opacity="0.42" stroke-width="3"/>
+      <path d="M322 150 C 338 150, 352 232, 328 266" stroke="#8fb7d8" stroke-opacity="0.42" stroke-width="3"/>
+    </g>
+
+    <g>
+      <rect x="252" y="92" width="70" height="116" rx="26" fill="url(#core)" stroke="#00b8d9" stroke-opacity="0.7"/>
+      <rect x="266" y="108" width="42" height="18" rx="9" fill="#0b162b" stroke="#27456f"/>
+      <text x="287" y="122" text-anchor="middle" font-size="10" font-weight="800" fill="#8fb7d8" letter-spacing="1.6">CORE</text>
+      <text x="287" y="158" text-anchor="middle" font-size="24" font-weight="800" fill="#f7fbff">LARKIN</text>
+      <text x="287" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#9cb4cf">local host</text>
+    </g>
+
+    <g fill="#eff6ff" font-size="15" font-weight="700">
+      <rect x="328" y="92" width="92" height="34" rx="17" fill="#0f1b33" stroke="#264267"/>
+      <text x="374" y="113" text-anchor="middle">Feishu</text>
+
+      <rect x="328" y="144" width="92" height="34" rx="17" fill="#0f1b33" stroke="#264267"/>
+      <text x="374" y="165" text-anchor="middle">Cards</text>
+
+      <rect x="328" y="196" width="92" height="34" rx="17" fill="#0f1b33" stroke="#264267"/>
+      <text x="374" y="217" text-anchor="middle">Reminders</text>
+
+      <rect x="328" y="248" width="92" height="34" rx="17" fill="#0f1b33" stroke="#264267"/>
+      <text x="374" y="269" text-anchor="middle">Dashboard</text>
+    </g>
+
+    <g>
+      <rect x="24" y="254" width="214" height="26" rx="13" fill="#07111f" stroke="#244068"/>
+      <text x="38" y="272" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#8fb7d8">sessions + traces + local config</text>
+    </g>
+  </g>
+</svg>

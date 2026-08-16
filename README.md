@@ -1,6 +1,12 @@
-# Larkin
+<p align="center">
+  <img src="./assets/readme/larkin-hero.svg" width="100%" alt="Larkin connecting Codex, Claude Code, and Pi agent runtimes to Feishu with a local dashboard and message surfaces.">
+</p>
 
-Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu (Lark). It provides a local runtime host, persistent sessions, reminders, interactive messages, and a local dashboard.
+<p align="center">
+  <a href="#quick-start">Quick start</a> · <a href="#requirements">Requirements</a> · <a href="#what-it-does">What it does</a> · <a href="#installation">Installation</a> · <a href="#usage">Usage</a> · <a href="#setup-and-configuration">Setup and configuration</a> · <a href="#details">Details</a> · <a href="#development">Development</a>
+</p>
+
+Larkin is a local Runtime Host that connects Codex, Claude Code, and Pi agent runtimes to Feishu (Lark). It keeps sessions, reminders, interactive messages, and a local dashboard close to the machine that runs them.
 
 ## Requirements
 
@@ -9,9 +15,56 @@ Larkin connects Codex, Claude Code, and Pi agent runtimes to Feishu (Lark). It p
 - At least one supported agent runtime and its authentication
 - Bun 1.3.14 when running the npm package or building from source (standalone binaries bundle their own runtime)
 
+## Quick start
+
+```bash
+npx larkin@latest setup
+npx larkin@latest start
+npx larkin@latest status
+```
+
+## What it does
+
+<table>
+<tr>
+<td valign="top">
+
+**Runtime host**
+
+Connect supported coding-agent runtimes to Feishu from one local process.
+
+</td>
+<td valign="top">
+
+**Persistent workflow**
+
+Keep sessions and reminders available across runs.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Message surfaces**
+
+Work with Feishu messages, interactive cards, and related automation.
+
+</td>
+<td valign="top">
+
+**Local visibility**
+
+Inspect the host through the embedded dashboard and OpenTelemetry traces.
+
+</td>
+</tr>
+</table>
+
+The rest of this document uses the short `larkin` form; it works as-is after `npm install -g larkin`, or prefix any command with `npx larkin@latest` to run it without installing.
+
 ## Installation
 
-Larkin is published to the npm registry and also distributed as standalone binaries. Prefer npm:
+Prefer npm:
 
 ```bash
 # Run the latest version directly with npx — no install step, always the newest release
@@ -26,39 +79,24 @@ Standalone binaries for macOS, Linux, and Windows (x64) are attached to every [G
 
 ## Usage
 
-```bash
-npx larkin@latest setup
-npx larkin@latest start
-npx larkin@latest status
-```
-
-The rest of this document uses the short `larkin` form; it works as-is after `npm install -g larkin`, or prefix any command with `npx larkin@latest` to run it without installing.
-
-Run `larkin --help` or `larkin config --help` for the available commands and configuration options. Local configuration is stored under `~/.larkin` by default; set `LARKIN_CONFIG_DIR` to use another directory.
+Run `larkin --help` or `larkin config --help` for the available commands and configuration options. `larkin agents` reports event readiness, reply-scope readiness, subscription mode/status/dimension, arrivals, and read failures. Local configuration is stored under `~/.larkin` by default; set `LARKIN_CONFIG_DIR` to use another directory.
 
 ### Feishu message links
 
 Feishu clients do not reliably render Markdown links such as `[label](URL)` as clickable in text or Markdown messages. When a recipient must be able to open a link, keep the complete bare HTTPS URL visible, for example: Issue 115 — https://github.com/eddiearc/larkin/issues/115. A label may accompany it, but must not replace the bare URL. Larkin does not rewrite exact, verbatim, or user-authored message bodies to enforce this guidance.
 
-During setup, a new Agent is offered Pi first, followed by Codex and Claude Code. Pi can use an existing
-official `pi` installation or the official Pi runtime bundled in Larkin. The bundled option supports
-DeepSeek, Kimi/Moonshot, MiniMax, Zhipu/BigModel, and a custom OpenAI-compatible Base URL. Provider keys
-are stored only in the selected Agent's private provider directory, not in the ordinary Agent config. Setup
-also discovers every API-key and OAuth/subscription login exposed by the pinned official Pi registry and
-delegates those flows to Pi. Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage them.
-The builtin Pi runtime loads Larkin's two supported extensions inline: background subagents and the 60-second
-foreground bash timeout guard are enabled without writing extension files or arguments. A compatible external
-Pi installation keeps the existing explicit `-e` extension path.
+## Setup and configuration
 
-### Windows support boundary and optional autostart
+During setup, a new Agent is offered Pi first, followed by Codex and Claude Code. Provider keys are stored only in the selected Agent's private provider directory, not in the ordinary Agent config. Setup also discovers every API-key and OAuth/subscription login exposed by the pinned official Pi registry and delegates those flows to Pi.
 
-Windows 11 x64 core support covers the standalone CLI, local Runtime Host startup, builtin Pi RPC with the
-inline extensions above, and the embedded Dashboard. Provider authentication, the official `lark-cli`, and
-external Codex, Claude Code, or Pi executables remain separately installed dependencies; secret-bearing live
-channel/provider tests are intentionally outside the hosted Windows CI gate.
+Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage Pi auth. The builtin Pi runtime loads Larkin's two supported extensions inline: background subagents and the 60-second foreground bash timeout guard are enabled without writing extension files or arguments. A compatible external Pi installation keeps the existing explicit `-e` extension path.
 
-An Administrator account can optionally start Larkin at that account's interactive logon with Task Scheduler.
-From an elevated PowerShell prompt, adjust the executable and working-directory paths first:
+<details>
+<summary>Windows support and optional autostart</summary>
+
+Windows 11 x64 core support covers the standalone CLI, local Runtime Host startup, builtin Pi RPC with the inline extensions above, and the embedded Dashboard. Provider authentication, the official `lark-cli`, and external Codex, Claude Code, or Pi executables remain separately installed dependencies; secret-bearing live channel/provider tests are intentionally outside the hosted Windows CI gate.
+
+An Administrator account can optionally start Larkin at that account's interactive logon with Task Scheduler. From an elevated PowerShell prompt, adjust the executable and working-directory paths first:
 
 ```powershell
 $Exe = 'C:\Tools\Larkin\larkin.exe'
@@ -69,13 +107,13 @@ Register-ScheduledTask -TaskName 'Larkin Runtime Host' -Action $Action -Trigger 
   -Description 'Start Larkin for this Administrator account at logon' -RunLevel Highest
 ```
 
-This is an optional per-user Administrator-logon task, not SYSTEM boot support or a Windows service. Keep the
-account profile available because Larkin stores its state there. Release executables are currently unsigned;
-normal Windows security policy and SmartScreen decisions still apply.
+This is an optional per-user Administrator-logon task, not SYSTEM boot support or a Windows service. Keep the account profile available because Larkin stores its state there. Release executables are currently unsigned; normal Windows security policy and SmartScreen decisions still apply.
+</details>
 
-For supported Feishu cloud-document comments (`doc`, `docx`, `sheet`, and `file`), the safe default accepts only comments or replies that @ the Bot. Document comments never reuse IM `require`/`free` settings. An explicit platform-verified application-dimension Bot subscription accepts every supported comment event that Feishu actually delivers, whether or not it mentions the Bot. Larkin stores accepted comments as `kind=document_comment` canonical Inbox events and wakes the Bot's persistent Agent. Replies are bound back to the exact comment; whole-document comments use Feishu's top-level fallback. `larkin setup --comment-subscription application` makes the broad trigger surface explicit, creates the Bot subscription through the official `lark-cli` structured API, and then verifies it with the read-only platform status API. `--comment-subscription none` explicitly removes that application subscription and verifies removal. Until positive status verification, only @Bot comments enter the Inbox. Setup requests `docs:document.comment:create` for both in-thread replies and whole-document `create_v2` fallback, while retaining `drive:drive` for event/read support. `larkin agents` reports event readiness, reply-scope readiness, subscription mode/status/dimension, arrivals, and read failures.
+## Details
 
-## OpenTelemetry traces
+<details>
+<summary>OpenTelemetry traces</summary>
 
 Larkin records a privacy-safe timing waterfall for each woken Feishu message. Tracing is always enabled, and ended spans first enter a durable local OTLP/HTTP JSON spool. Message processing therefore does not depend on an observability backend being reachable.
 
@@ -136,6 +174,7 @@ larkin.message.process
 ```
 
 The compose stack binds Grafana, Tempo, and OTLP only to `127.0.0.1` and persists `/data`. It is intended for development, demos, and testing. Do not expose its default credentials or plaintext OTLP port publicly; use a deployment-owned TLS/authenticated endpoint or private network for remote automatic upload.
+</details>
 
 ## Development
 

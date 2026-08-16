@@ -32,7 +32,16 @@ class FakeSession {
   cancels = [];
   closes = [];
   nextBusy = null;
-  subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+  subscribeFailure = null;
+  unsubscribeFailure = null;
+  subscribe(fn) {
+    if (this.subscribeFailure) throw new Error(this.subscribeFailure);
+    this.listeners.add(fn);
+    return () => {
+      if (this.unsubscribeFailure) throw new Error(this.unsubscribeFailure);
+      this.listeners.delete(fn);
+    };
+  }
   emit(event) { for (const fn of this.listeners) fn(event); }
   async prompt(input) { this.prompts.push(input); return { status: "accepted", inputId: input.inputId }; }
   async busyInput(input) {
@@ -42,6 +51,94 @@ class FakeSession {
   async cancel(reason) { this.cancels.push(reason); }
   async close(reason) { this.closes.push(reason); }
 }
+
+test("RuntimeHost manually compacts one exact overflow and retries the same stable input once", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-manual-compaction-"));
+  const agentId = "cli_piManualA1";
+  const store = createAgentStateStore(root, agentId);
+  let releaseCompact;
+  class CompactingSession extends FakeSession {
+    compactCalls = 0;
+    async compact() { this.compactCalls += 1; await new Promise((resolve) => { releaseCompact = resolve; }); return {}; }
+  }
+  const session = new CompactingSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId, name: "manual", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    store.appendNdjson("inbox", { message_id: "om_pi_manual", chat_id: "oc_pi_manual", content: "stable" });
+    const first = await host.deliver(agentId, { message_id: "om_pi_manual", chat_id: "oc_pi_manual", content: "stable" });
+    assert.equal(first.status, "accepted");
+    const inputId = session.prompts[0].inputId;
+    session.emit({ type: "input-error", inputId, retryable: false, willRetry: false,
+      message: "Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.compactCalls, 1);
+    const breaker = JSON.parse(fs.readFileSync(path.join(root, "piCompactionRecovery.json"), "utf8"));
+    assert.equal(breaker.records[0].manualAttempt, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "external", phase: "compaction_end",
+      reason: "manual", success: true, willRetry: false });
+    releaseCompact();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(session.prompts.length, 2, `compact=${session.compactCalls} breaker=${fs.readFileSync(path.join(root, "piCompactionRecovery.json"), "utf8")}`);
+    assert.equal(session.prompts[1].inputId, inputId);
+    assert.equal(session.prompts[1].deliveryId, session.prompts[0].deliveryId);
+    assert.equal(session.compactCalls, 1);
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost treats a failed manual compact as an internal fresh-session fallback", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-fallback-"));
+  const agentId = "cli_piFallbackA1";
+  const store = createAgentStateStore(root, agentId);
+  const sessions = [];
+  class FailingCompactionSession extends FakeSession {
+    async compact() { throw new Error("compact RPC unavailable after send"); }
+  }
+  const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+    const session = new FailingCompactionSession(); session.sessionId = `pi-session-${sessions.length + 1}`;
+    sessions.push({ session, input }); return session;
+  } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId, name: "fallback", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    store.appendNdjson("inbox", { message_id: "om_pi_fallback", chat_id: "oc_pi_fallback", content: "stable" });
+    await host.deliver(agentId, { message_id: "om_pi_fallback", chat_id: "oc_pi_fallback", content: "stable" });
+    const oldInput = sessions[0].session.prompts[0];
+    sessions[0].session.emit({ type: "input-error", inputId: oldInput.inputId, retryable: false, willRetry: false,
+      message: "Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window" });
+    const deadline = Date.now() + 1_000;
+    while (sessions.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sessions.length, 2);
+    assert.equal(sessions[1].input.resumeSessionId, null);
+    const retryDeadline = Date.now() + 1_000;
+    while (sessions[1].session.prompts.length < 1 && Date.now() < retryDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sessions[1].session.prompts[0].inputId, oldInput.inputId);
+    assert.equal(sessions[1].session.prompts[0].deliveryId, oldInput.deliveryId);
+    assert.match(sessions[0].session.closes.join(" "), /fallback/);
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost honors Pi-owned willRetry without manual compact or duplicate input", async () => {
+  const session = new FakeSession();
+  let host;
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  await host.start([{ agentId: "cli_piNativeA1", name: "native", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+  const first = await host.deliver("cli_piNativeA1", { message_id: "om_pi_native", chat_id: "oc_pi_native", content: "stable" });
+  const input = session.prompts[0];
+  session.emit({ type: "input-error", inputId: input.inputId, retryable: true, willRetry: true,
+    message: "Pi owns the context-overflow retry", errorCategory: "context_window" });
+  assert.equal(first.status, "accepted");
+  assert.equal(session.prompts.length, 1);
+  await host.shutdown("done");
+});
 
 test("RuntimeHost stages a candidate session without stopping the old healthy Agent", async () => {
   const oldSession = new FakeSession();
@@ -150,6 +247,120 @@ test("RuntimeHost aborts a staged reset when Inbox arrival or turn start races c
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("RuntimeHost context-overflow recovery stages no-resume, rearms exact records, and schedules normal retry", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-context-runtime-recovery-"));
+  const agentId = "cli_contextRuntimeA1";
+  const store = createAgentStateStore(root, agentId);
+  const messages = ["om_runtime_overflow_1", "om_runtime_overflow_2", "om_runtime_overflow_3", "om_runtime_overflow_4"];
+  for (const messageId of messages) store.appendNdjson("inbox", { message_id: messageId, chat_id: "oc_runtime_overflow", content: "synthetic" });
+  store.writeJson("runtimeDeliveries", { version: 1, records: messages.map((messageId, index) => ({
+    deliveryId: `runtime-delivery-${index}`, messageId, status: "error", retryable: false,
+    reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window",
+    input: { inputId: `runtime-input-${index}`, deliveryId: `runtime-delivery-${index}`, kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before",
+  })) });
+  const sessions = [];
+  try {
+    const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+      const session = new FakeSession(); session.sessionId = sessions.length === 0 ? "old-context-session" : `fresh-context-${sessions.length}`;
+      sessions.push({ session, input }); return session;
+    } };
+    const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+    await host.start([{ agentId, name: "context", runtime: "pi", model: "model", workspaceDir: "/tmp", sessionId: "resume-old" }]);
+    const result = await host.recoverSession(agentId, "context-overflow");
+    assert.equal(result.rearmedCount, 4);
+    assert.equal(result.replayStatus, "pending", "the Inbox remains durable until the normal Runtime poll consumes it");
+    assert.equal(sessions[1].input.resumeSessionId, null);
+    assert.deepEqual(sessions[0].session.closes, ["context-window recovery committed"]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const ledger = store.readJson("runtimeDeliveries", { records: [] });
+    assert.equal(ledger.records.filter((record) => record.messageId.startsWith("om_runtime_overflow_")).length, 4);
+    assert.equal(new Set(ledger.records.map((record) => record.deliveryId)).size, 4);
+    assert.equal(ledger.records.filter((record) => record.status === "accepted").length, 1, "retry uses the existing delivery identity");
+    const sessionsBeforeRepeat = sessions.length;
+    const repeatDeadline = Date.now() + 1_000;
+    while (host.isBusy?.(agentId) && Date.now() < repeatDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    await assert.rejects(host.recoverSession(agentId, "context-overflow"), (error) => ["agent_busy", "recovery_refused"].includes(error.code));
+    assert.equal(sessions.length, sessionsBeforeRepeat, "repeating recovery does not stage another Runtime session");
+    await host.shutdown("done");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("RuntimeHost context-overflow recovery closes the staged session and preserves the old session on commit race", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-context-runtime-race-"));
+  const agentId = "cli_contextRaceA1";
+  const store = createAgentStateStore(root, agentId);
+  store.appendNdjson("inbox", { message_id: "om_context_race", chat_id: "oc_context_race", content: "synthetic" });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{ deliveryId: "delivery-context-race", messageId: "om_context_race",
+    status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window", input: { inputId: "input-context-race", deliveryId: "delivery-context-race", kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before" }] });
+  const sessions = [];
+  try {
+    const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+      const session = new FakeSession(); session.sessionId = sessions.length === 0 ? "old-race-session" : "fresh-race-session";
+      sessions.push({ session, input }); return session;
+    } };
+    const racingStore = { readJson: store.readJson.bind(store), readNdjson: store.readNdjson.bind(store),
+      writeJson: store.writeJson.bind(store), withInboxTransaction: store.withInboxTransaction.bind(store),
+      resolveInboxDeliverySource: store.resolveInboxDeliverySource.bind(store), rearmContextOverflow(callback) {
+      store.appendNdjson("inbox", { message_id: "om_context_arrived_during_stage", chat_id: "oc_context_race", content: "synthetic" });
+      return store.rearmContextOverflow(callback);
+    } };
+    const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => racingStore });
+    await host.start([{ agentId, name: "race", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await assert.rejects(host.recoverSession(agentId, "context-overflow"), /canonical Inbox row has no Runtime delivery record/);
+    assert.deepEqual(sessions[0].session.closes, []);
+    assert.deepEqual(sessions[1].session.closes, ["context-window recovery not committed"]);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "error");
+    await host.shutdown("done");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("RuntimeHost context-overflow recovery rolls back durable rearm when fresh subscription fails", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-context-subscribe-failure-"));
+  const agentId = "cli_contextSubscribeA1";
+  const store = createAgentStateStore(root, agentId);
+  store.appendNdjson("inbox", { message_id: "om_context_subscribe", chat_id: "oc_context_subscribe", content: "synthetic" });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{ deliveryId: "d-subscribe", messageId: "om_context_subscribe", status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window", input: { inputId: "i-subscribe", deliveryId: "d-subscribe" }, updatedAt: "before" }] });
+  const sessions = [];
+  try {
+    const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+      const session = new FakeSession(); session.sessionId = sessions.length === 0 ? "old-subscribe" : "fresh-subscribe";
+      if (sessions.length > 0) session.subscribeFailure = "injected subscription failure";
+      sessions.push({ session, input }); return session;
+    } };
+    const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+    await host.start([{ agentId, name: "subscribe", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await assert.rejects(host.recoverSession(agentId, "context-overflow"), /subscription failed/);
+    assert.deepEqual(sessions[0].session.closes, []);
+    assert.deepEqual(sessions[1].session.closes, ["context-window recovery subscription failed"]);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "error");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("RuntimeHost context-overflow recovery rolls back durable rearm when commit emission fails", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-context-emission-failure-"));
+  const agentId = "cli_contextEmissionA1";
+  const store = createAgentStateStore(root, agentId);
+  store.appendNdjson("inbox", { message_id: "om_context_emission", chat_id: "oc_context_emission", content: "synthetic" });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{ deliveryId: "d-emission", messageId: "om_context_emission", status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window", input: { inputId: "i-emission", deliveryId: "d-emission" }, updatedAt: "before" }] });
+  const sessions = [];
+  let failEmission = false;
+  try {
+    const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+      const session = new FakeSession(); session.sessionId = sessions.length === 0 ? "old-emission" : "fresh-emission";
+      if (sessions.length > 0) session.unsubscribeFailure = "injected unsubscribe failure";
+      sessions.push({ session, input }); return session;
+    } };
+    const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+    host.subscribe((event) => { if (failEmission && event.type === "session") throw new Error("injected commit emission failure"); });
+    await host.start([{ agentId, name: "emission", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    failEmission = true;
+    await assert.rejects(host.recoverSession(agentId, "context-overflow"), /not committed/);
+    assert.deepEqual(sessions[0].session.closes, []);
+    assert.deepEqual(sessions[1].session.closes, ["context-window recovery not committed"]);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "error");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("RuntimeHost isolates a missing runtime and keeps healthy agents active", async () => {
@@ -629,6 +840,30 @@ test("non-retryable input-error produces a terminal delivery error without resub
   assert.equal(session.prompts.length, 1);
   assert.ok(events.some((event) => event.type === "delivery" && event.status === "error" && event.reason === "invalid request"));
   await host.shutdown("test complete");
+});
+
+test("RuntimeHost ingestion uses the shared strict classifier for a legacy Codex context error", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-legacy-classifier-"));
+  const session = new FakeSession();
+  const agentId = "cli_codexLegacyClassifierA1";
+  const store = createAgentStateStore(root, agentId);
+  store.appendNdjson("inbox", { message_id: "om_codex_legacy_classifier", target: "chat:oc_codex_legacy_classifier", content: "synthetic" });
+  const adapter = { id: "codex", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "codex", workspaceDir: "/tmp" }]);
+    const receipt = await host.deliver(agentId, { message_id: "om_codex_legacy_classifier", target: "chat:oc_codex_legacy_classifier" });
+    session.emit({ type: "input-error", inputId: receipt.deliveryId, retryable: false,
+      message: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again." });
+    await new Promise((resolve) => setImmediate(resolve));
+    const record = store.readJson("runtimeDeliveries", { records: [] }).records[0];
+    assert.equal(record.status, "error");
+    assert.equal(record.retryable, false);
+    assert.equal(record.errorCategory, "context_window");
+  } finally {
+    await host.shutdown("legacy classifier test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("terminal provider auth failure downgrades only its Agent and a later successful turn restores readiness", async () => {

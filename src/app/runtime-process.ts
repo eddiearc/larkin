@@ -112,6 +112,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
       const result = await hostShell.resetSession(request.agentId, request.waitReadyMs);
       return { ok: result.readyForFreshScenario, agentId: request.agentId, ...result };
     },
+    async recoverSession(request) {
+      const result = await hostShell.recoverSession(request.agentId, request.reason, request.waitReadyMs);
+      return { ok: result.recoveryCommitted, agentId: request.agentId, ...result };
+    },
   });
   await controlServer.start();
   await markConfigAppliedAfterRuntimeReady(env, hostShell.agents, hostShell.start());

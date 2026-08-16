@@ -600,7 +600,7 @@ export function projectActivityStatus(
 export function projectSessionStatus(
   current: ProjectedStatus,
   runtime: string,
-  sessionId: string,
+  sessionId: string | null,
   launchId: string | null,
   now: Date = new Date(),
   effective: { model?: string; reasoningEffort?: string } = {},

@@ -5,6 +5,7 @@ import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.
 import { acquireProcessLock, inspectProcess } from "../platform/process-state.js";
 import { isWindows } from "../platform/secure-metadata.js";
 import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
+import { buildStrictProviderErrorInput, classifyStrictProviderError } from "../runtime/provider-error-classifier.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
   "senderProfiles" | "readReceipts" | "pendingReact" | "runtimeDeliveries" | "inboxState" | "freshnessState" | "documentComments" | "reminders" | "interactions";
@@ -236,6 +237,22 @@ function validInboxLockOwner(value: unknown): value is InboxLockOwner {
 }
 
 export type InboxDeliveryPreparation = "appended" | "present" | "active" | "terminal_error" | "consumed";
+
+export interface ContextOverflowRearmResult {
+  rearmedCount: number;
+  remainingPendingCount: number;
+}
+
+export type ContextOverflowRecoveryCode = "inbox_empty" | "canonical_inbox_malformed" | "duplicate_message_id"
+  | "delivery_missing" | "delivery_not_terminal" | "delivery_not_context_window" | "delivery_duplicate"
+  | "delivery_identity_invalid" | "duplicate_input_id";
+
+export class ContextOverflowRecoveryError extends Error {
+  constructor(readonly code: ContextOverflowRecoveryCode, message: string) {
+    super(message);
+    this.name = "ContextOverflowRecoveryError";
+  }
+}
 
 export type CanonicalInboxAppendResult =
   | { status: "appended" | "duplicate_pending"; envelope: InboxEnvelope }
@@ -709,6 +726,154 @@ export class AgentStateStore {
       if (targetState && targetState.model_seen_seq >= known.seq) return { status: "consumed", target: known.target };
       return { status: "missing", code: "canonical_inbox_row_missing" };
     });
+  }
+
+  /**
+   * Re-arm only the durable deliveries proven to be the context-window incident.
+   * The Inbox bytes are intentionally untouched. An optional synchronous commit
+   * hook lets RuntimeHost swap its in-memory generation while this same lock is
+   * still held. If the hook fails, the ledger is restored before the lock is
+   * released. The callback also receives a guarded rollback for post-callback
+   * commit failures before retry scheduling begins.
+   */
+  rearmContextOverflow(onCommit?: (messageIds: readonly string[], rollback: () => void) => void, expected?: {
+    messageId?: string; deliveryId?: string; inputId?: string;
+  }): ContextOverflowRearmResult {
+    let lockActive = true;
+    try { return this.withInboxTransaction(() => {
+      let rows: InboxEnvelope[];
+      try { rows = this.readNdjson<InboxEnvelope>("inbox"); }
+      catch { throw new ContextOverflowRecoveryError("canonical_inbox_malformed", "canonical Inbox is malformed"); }
+      if (rows.length === 0) throw new ContextOverflowRecoveryError("inbox_empty", "canonical Inbox backlog is empty");
+      const messageIds = new Set<string>();
+      for (const row of rows) {
+        try { targetKeyOfInboxEnvelope(row); }
+        catch { throw new ContextOverflowRecoveryError("canonical_inbox_malformed", "canonical Inbox contains a malformed row"); }
+        if (typeof row.message_id !== "string" || !row.message_id) {
+          throw new ContextOverflowRecoveryError("canonical_inbox_malformed", "canonical Inbox row has no message identity");
+        }
+        if (messageIds.has(row.message_id)) throw new ContextOverflowRecoveryError("duplicate_message_id", "canonical Inbox contains duplicate message identities");
+        messageIds.add(row.message_id);
+      }
+      const ledger = this.readJson<RuntimeDeliveryStore>("runtimeDeliveries", { version: 1, records: [] });
+      if (!Array.isArray(ledger.records)) throw new ContextOverflowRecoveryError("canonical_inbox_malformed", "Runtime delivery ledger is malformed");
+      const ledgerRecords = ledger.records as unknown[];
+      const matches = new Map<string, RuntimeDeliveryRecord>();
+      const deliveryIds = new Set<string>();
+      const inputIds = new Set<string>();
+      for (const candidate of ledger.records) {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+        const record = candidate as RuntimeDeliveryRecord;
+        if (typeof record.messageId !== "string" || !messageIds.has(record.messageId)) continue;
+        if (typeof record.deliveryId !== "string" || !record.deliveryId) throw new ContextOverflowRecoveryError("delivery_missing", "a matching Runtime delivery record has no delivery identity");
+        if (!record.input || typeof record.input !== "object" || Array.isArray(record.input)) {
+          throw new ContextOverflowRecoveryError("delivery_identity_invalid", "a matching Runtime delivery record has no Runtime input identity");
+        }
+        const input = record.input as Record<string, unknown>;
+        if (typeof input.inputId !== "string" || !input.inputId.trim()
+            || typeof input.deliveryId !== "string" || input.deliveryId !== record.deliveryId) {
+          throw new ContextOverflowRecoveryError("delivery_identity_invalid", "a matching Runtime delivery record has malformed input identity");
+        }
+        if (matches.has(record.messageId)) throw new ContextOverflowRecoveryError("delivery_duplicate", "a canonical Inbox row maps to multiple delivery records");
+        if (deliveryIds.has(record.deliveryId)) throw new ContextOverflowRecoveryError("delivery_duplicate", "matching Runtime delivery records share a delivery identity");
+        if (inputIds.has(input.inputId)) throw new ContextOverflowRecoveryError("duplicate_input_id", "matching Runtime delivery records share an input identity");
+        deliveryIds.add(record.deliveryId);
+        inputIds.add(input.inputId);
+        matches.set(record.messageId, record);
+      }
+      if (expected?.messageId && !messageIds.has(expected.messageId)) {
+        throw new ContextOverflowRecoveryError("delivery_missing", "the expected context-overflow message is not in canonical Inbox");
+      }
+      if (expected?.messageId) {
+        const expectedRecord = matches.get(expected.messageId);
+        if (!expectedRecord || (expected.deliveryId && expectedRecord.deliveryId !== expected.deliveryId)
+            || (expected.inputId && (expectedRecord.input as Record<string, unknown>).inputId !== expected.inputId)) {
+          throw new ContextOverflowRecoveryError("delivery_identity_invalid", "the expected context-overflow delivery identity changed");
+        }
+      }
+      for (const messageId of messageIds) {
+        const record = matches.get(messageId);
+        if (!record) throw new ContextOverflowRecoveryError("delivery_missing", "a canonical Inbox row has no Runtime delivery record");
+        if (record.status !== "error" || record.retryable === true) {
+          throw new ContextOverflowRecoveryError("delivery_not_terminal", "a canonical Inbox row is not backed by a non-retryable terminal Runtime error");
+        }
+        const reasonCategory = classifyStrictProviderError(buildStrictProviderErrorInput({
+          reason: record.reason, errorCategory: record.errorCategory,
+        }));
+        if (record.retryable !== false || reasonCategory !== "context_window"
+            || (record.errorCategory !== undefined && record.errorCategory !== "context_window")) {
+          throw new ContextOverflowRecoveryError("delivery_not_context_window", "a Runtime delivery error is not classified as context_window");
+        }
+      }
+      for (const candidate of ledgerRecords) {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+        const record = candidate as RuntimeDeliveryRecord;
+        if (typeof record.deliveryId === "string" && deliveryIds.has(record.deliveryId)
+            && (typeof record.messageId !== "string" || !messageIds.has(record.messageId))) {
+          throw new ContextOverflowRecoveryError("delivery_duplicate", "a matching delivery identity is also used by an unrelated Runtime delivery record");
+        }
+      }
+      const updatedAt = new Date().toISOString();
+      const records = ledgerRecords.map((candidate) => {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
+        const record = candidate as RuntimeDeliveryRecord;
+        if (typeof record.messageId !== "string" || !messageIds.has(record.messageId)) return candidate;
+        return { ...record, status: "pending", retryable: true, updatedAt,
+          reason: "context-window recovery rearmed the retained Inbox delivery" };
+      });
+      const committedLedger = { ...ledger, records };
+      let restored = false;
+      const restoreUnlocked = (): void => {
+        if (restored) return;
+        const current = this.readJson<RuntimeDeliveryStore>("runtimeDeliveries", { version: 1, records: [] });
+        if (!Array.isArray(current.records)) throw new Error("Runtime delivery rollback found a malformed ledger");
+        const originalMatching = ledgerRecords.filter((candidate) => {
+          if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+          const record = candidate as RuntimeDeliveryRecord;
+          return typeof record.messageId === "string" && messageIds.has(record.messageId);
+        });
+        const originalDeliveryIds = new Set(originalMatching.flatMap((candidate) => {
+          const deliveryId = (candidate as RuntimeDeliveryRecord).deliveryId;
+          return typeof deliveryId === "string" ? [deliveryId] : [];
+        }));
+        const currentMatching = current.records.filter((candidate) => {
+          if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+          const record = candidate as RuntimeDeliveryRecord;
+          return (typeof record.deliveryId === "string" && originalDeliveryIds.has(record.deliveryId))
+            || (typeof record.messageId === "string" && messageIds.has(record.messageId));
+        });
+        const matchingRestored = currentMatching.length === originalMatching.length
+          && currentMatching.every((candidate, index) => JSON.stringify(candidate) === JSON.stringify(originalMatching[index]));
+        if (!matchingRestored) {
+          const unrelated = current.records.filter((candidate) => {
+            if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return true;
+            const record = candidate as RuntimeDeliveryRecord;
+            return !((typeof record.deliveryId === "string" && originalDeliveryIds.has(record.deliveryId))
+              || (typeof record.messageId === "string" && messageIds.has(record.messageId)));
+          });
+          const restoredRecords = [...unrelated];
+          for (const candidate of originalMatching) {
+            const originalIndex = ledgerRecords.indexOf(candidate);
+            restoredRecords.splice(Math.min(originalIndex, restoredRecords.length), 0, candidate);
+          }
+          this.writeJson("runtimeDeliveries", { ...current, records: restoredRecords });
+        }
+        restored = true;
+      };
+      const rollback = (): void => {
+        if (lockActive) restoreUnlocked();
+        else this.withInboxTransaction(restoreUnlocked);
+      };
+      try {
+        this.writeJson("runtimeDeliveries", committedLedger);
+        onCommit?.([...messageIds], rollback);
+      } catch (error) {
+        try { rollback(); }
+        catch { throw new Error("context-window recovery ledger rollback failed"); }
+        throw error;
+      }
+      return { rearmedCount: messageIds.size, remainingPendingCount: rows.length };
+    }); } finally { lockActive = false; }
   }
 
   /**

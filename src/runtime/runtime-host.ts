@@ -3,12 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
 import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
-import type { InboxDeliverySourceResolution } from "../agent/agent-state-store.js";
+import type { ContextOverflowRearmResult, InboxDeliverySourceResolution } from "../agent/agent-state-store.js";
 import { SpanKind } from "@opentelemetry/api";
 import type { ContextPromptBuilder } from "../agent/context-prompt.js";
 import type {
   NormalizedRuntimeEvent, RuntimeAdapter, RuntimeInput, RuntimeInputResult, RuntimeSession,
 } from "./runtime-contracts.js";
+import { buildStrictProviderErrorInput, classifyStrictProviderError } from "./provider-error-classifier.js";
 import {
   classifyRuntimePrerequisite,
   providerAuthenticationFailureReadiness,
@@ -18,6 +19,7 @@ import {
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
+import { PiCompactionBreaker, PiCompactionRecoveryMachine } from "./pi-compaction-recovery.js";
 
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
@@ -34,7 +36,7 @@ export interface DeliveryRecord {
   /** Structured canonical target is authoritative; RuntimeInput.text is always rebuilt before submission. */
   target?: string;
   wakeReason?: string;
-  reason?: string; retryable?: boolean;
+  reason?: string; retryable?: boolean; errorCategory?: string;
 }
 interface DeliveryFile { version: 1; records: DeliveryRecord[] }
 interface DeliveryStateStore {
@@ -43,11 +45,14 @@ interface DeliveryStateStore {
   writeJson(key: "runtimeDeliveries", value: unknown): void;
   withInboxTransaction<T>(operation: () => T): T;
   resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
+  rearmContextOverflow?(onCommit?: (messageIds: readonly string[], rollback: () => void) => void, expected?: {
+    messageId?: string; deliveryId?: string; inputId?: string;
+  }): ContextOverflowRearmResult;
 }
 
 export type RuntimeHostEvent =
   | { type: "agent-status"; agentId: string; status: "active" | "inactive" | "error"; error?: string; readiness?: RuntimeReadiness }
-  | { type: "session"; agentId: string; runtime: string; sessionId: string; launchId: string; model?: string; reasoningEffort?: string }
+  | { type: "session"; agentId: string; runtime: string; sessionId: string | null; launchId: string; model?: string; reasoningEffort?: string }
   | { type: "activity"; agentId: string; activity: string; activityKind?: string; detailKind?: string; isHeartbeat?: boolean }
   | { type: "delivery"; agentId: string; deliveryId: string; messageId: string; status: "accepted" | "consumed" | "deferred" | "error"; reason?: string }
   | { type: "runtime"; agentId: string; event: NormalizedRuntimeEvent };
@@ -67,6 +72,9 @@ interface ManagedAgent {
   stabilityTimer: NodeJS.Timeout | null; recreateReason: string | null;
   stopped: boolean; disabledReason: string | null; configurationRecovery: Promise<void> | null;
   stateStore?: DeliveryStateStore;
+  compactionBreaker?: PiCompactionBreaker;
+  compactionMachines: Map<string, PiCompactionRecoveryMachine>;
+  piOverflowCompactionFailed: Set<string>;
   readiness: RuntimeReadiness | null;
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
 }
@@ -81,6 +89,9 @@ export interface RuntimeHost {
   subscribe(listener: (event: RuntimeHostEvent) => void): () => void;
   isBusy?(agentId: string): boolean;
   resetSession?(agentId: string): Promise<RuntimeSessionResetResult>;
+  recoverSession?(agentId: string, reason: "context-overflow"): Promise<RuntimeSessionRecoveryResult>;
+  /** Internal recovery boundary for Pi compaction failures; never exposed as session reset. */
+  recoverContextOverflow?(agentId: string, deliveryKey: string, reason: string): Promise<RuntimeSessionRecoveryResult>;
 }
 
 export interface RuntimeSessionResetResult {
@@ -92,10 +103,28 @@ export interface RuntimeSessionResetResult {
   sessionId: string | null;
 }
 
+export interface RuntimeSessionRecoveryResult {
+  generationChanged: boolean;
+  sessionChanged: boolean;
+  turns: 0;
+  runtimeReady: true;
+  pendingCount: number;
+  rearmedCount: number;
+  replayStatus: "scheduled" | "pending" | "consumed";
+  sessionId: string | null;
+}
+
 export class RuntimeSessionResetError extends Error {
   constructor(readonly code: "unknown_agent" | "agent_busy" | "inbox_backlog", message: string, readonly pendingCount = 0) {
     super(message);
     this.name = "RuntimeSessionResetError";
+  }
+}
+
+export class RuntimeSessionRecoveryError extends Error {
+  constructor(readonly code: "unknown_agent" | "agent_busy" | "recovery_unavailable" | "recovery_refused" | "recovery_staged_not_committed", message: string, readonly pendingCount = 0) {
+    super(message);
+    this.name = "RuntimeSessionRecoveryError";
   }
 }
 
@@ -192,12 +221,15 @@ export function createRuntimeHost(options: {
   stateStoreFor?(agentId: string): DeliveryStateStore;
   assertOfficialCliReady?(config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): void | Promise<void>;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
+  compactTimeoutMs?: number;
   telemetry?: TelemetryRuntime;
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
   const listeners = new Set<(event: RuntimeHostEvent) => void>();
   const log = options.log ?? (() => {});
   const telemetry = options.telemetry;
+  const compactTimeoutMs = options.compactTimeoutMs ?? 120_000;
+  if (!Number.isFinite(compactTimeoutMs) || compactTimeoutMs <= 0) throw new Error("compactTimeoutMs must be positive");
   const retryPolicy = {
     baseDelayMs: options.retryPolicy?.baseDelayMs ?? 250,
     maxDelayMs: options.retryPolicy?.maxDelayMs ?? 10_000,
@@ -320,6 +352,7 @@ export function createRuntimeHost(options: {
     scrubQuarantinedInput(record, reason);
     record.reason = reason;
     record.retryable = false;
+    delete record.errorCategory;
     const finalRecord = setRecord(agent, record, "error");
     if (finalRecord.status === "consumed") return { status: "accepted", deliveryId: record.deliveryId };
     emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
@@ -451,11 +484,13 @@ export function createRuntimeHost(options: {
     if (result.status === "accepted") {
       delete record.reason;
       delete record.retryable;
+      delete record.errorCategory;
       const finalRecord = setRecord(agent, record, "accepted");
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId, status: "accepted" });
       return { status: "accepted", deliveryId: record.deliveryId };
     }
+    delete record.errorCategory;
     const retryable = result.status === "deferred" || result.retryable;
     record.reason = result.reason;
     record.retryable = retryable;
@@ -502,6 +537,7 @@ export function createRuntimeHost(options: {
       const reason = error instanceof Error ? error.message : String(error);
       record.reason = reason;
       record.retryable = true;
+      delete record.errorCategory;
       setRecord(agent, record, "pending");
       emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId, messageId: record.messageId, status: "deferred", reason });
       return { status: "deferred", deliveryId: record.deliveryId, reason };
@@ -607,12 +643,130 @@ export function createRuntimeHost(options: {
     agent.configurationRecovery = recovery;
   };
 
+  let recoverContextOverflowInternal: (agentId: string, deliveryKey: string, reason: string, breakerKey?: string) => Promise<RuntimeSessionRecoveryResult>;
+
+  const beginPiManualCompaction = (agent: ManagedAgent, session: RuntimeSession, record: DeliveryRecord, nativeWillRetry = false): void => {
+    if (agent.adapter.id !== "pi" || !session.compact || !agent.compactionBreaker) return;
+    const existing = agent.compactionMachines.get(record.input.inputId);
+    if (existing) {
+      existing.agentEnd({ exactOverflow: true, willRetry: nativeWillRetry });
+      return;
+    }
+    const key = `${record.deliveryId}:${record.input.inputId}`;
+    const prior = agent.compactionBreaker.get(key);
+    if (prior && prior.manualAttempt >= 1 && ["manual_sent", "manual_ambiguous", "manual_failed", "native_failed"].includes(prior.state)) {
+      agent.busy = false;
+      agent.turnInProgress = false;
+      void recoverContextOverflowInternal(agent.config.agentId, key, "validated Pi compaction breaker state after restart", key)
+        .catch((error) => log("Pi restart fallback failed", String(error)));
+      return;
+    }
+    const machine = new PiCompactionRecoveryMachine({
+      breaker: agent.compactionBreaker, key, messageId: record.messageId, deliveryId: record.deliveryId,
+      inputId: record.input.inputId, sessionGeneration: agent.generation,
+      onAction: (action) => {
+        if (action === "retry_input") {
+          machine.retrySubmitted();
+          record.status = "pending";
+          record.retryable = true;
+          record.reason = "Pi manual compaction succeeded; retrying the same delivery input";
+          record.updatedAt = now();
+          persist(agent);
+          queueMicrotask(() => { if (!agent.stopped) void submit(agent, record, false); });
+        } else if (action === "fresh_session_fallback") {
+          agent.busy = false;
+          agent.turnInProgress = false;
+          if (record.status !== "error") {
+            record.reason = machine.recordSnapshot.fallbackReason || "Pi compaction recovery fallback";
+            record.retryable = false;
+            record.errorCategory = "context_window";
+            setRecord(agent, record, "error");
+          }
+          void recoverContextOverflowInternal(agent.config.agentId, key, machine.recordSnapshot.fallbackReason || "Pi compaction recovery fallback", key)
+            .catch((error) => log("Pi context fallback failed", String(error)));
+        }
+      },
+    });
+    agent.compactionMachines.set(record.input.inputId, machine);
+    machine.agentEnd({ exactOverflow: true, willRetry: nativeWillRetry });
+    if (nativeWillRetry) return;
+    machine.agentSettled();
+    const deadline = new Date(Date.now() + compactTimeoutMs).toISOString();
+    machine.manualCompactSent(deadline);
+    let compactSettled = false;
+    const compactTimer = setTimeout(() => {
+      if (compactSettled) return;
+      compactSettled = true;
+      machine.compactTimeout();
+    }, compactTimeoutMs);
+    compactTimer.unref?.();
+    void session.compact().then(() => {
+      if (compactSettled) return;
+      compactSettled = true;
+      clearTimeout(compactTimer);
+      machine.compactResponse({ success: true });
+    }).catch((error) => {
+      if (compactSettled) return;
+      compactSettled = true;
+      clearTimeout(compactTimer);
+      const message = error instanceof Error ? error.message : String(error);
+      machine.compactResponse({ success: false, ambiguous: /process exited|process failed|session replaced|protocol/i.test(message) });
+    });
+  };
+
+  const recoverStalePiCompaction = async (agent: ManagedAgent): Promise<void> => {
+    const breaker = agent.compactionBreaker;
+    if (!breaker) return;
+    const stale = breaker.listNonTerminal().find((candidate) => candidate.state !== "native_succeeded");
+    if (!stale) {
+      const succeeded = breaker.listNonTerminal().find((candidate) => candidate.state === "native_succeeded");
+      if (succeeded) breaker.transition(succeeded.key, {}, "closed");
+      return;
+    }
+    const record = [...agent.records.values()].find((candidate) => candidate.deliveryId === stale.deliveryId
+      || candidate.input.inputId === stale.inputId);
+    if (!record) return;
+    record.reason = stale.fallbackReason || "Pi compaction recovery resumed after restart";
+    record.retryable = false;
+    record.errorCategory = "context_window";
+    setRecord(agent, record, "error");
+    breaker.forceFallback(stale.key, record.reason);
+    agent.busy = false;
+    agent.turnInProgress = false;
+    await recoverContextOverflowInternal(agent.config.agentId, stale.key, record.reason, stale.key);
+  };
+
   const observe = (agent: ManagedAgent, session: RuntimeSession, event: NormalizedRuntimeEvent): void => {
     if (agent.session !== session) return; // Ignore late output from a replaced child.
     // Keep the trace parent published until authoritative Inbox reconciliation
     // has observed any direct CLI poll completed by this turn.
     if (event.type !== "turn-end") telemetry?.runtimeEvent(agent.config.agentId, event);
     emit({ type: "runtime", agentId: agent.config.agentId, event });
+    if (event.type === "runtime-observation") {
+      if (event.phase === "compaction_start" && event.reason === "overflow" && event.inputId) {
+        const overflowRecord = [...agent.records.values()].find((candidate) => candidate.input.inputId === event.inputId);
+        if (overflowRecord && !agent.compactionMachines.has(event.inputId)) beginPiManualCompaction(agent, session, overflowRecord, true);
+      }
+      const candidates = [...agent.compactionMachines.values()].filter((machine) =>
+        machine.recordSnapshot.sessionGeneration === agent.generation
+        && (!event.inputId || machine.recordSnapshot.inputId === event.inputId));
+      const machines = event.inputId ? candidates : candidates.length === 1 ? candidates : [];
+      for (const machine of machines) {
+        if (event.phase === "compaction_start" && event.reason === "overflow") machine.compactionStart({ reason: "overflow" });
+        if (event.phase === "compaction_end" && event.reason === "manual") {
+          machine.compactionEnd({ reason: "manual", success: event.success === true, willRetry: event.willRetry === true });
+        }
+        if (event.phase === "compaction_end" && event.reason === "overflow") {
+          machine.compactionEnd({ reason: "overflow", success: event.success === true, willRetry: event.willRetry === true });
+        }
+        if (event.phase === "settled") machine.agentSettled();
+      }
+      if (event.phase === "compaction_end" && event.reason === "overflow" && event.success !== true) {
+        for (const record of agent.records.values()) {
+          if (isActiveDelivery(record.status)) agent.piOverflowCompactionFailed.add(record.input.inputId);
+        }
+      }
+    }
     if (event.type === "session-init") {
       agent.config.sessionId = event.sessionId;
       emit({ type: "session", agentId: agent.config.agentId, runtime: agent.adapter.id, sessionId: event.sessionId, launchId: agent.launchId,
@@ -626,6 +780,11 @@ export function createRuntimeHost(options: {
       markSessionStable(agent, session);
       emit({ type: "activity", agentId: agent.config.agentId, activity: "working", activityKind: "working", detailKind: "turn_started" });
     } else if (event.type === "turn-end") {
+      for (const [inputId, machine] of agent.compactionMachines) {
+        if (machine.recordSnapshot.sessionGeneration !== agent.generation) continue;
+        machine.close();
+        if (["closed", "fallback_committed"].includes(machine.state)) agent.compactionMachines.delete(inputId);
+      }
       const recoveredAuthentication = agent.authFailureActive && agent.turnInProgress
         && agent.turnHadAuthenticatedOutput && !agent.turnHadFailure;
       agent.turnInProgress = false;
@@ -654,6 +813,29 @@ export function createRuntimeHost(options: {
         : undefined;
       if (!record || record.status === "consumed" || record.status === "error") return;
       agent.turnHadFailure = true;
+      if (agent.adapter.id === "pi" && event.errorCategory === "context_window" && event.willRetry === true && session.compact) {
+        beginPiManualCompaction(agent, session, record, true);
+        return;
+      }
+      if (agent.adapter.id === "pi" && event.errorCategory === "context_window" && event.willRetry !== true && session.compact) {
+        record.reason = event.message;
+        record.retryable = false;
+        record.errorCategory = "context_window";
+        setRecord(agent, record, "error");
+        if (agent.piOverflowCompactionFailed.has(record.input.inputId)) {
+          agent.busy = false;
+          agent.turnInProgress = false;
+          void recoverContextOverflowInternal(agent.config.agentId, `${record.deliveryId}:${record.input.inputId}`, "native Pi overflow compaction failed", `${record.deliveryId}:${record.input.inputId}`)
+            .catch((error) => log("Pi native compaction fallback failed", String(error)));
+          return;
+        }
+        // Pi emits this terminal error only after agent_settled; release the
+        // normal turn reservation before the one authorized recovery action.
+        agent.busy = false;
+        agent.turnInProgress = false;
+        beginPiManualCompaction(agent, session, record);
+        return;
+      }
       if (event.willRetry) {
         emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
           messageId: record.messageId, status: "deferred", reason: event.message });
@@ -663,6 +845,11 @@ export function createRuntimeHost(options: {
       if (!submittedWhileBusy) agent.busy = false;
       record.reason = event.message;
       record.retryable = event.retryable;
+      const classifiedCategory = event.errorCategory ?? classifyStrictProviderError(buildStrictProviderErrorInput({
+        message: event.message, errorCategory: event.errorCategory, upstream: event.upstream,
+      }));
+      if (classifiedCategory) record.errorCategory = classifiedCategory;
+      else delete record.errorCategory;
       const finalRecord = setRecord(agent, record, event.retryable ? "pending" : "error");
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId,
@@ -736,6 +923,110 @@ export function createRuntimeHost(options: {
       }
     });
     return agent.starting;
+  };
+
+  recoverContextOverflowInternal = async (agentId: string, deliveryKey: string, reason: string, breakerKey?: string): Promise<RuntimeSessionRecoveryResult> => {
+    const agent = managed.get(agentId);
+    if (!agent || agent.stopped) throw new RuntimeSessionRecoveryError("unknown_agent", `unknown runtime Agent: ${agentId}`);
+    if (agent.adapter.id !== "pi") throw new RuntimeSessionRecoveryError("recovery_unavailable", "Pi context fallback is unavailable for this runtime");
+    const oldSession = agent.session;
+    if (!oldSession || agent.busy || agent.submitting || agent.starting) {
+      throw new RuntimeSessionRecoveryError("agent_busy", `Agent ${agentId} is not idle for Pi context fallback`);
+    }
+    const record = [...agent.records.values()].find((candidate) =>
+      candidate.deliveryId === deliveryKey || candidate.input.inputId === deliveryKey || `${candidate.deliveryId}:${candidate.input.inputId}` === deliveryKey);
+    if (!record) throw new RuntimeSessionRecoveryError("recovery_refused", "Pi context fallback delivery identity is unavailable");
+    const probeEnv = runtimeEnv(agent.config, `${agent.launchId}:pi-context-fallback`);
+    await assertOfficialCliReady(agent.config, probeEnv);
+    const readiness = agent.adapter.probe ? await agent.adapter.probe({ agentId: agent.config.agentId,
+      workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir, env: probeEnv }) : { runtime: "pi" as const, state: "ready" as const };
+    if (readiness.state !== "ready") throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "Pi context fallback readiness failed");
+    const standingPrompt = options.promptBuilder.build({
+      agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
+      description: agent.config.description || "", runtime: agent.adapter.id, cli: agentCliPromptCapabilities("larkin"),
+    });
+    let fresh: RuntimeSession;
+    try {
+      fresh = await agent.adapter.createSession({ agentId: agent.config.agentId, model: agent.config.model,
+        reasoningEffort: agent.config.effort || null, workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
+        resumeSessionId: null, standingPrompt, env: probeEnv });
+    } catch {
+      throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "Pi fresh fallback session could not be staged");
+    }
+    if (agent.session !== oldSession || agent.busy || agent.submitting || agent.starting || agent.stopped) {
+      await fresh.close("Pi context fallback commit precondition changed").catch(() => {});
+      throw new RuntimeSessionRecoveryError("agent_busy", `Agent ${agentId} changed during Pi context fallback`);
+    }
+    let unsubscribeFresh: (() => void) | null = null;
+    try { unsubscribeFresh = fresh.subscribe((next) => observe(agent, fresh, next)); }
+    catch {
+      await fresh.close("Pi context fallback subscription failed").catch(() => {});
+      throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "Pi context fallback subscription failed");
+    }
+    const oldSessionId = oldSession.sessionId;
+    const oldGeneration = agent.generation;
+    const oldLaunchId = agent.launchId;
+    const oldConfigSessionId = agent.config.sessionId;
+    const oldReadiness = agent.readiness;
+    const oldDisabledReason = agent.disabledReason;
+    const oldRecord = { ...record, input: { ...record.input } };
+    let durableRollback: (() => void) | null = null;
+    let rearmedCount = 1;
+    let remainingPendingCount = 1;
+    const commitSwap = (messageIds: readonly string[], rollback?: () => void): void => {
+      if (agent.session !== oldSession || agent.busy || agent.submitting || agent.starting || agent.stopped) {
+        throw new RuntimeSessionRecoveryError("agent_busy", `Agent ${agentId} changed during Pi context fallback`);
+      }
+      durableRollback = rollback ?? null;
+      if (breakerKey && agent.compactionBreaker) agent.compactionBreaker.forceFallbackInTransaction(breakerKey, reason);
+      agent.generation += 1;
+      agent.launchId = crypto.randomUUID();
+      agent.config.sessionId = null;
+      agent.session = fresh;
+      agent.readiness = readiness;
+      agent.disabledReason = null;
+      for (const candidate of agent.records.values()) {
+        if (!messageIds.includes(candidate.messageId)) continue;
+        candidate.status = "pending"; candidate.retryable = true;
+        candidate.reason = "context-window recovery rearmed the retained Inbox delivery"; candidate.updatedAt = now();
+      }
+    };
+    try {
+      if (agent.stateStore?.rearmContextOverflow) {
+        const rearmed = agent.stateStore.rearmContextOverflow((messageIds, rollback) => commitSwap(messageIds, rollback), {
+          messageId: record.messageId, deliveryId: record.deliveryId, inputId: record.input.inputId,
+        });
+        rearmedCount = rearmed.rearmedCount;
+        remainingPendingCount = rearmed.remainingPendingCount;
+      } else {
+        commitSwap([record.messageId]);
+        persist(agent);
+      }
+    } catch (error) {
+      try { const rollback = durableRollback as (() => void) | null; if (rollback) rollback(); } catch { /* preserve primary error */ }
+      agent.generation = oldGeneration;
+      agent.launchId = oldLaunchId;
+      agent.config.sessionId = oldConfigSessionId;
+      agent.session = oldSession;
+      agent.readiness = oldReadiness;
+      agent.disabledReason = oldDisabledReason;
+      Object.assign(record, oldRecord);
+      try { unsubscribeFresh?.(); } catch { /* preserve primary failure */ }
+      await fresh.close("Pi context fallback rolled back").catch(() => {});
+      throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", error instanceof Error ? error.message : "Pi context fallback commit failed");
+    }
+    if (fresh.sessionId) {
+      agent.config.sessionId = fresh.sessionId;
+      emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: fresh.sessionId, launchId: agent.launchId,
+        ...(fresh.effectiveModel ? { model: fresh.effectiveModel } : {}),
+        ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
+    }
+    emit({ type: "agent-status", agentId, status: "active", readiness });
+    await oldSession.close("Pi context fallback committed").catch((error) => log("previous Pi session close after fallback failed", String(error)));
+    void retryPending(agent);
+    return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
+      runtimeReady: true, pendingCount: remainingPendingCount, rearmedCount,
+      replayStatus: remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
   };
 
   return {
@@ -893,6 +1184,154 @@ export function createRuntimeHost(options: {
       return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
         runtimeReady: true, pendingCount: 0, sessionId: fresh.sessionId };
     },
+    async recoverSession(agentId, reason): Promise<RuntimeSessionRecoveryResult> {
+      if (reason !== "context-overflow") throw new RuntimeSessionRecoveryError("recovery_refused", "unsupported recovery reason");
+      const agent = managed.get(agentId);
+      if (agent && agent.adapter.id !== "pi") throw new RuntimeSessionRecoveryError("recovery_unavailable", "context-overflow recovery is available only for Pi Runtime");
+      if (!agent || agent.stopped) throw new RuntimeSessionRecoveryError("unknown_agent", `unknown runtime Agent: ${agentId}`);
+      if (!agent.stateStore?.rearmContextOverflow) {
+        throw new RuntimeSessionRecoveryError("recovery_unavailable", "canonical Inbox recovery is unavailable");
+      }
+      if (agent.busy || agent.turnInProgress || agent.submitting || agent.starting) {
+        throw new RuntimeSessionRecoveryError("agent_busy", `Agent ${agentId} is not idle`);
+      }
+      const oldSession = agent.session;
+      if (!oldSession) throw new RuntimeSessionRecoveryError("agent_busy", `Agent ${agentId} Runtime session is unavailable`);
+      const oldSessionId = oldSession.sessionId;
+      if (agent.stateStore.readNdjson) {
+        const pendingRows = agent.stateStore.withInboxTransaction(() => agent.stateStore!.readNdjson!("inbox"));
+        if (pendingRows.length === 0) {
+          throw new RuntimeSessionRecoveryError("recovery_refused", "context-window recovery has no retained Inbox backlog");
+        }
+        const messageIds = new Set(pendingRows.flatMap((row) => {
+          const messageId = row && typeof row === "object" && !Array.isArray(row)
+            ? (row as { message_id?: unknown }).message_id : undefined;
+          return typeof messageId === "string" && messageId ? [messageId] : [];
+        }));
+        const persisted = agent.stateStore.readJson<DeliveryFile>("runtimeDeliveries", { version: 1, records: [] });
+        if (Array.isArray(persisted.records) && persisted.records.some((record) => messageIds.has(record.messageId) && record.status !== "error")) {
+          throw new RuntimeSessionRecoveryError("recovery_refused", "context-window recovery is already staged or completed");
+        }
+      }
+      const probeEnv = runtimeEnv(agent.config, `${agent.launchId}:context-overflow-recovery`);
+      let readiness: RuntimeReadiness;
+      try {
+        await assertOfficialCliReady(agent.config, probeEnv);
+        readiness = agent.adapter.probe ? await agent.adapter.probe({ agentId: agent.config.agentId,
+          workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
+          env: { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND, LARKIN_CODEX_COMMAND: process.env.LARKIN_CODEX_COMMAND,
+            LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...probeEnv } })
+          : { runtime: agent.adapter.id, state: "ready" as const };
+      } catch (error) {
+        if (error instanceof RuntimePrerequisiteError) throw error;
+        throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "Runtime readiness probe failed");
+      }
+      if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
+      const standingPrompt = options.promptBuilder.build({
+        agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
+        description: agent.config.description || "", runtime: agent.adapter.id,
+        cli: agentCliPromptCapabilities("larkin"),
+      });
+      let fresh: RuntimeSession;
+      try {
+        fresh = await agent.adapter.createSession({
+          agentId: agent.config.agentId, model: agent.config.model, reasoningEffort: agent.config.effort || null,
+          workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
+          resumeSessionId: null, standingPrompt, env: probeEnv,
+        });
+      } catch {
+        throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "fresh Runtime session could not be staged");
+      }
+      let unsubscribeFresh: (() => void) | null = null;
+      try { unsubscribeFresh = fresh.subscribe((event) => observe(agent, fresh, event)); }
+      catch {
+        await fresh.close("context-window recovery subscription failed").catch(() => {});
+        throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "fresh Runtime session subscription failed");
+      }
+      const oldGeneration = agent.generation;
+      const oldLaunchId = agent.launchId;
+      const oldConfigSessionId = agent.config.sessionId;
+      const oldReadiness = agent.readiness;
+      const oldDisabledReason = agent.disabledReason;
+      const oldRecords = new Map([...agent.records.entries()].map(([id, record]) => [id, { ...record, input: { ...record.input } }] as const));
+      const cleanupFresh = async (reason: string): Promise<void> => {
+        const unsubscribe = unsubscribeFresh;
+        unsubscribeFresh = null;
+        try { unsubscribe?.(); } catch { /* close still owns staged-session cleanup */ }
+        await fresh.close(reason).catch(() => {});
+      };
+      const restoreRuntime = (): void => {
+        agent.session = oldSession;
+        agent.generation = oldGeneration;
+        agent.launchId = oldLaunchId;
+        agent.config.sessionId = oldConfigSessionId;
+        agent.readiness = oldReadiness;
+        agent.disabledReason = oldDisabledReason;
+        agent.records = new Map(oldRecords);
+        agent.byMessage = new Map([...oldRecords.values()].map((record) => [record.messageId, record.deliveryId]));
+      };
+      let recoveryProjectionEmitted = false;
+      const compensateProjection = (): void => {
+        if (!recoveryProjectionEmitted) return;
+        try { emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: oldSessionId, launchId: oldLaunchId }); }
+        catch { /* preserve the original listener failure */ }
+        try { emit({ type: "agent-status", agentId, status: "active", ...(oldReadiness ? { readiness: oldReadiness } : {}) }); }
+        catch { /* preserve the original listener failure */ }
+      };
+      let durableRollback: (() => void) | null = null;
+      try {
+        const rearmed = agent.stateStore.rearmContextOverflow((messageIds, rollback) => {
+          // This callback runs under the canonical Inbox lock. All potentially
+          // racing checks above are synchronous from this process, while the
+          // state-store method rechecks every row and delivery on disk.
+          if (agent.session !== oldSession || agent.busy || agent.turnInProgress || agent.submitting || agent.starting || agent.stopped) {
+            throw new RuntimeSessionRecoveryError("agent_busy", `Agent ${agentId} changed during recovery`);
+          }
+          durableRollback = rollback;
+          agent.generation += 1;
+          agent.launchId = crypto.randomUUID();
+          agent.config.sessionId = null;
+          agent.session = fresh;
+          agent.readiness = readiness;
+          agent.disabledReason = null;
+          for (const record of agent.records.values()) {
+            if (!messageIds.includes(record.messageId)) continue;
+            record.status = "pending";
+            record.retryable = true;
+            record.reason = "context-window recovery rearmed the retained Inbox delivery";
+            record.updatedAt = now();
+          }
+        });
+        recoveryProjectionEmitted = true;
+        if (fresh.sessionId) {
+          agent.config.sessionId = fresh.sessionId;
+          emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: fresh.sessionId, launchId: agent.launchId,
+            ...(fresh.effectiveModel ? { model: fresh.effectiveModel } : {}),
+            ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
+        }
+        emit({ type: "agent-status", agentId, status: "active", readiness });
+        durableRollback = null;
+        await oldSession.close("context-window recovery committed")
+          .catch((error) => log("previous runtime close after context-window recovery failed", String(error)));
+        void retryPending(agent);
+        return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
+          runtimeReady: true, pendingCount: rearmed.remainingPendingCount, rearmedCount: rearmed.rearmedCount,
+          replayStatus: rearmed.remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
+      } catch (error) {
+        try { const rollback = durableRollback as (() => void) | null; if (rollback) rollback(); } catch { /* preserve the original failure */ }
+        restoreRuntime();
+        compensateProjection();
+        await cleanupFresh("context-window recovery not committed");
+        if (error instanceof RuntimeSessionRecoveryError) throw error;
+        if (typeof (error as { code?: unknown }).code === "string") {
+          throw new RuntimeSessionRecoveryError("recovery_refused", error instanceof Error ? error.message : "context-window recovery was refused");
+        }
+        throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "context-window recovery was not committed");
+      }
+    },
+    async recoverContextOverflow(agentId, deliveryKey, reason): Promise<RuntimeSessionRecoveryResult> {
+      return recoverContextOverflowInternal(agentId, deliveryKey, reason);
+    },
     async start(configs): Promise<void> {
       let activeCount = 0;
       let recoveringCount = 0;
@@ -930,7 +1369,12 @@ export function createRuntimeHost(options: {
           byMessage: new Map(persisted.records.map((record) => [record.messageId, record.deliveryId])),
           generation: 0, poller: null, retryTimer: null, recreateAttempts: 0,
           stabilityTimer: null, recreateReason: null, stopped: false, disabledReason: null,
-          configurationRecovery: null, stateStore, readiness: null,
+          configurationRecovery: null, stateStore,
+          compactionBreaker: config.runtime === "pi"
+            ? new PiCompactionBreaker(config.stateDir ?? path.join(config.workspaceDir, ".larkin", "agents", config.agentId), {
+              withLock: stateStore ? <T>(operation: () => T): T => stateStore.withInboxTransaction(operation) : undefined,
+            }) : undefined,
+          compactionMachines: new Map(), piOverflowCompactionFailed: new Set(), readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
@@ -960,6 +1404,7 @@ export function createRuntimeHost(options: {
         emitConsumed(agent, [...startupConsumed, ...persist(agent)]);
         try {
           await ensureSession(agent);
+          await recoverStalePiCompaction(agent);
           activeCount += 1;
           await retryPending(agent);
         } catch (error) {

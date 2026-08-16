@@ -14,6 +14,7 @@ import {
   requirePiResumeSessionFile,
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
+import { classifyStrictProviderError } from "../../../dist/runtime/provider-error-classifier.mjs";
 
 const fakeProcesses = new Set();
 
@@ -577,12 +578,12 @@ test("bundled Pi emits content-free RPC timing phases while preserving normalize
   ["turn-start", "activity:thinking", "activity:text", "activity:tool", "turn-end"]);
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), [
-    "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "completed", "tool_result", "settled",
+    "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "agent_end", "completed", "tool_result", "settled",
   ]);
   assert.ok(observations.every((event) => event.runtime === "pi" && event.distribution === "builtin"));
   assert.equal(events.filter((event) => event.type === "turn-start").length, 1);
   assert.equal(events.filter((event) => event.type === "turn-end").length, 1);
-  assert.doesNotMatch(JSON.stringify(observations), /reason|answer|read|out-of-order|FORBIDDEN|toolName|toolResult|message|text/);
+  assert.doesNotMatch(JSON.stringify(observations), /answer|read|out-of-order|FORBIDDEN|toolName|toolResult|message|text/);
 });
 
 test("bundled Pi closes an epoch RPC observation only from its original submit owner", async () => {
@@ -715,8 +716,19 @@ test("Pi reports an exhausted transport failure against every owned input before
   assert.equal(events.filter((event) => event.type === "error").length, 0);
 });
 
+test("strict classifier accepts only the exact categorized Pi context projection", () => {
+  const canonical = "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.";
+  const projection = classifyPiProviderError({ message: canonical }).reason;
+  assert.equal(classifyStrictProviderError({ message: projection, errorCategory: "context_window" }), "context_window");
+  assert.equal(classifyStrictProviderError({ message: projection }), undefined);
+  assert.equal(classifyStrictProviderError({ message: projection.replace("exceeded", "exceedeD"), errorCategory: "context_window" }), undefined);
+  assert.equal(classifyStrictProviderError({ message: "provider rejected the input because context overflow happened", errorCategory: "context_window" }), undefined);
+  assert.equal(classifyStrictProviderError({ message: "Codex error: provider rejected the input because the context window was exceeded", errorCategory: "context_window" }), undefined);
+});
+
 test("Pi provider failures preserve safe actionable categories", () => {
   for (const [upstream, category] of [
+    [{ provider: "openai-codex", message: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again." }, "context_window"],
     [{ status: 402, message: "payment required" }, "billing"],
     [{ status: 429, code: "insufficient_quota", message: "monthly allowance exhausted" }, "quota"],
     [{ status: 429, message: "too many requests" }, "rate_limit"],
@@ -731,6 +743,7 @@ test("Pi provider failures preserve safe actionable categories", () => {
   }
   for (const upstream of [
     { provider: "policy-gateway", message: "Authorization metadata documents the API key policy for this workspace" },
+    { provider: "openai-codex", message: "The context policy token limit may apply" },
     { provider: "policy-gateway", code: "policy_error", message: "API key authorization requirements are controlled by tenant policy" },
   ]) {
     assert.equal(classifyPiProviderError(upstream).category, "provider");

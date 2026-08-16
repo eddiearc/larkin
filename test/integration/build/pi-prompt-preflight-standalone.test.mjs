@@ -81,12 +81,14 @@ if (process.argv.includes("--version")) { console.log("0.83.0"); process.exit(0)
 const marker = process.env.PI_PREFLIGHT_MARKER;
 const record = (value) => fs.appendFileSync(marker, JSON.stringify(value) + "\\n");
 const output = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-const model = { provider: "fixture", id: "pi-preflight", reasoning: false, contextWindow: 32000 };
+const model = { provider: "fixture", id: "pi-preflight", reasoning: false, contextWindow: 272000 };
 record({ type: "launch", args: process.argv.slice(2) });
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "get_state") return output({ id: request.id, type: "response", command: request.type, success: true,
-    data: { sessionId: "PRIVATE_STANDALONE_SESSION", model, thinkingLevel: "off", isStreaming: false } });
+    data: { sessionId: "PRIVATE_STANDALONE_SESSION", model, thinkingLevel: "off", isStreaming: false,
+      autoCompactionEnabled: true, compactionCapabilities: { reserveTokens: 40800, keepRecentTokens: 20000,
+        events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"] } } });
   if (request.type === "get_available_models") return output({ id: request.id, type: "response", command: request.type, success: true,
     data: { models: [model] } });
   if (request.type !== "prompt") return;

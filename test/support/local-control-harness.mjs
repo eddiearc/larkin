@@ -11,6 +11,7 @@ import { RuntimePrerequisiteError } from "../../dist/runtime/runtime-readiness.m
 
 const root = process.env.LARKIN_CONFIG_DIR;
 const calls = process.env.LARKIN_CONTROL_CALLS;
+const recoveryWorkflow = process.env.LARKIN_RECOVERY_WORKFLOW === "1";
 if (!root || !calls) throw new Error("harness env missing");
 fs.mkdirSync(root, { recursive: true, mode: 0o700 });
 fs.chmodSync(root, 0o700);
@@ -37,20 +38,27 @@ fs.writeFileSync(path.join(root, "daemon-status.json"), JSON.stringify({
 }), { mode: 0o600 });
 class ResetSession {
   listeners = new Set(); closes = []; sessionId;
-  constructor(id) { this.sessionId = id; }
+  constructor(id, replayStore = null) { this.sessionId = id; this.replayStore = replayStore; }
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  async prompt(input) { return { status: "accepted", inputId: input.inputId }; }
-  async busyInput(input) { return { status: "accepted", inputId: input.inputId }; }
+  emit(event) { for (const listener of this.listeners) listener(event); }
+  async prompt(input) {
+    if (this.replayStore) setTimeout(() => { try { this.emit({ type: "turn-start" }); this.replayStore.pollInbox({ limit: 1 }); this.emit({ type: "turn-end" }); } catch {} }, 0);
+    if (this.replayStore) fs.appendFileSync(calls, `replay:${input.deliveryId}:${input.inputId}\n`);
+    return { status: "accepted", inputId: input.inputId };
+  }
+  async busyInput(input) { return this.prompt(input); }
   async cancel() {} async close(reason) { this.closes.push(reason); }
 }
 const resetAgentId = "cli_newA1";
 let resetGeneration = 0;
 const resetStore = createAgentStateStore(root, resetAgentId);
 const resetRuntimeHost = createRuntimeHost({
-  adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return new ResetSession(`control-session-${++resetGeneration}`); } }),
+  adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() {
+    return new ResetSession(`control-session-${++resetGeneration}`, recoveryWorkflow ? resetStore : null);
+  } }),
   promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => resetStore, assertOfficialCliReady: () => {},
 });
-const resetAgent = { agentId: resetAgentId, name: resetAgentId, runtime: "codex", model: "gpt-5.2",
+const resetAgent = { agentId: resetAgentId, name: resetAgentId, runtime: "pi", model: "fixture-model",
   feishuAppId: resetAgentId, feishuProfile: resetAgentId, feishuAppSecret: "fixture-secret", feishuDomain: "https://open.feishu.cn",
   larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir: path.join(root, "agents", resetAgentId),
   stateDir: path.join(root, "state", "agents", resetAgentId) };
@@ -59,9 +67,17 @@ const resetHost = createHostShell({ env: { ...process.env, LARKIN_HOME: root, LA
   runtimeHost: resetRuntimeHost, eventSourceStartDelayMs: 60_000,
   managedCliForAgent: () => ({ command: { command: "/test/lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} }),
   channelPackage: { createLarkChannel() { throw new Error("not started in control harness"); } }, logImpl: () => {} });
+if (recoveryWorkflow) {
+  for (let index = 0; index < 4; index += 1) resetStore.appendNdjson("inbox", { message_id: `om_workflow_context_${index}`, chat_id: "oc_workflow_context", content: "synthetic" });
+  resetStore.writeJson("runtimeDeliveries", { version: 1, records: Array.from({ length: 4 }, (_, index) => ({
+    deliveryId: `workflow-delivery-${index}`, messageId: `om_workflow_context_${index}`, status: "error", retryable: false,
+    reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window",
+    input: { inputId: `workflow-input-${index}`, deliveryId: `workflow-delivery-${index}`, kind: "wake", text: "synthetic", attempt: 0 }, updatedAt: "before",
+  })) });
+}
 await resetHost.start();
 resetStore.writeJson("status", { ...resetStore.readJson("status", {}), connectedAt: new Date().toISOString(), connectedVia: "mock",
-  reconnectingAt: "2020-01-01T00:00:02.000Z", reconnectedAt: "2020-01-01T00:00:01.000Z" });
+  ...(recoveryWorkflow ? {} : { reconnectingAt: "2020-01-01T00:00:02.000Z", reconnectedAt: "2020-01-01T00:00:01.000Z" }) });
 const serverOptions = {
   larkinHome: root,
   authorityToken,
@@ -79,6 +95,17 @@ const serverOptions = {
     await new Promise((resolve) => setTimeout(resolve, 80));
     const result = await resetHost.resetSession(request.agentId, request.waitReadyMs);
     return { ok: result.readyForFreshScenario, agentId: request.agentId, ...result };
+  },
+  async recoverSession(request) {
+    if (recoveryWorkflow) {
+      const result = await resetHost.recoverSession(request.agentId, request.reason, request.waitReadyMs);
+      return { ok: result.recoveryCommitted, agentId: request.agentId, ...result };
+    }
+    return { ok: true, agentId: request.agentId, recoveryCommitted: true, generationChanged: true,
+      sessionChanged: true, turns: 0, runtimeReady: false, channelConnected: true, reconnecting: false,
+      pendingCount: 4, rearmedCount: 4, replayStatus: "pending", remainingPendingCount: 4,
+      readyForFreshScenario: false, inboundObserved: false,
+      readiness: { runtime: "pi", state: "unavailable", executable: "/private/bin/pi", reason: "raw /private response", nextAction: "raw secret" } };
   },
 };
 let server = createAgentControlServer(serverOptions);

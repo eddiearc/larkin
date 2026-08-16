@@ -113,6 +113,53 @@ test("production-order Pi preflight progress preserves one durable Inbox deliver
   }
 });
 
+test("production-shaped Pi RPC Mock proves native retry lifecycle is correlated and does not duplicate compact or input", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-native-retry-e2e-"));
+  const agentId = "cli_nativeRetryA1"; const messageId = "om_native_retry";
+  const stateDir = path.join(root, "state", "agents", agentId); const workspaceDir = path.join(root, "workspace");
+  const store = createAgentStateStore(root, agentId); let compactCount = 0; let promptCount = 0;
+  const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.killed = [];
+  child.kill = (signal) => { child.killed.push(signal); queueMicrotask(() => child.emit("exit", null, signal)); return true; };
+  child.stdin = { destroyed: false, write(line, callback) {
+    const request = JSON.parse(line); callback?.();
+    if (request.type === "get_state") queueMicrotask(() => child.stdout.write(`${JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
+      data: { sessionId: "native-session", model: { provider: "fixture", id: "fixture-model", contextWindow: 272000 }, thinkingLevel: "off", autoCompactionEnabled: true } })}\n`));
+    else if (request.type === "get_available_models") queueMicrotask(() => child.stdout.write(`${JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
+      data: { models: [{ provider: "fixture", id: "fixture-model" }] } })}\n`));
+    else if (request.type === "prompt") {
+      promptCount += 1;
+      queueMicrotask(() => child.stdout.write(`${JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data: {} })}\n`));
+      setTimeout(() => child.stdout.write(`${JSON.stringify({ type: "turn_start", turnIndex: 0 })}\n`), 2);
+      setTimeout(() => child.stdout.write(`${JSON.stringify({ type: "compaction_start", reason: "overflow" })}\n`), 4);
+      setTimeout(() => child.stdout.write(`${JSON.stringify({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: true, result: {} })}\n`), 6);
+      setTimeout(() => child.stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: true, messages: [{ role: "assistant", stopReason: "error", errorMessage: "Your input exceeds the context window of this model. Please adjust your input and try again." }] })}\n`), 8);
+      setTimeout(() => child.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`), 10);
+    } else if (request.type === "compact") compactCount += 1;
+    return true;
+  }, end() {} };
+  const native = createNativeRuntimeAdapter("pi", { env: { LARKIN_PI_DISTRIBUTION: "builtin" }, spawn: () => child });
+  const adapter = { id: native.id, capabilities: native.capabilities, probe: async () => ({ runtime: "pi", state: "ready" }), createSession: (input) => native.createSession(input) };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+    assertOfficialCliReady: () => {}, retryPolicy: { baseDelayMs: 2, maxDelayMs: 2, maxAttempts: 1 } });
+  const target = "chat:oc_native_retry";
+  try {
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    await host.start([{ agentId, name: agentId, runtime: "pi", model: "default", piDistribution: "builtin", workspaceDir, stateDir }]);
+    store.prepareInboxDelivery({ message_id: messageId, target, content: "native retry", wake: true });
+    const receipt = await host.deliver(agentId, { message_id: messageId, target, content: "native retry", wake: true });
+    assert.equal(receipt.status, "accepted");
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    store.pollInbox({ target });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(promptCount, 1); assert.equal(compactCount, 0);
+    const breaker = JSON.parse(fs.readFileSync(path.join(stateDir, "piCompactionRecovery.json"), "utf8"));
+    assert.equal(breaker.records[0].state, "closed");
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "consumed");
+  } finally {
+    await host.shutdown("native retry mock complete").catch(() => {}); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("external Pi production-order preflight timeout stays bounded, pending, observable, and turn-free", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-timeout-e2e-"));
   const agentId = "cli_externalTimeoutA1"; const messageId = "om_PRIVATE_TIMEOUT";

@@ -38,19 +38,29 @@ test("Pi RPC client uses correlated requests and accepts CRLF without splitting 
   assert.equal(events[0].assistantMessageEvent.delta, "a\u2028b");
 });
 
-test("Pi RPC client fails pending work exactly once on malformed or oversized frames", async () => {
-  for (const frame of ["{broken}\n", `${"x".repeat(33)}\n`]) {
-    const child = new FakeProcess();
-    const client = new PiRpcClient(child, { requestTimeoutMs: 100, maxFrameBytes: 32 });
-    const failures = [];
-    client.subscribeFailure((error) => failures.push(error.message));
-    const pending = client.request("get_state");
-    child.stdout.write(frame);
-    await assert.rejects(pending, /Pi RPC protocol/i);
-    child.stdout.write("{broken-again}\n");
-    assert.equal(failures.length, 1);
-    assert.deepEqual(child.killed, ["SIGTERM"]);
-  }
+test("Pi RPC client fails pending work exactly once on malformed frames", async () => {
+  const child = new FakeProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 100 });
+  const failures = [];
+  client.subscribeFailure((error) => failures.push(error.message));
+  const pending = client.request("get_state");
+  child.stdout.write("{broken}\n");
+  await assert.rejects(pending, /Pi RPC protocol/i);
+  child.stdout.write("{broken-again}\n");
+  assert.equal(failures.length, 1);
+  assert.deepEqual(child.killed, ["SIGTERM"]);
+});
+
+test("Pi RPC client accepts valid image events larger than 1 MiB", async () => {
+  const child = new FakeProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 100 });
+  const events = [];
+  client.subscribe((event) => events.push(event));
+  const data = "a".repeat(1024 * 1024 + 1);
+  child.stdout.write(`${JSON.stringify({ type: "message_update", content: [{ type: "image", data, mimeType: "image/png" }] })}\n`);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].content[0].data.length, data.length);
+  await client.close();
 });
 
 test("Pi RPC request timeout is bounded and tears down the unhealthy process", async () => {
@@ -102,6 +112,20 @@ test("Pi RPC prompt progress cannot evade its absolute preflight deadline", asyn
   } finally {
     clearInterval(interval);
   }
+});
+
+test("Pi RPC compact uses one absolute deadline and ignores a late response without killing the client", async () => {
+  const child = new FakeProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 100, compactTimeoutMs: 20 });
+  const compact = client.requestCompact();
+  const id = child.writes[0].id;
+  await assert.rejects(compact, /absolute.*compact/i);
+  child.stdout.write(`${JSON.stringify({ id, type: "response", command: "compact", success: true, data: {} })}\n`);
+  const next = client.request("get_state");
+  child.stdout.write(`${JSON.stringify({ id: child.writes[1].id, type: "response", command: "get_state", success: true, data: {} })}\n`);
+  assert.deepEqual(await next, {});
+  assert.deepEqual(child.killed, []);
+  await client.close();
 });
 
 test("Pi RPC failure and close share one shutdown promise that escalates a stubborn child", async () => {

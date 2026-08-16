@@ -61,6 +61,54 @@ test("public session reset preserves a truthful reconnect refusal projection", a
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("public context-overflow recovery requires the exact reason and emits only aggregate replay state", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-session-recover-cli-"));
+  const agentId = "cli_recoverPublicA1";
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ version: 3, serverId: "server-test", activeAgent: agentId,
+    agents: { [agentId]: { runtime: "pi", model: "openai/gpt-5" } } }), { mode: 0o600 });
+  let stdout = "", request;
+  try {
+    const code = await runSessionCli(["recover", "--agent", agentId, "--reason", "context-overflow", "--json", "--wait-ready", "2"],
+      { ...process.env, LARKIN_CONFIG_DIR: root }, {
+        async requestRecovery(input) { request = input; return { ok: true, agentId, recoveryCommitted: true,
+          generationChanged: true, sessionChanged: true, turns: 0, runtimeReady: true, channelConnected: true,
+          reconnecting: false, pendingCount: 4, rearmedCount: 4, replayStatus: "pending", remainingPendingCount: 4,
+          readyForFreshScenario: true, inboundObserved: false }; },
+        io: { stdout: (value) => { stdout += value; }, stderr() {} },
+      });
+    assert.equal(code, 0);
+    assert.equal(request.reason, "context-overflow");
+    assert.equal(request.waitReadyMs, 2_000);
+    assert.deepEqual(JSON.parse(stdout), { ok: true, agent_id: agentId, recovery_committed: true,
+      generation_changed: true, session_changed: true, turns: 0, runtime_ready: true,
+      channel_connected: true, reconnecting: false, pending_count: 4, rearmed_count: 4,
+      replay_status: "pending", remaining_pending_count: 4, ready_for_fresh_scenario: true,
+      inbound_observed: false });
+    assert.doesNotMatch(stdout, /message|delivery|session-[0-9]|stateDir|credential|\/tmp/i);
+    stdout = "";
+    assert.equal(await runSessionCli(["recover", "--agent", agentId, "--reason", "context-overflow", "--json"],
+      { ...process.env, LARKIN_CONFIG_DIR: root }, { async requestRecovery() { return { ok: false, agentId,
+        recoveryCommitted: false, generationChanged: false, sessionChanged: false, turns: 0, runtimeReady: false,
+        channelConnected: false, reconnecting: false, pendingCount: 4, rearmedCount: 0, replayStatus: "not_started",
+        remainingPendingCount: 4, readyForFreshScenario: false, inboundObserved: false, code: "runtime_unavailable",
+        error: "raw /private/session-id message body credential=secret", readiness: { runtime: "pi", state: "unavailable",
+          executable: "/private/bin/pi", reason: "raw provider response /private", nextAction: "raw secret" } }; }, io: { stdout: (value) => { stdout += value; }, stderr() {} } }), 1);
+    assert.doesNotMatch(stdout, /raw|private|session-id|message body|credential|secret|\/tmp/i);
+    assert.deepEqual(JSON.parse(stdout).readiness, { runtime: "pi", state: "unavailable",
+      reason: "Runtime readiness is unavailable.", nextAction: "Inspect Runtime/provider configuration, then retry." });
+    for (const [argv, expected] of [
+      [["recover", "--agent", agentId, "--json"], /--reason context-overflow is required/],
+      [["recover", "--agent", agentId, "--reason", "quota", "--json"], /--reason context-overflow is required/],
+      [["reset", "--agent", agentId, "--reason", "context-overflow", "--json"], /--reason is only valid/],
+    ]) {
+      let invalid = "";
+      assert.equal(await runSessionCli(argv, {}, { requestRecovery: async () => { throw new Error("must not run"); }, io: { stdout: (value) => { invalid += value; }, stderr() {} } }), 1);
+      assert.equal(JSON.parse(invalid).code, "invalid_arguments");
+      assert.match(JSON.parse(invalid).error, expected);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("session reset is user-only and rejects malformed argv before control access", async () => {
   const cases = [
     [[], /unsupported session subcommand/],

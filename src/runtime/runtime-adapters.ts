@@ -1,4 +1,4 @@
-import { spawn as nodeSpawn } from "node:child_process";
+import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -27,6 +27,18 @@ import {
   providerAuthenticationFailureReadiness,
   RuntimePrerequisiteError,
 } from "./runtime-readiness.js";
+import {
+  buildStrictProviderErrorInput,
+  classifyStrictProviderError,
+  INTERNAL_CONTEXT_WINDOW_PROJECTION_REASON,
+} from "./provider-error-classifier.js";
+import {
+  assertEffectivePiCompactionSettings,
+  assertNoProjectPiCompactionOverride,
+  prepareOwnedPiDirectory,
+  readOwnedPiSettings,
+  verifyPiCapabilities,
+} from "./pi-compaction-recovery.js";
 
 interface WritableLike {
   destroyed?: boolean;
@@ -52,6 +64,8 @@ export interface PiSessionProcessLike {
   prompt(text: string): Promise<unknown>;
   steer(text: string): Promise<unknown> | unknown;
   abort(): Promise<unknown> | unknown;
+  compact?(customInstructions?: string): Promise<unknown>;
+  getState?(): Promise<Record<string, unknown>>;
   dispose?(): Promise<unknown> | unknown;
   subscribe?(listener: (event: unknown) => void): (() => void) | void;
 }
@@ -499,6 +513,7 @@ class PiSession extends EventSession {
   private readonly observedSubmitEpochs = new Set<number>();
   private readonly observedAcceptedEpochs = new Set<number>();
   private readonly observedCompletedEpochs = new Set<number>();
+  private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
   constructor(private readonly sdk: PiSessionProcessLike, private readonly distribution: "builtin" | "external") {
@@ -518,6 +533,10 @@ class PiSession extends EventSession {
   async prompt(input: RuntimeInput): Promise<RuntimeInputResult> { return this.enqueue(input, () => this.sdk.prompt(input.text)); }
   async busyInput(input: RuntimeInput): Promise<RuntimeInputResult> { return this.enqueue(input, () => this.sdk.steer(input.text)); }
   async cancel(_reason: string): Promise<void> { await this.sdk.abort(); }
+  async compact(customInstructions?: string): Promise<unknown> {
+    if (!this.sdk.compact) throw new Error("Pi compact RPC is unavailable");
+    return this.sdk.compact(customInstructions);
+  }
   async close(_reason: string): Promise<void> { this.unsubscribe?.(); await this.sdk.dispose?.(); }
 
   private async enqueue(input: RuntimeInput, operation: () => Promise<unknown> | unknown): Promise<RuntimeInputResult> {
@@ -529,14 +548,14 @@ class PiSession extends EventSession {
     const ownsRpcObservation = !this.observedSubmitEpochs.has(epoch);
     if (ownsRpcObservation) {
       this.observedSubmitEpochs.add(epoch);
-      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "rpc_submit" });
+      this.emitObservation("rpc_submit");
     }
     try {
       await operation();
       this.awaitingAcknowledgement.delete(input.inputId);
       if (ownsRpcObservation && !this.observedAcceptedEpochs.has(epoch)) {
         this.observedAcceptedEpochs.add(epoch);
-        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "rpc_accepted" });
+        this.emitObservation("rpc_accepted");
       }
       return { status: "accepted", inputId: input.inputId };
     } catch (error) {
@@ -569,16 +588,20 @@ class PiSession extends EventSession {
       this.observedSubmitEpochs.clear();
       this.observedAcceptedEpochs.clear();
       this.observedCompletedEpochs.clear();
+      this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       this.emit({ type: "error", message });
-    } else if (event?.type === "compaction_start" && this.awaitingAcknowledgement.size > 0) {
-      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "compaction_start" });
-    } else if (event?.type === "compaction_end" && this.awaitingAcknowledgement.size > 0) {
-      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "compaction_end" });
+    } else if (event?.type === "compaction_start") {
+      this.emitObservation("compaction_start", event.reason === "manual" || event.reason === "threshold" || event.reason === "overflow" ? { reason: event.reason } : {});
+    } else if (event?.type === "compaction_end") {
+      this.emitObservation("compaction_end", {
+        ...(event.reason === "manual" || event.reason === "threshold" || event.reason === "overflow" ? { reason: event.reason } : {}),
+        willRetry: event.willRetry === true, success: event.aborted !== true && event.result !== undefined,
+      });
     } else if ((event?.type === "auto_retry_start" || event?.type === "auto_retry_end"
       || String(event?.type || "").startsWith("summarization_retry_")) && this.awaitingAcknowledgement.size > 0) {
-      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "retry_progress" });
+      this.emitObservation("retry_progress");
     } else if (event?.type === "turn_start") {
       const epoch = this.oldestOwnedEpoch();
       if (epoch === null || this.activeEpoch !== null) return;
@@ -586,7 +609,7 @@ class PiSession extends EventSession {
       this.settleArmedEpoch = null;
       this.firstOutputObserved = false;
       this.toolCallOpen = false;
-      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "turn_start" });
+      this.emitObservation("turn_start");
       this.emit({ type: "turn-start", ...(Number.isInteger(event.turnIndex) ? { turnId: `pi-${event.turnIndex}` } : {}) });
     }
     else if (event?.type === "agent_end") {
@@ -597,9 +620,17 @@ class PiSession extends EventSession {
         ? piAssistantProviderError(assistant)
         : null;
       this.settleArmedEpoch = this.activeEpoch;
+      if (this.activeEpoch !== null && !this.observedAgentEndEpochs.has(this.activeEpoch)) {
+        this.observedAgentEndEpochs.add(this.activeEpoch);
+        this.emitObservation("agent_end", { willRetry: event.willRetry === true });
+      }
+      if (event.willRetry === true && this.finalAssistantError?.upstream.message === "Your input exceeds the context window of this model. Please adjust your input and try again.") {
+        this.emit({ type: "input-error", inputId: this.oldestOwnedInput(), retryable: true, willRetry: true,
+          message: "Pi owns the context-overflow retry", errorCategory: "context_window" });
+      }
       if (event.willRetry !== true && this.activeEpoch !== null && !this.observedCompletedEpochs.has(this.activeEpoch)) {
         this.observedCompletedEpochs.add(this.activeEpoch);
-        this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "completed" });
+        this.emitObservation("completed");
       }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
@@ -614,7 +645,7 @@ class PiSession extends EventSession {
         this.toolCallOpen = false;
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_result" });
       }
-      this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "settled" });
+      this.emitObservation("settled");
       const owned = [...this.ownedInputIds].filter((inputId) => this.inputEpochs.get(inputId) === epoch);
       if (error) {
         const classified = classifyPiProviderError(error);
@@ -636,6 +667,7 @@ class PiSession extends EventSession {
       this.observedSubmitEpochs.delete(epoch);
       this.observedAcceptedEpochs.delete(epoch);
       this.observedCompletedEpochs.delete(epoch);
+      this.observedAgentEndEpochs.delete(epoch);
     }
     else if (event?.type === "tool_execution_start") {
       if (!this.firstOutputObserved) {
@@ -662,6 +694,22 @@ class PiSession extends EventSession {
       const kind = event.assistantMessageEvent.type?.startsWith("thinking") ? "thinking" : "text";
       this.emit({ type: "activity", activity: kind, text: String(event.assistantMessageEvent.delta) });
     }
+  }
+
+  private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
+    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean;
+  } = {}): void {
+    const inputId = this.oldestOwnedInput();
+    const observation = { type: "runtime-observation" as const, runtime: "pi" as const,
+      distribution: this.distribution, phase, ...fields } as NormalizedRuntimeEvent & Record<string, unknown>;
+    // Correlation is host-internal metadata, not telemetry payload.
+    if (this.sessionId) Object.defineProperty(observation, "sessionId", { value: this.sessionId, enumerable: false });
+    if (inputId) Object.defineProperty(observation, "inputId", { value: inputId, enumerable: false });
+    this.emit(observation as NormalizedRuntimeEvent);
+  }
+
+  private oldestOwnedInput(): string | undefined {
+    return this.ownedInputIds.values().next().value as string | undefined;
   }
 
   private oldestOwnedEpoch(): number | null {
@@ -710,12 +758,18 @@ function piAssistantProviderError(message: Record<string, any>): PiProviderError
 }
 
 export function classifyPiProviderError(error: PiProviderErrorDetails | UpstreamProviderError): {
-  category: "billing" | "quota" | "rate_limit" | "auth" | "provider"; reason: string; nextAction: string;
+  category: "billing" | "quota" | "rate_limit" | "auth" | "context_window" | "provider"; reason: string; nextAction: string;
 } {
   const upstream = "upstream" in error ? error.upstream : error;
   const errorType = "type" in error ? error.type : undefined;
   const reason = safeProviderText(upstream.message, "Pi provider request failed");
   const signal = new Set([String(upstream.code ?? "").trim().toLowerCase(), String(errorType ?? "").trim().toLowerCase()].filter(Boolean));
+  if (classifyStrictProviderError(buildStrictProviderErrorInput({
+    message: reason, type: errorType, upstream,
+  })) === "context_window") return {
+    category: "context_window", reason: INTERNAL_CONTEXT_WINDOW_PROJECTION_REASON,
+    nextAction: "Start a fresh Runtime session, then replay the retained Inbox deliveries.",
+  };
   if (upstream.status === 402 || [...signal].some((value) => ["payment_required", "billing_hard_limit_reached", "insufficient_balance"].includes(value))) return {
     category: "billing", reason, nextAction: "Update the provider billing method or balance, then retry.",
   };
@@ -787,8 +841,12 @@ export function createPiSessionManager(input: { workspaceDir: string; stateDir: 
 interface PiRpcState {
   sessionId?: string;
   sessionFile?: string;
-  model?: { provider?: string; id?: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> } | null;
+  model?: { provider?: string; id?: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown>; contextWindow?: number } | null;
   thinkingLevel?: string;
+  version?: string;
+  autoCompactionEnabled?: boolean;
+  /** Optional external handshake fields; absence is fail-closed for external Pi. */
+  compactionCapabilities?: { reserveTokens?: unknown; keepRecentTokens?: unknown; events?: readonly string[] };
 }
 
 function writePrivateAtomic(file: string, content: string): void {
@@ -818,6 +876,8 @@ class PiRpcBackend implements PiSessionProcessLike {
   prompt(text: string): Promise<unknown> { return this.client.request("prompt", { message: text }); }
   steer(text: string): Promise<unknown> { return this.client.request("steer", { message: text }); }
   abort(): Promise<unknown> { return this.client.request("abort"); }
+  compact(customInstructions?: string): Promise<unknown> { return this.client.requestCompact(customInstructions); }
+  getState(): Promise<Record<string, unknown>> { return this.client.request("get_state"); }
   dispose(): Promise<void> { return this.client.close(); }
   subscribe(listener: (event: unknown) => void): () => void {
     const offEvent = this.client.subscribe(listener as (event: Record<string, any>) => void);
@@ -848,8 +908,15 @@ export function resolvePiProcessExtensionArgs(input: {
 }
 
 async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: NativeRuntimeAdapterDependencies,
-  spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike): Promise<PiSessionProcessLike> {
+  spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike,
+  productionSpawn = true): Promise<PiSessionProcessLike> {
   const stateRoot = input.stateDir ?? path.join(input.workspaceDir, ".larkin");
+  const mergedEnv: NodeJS.ProcessEnv = { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" };
+  assertNoProjectPiCompactionOverride(input.workspaceDir);
+  const ownedPiDirectory = mergedEnv.LARKIN_CONFIG_DIR
+    ? piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId)
+    : path.join(stateRoot, "pi-agent");
+  prepareOwnedPiDirectory(ownedPiDirectory);
   const runtimeDir = path.join(stateRoot, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const promptFile = path.join(runtimeDir, "pi-standing-prompt.md");
@@ -862,16 +929,15 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ...(session.sessionFile ? ["--session", session.sessionFile] : []),
     ...(requestedModel ? ["--model", requestedModel] : []),
     ...(requestedEffort ? ["--thinking", requestedEffort] : [])];
-  const mergedEnv: NodeJS.ProcessEnv = { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" };
   const builtin = mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin";
   const builtinSpec = builtin ? internalCommandSpec("pi-rpc", [], mergedEnv) : null;
   const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
   const commandArgs = [...(builtinSpec?.args ?? []), ...args];
-  if (builtin) {
-    if (!mergedEnv.LARKIN_CONFIG_DIR) throw new Error("内置 Pi 缺少 LARKIN_CONFIG_DIR");
-    mergedEnv.PI_CODING_AGENT_DIR = piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId);
-    mergedEnv.PI_TELEMETRY = "0";
-  }
+  const reportedVersion = productionSpawn && !builtin
+    ? String(spawnSync(command, ["--version"], { cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000 }).stdout || "").trim()
+    : "0.83.0";
+  mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
+  if (builtin) mergedEnv.PI_TELEMETRY = "0";
   commandArgs.push(...(dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,
@@ -891,6 +957,20 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ]);
     if (!available?.models?.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow or configure provider credentials; Larkin will not create a fallback session.");
     const effectiveModel = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
+    if (productionSpawn) {
+      const ownedSettings = readOwnedPiSettings(ownedPiDirectory);
+      assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
+        enabled: state.autoCompactionEnabled,
+        reserveTokens: ownedSettings.compaction?.reserveTokens,
+        keepRecentTokens: ownedSettings.compaction?.keepRecentTokens,
+      } });
+      const handshake = state.compactionCapabilities;
+      verifyPiCapabilities({ distribution: builtin ? "builtin" : "external", version: reportedVersion,
+        contextWindow: state.model?.contextWindow, autoCompactionEnabled: state.autoCompactionEnabled,
+        reserveTokens: handshake?.reserveTokens, keepRecentTokens: handshake?.keepRecentTokens,
+        compactRpc: true, events: handshake?.events,
+        trustedProtocol: builtin });
+    }
     // 严格对账（Owner 决策）：模型必须来自 pi 的权威可用列表，不做后缀猜测——
     // 配置的模型与 pi 可用列表不符即报错，并在错误里列出可用模型。
     const availableEntries = (available.models ?? []).map((entry) => ({
@@ -1013,7 +1093,7 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
           ? "builtin" : "external";
         return new PiSession(await (dependencies.createPiSession
         ? dependencies.createPiSession(input)
-        : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn)), distribution);
+        : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn, productionSpawn)), distribution);
       }
       if (id === "codex") {
         const codexInput = dependencies.codexModelOverride?.trim()

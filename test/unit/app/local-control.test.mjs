@@ -13,6 +13,7 @@ import {
   createAgentControlServer,
   initializeControlAuthority,
   requestAgentUpsert,
+  requestSessionRecovery,
   requestSessionReset,
 } from "../../../dist/app/local-control.mjs";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
@@ -151,6 +152,15 @@ test("local control keeps upsert ID idempotency and coalesces only concurrent re
     assert.equal("operationId" in forbiddenResetId, false);
     assert.match(forbiddenResetId.error, /未知字段/);
     assert.equal(resetCalls(), 3);
+    const invalidRecoveryReason = await rawRequest(socket, { operation: "session-recover", agentId: "cli_newA1",
+      authorization: authority.token, reason: "quota", waitReadyMs: 10 });
+    assert.equal(invalidRecoveryReason.ok, false);
+    assert.match(invalidRecoveryReason.error, /context-overflow/);
+    const sanitizedRecovery = await requestSessionRecovery({ larkinHome: root, agentId: "cli_newA1", waitReadyMs: 10 });
+    assert.equal(sanitizedRecovery.ok, true);
+    assert.doesNotMatch(JSON.stringify(sanitizedRecovery), /private|session-id|message|delivery|input|credential|secret|\/tmp/i);
+    assert.deepEqual(sanitizedRecovery.readiness, { runtime: "pi", state: "unavailable",
+      reason: "Runtime readiness is unavailable.", nextAction: "Inspect Runtime/provider configuration, then retry." });
     const unknown = await requestSessionReset({ larkinHome: root, agentId: "cli_unknownA1", waitReadyMs: 10 });
     assert.equal(unknown.ok, false);
     assert.equal(unknown.resetCommitted, false);

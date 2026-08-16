@@ -476,7 +476,12 @@ jobs:
           $actual = (Get-FileHash (Join-Path artifacts/release $record.file) -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($expected -ne $record.sha256 -or $actual -ne $record.sha256) { throw "Windows artifact checksum mismatch" }
 
+      - name: Build exact immutable candidate source for Runtime upgrade smoke
+        run: bun run build
+
       - name: Smoke exact assembled Windows executable natively
+        env:
+          LARKIN_RELEASE_CANDIDATE_ROOT: ${{ github.workspace }}/release-source
         run: bun "${{ github.workspace }}/release-tooling/scripts/release/smoke.ts" --release-dir artifacts/release
 
   publish:

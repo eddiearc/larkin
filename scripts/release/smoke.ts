@@ -3,6 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   selectReleaseArtifact,
@@ -15,15 +16,129 @@ import {
   smokeArtifactEnvironment,
   smokeTerminationPlan,
 } from "./smoke-support.js";
-// Release smoke runs only after `bun run build`; exercising dist keeps the
-// same compiled module graph used to construct the standalone.
-// @ts-expect-error dist is generated and intentionally has no declaration file.
-import { createAgentStateStore } from "../../dist/agent/agent-state-store.mjs";
-// @ts-expect-error dist is generated and intentionally has no declaration file.
-import { ContextPromptBuilder } from "../../dist/agent/context-prompt.mjs";
-// @ts-expect-error dist is generated and intentionally has no declaration file.
-import { createRuntimeHost } from "../../dist/runtime/runtime-host.mjs";
 import type { RuntimeInput, RuntimeSession } from "../../src/runtime/runtime-contracts.js";
+
+type CreateAgentStateStore = typeof import("../../src/agent/agent-state-store.js")["createAgentStateStore"];
+type ContextPromptBuilderConstructor = typeof import("../../src/agent/context-prompt.js")["ContextPromptBuilder"];
+type CreateRuntimeHost = typeof import("../../src/runtime/runtime-host.js")["createRuntimeHost"];
+
+const RELEASE_CANDIDATE_ROOT_ENV = "LARKIN_RELEASE_CANDIDATE_ROOT";
+const RUNTIME_UPGRADE_CANDIDATE_FILES = Object.freeze({
+  package: "package.json",
+  fixture: "test/fixtures/runtime-upgrade/v0.3.3-active-thread.json",
+  agentStateStore: "dist/agent/agent-state-store.mjs",
+  contextPrompt: "dist/agent/context-prompt.mjs",
+  runtimeHost: "dist/runtime/runtime-host.mjs",
+});
+
+export interface CandidateRuntimeUpgradeModules {
+  candidateRoot: string;
+  upgradeFixtureFile: string;
+  moduleOrigins: Readonly<{
+    agentStateStore: string;
+    contextPrompt: string;
+    runtimeHost: string;
+  }>;
+  createAgentStateStore: CreateAgentStateStore;
+  ContextPromptBuilder: ContextPromptBuilderConstructor;
+  createRuntimeHost: CreateRuntimeHost;
+}
+
+function canonicalDirectory(directory: string, label: string): string {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(directory);
+  } catch {
+    throw new Error(`${label} is unavailable: ${directory}`);
+  }
+  if (!stat.isDirectory()) throw new Error(`${label} is not a directory: ${directory}`);
+  return fs.realpathSync.native(directory);
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+function candidateRegularFile(candidateRoot: string, relativeFile: string): string {
+  const unresolved = path.resolve(candidateRoot, relativeFile);
+  if (!isWithin(candidateRoot, unresolved) || unresolved === candidateRoot) {
+    throw new Error(`release smoke candidate path escaped its root: ${relativeFile}`);
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(unresolved);
+  } catch {
+    throw new Error(`release smoke candidate file is missing: ${relativeFile}`);
+  }
+  if (!stat.isFile()) throw new Error(`release smoke candidate path is not a regular file: ${relativeFile}`);
+  const canonicalFile = fs.realpathSync.native(unresolved);
+  if (!isWithin(candidateRoot, canonicalFile)) {
+    throw new Error(`release smoke candidate file escaped its root: ${relativeFile}`);
+  }
+  return canonicalFile;
+}
+
+function releaseCandidateRoot(): string {
+  const workingRoot = canonicalDirectory(process.cwd(), "release smoke working directory");
+  const configuredRoot = process.env[RELEASE_CANDIDATE_ROOT_ENV];
+  if (configuredRoot === undefined) return workingRoot;
+  if (!configuredRoot || /[\0\r\n]/.test(configuredRoot) || !path.isAbsolute(configuredRoot)) {
+    throw new Error(`${RELEASE_CANDIDATE_ROOT_ENV} must be one absolute directory path`);
+  }
+  const candidateRoot = canonicalDirectory(configuredRoot, `${RELEASE_CANDIDATE_ROOT_ENV} candidate root`);
+  if (path.relative(workingRoot, candidateRoot) !== "") {
+    throw new Error(`${RELEASE_CANDIDATE_ROOT_ENV} does not match the release smoke working directory`);
+  }
+  return candidateRoot;
+}
+
+// Recovery runs may execute this script from a newer release-tooling checkout.
+// The immutable candidate working directory is the sole authority for Runtime
+// modules and fixtures; there is intentionally no import.meta.dirname fallback.
+export async function loadCandidateRuntimeUpgradeModules(expectedVersion: string): Promise<CandidateRuntimeUpgradeModules> {
+  const candidateRoot = releaseCandidateRoot();
+  const packageFile = candidateRegularFile(candidateRoot, RUNTIME_UPGRADE_CANDIDATE_FILES.package);
+  const upgradeFixtureFile = candidateRegularFile(candidateRoot, RUNTIME_UPGRADE_CANDIDATE_FILES.fixture);
+  const agentStateStoreFile = candidateRegularFile(candidateRoot, RUNTIME_UPGRADE_CANDIDATE_FILES.agentStateStore);
+  const contextPromptFile = candidateRegularFile(candidateRoot, RUNTIME_UPGRADE_CANDIDATE_FILES.contextPrompt);
+  const runtimeHostFile = candidateRegularFile(candidateRoot, RUNTIME_UPGRADE_CANDIDATE_FILES.runtimeHost);
+
+  let candidatePackage: { name?: unknown; version?: unknown };
+  try {
+    candidatePackage = JSON.parse(fs.readFileSync(packageFile, "utf8")) as { name?: unknown; version?: unknown };
+  } catch {
+    throw new Error("release smoke candidate package.json is invalid");
+  }
+  if (candidatePackage.name !== "larkin" || candidatePackage.version !== expectedVersion) {
+    throw new Error(`release smoke candidate package identity does not match manifest version ${expectedVersion}`);
+  }
+
+  // Every expected path is checked above before any candidate code is loaded.
+  const moduleOrigins = Object.freeze({
+    agentStateStore: pathToFileURL(agentStateStoreFile).href,
+    contextPrompt: pathToFileURL(contextPromptFile).href,
+    runtimeHost: pathToFileURL(runtimeHostFile).href,
+  });
+  const [agentStateStoreModule, contextPromptModule, runtimeHostModule] = await Promise.all([
+    import(moduleOrigins.agentStateStore),
+    import(moduleOrigins.contextPrompt),
+    import(moduleOrigins.runtimeHost),
+  ]);
+  if (typeof agentStateStoreModule.createAgentStateStore !== "function"
+    || typeof contextPromptModule.ContextPromptBuilder !== "function"
+    || typeof runtimeHostModule.createRuntimeHost !== "function") {
+    throw new Error("release smoke candidate Runtime modules do not expose the expected API");
+  }
+  return {
+    candidateRoot,
+    upgradeFixtureFile,
+    moduleOrigins,
+    createAgentStateStore: agentStateStoreModule.createAgentStateStore as CreateAgentStateStore,
+    ContextPromptBuilder: contextPromptModule.ContextPromptBuilder as ContextPromptBuilderConstructor,
+    createRuntimeHost: runtimeHostModule.createRuntimeHost as CreateRuntimeHost,
+  };
+}
 
 async function freePort(): Promise<number> {
   const server = net.createServer();
@@ -92,6 +207,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const record = selectReleaseArtifact(manifest, platform, arch);
   verifyReleaseNotices(releaseDir, manifest);
   const artifact = verifyReleaseArtifact(releaseDir, record);
+  const {
+    createAgentStateStore,
+    ContextPromptBuilder,
+    createRuntimeHost,
+    upgradeFixtureFile,
+  } = await loadCandidateRuntimeUpgradeModules(manifest.version);
 
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-release-smoke-"));
   const home = path.join(temporaryRoot, "home");
@@ -115,7 +236,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // bounded in the fixture; the candidate Runtime must migrate and replay its
     // same-home active targetless ledger, then the standalone must read that
     // upgraded Inbox/ledger state without an extra mutation.
-    const upgradeFixtureFile = path.resolve(import.meta.dirname, "../../test/fixtures/runtime-upgrade/v0.3.3-active-thread.json");
     const upgradeFixture = JSON.parse(fs.readFileSync(upgradeFixtureFile, "utf8")) as {
       provenance: { release_tag: string; claim_boundary: string };
       agent_id: string;

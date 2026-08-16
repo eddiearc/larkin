@@ -54,6 +54,7 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
     "test/unit/runtime/runtime-inbox-target.test.mjs",
     "test/integration/build/runtime-clean-cutover.test.mjs",
     "test/integration/build/runtime-upgrade-in-place.test.mjs",
+    "test/integration/build/release-smoke-candidate-root.test.mjs",
     "test/e2e/issue124-thread-runtime-envelope-e2e.test.mjs",
     "test/integration/build/release-platform-ci.test.mjs",
   ];
@@ -70,9 +71,14 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
   for (const issue124Test of [
     "test/unit/feishu/host-runtime-delivery-health.test.mjs",
     "test/integration/build/runtime-upgrade-in-place.test.mjs",
+    "test/integration/build/release-smoke-candidate-root.test.mjs",
     "test/e2e/issue124-thread-runtime-envelope-e2e.test.mjs",
   ]) assert.ok(expectedWindowsTestInputs.includes(issue124Test), `${issue124Test} covers issue 124 natively`);
   assert.match(releaseSmoke, /v0\.3\.3-active-thread\.json/);
+  assert.match(releaseSmoke, /LARKIN_RELEASE_CANDIDATE_ROOT/);
+  assert.match(releaseSmoke, /pathToFileURL/);
+  assert.match(releaseSmoke, /loadCandidateRuntimeUpgradeModules/);
+  assert.doesNotMatch(releaseSmoke, /from "\.\.\/\.\.\/dist\//);
   assert.match(releaseSmoke, /createRuntimeHost/);
   assert.match(releaseSmoke, /candidate Runtime did not migrate the active targetless v0\.3\.3 ledger/);
   assert.match(releaseSmoke, /artifact v0\.3\.3 same-home upgrade state/);
@@ -91,6 +97,7 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
 
 test("package version and explicit tag publication share one immutable combined-release run", () => {
   const workflow = read(".github/workflows/release.yml");
+  const verifyWindowsJob = workflow.slice(workflow.indexOf("  verify-windows-release:"), workflow.indexOf("  publish:"));
   const intent = read("scripts/release/intent.mjs");
   assert.equal(fs.existsSync(path.join(ROOT, ".github/workflows/bump-patch-version.yml")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "scripts/bump-patch-version.mjs")), false);
@@ -169,6 +176,12 @@ test("package version and explicit tag publication share one immutable combined-
   assert.match(workflow, /assemble-release:[\s\S]*bun scripts\/release\/assemble\.ts[\s\S]*actions\/upload-artifact@v4/);
   assert.match(workflow, /verify-windows-release:[\s\S]*always\(\)[\s\S]*needs\.assemble-release\.result == 'success'[\s\S]*runs-on: windows-latest/);
   assert.match(workflow, /verify-windows-release:[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*path: release-tooling[\s\S]*actions\/download-artifact@v4[\s\S]*Get-FileHash[\s\S]*release-tooling\/scripts\/release\/smoke\.ts" --release-dir artifacts\/release/);
+  assert.match(verifyWindowsJob, /name: Verify immutable source, Windows manifest, and SHA256SUMS[\s\S]*Get-FileHash[\s\S]*name: Build exact immutable candidate source for Runtime upgrade smoke\n\s+run: bun run build[\s\S]*name: Smoke exact assembled Windows executable natively\n\s+env:\n\s+LARKIN_RELEASE_CANDIDATE_ROOT: \$\{\{ github\.workspace \}\}\/release-source\n\s+run: bun "\$\{\{ github\.workspace \}\}\/release-tooling\/scripts\/release\/smoke\.ts" --release-dir artifacts\/release/);
+  assert.equal(verifyWindowsJob.match(/bun run build/g)?.length, 1, "the recovery Windows gate builds the exact candidate once before smoke");
+  assert.ok(verifyWindowsJob.indexOf("Verify immutable source, Windows manifest, and SHA256SUMS")
+    < verifyWindowsJob.indexOf("Build exact immutable candidate source for Runtime upgrade smoke"));
+  assert.ok(verifyWindowsJob.indexOf("Build exact immutable candidate source for Runtime upgrade smoke")
+    < verifyWindowsJob.indexOf("Smoke exact assembled Windows executable natively"));
   assert.match(workflow, /publish:[\s\S]*- verify-windows-release[\s\S]*always\(\)[\s\S]*needs\.verify-windows-release\.result == 'success'[\s\S]*Download Windows-verified assembled release[\s\S]*Finalize GitHub release/);
   assert.ok(workflow.indexOf("  verify-windows-release:") < workflow.indexOf("  publish:"));
   assert.match(workflow, /gh release edit[\s\S]*--draft=false/);

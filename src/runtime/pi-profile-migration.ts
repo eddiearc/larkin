@@ -37,7 +37,26 @@ export interface PiProfileMigrationPlan {
   sourceEnvironment: { PATH?: string; LARKIN_PI_COMMAND?: string };
 }
 
+const TARGET_LOCK_SUFFIX = ".larkin-pi-import.lock";
 function hash(bytes: Buffer): string { return crypto.createHash("sha256").update(bytes).digest("hex"); }
+function targetLockFile(state: PiProfileMigrationState): string { return path.join(path.dirname(state.targetDir), `${state.agentId}${TARGET_LOCK_SUFFIX}`); }
+function acquireTargetLock(state: PiProfileMigrationState): void {
+  const file = targetLockFile(state);
+  assertNoSymlinkAncestors(path.dirname(file));
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, "wx", 0o600);
+    fs.writeFileSync(fd, `${process.pid}\n`); fs.fsyncSync(fd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Pi provider target is busy; refusing migration");
+    throw error;
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+  fsyncDirectory(path.dirname(file));
+}
+export function releasePiProfileMigrationLock(state: PiProfileMigrationState): void {
+  try { fs.unlinkSync(targetLockFile(state)); fsyncDirectory(path.dirname(targetLockFile(state))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+}
 function isKnownSystemSymlink(value: string): boolean {
   return value === "/tmp" || value === "/private/tmp" || value === "/var" || value === "/private/var"
     || value === "/var/folders" || /^\/var\/folders\/[^/]+$/.test(value)
@@ -79,7 +98,13 @@ function readBounded(file: string, label: string, limit: number, required = true
     if (!before.isFile() || before.nlink !== 1) throw new Error(`${label} is unsafe`);
     assertOwner(before, label);
     if (before.size > limit) throw new Error(`${label} is too large`);
-    const bytes = fs.readFileSync(fd);
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < before.size) {
+      const read = fs.readSync(fd, bytes, offset, before.size - offset, null);
+      if (read === 0) throw new Error(`${label} changed while reading`);
+      offset += read;
+    }
     const after = fs.fstatSync(fd);
     if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.nlink !== before.nlink
         || after.uid !== before.uid || after.gid !== before.gid || (after.mode & 0o777) !== (before.mode & 0o777)) throw new Error(`${label} changed while reading`);
@@ -290,8 +315,9 @@ export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
   const sameEnvironment = process.env.PATH === plan.sourceEnvironment.PATH
     && process.env.LARKIN_PI_COMMAND === plan.sourceEnvironment.LARKIN_PI_COMMAND;
   assertSourceUnchanged(plan.state, sameEnvironment ? process.env : plan.sourceEnvironment);
-  assertTargetUnchanged(plan.state);
   const parent = path.dirname(plan.state.targetDir); assertNoSymlinkAncestors(parent); fs.mkdirSync(parent, { recursive: true, mode: 0o700 }); fs.chmodSync(parent, 0o700);
+  acquireTargetLock(plan.state);
+  assertTargetUnchanged(plan.state);
   const existing = assertDirectory(plan.state.targetDir, "Pi provider target", false);
   if (existing && (existing.mode & 0o777) !== 0o700) throw new Error("Pi provider target must be 0700");
   if (!existing) {
@@ -341,4 +367,5 @@ export function rollbackPiProfileMigration(state: PiProfileMigrationState): void
   } else fs.chmodSync(state.targetDir, state.targetDirMode);
   if (state.targetDirExisted) assertPrior(state);
   fsyncDirectory(path.dirname(state.targetDir));
+  releasePiProfileMigrationLock(state);
 }

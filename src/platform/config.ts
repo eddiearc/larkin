@@ -10,6 +10,7 @@ import {
   applyPiProfileMigration,
   assertPiProfileMigrationAfterState,
   preparePiProfileMigration,
+  releasePiProfileMigrationLock,
   rollbackPiProfileMigration,
   validatePiProfileMigrationState,
   type PiProfileMigrationPlan,
@@ -276,7 +277,13 @@ function readBoundedPrivateFile(file: string, limit: number, label: string): Buf
     assertPrivateConfigMetadata({ regularFile: before.isFile(), uid: before.uid, mode: before.mode }, label);
     if (before.nlink !== 1) throw new Error(`${label} 必须是未共享的普通文件`);
     if (before.size > limit) throw new Error(`${label} 超过 ${limit} bytes`);
-    const bytes = fs.readFileSync(fd);
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < before.size) {
+      const read = fs.readSync(fd, bytes, offset, before.size - offset, null);
+      if (read === 0) throw new Error(`${label} 读取期间发生变化`);
+      offset += read;
+    }
     const after = fs.fstatSync(fd);
     if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.nlink !== before.nlink
         || after.uid !== before.uid || after.gid !== before.gid || after.mode !== before.mode) throw new Error(`${label} 读取期间发生变化`);
@@ -505,6 +512,7 @@ function recoverMigrationJournal(root: string): void {
     const migration = journal.migration;
     assertPiProfileMigrationAfterState(migration);
   } else throw new Error("Pi profile migration journal conflicts with the current configuration");
+  releasePiProfileMigrationLock(journal.migration);
   fs.unlinkSync(file); fsyncDirectoryOf(file);
 }
 
@@ -898,6 +906,7 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
     if (migrationPlan) {
       try { fs.unlinkSync(migrationJournalFile(layout.root)); fsyncDirectoryOf(migrationJournalFile(layout.root)); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      releasePiProfileMigrationLock(migrationPlan.state);
     }
     return {
       revision: nextRevision, previousRevision: revision(current.bytes), changedScope: changed.scope,

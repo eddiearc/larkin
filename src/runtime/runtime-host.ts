@@ -665,6 +665,26 @@ export function createRuntimeHost(options: {
     await retryPending(agent);
   };
 
+  const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<void> => {
+    if (agent.busy || agent.turnInProgress || agent.submitting) return;
+    const session = await ensureSession(agent);
+    if (agent.session !== session || agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
+    const input = options.promptBuilder.buildRuntimeInput("wake", crypto.randomUUID(), { wakeReason: "background subagent completed" });
+    agent.submitting = true;
+    agent.busy = true;
+    try {
+      const result = await session.prompt(input);
+      if (agent.session !== session || agent.stopped) return;
+      if (result.status === "accepted") markSessionStable(agent, session);
+      else agent.busy = false;
+    } catch (error) {
+      agent.busy = false;
+      log("background completion wake failed", error instanceof Error ? error.message : String(error));
+    } finally {
+      agent.submitting = false;
+    }
+  };
+
   const scheduleRecreate = (agent: ManagedAgent, reason: string): void => {
     if (agent.stopped || agent.retryTimer || agent.starting || agent.session) return;
     if (agent.recreateAttempts >= retryPolicy.maxAttempts) {
@@ -960,6 +980,10 @@ export function createRuntimeHost(options: {
         if (outcome !== "failed") return retryPending(agent);
       });
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
+    } else if (event.type === "runtime-observation") {
+      if (event.phase === "completed" && !agent.turnInProgress && !agent.busy && !agent.submitting) {
+        queueMicrotask(() => { void wakeOnBackgroundCompletion(agent); });
+      }
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
       emit({ type: "activity", agentId: agent.config.agentId, activity: event.activity, activityKind: event.activity });

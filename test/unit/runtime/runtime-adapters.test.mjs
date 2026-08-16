@@ -352,6 +352,24 @@ test("Codex native notifications normalize start, intermediate output, and termi
   ["turn-start", "activity:thinking", "activity:text", "turn-end"]);
 });
 
+test("Pi late completion notification emits a wake bridge after the turn is idle", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  listener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: "stop", content: "subagent-notification" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => ["turn-start", "turn-end"].includes(event.type)), []);
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation").map((event) => event.phase), ["completed"]);
+});
+
 test("Codex resume failure falls back to a fresh thread with the same standing prompt", async () => {
   const child = new FakeProcess();
   await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "stale-thread" }));

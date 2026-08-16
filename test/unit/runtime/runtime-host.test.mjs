@@ -272,6 +272,26 @@ test("RuntimeHost gates startup replay behind high-water proactive compaction", 
   }
 });
 
+test("RuntimeHost re-wakes an idle Agent when Pi reports a late background completion notification", async () => {
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeA1", name: "wake", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeA1", { message_id: "om_pi_wake", chat_id: "oc_pi_wake", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.match(session.prompts[1].text, /Inbox changed|reason=background subagent completed/i);
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
 test("RuntimeHost treats a failed manual compact as an internal fresh-session fallback", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-fallback-"));
   const agentId = "cli_piFallbackA1";

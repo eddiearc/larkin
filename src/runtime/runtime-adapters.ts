@@ -522,6 +522,7 @@ class PiSession extends EventSession {
   private readonly observedSubmitEpochs = new Set<number>();
   private readonly observedAcceptedEpochs = new Set<number>();
   private readonly observedCompletedEpochs = new Set<number>();
+  private readonly observedBackgroundCompletionNotifications = new Set<string>();
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
@@ -613,6 +614,7 @@ class PiSession extends EventSession {
       this.observedSubmitEpochs.clear();
       this.observedAcceptedEpochs.clear();
       this.observedCompletedEpochs.clear();
+      this.observedBackgroundCompletionNotifications.clear();
       this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
@@ -634,6 +636,7 @@ class PiSession extends EventSession {
       this.settleArmedEpoch = null;
       this.firstOutputObserved = false;
       this.toolCallOpen = false;
+      this.observedBackgroundCompletionNotifications.clear();
       this.emitObservation("turn_start");
       this.emit({ type: "turn-start", ...(Number.isInteger(event.turnIndex) ? { turnId: `pi-${event.turnIndex}` } : {}) });
     }
@@ -655,6 +658,13 @@ class PiSession extends EventSession {
       }
       if (event.willRetry !== true && this.activeEpoch !== null && !this.observedCompletedEpochs.has(this.activeEpoch)) {
         this.observedCompletedEpochs.add(this.activeEpoch);
+        this.emitObservation("completed");
+      }
+      const completionNotificationKey = Array.isArray(event.messages) ? JSON.stringify(event.messages) : null;
+      if (completionNotificationKey?.includes("subagent-notification")
+        && this.activeEpoch === null
+        && !this.observedBackgroundCompletionNotifications.has(completionNotificationKey)) {
+        this.observedBackgroundCompletionNotifications.add(completionNotificationKey);
         this.emitObservation("completed");
       }
     } else if (event?.type === "agent_settled") {

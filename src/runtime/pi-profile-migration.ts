@@ -307,7 +307,7 @@ export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
     }
     atomicPrivateWrite(path.join(plan.state.targetDir, name), plan.sourceBytes[name]);
   }
-  for (const name of FILES) if (currentFileState(path.join(plan.state.targetDir, name)).sha256 !== plan.state.afterFiles[name].sha256) throw new Error("Pi provider import verification failed");
+  assertPiProfileMigrationAfterState(plan.state);
   fsyncDirectory(plan.state.targetDir);
 }
 function fsyncDirectory(directory: string): void {

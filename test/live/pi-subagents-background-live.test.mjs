@@ -7,6 +7,7 @@ import { afterAll, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { PiRpcClient } from "../../dist/runtime/pi-rpc-client.mjs";
 import { bundledPiSubagentExtensionPath } from "../../dist/runtime/pi-subagent-injection.mjs";
+import { extractCanonicalPiSubagentCompletionKeyFromMessages } from "../../dist/runtime/pi-subagents-notification.mjs";
 import {
   gradePiSubagentsTrace,
   loadPiSubagentsEval,
@@ -97,8 +98,8 @@ async function runScenario(scenario) {
     // For background-delegation scenarios wait for the completion notification turn
     // with a generous timeout (provider latency varies); grade whatever arrived.
     const isNotification = (event) => {
-      if (event?.type !== "agent_end" || !Array.isArray(event.messages)) return false;
-      return JSON.stringify(event.messages).includes("subagent-notification");
+      if (event?.type !== "agent_end") return false;
+      return extractCanonicalPiSubagentCompletionKeyFromMessages(event.messages) !== null;
     };
     try {
       await waitFor(trace, isNotification, 180_000);

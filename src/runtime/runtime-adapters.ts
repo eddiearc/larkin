@@ -22,6 +22,7 @@ import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
+import { extractCanonicalPiSubagentCompletionKeyFromMessages } from "./pi-subagents-notification.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
   classifyRuntimePrerequisite,
@@ -522,7 +523,7 @@ class PiSession extends EventSession {
   private readonly observedSubmitEpochs = new Set<number>();
   private readonly observedAcceptedEpochs = new Set<number>();
   private readonly observedCompletedEpochs = new Set<number>();
-  private readonly observedBackgroundCompletionNotifications = new Set<string>();
+  private readonly observedBackgroundCompletionKeys = new Set<string>();
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
@@ -614,7 +615,7 @@ class PiSession extends EventSession {
       this.observedSubmitEpochs.clear();
       this.observedAcceptedEpochs.clear();
       this.observedCompletedEpochs.clear();
-      this.observedBackgroundCompletionNotifications.clear();
+      this.observedBackgroundCompletionKeys.clear();
       this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
@@ -636,7 +637,6 @@ class PiSession extends EventSession {
       this.settleArmedEpoch = null;
       this.firstOutputObserved = false;
       this.toolCallOpen = false;
-      this.observedBackgroundCompletionNotifications.clear();
       this.emitObservation("turn_start");
       this.emit({ type: "turn-start", ...(Number.isInteger(event.turnIndex) ? { turnId: `pi-${event.turnIndex}` } : {}) });
     }
@@ -660,12 +660,12 @@ class PiSession extends EventSession {
         this.observedCompletedEpochs.add(this.activeEpoch);
         this.emitObservation("completed");
       }
-      const completionNotificationKey = Array.isArray(event.messages) ? JSON.stringify(event.messages) : null;
-      if (completionNotificationKey?.includes("subagent-notification")
+      const completionNotificationKey = extractCanonicalPiSubagentCompletionKeyFromMessages(event.messages);
+      if (completionNotificationKey
         && this.activeEpoch === null
-        && !this.observedBackgroundCompletionNotifications.has(completionNotificationKey)) {
-        this.observedBackgroundCompletionNotifications.add(completionNotificationKey);
-        this.emitObservation("completed");
+        && !this.observedBackgroundCompletionKeys.has(completionNotificationKey)) {
+        this.observedBackgroundCompletionKeys.add(completionNotificationKey);
+        this.emitObservation("completed", { completionKey: completionNotificationKey });
       }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
@@ -732,7 +732,7 @@ class PiSession extends EventSession {
   }
 
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
-    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean;
+    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; completionKey?: string;
   } = {}): void {
     const inputId = this.oldestOwnedInput();
     const observation = { type: "runtime-observation" as const, runtime: "pi" as const,
@@ -740,6 +740,7 @@ class PiSession extends EventSession {
     // Correlation is host-internal metadata, not telemetry payload.
     if (this.sessionId) Object.defineProperty(observation, "sessionId", { value: this.sessionId, enumerable: false });
     if (inputId) Object.defineProperty(observation, "inputId", { value: inputId, enumerable: false });
+    if (fields.completionKey) Object.defineProperty(observation, "completionKey", { value: fields.completionKey, enumerable: false });
     this.emit(observation as NormalizedRuntimeEvent);
   }
 

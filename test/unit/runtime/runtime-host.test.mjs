@@ -272,7 +272,7 @@ test("RuntimeHost gates startup replay behind high-water proactive compaction", 
   }
 });
 
-test("RuntimeHost re-wakes an idle Agent when Pi reports a late background completion notification", async () => {
+test("RuntimeHost wakes once for a canonical late completion and re-wakes for a later independent one", async () => {
   const session = new FakeSession();
   const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
   const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
@@ -282,11 +282,71 @@ test("RuntimeHost re-wakes an idle Agent when Pi reports a late background compl
     session.emit({ type: "turn-start" });
     session.emit({ type: "turn-end" });
     assert.equal(session.prompts.length, 1);
-    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-bridge-1" });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(session.prompts.length, 2);
     assert.equal(session.prompts[1].kind, "wake");
-    assert.match(session.prompts[1].text, /Inbox changed|reason=background subagent completed/i);
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-bridge-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-bridge-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 3);
+    assert.equal(session.prompts[2].kind, "wake");
+    assert.match(session.prompts[2].text, /Inbox changed|reason=background subagent completed/i);
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost ignores background completion wake bridges while busy or mid-turn", async () => {
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeBusyA1", name: "wake-busy", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeBusyA1", { message_id: "om_pi_wake_busy", chat_id: "oc_pi_wake_busy", content: "start" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-busy-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-busy-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 1);
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost ignores additional completion wake bridges while a wake prompt is submitting", async () => {
+  let releaseWake;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (this.prompts.length === 2) return new Promise((resolve) => { releaseWake = () => resolve({ status: "accepted", inputId: input.inputId }); });
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeSubmitA1", name: "wake-submit", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeSubmitA1", { message_id: "om_pi_wake_submit", chat_id: "oc_pi_wake_submit", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-submit-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-submit-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2);
+    releaseWake();
+    await new Promise((resolve) => setImmediate(resolve));
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
   } finally {
     await host.shutdown("done");
   }

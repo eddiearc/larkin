@@ -14,6 +14,7 @@ import {
   requirePiResumeSessionFile,
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
+import { buildCanonicalPiSubagentAssistantMessage } from "../../../dist/runtime/pi-subagents-notification.mjs";
 import { classifyStrictProviderError } from "../../../dist/runtime/provider-error-classifier.mjs";
 
 const fakeProcesses = new Set();
@@ -352,7 +353,7 @@ test("Codex native notifications normalize start, intermediate output, and termi
   ["turn-start", "activity:thinking", "activity:text", "turn-end"]);
 });
 
-test("Pi late completion notification emits a wake bridge after the turn is idle", async () => {
+test("Pi canonical late completion notifications bridge once and ignore assistant lookalikes", async () => {
   let listener;
   const sdk = {
     sessionId: "pi-late-complete", prompt() {}, steer() {}, abort() {},
@@ -364,10 +365,65 @@ test("Pi late completion notification emits a wake bridge after the turn is idle
   }).createSession(create());
   const events = [];
   session.subscribe((event) => events.push(event));
-  listener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: "stop", content: "subagent-notification" }] });
+  const canonical = buildCanonicalPiSubagentAssistantMessage({
+    taskId: "task-bridge-1",
+    toolUseId: "tool-use-bridge-1",
+    outputFile: "/tmp/task-bridge-1.output",
+    summary: "Agent \"fixture\" completed",
+    result: "Fixture result.",
+  });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(events.filter((event) => ["turn-start", "turn-end"].includes(event.type)), []);
-  assert.deepEqual(events.filter((event) => event.type === "runtime-observation").map((event) => event.phase), ["completed"]);
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-bridge-1");
+});
+
+test("Pi assistant text lookalikes do not trigger the late completion bridge", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-lookalike", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  for (const content of ["ordinary assistant text mentioning subagent-notification", "ordinary assistant text mentioning not-subagent-notification"]) {
+    listener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: "stop", content }] });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => event.type !== "session-init"), []);
+});
+
+test("Pi repeated canonical late completion notifications only bridge once", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-repeat", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  const canonical = buildCanonicalPiSubagentAssistantMessage({
+    taskId: "task-bridge-repeat",
+    toolUseId: "tool-use-bridge-repeat",
+    outputFile: "/tmp/task-bridge-repeat.output",
+    summary: "Agent \"repeat fixture\" completed",
+    result: "Repeat result.",
+  });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-bridge-repeat");
 });
 
 test("Codex resume failure falls back to a fresh thread with the same standing prompt", async () => {

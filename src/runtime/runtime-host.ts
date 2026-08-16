@@ -88,6 +88,7 @@ interface ManagedAgent {
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
   /** Delivery ids already promoted from accepted inbox_update to a wake while idle. */
   promotedInboxUpdateIds: Set<string>;
+  backgroundCompletionQueue: string[]; backgroundCompletionKeys: Set<string>;
 }
 
 export interface RuntimeHost {
@@ -685,6 +686,25 @@ export function createRuntimeHost(options: {
     }
   };
 
+  const drainBackgroundCompletionQueue = async (agent: ManagedAgent): Promise<void> => {
+    if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
+    if (!agent.backgroundCompletionQueue.length) return;
+    agent.backgroundCompletionQueue.shift();
+    await wakeOnBackgroundCompletion(agent);
+    if (!agent.stopped && !agent.busy && !agent.turnInProgress && !agent.submitting && agent.backgroundCompletionQueue.length > 0) {
+      queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+    }
+  };
+
+  const noteBackgroundCompletion = (agent: ManagedAgent, completionKey: string): void => {
+    if (agent.backgroundCompletionKeys.has(completionKey)) return;
+    agent.backgroundCompletionKeys.add(completionKey);
+    agent.backgroundCompletionQueue.push(completionKey);
+    if (!agent.busy && !agent.turnInProgress && !agent.submitting) {
+      queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+    }
+  };
+
   const scheduleRecreate = (agent: ManagedAgent, reason: string): void => {
     if (agent.stopped || agent.retryTimer || agent.starting || agent.session) return;
     if (agent.recreateAttempts >= retryPolicy.maxAttempts) {
@@ -722,6 +742,7 @@ export function createRuntimeHost(options: {
   const replaceSession = (agent: ManagedAgent, session: RuntimeSession, reason: string): void => {
     if (agent.session !== session || agent.stopped) return;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
+    agent.backgroundCompletionQueue = [];
     agent.recreateReason = reason;
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
@@ -736,6 +757,7 @@ export function createRuntimeHost(options: {
     if (agent.session !== session || agent.stopped) return;
     agent.disabledReason = `runtime configuration recovery in progress: ${message}`;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
+    agent.backgroundCompletionQueue = [];
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
     for (const record of agent.records.values()) {
@@ -963,6 +985,9 @@ export function createRuntimeHost(options: {
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
       reconcileAcceptedAtTurnEnd(agent);
+      if (agent.backgroundCompletionQueue.length > 0) {
+        queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+      }
       telemetry?.runtimeEvent(agent.config.agentId, event);
       if (recoveredAuthentication) {
         agent.authFailureActive = false;
@@ -981,8 +1006,8 @@ export function createRuntimeHost(options: {
       });
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
     } else if (event.type === "runtime-observation") {
-      if (event.phase === "completed" && !agent.turnInProgress && !agent.busy && !agent.submitting) {
-        queueMicrotask(() => { void wakeOnBackgroundCompletion(agent); });
+      if (event.phase === "completed" && typeof event.completionKey === "string") {
+        noteBackgroundCompletion(agent, event.completionKey);
       }
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
@@ -1575,7 +1600,8 @@ export function createRuntimeHost(options: {
           piProactiveCompaction: null, piProactiveCompactionGeneration: null, piProactiveCompactionSession: null,
           piProactiveCompactionFailedGeneration: null, readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false,
-          promotedInboxUpdateIds: new Set() };
+          promotedInboxUpdateIds: new Set(),
+          backgroundCompletionQueue: [], backgroundCompletionKeys: new Set() };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
         for (const record of agent.records.values()) {

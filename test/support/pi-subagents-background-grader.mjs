@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { extractCanonicalPiSubagentCompletionKeyFromMessages } from "../../dist/runtime/pi-subagents-notification.mjs";
 
 /**
  * pi-subagents 后台行为 rubric。
@@ -70,8 +71,8 @@ export function gradePiSubagentsTrace(scenario, trace) {
     && !trace.some((event) => event?.type === "tool_execution_start" && event.toolName === "get_subagent_result");
 
   results.notification_received = trace.some((event) => {
-    if (event?.type !== "agent_end" || !Array.isArray(event.messages)) return false;
-    return JSON.stringify(event.messages).includes("subagent-notification");
+    if (event?.type !== "agent_end") return false;
+    return extractCanonicalPiSubagentCompletionKeyFromMessages(event.messages) !== null;
   });
 
   results.parallel_agent_calls = agentCalls.length >= 2;
@@ -99,8 +100,8 @@ export function gradePiSubagentsTrace(scenario, trace) {
     && /b-done|\+b|\+dep|busy-b|second task|第二/i.test(wholeText);
 
   const notificationTurnIndex = trace.findIndex((event) => {
-    if (event?.type !== "agent_end" || !Array.isArray(event.messages)) return false;
-    return JSON.stringify(event.messages).includes("subagent-notification");
+    if (event?.type !== "agent_end") return false;
+    return extractCanonicalPiSubagentCompletionKeyFromMessages(event.messages) !== null;
   });
   const notificationSegmentIndex = turnSegments.findIndex((segment) => segment.some((event) => event === trace[notificationTurnIndex]));
   results.second_message_before_a_notification = notificationSegmentIndex > 1 || notificationTurnIndex === -1;

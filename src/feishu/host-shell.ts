@@ -1452,7 +1452,6 @@ export function createHostShell({
       const initialProjection = readinessProjection();
       if (!initialProjection.channelConnected) throw Object.assign(new Error(`Agent ${agentId} channel is not connected`), { code: "channel_unavailable", ...initialProjection });
       if (initialProjection.reconnecting) throw Object.assign(new Error(`Agent ${agentId} channel is reconnecting`), { code: "channel_reconnecting", ...initialProjection });
-      markRuntimeTransition(agent, "Runtime session recovery in progress");
       let recovery: RuntimeSessionRecoveryResult;
       try { recovery = await runtimeHost.recoverSession(agentId, reason); }
       catch (error) {

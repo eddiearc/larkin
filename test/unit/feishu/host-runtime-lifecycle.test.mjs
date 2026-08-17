@@ -113,6 +113,51 @@ test("HostShell recovery lifecycle persists the new session but exposes only san
   }
 });
 
+test("HostShell recovery refusal preserves the prior Runtime readiness", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-context-recovery-refused-"));
+  const agentId = "cli_hostContextRefusedA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const store = createAgentStateStore(root, agentId);
+  let channelCreated = false;
+  const runtimeHost = {
+    subscribe() { return () => {}; },
+    async start() {},
+    async recoverSession() { throw Object.assign(new Error("context-window recovery has no retained Inbox backlog"), { code: "recovery_refused" }); },
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = { agentId, name: agentId, runtime: "pi", model: "model", feishuAppId: agentId, feishuAppSecret: "fixture",
+    feishuProfile: agentId, feishuDomain: "https://open.feishu.cn", workspaceDir: path.join(root, "agents", agentId), stateDir };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-context-recovery-refused",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const channelPackage = { createLarkChannel() { channelCreated = true; return {
+    botIdentity: { openId: "ou_context_refused", name: "Context Refused" }, rawClient: null, dispatcher: { register() {} }, on() {},
+    async connect() {}, async disconnect() {},
+  }; } };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0 });
+  try {
+    await host.start();
+    const deadline = Date.now() + 1_000;
+    while (!channelCreated && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(channelCreated, true);
+    const observedAt = new Date().toISOString();
+    const status = store.readJson("status", {});
+    const priorReadiness = { runtime: "pi", state: "ready", observedAt };
+    store.writeJson("status", {
+      ...status,
+      session: { runtime: "pi", id: "existing-session", launchId: "existing-launch", startedAt: observedAt, lastSeenAt: observedAt, lastTurnAt: null, turns: 0 },
+      runtimeReadiness: priorReadiness,
+    });
+
+    await assert.rejects(host.recoverSession(agentId, "context-overflow", 0), (error) => error.code === "recovery_refused");
+    assert.deepEqual(store.readJson("status", {}).runtimeReadiness, priorReadiness);
+  } finally {
+    await host.shutdown("context recovery refusal test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("HostShell reset publishes a current readiness observation and rejects stale ready during transition", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-reset-freshness-"));
   const agentId = "cli_hostResetFreshA1";

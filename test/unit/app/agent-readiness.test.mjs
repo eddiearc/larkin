@@ -91,6 +91,20 @@ test("stale ready is rejected until the current daemon observes Runtime readines
   assert.equal(nextEpoch.readiness.runtime_ready, false, "a prior daemon observation cannot satisfy a new epoch");
 });
 
+test("a resumed session uses its current observation rather than its historic creation time", () => {
+  const resumed = projectAgentReadiness({ agentId: "cli_ready", daemon, status: {
+    connectedAt: "2026-07-29T01:00:01.000Z", connectedVia: "channel",
+    runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:01.000Z" },
+    session: {
+      id: "resumed-session",
+      startedAt: "2026-07-01T01:00:00.000Z",
+      lastSeenAt: "2026-07-29T01:00:01.000Z",
+    },
+  }});
+  assert.equal(resumed.readiness.runtime_ready, true);
+  assert.equal(resumed.ready, true);
+});
+
 test("a newer current connection clears older reconnect markers", () => {
   const status = {
     connectedAt: "2026-07-29T01:00:04.000Z",

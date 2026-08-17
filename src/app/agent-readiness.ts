@@ -8,7 +8,7 @@ export interface AgentReadinessStatus {
   reconnectingAt?: string | null;
   reconnectedAt?: string | null;
   runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string };
-  session?: { startedAt?: string; id?: string | null; [key: string]: unknown };
+  session?: { startedAt?: string; lastSeenAt?: string; id?: string | null; [key: string]: unknown };
 }
 
 function timestamp(value: unknown): number | null {
@@ -59,8 +59,11 @@ export function projectAgentReadiness(input: {
   const daemonOwned = isCurrentOwnedDaemon(input.daemon) && daemonHasAgent(input.daemon, input.agentId);
   const daemonStartedAt = timestamp(input.daemon.startedAt);
   const connectedAt = timestamp(status?.connectedAt);
-  const sessionStartedAt = timestamp(status?.session?.startedAt);
-  const sessionCurrent = daemonStartedAt !== null && sessionStartedAt !== null && sessionStartedAt >= daemonStartedAt;
+  // A resumed session deliberately retains its original creation time.  Its
+  // current daemon-epoch proof is the fresh session observation, not that
+  // historic creation timestamp.
+  const sessionObservedAt = timestamp(status?.session?.lastSeenAt) ?? timestamp(status?.session?.startedAt);
+  const sessionCurrent = daemonStartedAt !== null && sessionObservedAt !== null && sessionObservedAt >= daemonStartedAt;
   const channelConnected = daemonOwned
     && status?.connectedVia === "channel"
     && daemonStartedAt !== null

@@ -32,6 +32,12 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
       process.title = "pi-rpc";
       process.env.PI_CODING_AGENT = "true";
       process.emitWarning = (() => {}) as typeof process.emitWarning;
+      // The Pi package's normal Bun CLI registers OAuth loaders before starting.
+      // Larkin invokes its RPC entrypoint directly, so do the same here; otherwise
+      // an OAuth-backed compact falls back to a dynamic module import unavailable in
+      // a compiled standalone binary.
+      const { registerBunOAuthFlows } = await import("@earendil-works/pi-ai/bun-oauth");
+      registerBunOAuthFlows();
       const { main: piMain } = await import("@earendil-works/pi-coding-agent");
       const { invokeBuiltinPiRpc } = await import("../runtime/pi-inline-extensions.js");
       await invokeBuiltinPiRpc(piMain, rest);

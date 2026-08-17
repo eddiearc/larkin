@@ -109,6 +109,8 @@ test("production graph pins official Pi and exposes it only through the shared R
   assert.doesNotMatch(adapter, /from\s+["'][^"']*pi-coding-agent/);
   assert.doesNotMatch(binaryEntry, /pi-coding-agent\/rpc-entry/);
   assert.match(binaryEntry, /main:\s*piMain/);
+  assert.match(binaryEntry, /pi-ai\/bun-oauth/);
+  assert.match(binaryEntry, /registerBunOAuthFlows\(\)/);
   assert.match(inlineExtensions, /@tintinweb\/pi-subagents\/dist\/index\.js/);
   assert.match(adapter, /--mode["'],\s*["']rpc/);
   assert.doesNotMatch(adapter, /available\s*\[\s*0\s*\]/);

@@ -530,7 +530,7 @@ function assertUrgentAppPreconditions(
   snapshot: FeishuImSnapshot,
   target: FreshnessTarget,
   feishuAppId: string,
-): void {
+): string[] {
   const messageId = policyFlagValue(argv, "--message-id");
   if (!messageId || !/^om_/.test(messageId)) throw new Error("Runtime +messages-urgent-app 只接受真实 Feishu om_ message_id");
   const userIdType = policyFlagValue(argv, "--user-id-type");
@@ -548,6 +548,67 @@ function assertUrgentAppPreconditions(
     throw new Error("加急目标消息不属于当前 chat freshness target");
   }
   if (!isOwnBotMessage(message, feishuAppId)) throw new Error("Runtime +messages-urgent-app 只能加急当前 Bot 自己发出的消息");
+  return userIds.filter((value): value is string => typeof value === "string");
+}
+
+function parseChatMemberOpenIds(result: SpawnSyncReturns<string>): string[] {
+  if (result.error) throw new Error(`urgent-app member probe failed: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`urgent-app member probe exited ${result.status ?? "without status"}: ${result.stderr || "no details"}`);
+  let value: unknown;
+  try { value = JSON.parse(result.stdout || ""); } catch { throw new Error("urgent-app member probe returned non-JSON output"); }
+  const root = value as { ok?: unknown; identity?: unknown; data?: { users?: unknown; truncations?: unknown } } | null;
+  if (!root || root.ok !== true || !root.data) throw new Error("urgent-app member probe returned an unsuccessful payload");
+  if (root.identity !== "bot") throw new Error("urgent-app member probe did not confirm Bot identity");
+  if (Array.isArray(root.data.truncations) && root.data.truncations.length > 0) {
+    throw new Error("urgent-app member probe was truncated; refusing to guess chat membership");
+  }
+  const users = root.data.users;
+  if (!Array.isArray(users)) throw new Error("urgent-app member probe omitted users");
+  const ids: string[] = [];
+  for (const user of users) {
+    if (!user || typeof user !== "object" || Array.isArray(user)) continue;
+    const memberId = (user as { member_id?: unknown }).member_id;
+    if (typeof memberId === "string" && memberId.startsWith("ou_")) ids.push(memberId);
+  }
+  return ids;
+}
+
+function assertUrgentAppMembers(
+  argv: readonly string[],
+  target: FreshnessTarget,
+  userIds: readonly string[],
+  env: Env,
+  io: LarkCliIo,
+  dependencies: LarkCliLauncherDependencies,
+): void {
+  if (target.resourceKind !== "chat" || !target.resourceId) {
+    throw new Error("Runtime +messages-urgent-app 只能对照已确认的 chat freshness target 校验成员");
+  }
+  const members = new Set(parseChatMemberOpenIds(callNative([
+    "im", "+chat-members-list",
+    "--chat-id", target.resourceId,
+    "--member-id-type", "open_id",
+    "--member-types", "user",
+    "--page-all",
+    "--json",
+    "--as", "bot",
+  ], env, io, dependencies)));
+  const unknown = userIds.filter((userId) => !members.has(userId));
+  if (unknown.length > 0) {
+    throw new Error(`Runtime +messages-urgent-app 拒绝非本会话成员: ${unknown.join(",")}`);
+  }
+}
+
+function assertUrgentAppNativeAccepted(result: SpawnSyncReturns<string>): void {
+  if (result.error || result.status !== 0) return;
+  let value: unknown;
+  try { value = JSON.parse(result.stdout || ""); } catch { return; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const data = (value as { data?: unknown }).data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  const invalid = (data as { invalid_user_id_list?: unknown }).invalid_user_id_list;
+  if (!Array.isArray(invalid) || invalid.length === 0) return;
+  throw new Error(`Runtime +messages-urgent-app 收到 invalid_user_id_list，已 fail-closed: ${invalid.join(",")}`);
 }
 
 function probeArgv(target: FreshnessTarget): string[] {
@@ -927,11 +988,19 @@ export function runLarkCli(
       return 3;
     }
     if (decision.operation === "urgent-app") {
-      assertUrgentAppPreconditions(effectiveArgv, gated.snapshot, target, agent.feishuAppId);
+      const userIds = assertUrgentAppPreconditions(effectiveArgv, gated.snapshot, target, agent.feishuAppId);
+      assertUrgentAppMembers(effectiveArgv, target, userIds, privateEnv, io, nativeDependencies);
     }
     const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
     const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
-    if (decision.operation === "urgent-app") return emitNativeResult(write, io);
+    if (decision.operation === "urgent-app") {
+      try { assertUrgentAppNativeAccepted(write); }
+      catch (error) {
+        io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 2;
+      }
+      return emitNativeResult(write, io);
+    }
     const writeMessage = writeResponseMessage(write);
     const duplicate = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;

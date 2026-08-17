@@ -20,15 +20,24 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
   const output = { stdout: "", stderr: "" };
   const calls = [];
   const historyHolder = { value: history };
+  const membersHolder = { value: {
+    ok: true,
+    identity: "bot",
+    data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], truncations: [] },
+  } };
   let writeResult = { status: 7, signal: null, output: [], pid: 1,
     stdout: "native-out\n", stderr: "native-err\n", error: undefined };
   const spawn = (command, args, options) => {
     calls.push({ command, args, options });
     const isHistory = ["+chat-messages-list", "+threads-messages-list"].includes(args[2])
       || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages");
-    return isHistory
-      ? { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(historyHolder.value), stderr: "", error: undefined }
-      : writeResult;
+    if (isHistory) {
+      return { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(historyHolder.value), stderr: "", error: undefined };
+    }
+    if (args[2] === "+chat-members-list") {
+      return { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(membersHolder.value), stderr: "", error: undefined };
+    }
+    return writeResult;
   };
   const run = (argv) => {
     output.stdout = "";
@@ -39,7 +48,12 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     });
     return { code, ...output };
   };
-  return { root, store, calls, run, setWriteResult(value) { writeResult = value; }, setHistory(value) { historyHolder.value = value; } };
+  return {
+    root, store, calls, run,
+    setWriteResult(value) { writeResult = value; },
+    setHistory(value) { historyHolder.value = value; },
+    setMembers(value) { membersHolder.value = value; },
+  };
 }
 
 test("launcher classifies protected writes, removed drafts, bypasses, and observational help", () => {
@@ -346,6 +360,10 @@ test("protected urgent-app probes freshness then rewrites to native urgent_app f
     });
     const sent = f.run(urgentArgv());
     assert.equal(sent.code, 0, sent.stderr);
+    const memberCall = f.calls.find((call) => call.args[2] === "+chat-members-list");
+    assert.ok(memberCall, "urgent-app must probe chat members before write");
+    assert.equal(memberCall.args[memberCall.args.indexOf("--chat-id") + 1], "oc_urgent");
+    assert.equal(memberCall.args[memberCall.args.indexOf("--member-id-type") + 1], "open_id");
     const writeCall = f.calls.find((call) => call.args[2] === "messages" && call.args[3] === "urgent_app");
     assert.ok(writeCall, "native urgent_app must be spawned after freshness");
     const write = writeCall.args.slice(1);
@@ -386,12 +404,48 @@ test("protected urgent-app fails closed for foreign, synthetic, malformed, and u
       urgentArgv({ messageId: "om_missing" }),
       urgentArgv({ userIdType: "user_id" }),
       urgentArgv({ data: JSON.stringify({ user_id_list: ["not-an-open-id"] }) }),
+      urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_not_in_chat"] }) }),
+      urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234", "ou_not_in_chat"] }) }),
       ["im", "+messages-urgent-app", "--user-id", "ou_10937ddc38cfd9fd239591c634fed234", "--message-id", "om_own_urgent", "--user-id-type", "open_id", "--data", JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] })],
     ]) {
       const before = f.calls.length;
       assert.equal(f.run(argv).code, 2, argv.join(" "));
       assert.equal(f.calls.slice(before).some((call) => call.args[2] === "urgent_app"), false, argv.join(" "));
     }
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected urgent-app fails closed when member probe is truncated or native returns invalid users", () => {
+  const f = fixture({
+    ok: true,
+    identity: "bot",
+    data: { messages: [ownBotMessage()] },
+  });
+  try {
+    seedUrgentCursor(f.store);
+    f.setMembers({
+      ok: true,
+      identity: "bot",
+      data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], truncations: ["users"] },
+    });
+    const truncated = f.run(urgentArgv());
+    assert.equal(truncated.code, 2, truncated.stderr);
+    assert.match(truncated.stderr, /truncated/);
+    assert.equal(f.calls.some((call) => call.args[2] === "messages" && call.args[3] === "urgent_app"), false);
+
+    f.setMembers({
+      ok: true,
+      identity: "bot",
+      data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], truncations: [] },
+    });
+    f.setWriteResult({
+      status: 0, signal: null, output: [], pid: 1,
+      stdout: `${JSON.stringify({ ok: true, identity: "bot", data: { invalid_user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] } })}\n`,
+      stderr: "", error: undefined,
+    });
+    const invalid = f.run(urgentArgv());
+    assert.equal(invalid.code, 2, invalid.stderr);
+    assert.match(invalid.stderr, /invalid_user_id_list/);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

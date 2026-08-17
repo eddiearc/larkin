@@ -4,10 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
 
+/** Fallback values used while importing a Pi profile, before Pi reports its model. */
 export const PI_CONTEXT_WINDOW = 272_000;
 export const COMPACTION_RESERVE_TOKENS = 40_800;
 export const COMPACTION_KEEP_RECENT_TOKENS = 20_000;
 export const PI_COMPACTION_THRESHOLD = PI_CONTEXT_WINDOW - COMPACTION_RESERVE_TOKENS;
+const COMPACTION_RESERVE_RATIO_PERCENT = 15;
+const MAX_KEEP_RECENT_TOKENS = 20_000;
 export const PI_COMPACTION_RECOVERY_VERSION = 1;
 export const PI_COMPACTION_RECOVERY_FILE = "piCompactionRecovery.json";
 
@@ -66,24 +69,49 @@ export interface EffectivePiSettings {
   compaction?: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number };
 }
 
+export interface PiCompactionSettings {
+  reserveTokens: number;
+  keepRecentTokens: number;
+  threshold: number;
+}
+
 function requireFiniteBoolean(value: unknown, name: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
   return value;
 }
 
-export function isPiNativeCompactionRequired(contextTokens: number): boolean {
-  return Number.isFinite(contextTokens) && contextTokens > PI_COMPACTION_THRESHOLD;
+export function calculatePiCompactionSettings(contextWindow: number): PiCompactionSettings {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
+    throw new Error("Pi effective context window must be a positive safe integer");
+  }
+  const reserveTokens = Math.min(
+    contextWindow - 1,
+    Math.ceil(contextWindow * COMPACTION_RESERVE_RATIO_PERCENT / 100),
+  );
+  const threshold = contextWindow - reserveTokens;
+  if (reserveTokens < 1 || threshold <= 1) throw new Error("Pi effective context window is too small for safe compaction");
+  const keepRecentTokens = Math.min(MAX_KEEP_RECENT_TOKENS, threshold - 1);
+  return { reserveTokens, keepRecentTokens, threshold };
+}
+
+export function isPiNativeCompactionRequired(contextTokens: number, contextWindow = PI_CONTEXT_WINDOW): boolean {
+  if (!Number.isFinite(contextTokens)) return false;
+  try { return contextTokens > calculatePiCompactionSettings(contextWindow).threshold; }
+  catch { return false; }
 }
 
 export function assertEffectivePiCompactionSettings(settings: EffectivePiSettings): void {
   const contextWindow = settings.contextWindow ?? settings.model?.contextWindow;
-  if (contextWindow !== PI_CONTEXT_WINDOW) throw new Error(`Pi effective context window must be exactly ${PI_CONTEXT_WINDOW}`);
+  const expected = (() => {
+    try { return calculatePiCompactionSettings(contextWindow as number); }
+    catch { throw new Error("Pi effective context window must be a positive safe integer"); }
+  })();
   if (settings.compaction?.enabled !== true) throw new Error("Pi native compaction must be enabled");
-  if (settings.compaction.reserveTokens !== COMPACTION_RESERVE_TOKENS) {
-    throw new Error(`Pi reserveTokens must be exactly ${COMPACTION_RESERVE_TOKENS}`);
+  if (settings.compaction.reserveTokens !== expected.reserveTokens) {
+    throw new Error(`Pi reserveTokens must be exactly ${expected.reserveTokens} for context window ${contextWindow}`);
   }
-  if (settings.compaction.keepRecentTokens !== COMPACTION_KEEP_RECENT_TOKENS) {
-    throw new Error(`Pi keepRecentTokens must be exactly ${COMPACTION_KEEP_RECENT_TOKENS}`);
+  if (settings.compaction.keepRecentTokens !== expected.keepRecentTokens) {
+    throw new Error(`Pi keepRecentTokens must be exactly ${expected.keepRecentTokens} for context window ${contextWindow}`);
   }
 }
 
@@ -158,15 +186,19 @@ export function ownedPiSettings(directory: string): string {
   return path.join(directory, "settings.json");
 }
 
-export function prepareOwnedPiDirectory(directory: string): string {
+export function prepareOwnedPiDirectory(directory: string, compaction?: PiCompactionSettings): string {
   ensureDirectoryChain(path.dirname(directory));
   ensureDirectory(path.dirname(directory));
   ensureDirectory(directory);
-  writeOwnedPiSettings(directory);
+  writeOwnedPiSettings(directory, compaction);
   return directory;
 }
 
-export function mergeOwnedPiSettings(value: unknown): Record<string, unknown> {
+export function mergeOwnedPiSettings(value: unknown, compaction: PiCompactionSettings = {
+  reserveTokens: COMPACTION_RESERVE_TOKENS,
+  keepRecentTokens: COMPACTION_KEEP_RECENT_TOKENS,
+  threshold: PI_COMPACTION_THRESHOLD,
+}): Record<string, unknown> {
   if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
     throw new Error("Pi owned settings are invalid");
   }
@@ -177,11 +209,11 @@ export function mergeOwnedPiSettings(value: unknown): Record<string, unknown> {
   }
   return { ...object, compaction: {
     ...(existing as Record<string, unknown> | undefined), enabled: true,
-    reserveTokens: COMPACTION_RESERVE_TOKENS, keepRecentTokens: COMPACTION_KEEP_RECENT_TOKENS,
+    reserveTokens: compaction.reserveTokens, keepRecentTokens: compaction.keepRecentTokens,
   } };
 }
 
-export function writeOwnedPiSettings(directory: string): void {
+export function writeOwnedPiSettings(directory: string, compaction?: PiCompactionSettings): void {
   ensureDirectoryChain(path.dirname(directory));
   ensureDirectory(directory);
   const file = ownedPiSettings(directory);
@@ -198,7 +230,7 @@ export function writeOwnedPiSettings(directory: string): void {
   }
   const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(mergeOwnedPiSettings(value), null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(temporary, `${JSON.stringify(mergeOwnedPiSettings(value, compaction), null, 2)}\n`, { flag: "wx", mode: 0o600 });
     fs.renameSync(temporary, file);
     fs.chmodSync(file, 0o600);
   } finally {
@@ -255,15 +287,18 @@ export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
     throw new Error("external Pi cannot use the bundled trusted protocol bypass");
   }
   const contextWindow = capabilities.contextWindow ?? capabilities.model?.contextWindow;
-  if (contextWindow !== PI_CONTEXT_WINDOW) throw new Error("Pi capability context window is not 272000");
+  const expected = (() => {
+    try { return calculatePiCompactionSettings(contextWindow as number); }
+    catch { throw new Error("Pi capability context window is invalid"); }
+  })();
   if (requireFiniteBoolean(capabilities.autoCompactionEnabled, "Pi autoCompactionEnabled") !== true) {
     throw new Error("Pi effective native compaction is disabled");
   }
   if (capabilities.compactRpc !== true) throw new Error("Pi compact RPC capability is missing");
   if (capabilities.distribution === "builtin" && capabilities.trustedProtocol === true) return;
-  if (capabilities.reserveTokens !== COMPACTION_RESERVE_TOKENS
-      || capabilities.keepRecentTokens !== COMPACTION_KEEP_RECENT_TOKENS) {
-    throw new Error("Pi external effective compaction reserve/keep settings are unproven");
+  if (capabilities.reserveTokens !== expected.reserveTokens
+      || capabilities.keepRecentTokens !== expected.keepRecentTokens) {
+    throw new Error(`Pi external effective compaction reserve/keep settings are unproven for context window ${contextWindow}`);
   }
   const events = new Set(capabilities.events || []);
   for (const event of REQUIRED_PI_EVENTS) if (!events.has(event)) throw new Error(`Pi capability event is unproven: ${event}`);

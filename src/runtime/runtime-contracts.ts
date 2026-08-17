@@ -77,6 +77,7 @@ export interface RuntimeSession {
   busyInput(input: RuntimeInput): Promise<RuntimeInputResult>;
   cancel(reason: string): Promise<void>;
   compact?(customInstructions?: string): Promise<unknown>;
+  getContextUsage?(): Promise<{ tokens: number; contextWindow: number } | null>;
   close(reason: string): Promise<void>;
   subscribe(listener: (event: NormalizedRuntimeEvent) => void): () => void;
 }

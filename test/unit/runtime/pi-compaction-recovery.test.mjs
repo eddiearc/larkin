@@ -6,6 +6,7 @@ import { test } from "bun:test";
 import {
   COMPACTION_KEEP_RECENT_TOKENS,
   COMPACTION_RESERVE_TOKENS,
+  calculatePiCompactionSettings,
   PI_CONTEXT_WINDOW,
   PI_COMPACTION_THRESHOLD,
   assertEffectivePiCompactionSettings,
@@ -20,19 +21,38 @@ import {
   verifyPiCapabilities,
 } from "../../../dist/runtime/pi-compaction-recovery.mjs";
 
-test("Pi policy uses the exact effective settings and strict threshold boundary", () => {
+test("Pi policy derives a strict 15% reserve and 85% idle threshold from the effective model window", () => {
   assert.equal(PI_CONTEXT_WINDOW, 272_000);
   assert.equal(COMPACTION_RESERVE_TOKENS, 40_800);
   assert.equal(COMPACTION_KEEP_RECENT_TOKENS, 20_000);
   assert.equal(PI_COMPACTION_THRESHOLD, 231_200);
-  assert.equal(isPiNativeCompactionRequired(231_200), false);
-  assert.equal(isPiNativeCompactionRequired(231_201), true);
+  assert.deepEqual(calculatePiCompactionSettings(272_000), {
+    reserveTokens: 40_800, keepRecentTokens: 20_000, threshold: 231_200,
+  });
+  assert.deepEqual(calculatePiCompactionSettings(500_000), {
+    reserveTokens: 75_000, keepRecentTokens: 20_000, threshold: 425_000,
+  });
+  assert.equal(isPiNativeCompactionRequired(231_200, 272_000), false);
+  assert.equal(isPiNativeCompactionRequired(231_201, 272_000), true);
+  assert.equal(isPiNativeCompactionRequired(425_000, 500_000), false);
+  assert.equal(isPiNativeCompactionRequired(425_001, 500_000), true);
   assert.doesNotThrow(() => assertEffectivePiCompactionSettings({
     contextWindow: 272_000, compaction: { enabled: true, reserveTokens: 40_800, keepRecentTokens: 20_000 },
+  }));
+  assert.doesNotThrow(() => assertEffectivePiCompactionSettings({
+    contextWindow: 333_333, compaction: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000 },
   }));
   assert.throws(() => assertEffectivePiCompactionSettings({
     contextWindow: 272_000, compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
   }), /reserveTokens/i);
+});
+
+test("Pi policy safely clamps recent history and rejects unsafe tiny windows", () => {
+  assert.deepEqual(calculatePiCompactionSettings(10_000), {
+    reserveTokens: 1_500, keepRecentTokens: 8_499, threshold: 8_500,
+  });
+  assert.throws(() => calculatePiCompactionSettings(2), /too small/i);
+  assert.throws(() => calculatePiCompactionSettings(0), /positive safe integer/i);
 });
 
 test("Pi owned settings merge preserves unrelated external settings while owning compaction", () => {

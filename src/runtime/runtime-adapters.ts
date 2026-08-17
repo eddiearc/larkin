@@ -37,10 +37,12 @@ import {
 import {
   assertEffectivePiCompactionSettings,
   assertNoProjectPiCompactionOverride,
+  calculatePiCompactionSettings,
   parsePiExecutableVersion,
   prepareOwnedPiDirectory,
   readOwnedPiSettings,
   verifyPiCapabilities,
+  writeOwnedPiSettings,
 } from "./pi-compaction-recovery.js";
 
 interface WritableLike {
@@ -61,6 +63,7 @@ interface ProcessLike {
 }
 
 export interface PiSessionProcessLike {
+  readonly policyManaged?: boolean;
   readonly sessionId?: string | null;
   readonly model?: { provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> };
   readonly thinkingLevel?: string;
@@ -69,6 +72,8 @@ export interface PiSessionProcessLike {
   abort(): Promise<unknown> | unknown;
   compact?(customInstructions?: string): Promise<unknown>;
   getState?(): Promise<Record<string, unknown>>;
+  getSessionStats?(): Promise<Record<string, unknown>>;
+  validatePolicy?(): Promise<void>;
   dispose?(): Promise<unknown> | unknown;
   subscribe?(listener: (event: unknown) => void): (() => void) | void;
 }
@@ -519,8 +524,10 @@ class PiSession extends EventSession {
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
+  readonly piPolicyManaged: boolean;
   constructor(private readonly sdk: PiSessionProcessLike, private readonly distribution: "builtin" | "external") {
     super();
+    this.piPolicyManaged = sdk.policyManaged ?? typeof sdk.validatePolicy === "function";
     const result = sdk.subscribe?.((event) => this.onEvent(event));
     if (typeof result === "function") this.unsubscribe = result;
     if (sdk.sessionId) setImmediate(() => this.emit({
@@ -538,7 +545,20 @@ class PiSession extends EventSession {
   async cancel(_reason: string): Promise<void> { await this.sdk.abort(); }
   async compact(customInstructions?: string): Promise<unknown> {
     if (!this.sdk.compact) throw new Error("Pi compact RPC is unavailable");
+    await this.sdk.validatePolicy?.();
     return this.sdk.compact(customInstructions);
+  }
+  async getContextUsage(): Promise<{ tokens: number; contextWindow: number } | null> {
+    if (!this.sdk.getSessionStats) return null;
+    await this.sdk.validatePolicy?.();
+    const stats = await this.sdk.getSessionStats();
+    const usage = stats?.contextUsage as Record<string, unknown> | undefined;
+    const tokens = Number(usage?.tokens);
+    const contextWindow = Number(usage?.contextWindow);
+    if (!Number.isFinite(tokens) || tokens < 0 || !Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
+      throw new Error("Pi get_session_stats returned invalid contextUsage");
+    }
+    return { tokens, contextWindow };
   }
   async close(_reason: string): Promise<void> { this.unsubscribe?.(); await this.sdk.dispose?.(); }
 
@@ -554,7 +574,8 @@ class PiSession extends EventSession {
       this.emitObservation("rpc_submit");
     }
     try {
-      await operation();
+      const accepted = this.sdk.validatePolicy ? this.sdk.validatePolicy().then(operation) : operation();
+      await accepted;
       this.awaitingAcknowledgement.delete(input.inputId);
       if (ownsRpcObservation && !this.observedAcceptedEpochs.has(epoch)) {
         this.observedAcceptedEpochs.add(epoch);
@@ -852,6 +873,35 @@ interface PiRpcState {
   compactionCapabilities?: { reserveTokens?: unknown; keepRecentTokens?: unknown; events?: readonly string[] };
 }
 
+interface PiProbeResult {
+  model: string | null;
+  contextWindow: number;
+}
+
+async function discoverEffectivePiContextWindow(input: RuntimeSessionCreate, command: string,
+  commandPrefix: readonly string[], requestedModel: string | undefined,
+  env: NodeJS.ProcessEnv, spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike,
+  rpcOptions?: PiRpcClientOptions): Promise<PiProbeResult> {
+  const probeArgs = [...commandPrefix, "--mode", "rpc", "--no-session", "--no-extensions",
+    ...(requestedModel ? ["--model", requestedModel] : [])];
+  const probe = spawn(command, probeArgs, {
+    cwd: input.workspaceDir,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const client = new PiRpcClient(probe, rpcOptions);
+  try {
+    const state = await client.request<PiRpcState>("get_state");
+    const contextWindow = state.model?.contextWindow;
+    calculatePiCompactionSettings(contextWindow as number);
+    const model = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
+    if (!model) throw new Error("Pi isolated probe did not report an effective model");
+    return { model, contextWindow: contextWindow as number };
+  } finally {
+    await client.close();
+  }
+}
+
 function writePrivateAtomic(file: string, content: string): void {
   try { if (fs.lstatSync(file).isSymbolicLink()) throw new Error("standing prompt must not be a symlink"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -864,10 +914,13 @@ function writePrivateAtomic(file: string, content: string): void {
 }
 
 class PiRpcBackend implements PiSessionProcessLike {
+  readonly policyManaged: boolean;
   sessionId: string | null;
   model?: { provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> };
   thinkingLevel?: string;
-  constructor(private readonly client: PiRpcClient, state: PiRpcState) {
+  constructor(private readonly client: PiRpcClient, state: PiRpcState,
+    private readonly policy?: { model: string; contextWindow: number; ownedPiDirectory: string }) {
+    this.policyManaged = Boolean(policy);
     this.sessionId = state.sessionId ?? null;
     if (state.model?.provider && state.model.id) this.model = {
       provider: state.model.provider, id: state.model.id,
@@ -880,6 +933,21 @@ class PiRpcBackend implements PiSessionProcessLike {
   steer(text: string): Promise<unknown> { return this.client.request("steer", { message: text }); }
   abort(): Promise<unknown> { return this.client.request("abort"); }
   compact(customInstructions?: string): Promise<unknown> { return this.client.requestCompact(customInstructions); }
+  getSessionStats(): Promise<Record<string, unknown>> { return this.client.request("get_session_stats"); }
+  async validatePolicy(): Promise<void> {
+    if (!this.policy) return;
+    const state = await this.client.request<PiRpcState>("get_state");
+    const effectiveModel = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
+    if (effectiveModel !== this.policy.model || state.model?.contextWindow !== this.policy.contextWindow) {
+      throw new Error("Pi model or context window changed after startup; compaction policy is no longer safe");
+    }
+    const ownedSettings = readOwnedPiSettings(this.policy.ownedPiDirectory);
+    assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
+      enabled: state.autoCompactionEnabled,
+      reserveTokens: ownedSettings.compaction?.reserveTokens,
+      keepRecentTokens: ownedSettings.compaction?.keepRecentTokens,
+    } });
+  }
   getState(): Promise<Record<string, unknown>> { return this.client.request("get_state"); }
   dispose(): Promise<void> { return this.client.close(); }
   subscribe(listener: (event: unknown) => void): () => void {
@@ -920,8 +988,6 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ? piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId)
     : path.join(stateRoot, "pi-agent");
   prepareOwnedPiDirectory(ownedPiDirectory);
-  const artifactEntriesBeforeSpawn = new Set(fs.readdirSync(ownedPiDirectory));
-  const artifactSpawnBoundary = Date.now();
   traceProcessBoundary(mergedEnv, "pi-rpc:child-env", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childEnvConfigDir: mergedEnv.LARKIN_CONFIG_DIR || null, childEnvHome: mergedEnv.HOME || null });
   const runtimeDir = path.join(stateRoot, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
@@ -946,12 +1012,27 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     : BUNDLED_PI_VERSION;
   mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
   if (builtin) mergedEnv.PI_TELEMETRY = "0";
-  commandArgs.push(...(dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
+  const extensionArgs = (dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,
     env: mergedEnv,
     platform: process.platform,
-  }));
+  });
+  commandArgs.push(...extensionArgs);
+  let probedModel: PiProbeResult | null = null;
+  if (productionSpawn) {
+    // Pi reads compaction settings when the process starts. Probe the exact
+    // requested model first, then write the matching 15% reserve before the
+    // real session starts; no prompt, provider request, package, or extension
+    // is loaded by the probe.
+    probedModel = await discoverEffectivePiContextWindow(
+      input, command, builtinSpec?.args ?? [], requestedModel,
+      mergedEnv, spawn, dependencies.piRpcClientOptions,
+    );
+    writeOwnedPiSettings(ownedPiDirectory, calculatePiCompactionSettings(probedModel.contextWindow));
+  }
+  const artifactEntriesBeforeSpawn = new Set(fs.readdirSync(ownedPiDirectory));
+  const artifactSpawnBoundary = Date.now();
   const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
     env: mergedEnv,
@@ -967,6 +1048,10 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     if (!available?.models?.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow or configure provider credentials; Larkin will not create a fallback session.");
     const effectiveModel = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
     if (productionSpawn) {
+      if (!effectiveModel || !probedModel || effectiveModel !== probedModel.model
+          || state.model?.contextWindow !== probedModel.contextWindow) {
+        throw new Error("Pi model or context window changed between the isolated probe and runtime startup");
+      }
       const ownedSettings = readOwnedPiSettings(ownedPiDirectory);
       assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
         enabled: state.autoCompactionEnabled,
@@ -993,7 +1078,9 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     }
     if (requestedEffort && state.thinkingLevel !== requestedEffort) throw new Error(`Pi thinking level ${requestedEffort} was not accepted by effective model ${effectiveModel || "unknown"}`);
     recordPiRuntimeArtifactProvenance(ownedPiDirectory, artifactEntriesBeforeSpawn, artifactSpawnBoundary);
-    return new PiRpcBackend(client, state);
+    return new PiRpcBackend(client, state, productionSpawn ? {
+      model: effectiveModel!, contextWindow: state.model?.contextWindow as number, ownedPiDirectory,
+    } : undefined);
   } catch (error) {
     await client.close();
     if (error instanceof RuntimePrerequisiteError) throw error;

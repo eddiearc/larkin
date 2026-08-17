@@ -19,7 +19,11 @@ import {
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
-import { PiCompactionBreaker, PiCompactionRecoveryMachine } from "./pi-compaction-recovery.js";
+import {
+  isPiNativeCompactionRequired,
+  PiCompactionBreaker,
+  PiCompactionRecoveryMachine,
+} from "./pi-compaction-recovery.js";
 
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
@@ -66,7 +70,7 @@ export type DeliveryReceipt =
 interface ManagedAgent {
   config: AgentRuntimeConfig; adapter: RuntimeAdapter; session: RuntimeSession | null;
   launchId: string; busy: boolean; submitting: boolean; starting: Promise<RuntimeSession> | null;
-  retryAfterSubmit: boolean;
+  retryAfterSubmit: boolean; retryPendingInFlight: Promise<void> | null;
   records: Map<string, DeliveryRecord>; byMessage: Map<string, string>; generation: number;
   poller: NodeJS.Timeout | null; retryTimer: NodeJS.Timeout | null; recreateAttempts: number;
   stabilityTimer: NodeJS.Timeout | null; recreateReason: string | null;
@@ -76,6 +80,10 @@ interface ManagedAgent {
   compactionMachines: Map<string, PiCompactionRecoveryMachine>;
   compactionRecoveryInFlight: Set<string>;
   piOverflowCompactionFailed: Set<string>;
+  piProactiveCompaction: Promise<"noop" | "succeeded" | "failed"> | null;
+  piProactiveCompactionGeneration: number | null;
+  piProactiveCompactionSession: RuntimeSession | null;
+  piProactiveCompactionFailedGeneration: number | null;
   readiness: RuntimeReadiness | null;
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
 }
@@ -507,6 +515,22 @@ export function createRuntimeHost(options: {
   };
 
   const submit = async (agent: ManagedAgent, record: DeliveryRecord, busy: boolean): Promise<DeliveryReceipt> => {
+    const proactive = agent.piProactiveCompaction
+      && agent.piProactiveCompactionGeneration === agent.generation
+      && agent.piProactiveCompactionSession === agent.session
+      ? agent.piProactiveCompaction : null;
+    if (proactive && await proactive === "failed") {
+      return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
+    }
+    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) {
+      return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
+    }
+    if (agent.adapter.id === "pi" && !busy && !agent.busy && !agent.turnInProgress && agent.session) {
+      const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
+      if (idleGate && await idleGate === "failed") {
+        return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
+      }
+    }
     agent.submitting = true;
     if (!busy) agent.busy = true; // Reserve the turn before prompt() can yield.
     try {
@@ -556,11 +580,28 @@ export function createRuntimeHost(options: {
   };
 
   const retryPending = async (agent: ManagedAgent): Promise<void> => {
+    if (agent.retryPendingInFlight) return agent.retryPendingInFlight;
+    const run = (async (): Promise<void> => {
     reconcileExternalConsumption(agent);
-    if (agent.submitting) { agent.retryAfterSubmit = true; return; }
+    const proactive = agent.piProactiveCompaction
+      && agent.piProactiveCompactionGeneration === agent.generation
+      && agent.piProactiveCompactionSession === agent.session
+      ? agent.piProactiveCompaction : null;
+    if (proactive && await proactive === "failed") return;
+    if (agent.submitting || agent.starting) { agent.retryAfterSubmit = true; return; }
+    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) return;
     if (agent.busy || agent.turnInProgress || !agent.session) return;
+    if (agent.adapter.id === "pi") {
+      const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
+      if (idleGate && await idleGate === "failed") return;
+    }
     const record = [...agent.records.values()].find((candidate) => candidate.status === "pending" || candidate.status === "submitting");
     if (record) await submit(agent, record, false);
+    })();
+    agent.retryPendingInFlight = run;
+    try { await run; } finally {
+      if (agent.retryPendingInFlight === run) agent.retryPendingInFlight = null;
+    }
   };
 
   const scheduleRecreate = (agent: ManagedAgent, reason: string): void => {
@@ -577,8 +618,11 @@ export function createRuntimeHost(options: {
     agent.retryTimer = setTimeout(() => {
       agent.retryTimer = null;
       if (agent.stopped) return;
-      void ensureSession(agent).then(() => {
-        return retryPending(agent);
+      void ensureSession(agent).then(async () => {
+        const session = agent.session;
+        const proactive = session ? proactivelyCompactPiAtIdle(agent, session) : null;
+        if (proactive && await proactive === "failed") return;
+        await retryPending(agent);
       }).catch((error) => {
         const readiness = error instanceof RuntimePrerequisiteError ? error.readiness
           : classifyRuntimePrerequisite(agent.adapter.id as RuntimeReadiness["runtime"], error);
@@ -746,6 +790,44 @@ export function createRuntimeHost(options: {
     await recoverContextOverflowInternal(agent.config.agentId, stale.key, recoveryReason, stale.key);
   };
 
+  const proactivelyCompactPiAtIdle = (agent: ManagedAgent, session: RuntimeSession): Promise<"noop" | "succeeded" | "failed"> | null => {
+    if (agent.adapter.id !== "pi" || (session as RuntimeSession & { piPolicyManaged?: boolean }).piPolicyManaged === false
+        || !session.getContextUsage || !session.compact) return null;
+    if (agent.session !== session || agent.stopped || agent.busy || agent.turnInProgress || agent.submitting || agent.starting
+        || agent.compactionRecoveryInFlight.size > 0
+        || agent.compactionMachines.size > 0 || agent.piOverflowCompactionFailed.size > 0) return null;
+    if (agent.piProactiveCompactionFailedGeneration === agent.generation) return null;
+    const generation = agent.generation;
+    if (agent.piProactiveCompaction && agent.piProactiveCompactionGeneration === generation
+        && agent.piProactiveCompactionSession === session) return agent.piProactiveCompaction;
+    const task = (async (): Promise<"noop" | "succeeded"> => {
+      const before = await session.getContextUsage!();
+      if (!before || agent.session !== session || agent.stopped || agent.busy || agent.turnInProgress || agent.submitting
+          || agent.compactionRecoveryInFlight.size > 0 || agent.compactionMachines.size > 0
+          || agent.piOverflowCompactionFailed.size > 0) return "noop";
+      if (!isPiNativeCompactionRequired(before.tokens, before.contextWindow)) return "noop";
+      await session.compact!();
+      const after = await session.getContextUsage!();
+      if (!after || after.contextWindow !== before.contextWindow || after.tokens >= before.tokens) {
+        throw new Error("Pi proactive compaction did not reduce the verified context usage");
+      }
+      return "succeeded";
+    })();
+    const tracked = task.catch((error): "failed" => {
+      agent.piProactiveCompactionFailedGeneration = generation;
+      emit({ type: "agent-status", agentId: agent.config.agentId, status: "error",
+        error: "Pi proactive compaction failed; the current session generation is degraded" });
+      log("Pi proactive compaction failed", String(error));
+      return "failed";
+    }).finally(() => {
+      if (agent.piProactiveCompaction === tracked) agent.piProactiveCompaction = null;
+    });
+    agent.piProactiveCompactionGeneration = generation;
+    agent.piProactiveCompactionSession = session;
+    agent.piProactiveCompaction = tracked;
+    return tracked;
+  };
+
   const observe = (agent: ManagedAgent, session: RuntimeSession, event: NormalizedRuntimeEvent): void => {
     if (agent.session !== session) return; // Ignore late output from a replaced child.
     // Keep the trace parent published until authoritative Inbox reconciliation
@@ -781,7 +863,6 @@ export function createRuntimeHost(options: {
       agent.config.sessionId = event.sessionId;
       emit({ type: "session", agentId: agent.config.agentId, runtime: agent.adapter.id, sessionId: event.sessionId, launchId: agent.launchId,
         ...(event.model ? { model: event.model } : {}), ...(event.reasoningEffort ? { reasoningEffort: event.reasoningEffort } : {}) });
-      void retryPending(agent);
     } else if (event.type === "turn-start") {
       agent.busy = true;
       agent.turnInProgress = true;
@@ -813,7 +894,10 @@ export function createRuntimeHost(options: {
         };
         emit({ type: "agent-status", agentId: agent.config.agentId, status: "active", readiness: agent.readiness });
       }
-      void retryPending(agent);
+      const proactive = proactivelyCompactPiAtIdle(agent, session);
+      void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
+        if (outcome !== "failed") return retryPending(agent);
+      });
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
       emit({ type: "activity", agentId: agent.config.agentId, activity: event.activity, activityKind: event.activity });
@@ -1037,7 +1121,10 @@ export function createRuntimeHost(options: {
     }
     emit({ type: "agent-status", agentId, status: "active", readiness });
     await oldSession.close("Pi context fallback committed").catch((error) => log("previous Pi session close after fallback failed", String(error)));
-    void retryPending(agent);
+    const proactive = proactivelyCompactPiAtIdle(agent, fresh);
+    void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
+      if (outcome !== "failed") return retryPending(agent);
+    });
     return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
       runtimeReady: true, pendingCount: remainingPendingCount, rearmedCount,
       replayStatus: remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
@@ -1326,7 +1413,10 @@ export function createRuntimeHost(options: {
         durableRollback = null;
         await oldSession.close("context-window recovery committed")
           .catch((error) => log("previous runtime close after context-window recovery failed", String(error)));
-        void retryPending(agent);
+        const proactive = proactivelyCompactPiAtIdle(agent, fresh);
+        void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
+          if (outcome !== "failed") return retryPending(agent);
+        });
         return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
           runtimeReady: true, pendingCount: rearmed.remainingPendingCount, rearmedCount: rearmed.rearmedCount,
           replayStatus: rearmed.remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
@@ -1378,6 +1468,7 @@ export function createRuntimeHost(options: {
           : readDeliveryFile(config.stateDir ? path.join(config.stateDir, "runtime-deliveries.json") : null);
         const agent: ManagedAgent = { config, adapter: options.adapterFor(config.runtime), session: null,
           launchId: crypto.randomUUID(), busy: false, submitting: false, starting: null, retryAfterSubmit: false,
+          retryPendingInFlight: null,
           records: new Map(persisted.records.map((record) => [record.deliveryId, record])),
           byMessage: new Map(persisted.records.map((record) => [record.messageId, record.deliveryId])),
           generation: 0, poller: null, retryTimer: null, recreateAttempts: 0,
@@ -1387,7 +1478,9 @@ export function createRuntimeHost(options: {
             ? new PiCompactionBreaker(config.stateDir ?? path.join(config.workspaceDir, ".larkin", "agents", config.agentId), {
               withLock: <T>(operation: () => T): T => stateStore.withInboxTransaction(operation),
             }) : undefined,
-          compactionMachines: new Map(), compactionRecoveryInFlight: new Set(), piOverflowCompactionFailed: new Set(), readiness: null,
+          compactionMachines: new Map(), compactionRecoveryInFlight: new Set(), piOverflowCompactionFailed: new Set(),
+          piProactiveCompaction: null, piProactiveCompactionGeneration: null, piProactiveCompactionSession: null,
+          piProactiveCompactionFailedGeneration: null, readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
@@ -1418,8 +1511,11 @@ export function createRuntimeHost(options: {
         try {
           await ensureSession(agent);
           await recoverStalePiCompaction(agent);
+          const startupSession = agent.session;
+          const proactive = startupSession ? proactivelyCompactPiAtIdle(agent, startupSession) : null;
+          const proactiveOutcome = proactive ? await proactive : "noop" as const;
           activeCount += 1;
-          await retryPending(agent);
+          if (proactiveOutcome !== "failed") await retryPending(agent);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           const transient = error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable";

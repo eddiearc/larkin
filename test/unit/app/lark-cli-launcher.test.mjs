@@ -327,6 +327,8 @@ test("protected urgent-app classifies as guarded and keeps raw urgent denied", (
   assert.equal(launcher.classifyLarkCliCommand(urgentArgv()).kind, "guarded");
   assert.equal(launcher.classifyLarkCliCommand(urgentArgv()).operation, "urgent-app");
   assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "urgent_app", "--message-id", "om_own_urgent"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--dry-run"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--help"]).kind, "passthrough");
 });
 
 test("protected urgent-app probes freshness then rewrites to native urgent_app for the bot's own message", () => {
@@ -350,15 +352,18 @@ test("protected urgent-app probes freshness then rewrites to native urgent_app f
     assert.deepEqual(write.slice(0, 3), ["im", "messages", "urgent_app"]);
     assert.equal(write.includes("+messages-urgent-app"), false);
     assert.equal(write.includes("--chat-id"), false);
+    assert.equal(write.includes("--idempotency-key"), false);
     assert.equal(write[write.indexOf("--message-id") + 1], "om_own_urgent");
     assert.equal(write[write.indexOf("--user-id-type") + 1], "open_id");
     assert.equal(write[write.indexOf("--as") + 1], "bot");
     assert.deepEqual(JSON.parse(write[write.indexOf("--data") + 1]), {
       user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"],
     });
-    const again = f.run(urgentArgv());
+    const again = f.run([...urgentArgv(), "--idempotency-key", "forced-urgent-key"]);
     assert.equal(again.code, 0, again.stderr);
-    assert.equal(f.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "urgent_app").length, 2);
+    const writes = f.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "urgent_app");
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1].args.includes("--idempotency-key"), false);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

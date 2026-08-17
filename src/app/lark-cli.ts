@@ -221,9 +221,13 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (exactPath(parsed.commandArgv, ["im", "+messages-reply"])) return uniqueProtectedOperation(protectedPaths, "reply")
     ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "reply" })
     : noncanonicalProtectedDecision();
-  if (exactPath(parsed.commandArgv, ["im", "+messages-urgent-app"])) return uniqueProtectedOperation(protectedPaths, "urgent-app")
-    ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "urgent-app" })
-    : noncanonicalProtectedDecision();
+  if (exactPath(parsed.commandArgv, ["im", "+messages-urgent-app"])) {
+    if (!uniqueProtectedOperation(protectedPaths, "urgent-app")) return noncanonicalProtectedDecision();
+    if (parsed.commandArgv.includes("--dry-run")) {
+      return { kind: "denied", reason: "+messages-urgent-app 不支持 --dry-run；官方 CLI 不认识该合成命令" };
+    }
+    return { kind: "guarded", operation: "urgent-app" };
+  }
   if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
     const expected = parsed.commandArgv[2] === "patch" ? "card-patch" : "card-update";
     return uniqueProtectedOperation(protectedPaths, expected)
@@ -491,11 +495,11 @@ function botArgv(argv: readonly string[], intentId: string, decision?: Extract<L
       rewritten.push("messages", "urgent_app");
       continue;
     }
-    if (argument === "--chat-id") {
+    if (argument === "--chat-id" || argument === "--idempotency-key") {
       index += 1;
       continue;
     }
-    if (argument.startsWith("--chat-id=")) continue;
+    if (argument.startsWith("--chat-id=") || argument.startsWith("--idempotency-key=")) continue;
     rewritten.push(argument);
   }
   return rewritten;

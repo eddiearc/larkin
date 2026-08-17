@@ -40,6 +40,10 @@ For any Feishu-related operation, prefer the official `lark-cli` command and fla
 - Keep `+` shortcuts only where official `lark-cli` already defines them, for example `+messages-send` and `+messages-reply`.
 - Phone and SMS urgent remain out of scope unless the Owner explicitly authorizes them.
 
+## End-to-end tests
+
+Every requirement should have an end-to-end test that exercises the real command path, not only a classifier or prompt grep. Prefer the smallest test that still proves the change took effect: launcher/integration through `runLarkCli` or the hosted gate first; add an opt-in live test only when the claim depends on Feishu, Windows, npm, or another external system. Fake or API success must not be written as client-visible proof.
+
 ## Prompt engineering
 
 When tuning the Larkin standing prompt (`src/agent/context-prompt.ts`), follow the two canonical references and the file header notes:

@@ -52,7 +52,7 @@ const HELP_FLAGS = new Set(["--help", "-h"]);
 const MANAGEMENT_COMMANDS = new Set(["auth", "config", "profile", "update", "install"]);
 const USER_ONLY_COMMANDS = new Set(["attendance", "mail", "okr"]);
 const POLICY_VALUE_FLAGS = new Set([
-  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--thread-id", "--user-id-type", "--data",
+  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--thread-id",
 ]);
 const PROTECTED_VALUE_FLAGS = new Set([
   ...POLICY_VALUE_FLAGS,
@@ -561,9 +561,9 @@ function assertUrgentAppPreconditions(
 ): string[] {
   const messageId = policyFlagValue(argv, "--message-id");
   if (!messageId || !/^om_/.test(messageId)) throw new Error("Runtime im messages urgent_app 只接受真实 Feishu om_ message_id");
-  const userIdType = policyFlagValue(argv, "--user-id-type");
+  const userIdType = rawFlagValue(argv, "--user-id-type");
   if (userIdType !== "open_id") throw new Error("Runtime im messages urgent_app 必须使用 --user-id-type open_id");
-  const data = policyFlagValue(argv, "--data");
+  const data = rawFlagValue(argv, "--data");
   if (!data) throw new Error("Runtime im messages urgent_app 缺少 --data");
   const body = parseJsonObject(data, "--data");
   const userIds = body.user_id_list;
@@ -584,9 +584,12 @@ function parseChatMemberOpenIds(result: SpawnSyncReturns<string>): string[] {
   if (result.status !== 0) throw new Error(`urgent-app member probe exited ${result.status ?? "without status"}: ${result.stderr || "no details"}`);
   let value: unknown;
   try { value = JSON.parse(result.stdout || ""); } catch { throw new Error("urgent-app member probe returned non-JSON output"); }
-  const root = value as { ok?: unknown; identity?: unknown; data?: { users?: unknown; truncations?: unknown } } | null;
+  const root = value as { ok?: unknown; identity?: unknown; data?: { users?: unknown; truncations?: unknown; has_more?: unknown } } | null;
   if (!root || root.ok !== true || !root.data) throw new Error("urgent-app member probe returned an unsuccessful payload");
   if (root.identity !== "bot") throw new Error("urgent-app member probe did not confirm Bot identity");
+  if (root.data.has_more === true) {
+    throw new Error("urgent-app member probe is incomplete; refusing to guess chat membership");
+  }
   if (Array.isArray(root.data.truncations) && root.data.truncations.length > 0) {
     throw new Error("urgent-app member probe was truncated; refusing to guess chat membership");
   }
@@ -618,6 +621,7 @@ function assertUrgentAppMembers(
     "--member-id-type", "open_id",
     "--member-types", "user",
     "--page-all",
+    "--page-limit", "0",
     "--json",
     "--as", "bot",
   ], env, io, dependencies)));

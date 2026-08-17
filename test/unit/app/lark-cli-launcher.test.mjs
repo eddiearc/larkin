@@ -359,10 +359,14 @@ test("protected urgent-app probes freshness then spawns native urgent_app for th
     });
     const sent = f.run(urgentArgv());
     assert.equal(sent.code, 0, sent.stderr);
+    const lookup = f.calls.find((call) => call.args[2] === "+messages-mget");
+    assert.ok(lookup, "urgent_app must resolve the native message before freshness");
+    assert.equal(lookup.args[lookup.args.indexOf("--message-ids") + 1], "om_own_urgent");
     const memberCall = f.calls.find((call) => call.args[2] === "+chat-members-list");
     assert.ok(memberCall, "urgent-app must probe chat members before write");
     assert.equal(memberCall.args[memberCall.args.indexOf("--chat-id") + 1], "oc_urgent");
     assert.equal(memberCall.args[memberCall.args.indexOf("--member-id-type") + 1], "open_id");
+    assert.equal(memberCall.args[memberCall.args.indexOf("--page-limit") + 1], "0");
     const writeCall = f.calls.find((call) => call.args[2] === "messages" && call.args[3] === "urgent_app");
     assert.ok(writeCall, "native urgent_app must be spawned after freshness");
     const write = writeCall.args.slice(1);
@@ -421,6 +425,15 @@ test("protected urgent-app fails closed when member probe is truncated or native
   });
   try {
     seedUrgentCursor(f.store);
+    f.setMembers({
+      ok: true,
+      identity: "bot",
+      data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], has_more: true, truncations: [] },
+    });
+    const incomplete = f.run(urgentArgv());
+    assert.equal(incomplete.code, 2, incomplete.stderr);
+    assert.match(incomplete.stderr, /incomplete/);
+    assert.equal(f.calls.some((call) => call.args[2] === "messages" && call.args[3] === "urgent_app"), false);
     f.setMembers({
       ok: true,
       identity: "bot",

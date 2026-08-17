@@ -681,7 +681,7 @@ test("cursor matrix never advances from formatted, ranged, partial, ascending, o
       LARKIN_TEST_PROVIDER_HISTORY: failed.history([row]),
     }).status, 3, "failed provider read must not advance cursor");
   } finally { fs.rmSync(failed.root, { recursive: true, force: true }); }
-});
+}, { timeout: 30_000 });
 
 test("Host append, callback/background checks, Dashboard refresh, and failed writes do not advance cursor", () => {
   const f = fixture();

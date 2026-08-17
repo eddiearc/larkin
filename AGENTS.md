@@ -37,6 +37,7 @@ For any Feishu-related operation, prefer the official `lark-cli` command and fla
 
 - If official CLI already has a command such as `im messages urgent_app`, protect or wrap that exact path. Do not invent a parallel `+messages-...` surface just to make freshness or identity easier.
 - Wrapper gates may probe, deny, or inject Runtime-locked identity such as `--as bot`. They must not rename the user-facing command or invent extra required flags that official CLI does not have.
+- Do not invent wrapper-only features that official `lark-cli` does not have. If the official command has no idempotency key, do not add a local sent/sending ledger or a synthetic `--idempotency-key` just because a review asked for retries to be unique.
 - Keep `+` shortcuts only where official `lark-cli` already defines them, for example `+messages-send` and `+messages-reply`.
 - Phone and SMS urgent remain out of scope unless the Owner explicitly authorizes them.
 

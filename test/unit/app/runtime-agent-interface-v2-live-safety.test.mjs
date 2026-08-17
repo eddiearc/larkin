@@ -342,6 +342,7 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
   const target = freshHoldRoot();
   const claim = claimHoldHostRoot(target, { nonce: "ready-fixture-nonce", ownerPid: child.pid });
   const agentId = "cli_fixtureA";
+  const daemonStartedAt = new Date(Date.now() - 1000).toISOString();
   const connectedAt = new Date().toISOString();
   try {
     writePrivateJson(path.join(claim.targetRoot, "config.json"), {
@@ -349,7 +350,7 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
       agents: { [agentId]: { runtime: "codex", model: "fixture" } },
     });
     writePrivateJson(path.join(claim.targetRoot, "daemon-status.json"), {
-      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: connectedAt,
+      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: daemonStartedAt,
     });
     writeJson(path.join(claim.targetRoot, "state", "agents", agentId, "status.json"), {
       connectedVia: "channel", connectedAt, reconnectingAt: null,
@@ -360,7 +361,7 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     fs.writeFileSync(traceFile, "", { mode: 0o600 });
     fs.writeFileSync(traceFile, `${JSON.stringify({ at: connectedAt, epoch: connectedAt, pid: child.pid, ppid: process.pid, phase: "hold-host:ready-boundary" })}\n`, { mode: 0o600 });
     const identity = { pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN };
-    writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt }));
+    writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt, daemonStartedAt }));
     const validated = validateLiveHoldHostReady(claim.targetRoot, agentId);
     assert.equal(validated.inspected.startToken, inspected.startToken);
     assert.throws(() => validateLiveHoldHostReady(claim.targetRoot, agentId, {
@@ -422,7 +423,7 @@ test("ready proof binds a fresh channel to the live exact process, root inode, c
     assert.equal(barrierProviderCalls, 0, "provider side effect must remain zero after a post-final-check epoch mutation");
     assert.equal(fs.existsSync(barrierOutput), false, "post-final epoch mutation must leave fake provider output absent");
     fs.writeFileSync(path.join(claim.targetRoot, "daemon-status.json"), `${JSON.stringify({
-      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: connectedAt,
+      pid: child.pid, processStartToken: inspected.startToken, commandToken: HOLD_HOST_COMMAND_TOKEN, agents: [agentId], startedAt: daemonStartedAt,
     })}\n`, { mode: 0o600 });
 
     const validOutput = path.join(claim.targetRoot, "fake-provider-valid-output.json");

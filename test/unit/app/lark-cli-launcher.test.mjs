@@ -369,12 +369,14 @@ test("protected urgent-app fails closed for foreign, synthetic, malformed, and u
     data: { messages: [
       ownBotMessage(),
       ownBotMessage({ message_id: "om_other", sender: { id: "ou_human", sender_type: "user" } }),
+      ownBotMessage({ message_id: "om_other_app", sender: { id: "cli_otherAppA1", id_type: "app_id", sender_type: "app" } }),
     ] },
   });
   try {
-    seedUrgentCursor(f.store, "1786957010773", ["om_own_urgent", "om_other"]);
+    seedUrgentCursor(f.store, "1786957010773", ["om_own_urgent", "om_other", "om_other_app"]);
     for (const argv of [
       urgentArgv({ messageId: "om_other" }),
+      urgentArgv({ messageId: "om_other_app" }),
       urgentArgv({ messageId: "rem_not_a_message" }),
       urgentArgv({ messageId: "om_missing" }),
       urgentArgv({ userIdType: "user_id" }),

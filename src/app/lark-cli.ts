@@ -513,19 +513,19 @@ function senderRecord(message: FeishuImMessage): Record<string, unknown> | null 
   return sender && typeof sender === "object" && !Array.isArray(sender) ? sender as Record<string, unknown> : null;
 }
 
-function isOwnBotMessage(message: FeishuImMessage, agentId: string): boolean {
+function isOwnBotMessage(message: FeishuImMessage, feishuAppId: string): boolean {
   const sender = senderRecord(message);
   if (!sender) return false;
-  const senderType = sender.sender_type ?? sender.id_type;
+  const senderType = sender.sender_type;
   const senderId = sender.id ?? sender.sender_id;
-  return senderType === "app" && senderId === agentId;
+  return senderType === "app" && senderId === feishuAppId;
 }
 
 function assertUrgentAppPreconditions(
   argv: readonly string[],
   snapshot: FeishuImSnapshot,
   target: FreshnessTarget,
-  agentId: string,
+  feishuAppId: string,
 ): void {
   const messageId = policyFlagValue(argv, "--message-id");
   if (!messageId || !/^om_/.test(messageId)) throw new Error("Runtime +messages-urgent-app 只接受真实 Feishu om_ message_id");
@@ -543,7 +543,7 @@ function assertUrgentAppPreconditions(
   if (target.resourceKind === "chat" && message.chat_id && message.chat_id !== target.resourceId) {
     throw new Error("加急目标消息不属于当前 chat freshness target");
   }
-  if (!isOwnBotMessage(message, agentId)) throw new Error("Runtime +messages-urgent-app 只能加急当前 Bot 自己发出的消息");
+  if (!isOwnBotMessage(message, feishuAppId)) throw new Error("Runtime +messages-urgent-app 只能加急当前 Bot 自己发出的消息");
 }
 
 function probeArgv(target: FreshnessTarget): string[] {
@@ -923,10 +923,11 @@ export function runLarkCli(
       return 3;
     }
     if (decision.operation === "urgent-app") {
-      assertUrgentAppPreconditions(effectiveArgv, gated.snapshot, target, agent.agentId);
+      assertUrgentAppPreconditions(effectiveArgv, gated.snapshot, target, agent.feishuAppId);
     }
     const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
     const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
+    if (decision.operation === "urgent-app") return emitNativeResult(write, io);
     const writeMessage = writeResponseMessage(write);
     const duplicate = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;

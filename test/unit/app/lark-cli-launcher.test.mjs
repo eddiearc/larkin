@@ -29,7 +29,7 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     stdout: "native-out\n", stderr: "native-err\n", error: undefined };
   const spawn = (command, args, options) => {
     calls.push({ command, args, options });
-    const isHistory = ["+chat-messages-list", "+threads-messages-list"].includes(args[2])
+    const isHistory = ["+chat-messages-list", "+threads-messages-list", "+messages-mget"].includes(args[2])
       || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages");
     if (isHistory) {
       return { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(historyHolder.value), stderr: "", error: undefined };
@@ -301,7 +301,6 @@ test("forward merge urgent and raw/API write surfaces remain denied before spawn
       ["im", "messages", "reply", "--data", "{}"],
       ["im", "messages", "forward", "--message-id", "om_a"],
       ["im", "messages", "merge_forward", "--message-id", "om_a"],
-      ["im", "messages", "urgent_app", "--message-id", "om_a"],
       ["im", "messages", "urgent_phone", "--message-id", "om_a"],
       ["im", "messages", "urgent_sms", "--message-id", "om_a"],
       ["im", "threads", "forward", "--message-id", "om_a"],
@@ -323,8 +322,7 @@ function ownBotMessage(overrides = {}) {
 
 function urgentArgv(overrides = {}) {
   return [
-    "im", "+messages-urgent-app",
-    "--chat-id", overrides.chatId ?? "oc_urgent",
+    "im", "messages", "urgent_app",
     "--message-id", overrides.messageId ?? "om_own_urgent",
     "--user-id-type", overrides.userIdType ?? "open_id",
     "--data", overrides.data ?? JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] }),
@@ -337,15 +335,16 @@ function seedUrgentCursor(store, revisionTime = "1786957010773", messageIds = ["
   }, (seen, current) => current ?? seen);
 }
 
-test("protected urgent-app classifies as guarded and keeps raw urgent denied", () => {
+test("protected urgent-app classifies as guarded and keeps invented shortcut denied", () => {
   assert.equal(launcher.classifyLarkCliCommand(urgentArgv()).kind, "guarded");
   assert.equal(launcher.classifyLarkCliCommand(urgentArgv()).operation, "urgent-app");
-  assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "urgent_app", "--message-id", "om_own_urgent"]).kind, "denied");
-  assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--dry-run"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-urgent-app", "--message-id", "om_own_urgent"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "urgent_phone", "--message-id", "om_own_urgent"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--dry-run"]).kind, "passthrough");
   assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--help"]).kind, "passthrough");
 });
 
-test("protected urgent-app probes freshness then rewrites to native urgent_app for the bot's own message", () => {
+test("protected urgent-app probes freshness then spawns native urgent_app for the bot's own message", () => {
   const f = fixture({
     ok: true,
     identity: "bot",
@@ -369,7 +368,6 @@ test("protected urgent-app probes freshness then rewrites to native urgent_app f
     const write = writeCall.args.slice(1);
     assert.deepEqual(write.slice(0, 3), ["im", "messages", "urgent_app"]);
     assert.equal(write.includes("+messages-urgent-app"), false);
-    assert.equal(write.includes("--chat-id"), false);
     assert.equal(write.includes("--idempotency-key"), false);
     assert.equal(write[write.indexOf("--message-id") + 1], "om_own_urgent");
     assert.equal(write[write.indexOf("--user-id-type") + 1], "open_id");
@@ -406,7 +404,7 @@ test("protected urgent-app fails closed for foreign, synthetic, malformed, and u
       urgentArgv({ data: JSON.stringify({ user_id_list: ["not-an-open-id"] }) }),
       urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_not_in_chat"] }) }),
       urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234", "ou_not_in_chat"] }) }),
-      ["im", "+messages-urgent-app", "--user-id", "ou_10937ddc38cfd9fd239591c634fed234", "--message-id", "om_own_urgent", "--user-id-type", "open_id", "--data", JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] })],
+      ["im", "+messages-urgent-app", "--message-id", "om_own_urgent", "--user-id-type", "open_id", "--data", JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] })],
     ]) {
       const before = f.calls.length;
       assert.equal(f.run(argv).code, 2, argv.join(" "));

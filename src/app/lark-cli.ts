@@ -136,7 +136,6 @@ function protectedOperations(argv: readonly string[]): ProtectedOperation[] {
   for (const token of tokens) {
     if (token === "+messages-send") operations.push("send");
     else if (token === "+messages-reply") operations.push("reply");
-    else if (token === "+messages-urgent-app") operations.push("urgent-app");
     else if (token === "api") operations.push("api");
   }
   const hasIm = tokens.includes("im");
@@ -222,11 +221,12 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
     ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "reply" })
     : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["im", "+messages-urgent-app"])) {
-    if (!uniqueProtectedOperation(protectedPaths, "urgent-app")) return noncanonicalProtectedDecision();
-    if (parsed.commandArgv.includes("--dry-run")) {
-      return { kind: "denied", reason: "+messages-urgent-app 不支持 --dry-run；官方 CLI 不认识该合成命令" };
-    }
-    return { kind: "guarded", operation: "urgent-app" };
+    return { kind: "denied", reason: "不要使用合成入口 +messages-urgent-app；请使用官方 im messages urgent_app" };
+  }
+  if (exactPath(parsed.commandArgv, ["im", "messages", "urgent_app"])) {
+    return uniqueProtectedOperation(protectedPaths, "raw-urgent_app")
+      ? (parsed.commandArgv.includes("--dry-run") || parsed.help ? { kind: "passthrough" } : { kind: "guarded", operation: "urgent-app" })
+      : noncanonicalProtectedDecision();
   }
   if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
     const expected = parsed.commandArgv[2] === "patch" ? "card-patch" : "card-update";
@@ -240,7 +240,7 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
       ? { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" }
       : noncanonicalProtectedDecision();
   }
-  if (["forward", "merge_forward", "delete", "urgent_app", "urgent_phone", "urgent_sms"]
+  if (["forward", "merge_forward", "delete", "urgent_phone", "urgent_sms"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "messages", operation]))) {
     const expected = `raw-${parsed.commandArgv[2]}` as ProtectedOperation;
     return uniqueProtectedOperation(protectedPaths, expected)
@@ -461,13 +461,11 @@ async function spawnNativeTransparent(
 }
 
 function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarded" }>, argv: readonly string[], store: AgentStateStore): FreshnessTarget {
-  if (decision.operation === "send" || decision.operation === "urgent-app") {
+  if (decision.operation === "send") {
     const chatId = policyFlagValue(argv, "--chat-id");
     const userId = policyFlagValue(argv, "--user-id");
     if (!chatId || userId) {
-      throw new Error(decision.operation === "urgent-app"
-        ? "Runtime +messages-urgent-app 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target"
-        : "Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
+      throw new Error("Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
     }
     return feishuImTarget(`chat:${chatId}`);
   }
@@ -476,6 +474,40 @@ function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarde
   const target = store.resolveInboxMessageTarget(messageId);
   if (!target) throw new Error(`无法从 Inbox 状态确定 ${messageId} 的 target；先 poll 对应消息，禁止旁路 freshness`);
   return feishuImTarget(target);
+}
+
+function resolveUrgentAppTarget(
+  argv: readonly string[],
+  env: Env,
+  io: LarkCliIo,
+  dependencies: LarkCliLauncherDependencies,
+): FreshnessTarget {
+  const messageId = policyFlagValue(argv, "--message-id");
+  if (!messageId || !/^om_/.test(messageId)) {
+    throw new Error("Runtime im messages urgent_app 只接受真实 Feishu om_ message_id");
+  }
+  const result = callNative([
+    "im", "+messages-mget",
+    "--message-ids", messageId,
+    "--no-reactions",
+    "--json",
+    "--as", "bot",
+  ], env, io, dependencies);
+  if (result.error) throw new Error(`urgent_app message lookup failed: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`urgent_app message lookup exited ${result.status ?? "without status"}: ${result.stderr || "no details"}`);
+  let value: unknown;
+  try { value = JSON.parse(result.stdout || ""); } catch { throw new Error("urgent_app message lookup returned non-JSON output"); }
+  const root = value as { ok?: unknown; identity?: unknown; data?: { messages?: unknown } } | null;
+  if (!root || root.ok !== true || !root.data) throw new Error("urgent_app message lookup returned an unsuccessful payload");
+  if (root.identity !== "bot") throw new Error("urgent_app message lookup did not confirm Bot identity");
+  const rows = root.data.messages;
+  if (!Array.isArray(rows)) throw new Error("urgent_app message lookup omitted messages");
+  const message = rows.find((row) => row && typeof row === "object" && !Array.isArray(row)
+    && (row as { message_id?: unknown }).message_id === messageId) as { chat_id?: unknown } | undefined;
+  if (!message || typeof message.chat_id !== "string" || !message.chat_id) {
+    throw new Error(`无法从官方 +messages-mget 确认 ${messageId} 的 chat；禁止旁路加急`);
+  }
+  return feishuImTarget(`chat:${message.chat_id}`);
 }
 
 function botArgv(argv: readonly string[], intentId: string, decision?: Extract<LarkCliCommandDecision, { kind: "guarded" }>): string[] {
@@ -491,15 +523,11 @@ function botArgv(argv: readonly string[], intentId: string, decision?: Extract<L
   const rewritten: string[] = [];
   for (let index = 0; index < next.length; index += 1) {
     const argument = next[index];
-    if (argument === "+messages-urgent-app") {
-      rewritten.push("messages", "urgent_app");
-      continue;
-    }
-    if (argument === "--chat-id" || argument === "--idempotency-key") {
+    if (argument === "--idempotency-key") {
       index += 1;
       continue;
     }
-    if (argument.startsWith("--chat-id=") || argument.startsWith("--idempotency-key=")) continue;
+    if (argument.startsWith("--idempotency-key=")) continue;
     rewritten.push(argument);
   }
   return rewritten;
@@ -532,22 +560,22 @@ function assertUrgentAppPreconditions(
   feishuAppId: string,
 ): string[] {
   const messageId = policyFlagValue(argv, "--message-id");
-  if (!messageId || !/^om_/.test(messageId)) throw new Error("Runtime +messages-urgent-app 只接受真实 Feishu om_ message_id");
+  if (!messageId || !/^om_/.test(messageId)) throw new Error("Runtime im messages urgent_app 只接受真实 Feishu om_ message_id");
   const userIdType = policyFlagValue(argv, "--user-id-type");
-  if (userIdType !== "open_id") throw new Error("Runtime +messages-urgent-app 必须使用 --user-id-type open_id");
+  if (userIdType !== "open_id") throw new Error("Runtime im messages urgent_app 必须使用 --user-id-type open_id");
   const data = policyFlagValue(argv, "--data");
-  if (!data) throw new Error("Runtime +messages-urgent-app 缺少 --data");
+  if (!data) throw new Error("Runtime im messages urgent_app 缺少 --data");
   const body = parseJsonObject(data, "--data");
   const userIds = body.user_id_list;
   if (!Array.isArray(userIds) || userIds.length === 0 || userIds.some((value) => typeof value !== "string" || !value.startsWith("ou_"))) {
-    throw new Error("Runtime +messages-urgent-app 的 user_id_list 必须是非空 open_id 列表");
+    throw new Error("Runtime im messages urgent_app 的 user_id_list 必须是非空 open_id 列表");
   }
   const message = snapshot.messages.find((row) => row.message_id === messageId);
   if (!message) throw new Error(`无法在当前 freshness 窗口确认 ${messageId}；禁止旁路加急未知消息`);
   if (target.resourceKind === "chat" && message.chat_id && message.chat_id !== target.resourceId) {
     throw new Error("加急目标消息不属于当前 chat freshness target");
   }
-  if (!isOwnBotMessage(message, feishuAppId)) throw new Error("Runtime +messages-urgent-app 只能加急当前 Bot 自己发出的消息");
+  if (!isOwnBotMessage(message, feishuAppId)) throw new Error("Runtime im messages urgent_app 只能加急当前 Bot 自己发出的消息");
   return userIds.filter((value): value is string => typeof value === "string");
 }
 
@@ -582,7 +610,7 @@ function assertUrgentAppMembers(
   dependencies: LarkCliLauncherDependencies,
 ): void {
   if (target.resourceKind !== "chat" || !target.resourceId) {
-    throw new Error("Runtime +messages-urgent-app 只能对照已确认的 chat freshness target 校验成员");
+    throw new Error("Runtime im messages urgent_app 只能对照已确认的 chat freshness target 校验成员");
   }
   const members = new Set(parseChatMemberOpenIds(callNative([
     "im", "+chat-members-list",
@@ -595,7 +623,7 @@ function assertUrgentAppMembers(
   ], env, io, dependencies)));
   const unknown = userIds.filter((userId) => !members.has(userId));
   if (unknown.length > 0) {
-    throw new Error(`Runtime +messages-urgent-app 拒绝非本会话成员: ${unknown.join(",")}`);
+    throw new Error(`Runtime im messages urgent_app 拒绝非本会话成员: ${unknown.join(",")}`);
   }
 }
 
@@ -608,7 +636,7 @@ function assertUrgentAppNativeAccepted(result: SpawnSyncReturns<string>): void {
   if (!data || typeof data !== "object" || Array.isArray(data)) return;
   const invalid = (data as { invalid_user_id_list?: unknown }).invalid_user_id_list;
   if (!Array.isArray(invalid) || invalid.length === 0) return;
-  throw new Error(`Runtime +messages-urgent-app 收到 invalid_user_id_list，已 fail-closed: ${invalid.join(",")}`);
+  throw new Error(`Runtime im messages urgent_app 收到 invalid_user_id_list，已 fail-closed: ${invalid.join(",")}`);
 }
 
 function probeArgv(target: FreshnessTarget): string[] {
@@ -969,7 +997,9 @@ export function runLarkCli(
   }
   if (decision.kind === "passthrough") return passthroughWithObservation(effectiveArgv, privateEnv, io, nativeDependencies, store);
   try {
-    const target = guardedTarget(decision, effectiveArgv, store);
+    const target = decision.operation === "urgent-app"
+      ? resolveUrgentAppTarget(effectiveArgv, privateEnv, io, nativeDependencies)
+      : guardedTarget(decision, effectiveArgv, store);
     const targetKey = serializeFeishuImTarget(target);
     const generation = freshnessGeneration(privateEnv);
     const seen = store.readFreshnessCursor<FeishuImCursor>(targetKey, generation);

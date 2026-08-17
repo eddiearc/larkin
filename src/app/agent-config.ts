@@ -20,6 +20,8 @@ import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
+import { assertBuiltinPiAgentDirectory, piAgentDirectory } from "../runtime/pi-provider-config.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 interface RuntimeModel {
   id: string;
@@ -63,7 +65,7 @@ interface ConfigModule {
   loadRuntimeModels(): Record<string, RuntimeModel[]>;
   toStored(config: HydratedConfig, configDir: string): unknown;
   defaultModelFor(runtime: string): string;
-  mutateConfig(env: NodeJS.ProcessEnv, mutation: ConfigMutation, authority: { kind: "user" } | { kind: "agent"; agentId: string }): {
+  mutateConfig(env: NodeJS.ProcessEnv, mutation: ConfigMutation, authority: { kind: "user" } | { kind: "agent"; agentId: string }, options?: { snapshotFile?: string; importExternalProfile?: boolean }): {
     revision: string; changedScope: string; persisted: true; applyState: "applied" | "saved_not_applied";
   };
   configApplyState(env: NodeJS.ProcessEnv, config: HydratedConfig): Record<string, unknown>;
@@ -84,8 +86,8 @@ interface StatusRecord extends AgentReadinessStatus {
   droughtReconnectAt?: string | null;
   droughtReconnectAbandonedAt?: string | null;
   recentErrors?: Array<{ message?: string; error?: string; [key: string]: unknown }>;
-  session?: { runtime?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
-  runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready"; executable?: string; version?: string; reason?: string; nextAction?: string };
+  session?: { runtime?: string; id?: string | null; startedAt?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
+  runtimeReadiness?: { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string; executable?: string; version?: string; reason?: string; nextAction?: string };
 }
 
 function safeDocumentCommentCapabilities(configDir: string, profile: string): {
@@ -136,16 +138,16 @@ const die = (message: string): never => {
   process.exit(1);
 };
 
-if (!kind || !["agents", "model", "runtime", "effort", "chats", "config"].includes(kind)) {
-  die("用法: larkin agents | larkin config <show|mention|apply> | larkin model [<id>] | larkin runtime [<id>] [--model <id>] | larkin effort [<level>|clear] | larkin chats [free|strict <oc_id>]");
+if (!kind || !["agents", "model", "runtime", "effort", "pi-distribution", "chats", "config"].includes(kind)) {
+  die("用法: larkin agents | larkin config <show|mention|apply> | larkin model [<id>] | larkin runtime [<id>] [--model <id>] | larkin pi-distribution [show|builtin|external] | larkin effort [<level>|clear] | larkin chats [free|strict <oc_id>]");
 }
 
 const allowedValueFlags: Record<string, ReadonlySet<string>> = {
   agents: new Set(), model: new Set(["--agent"]), runtime: new Set(["--agent", "--model"]),
-  effort: new Set(["--agent"]), chats: new Set(["--agent"]), config: new Set(["--agent", "--chat"]),
+  effort: new Set(["--agent"]), "pi-distribution": new Set(["--agent", "--snapshot"]), chats: new Set(["--agent"]), config: new Set(["--agent", "--chat"]),
 };
 const allowedBooleanFlags: Record<string, ReadonlySet<string>> = {
-  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), chats: new Set(), config: new Set(["--json"]),
+  agents: new Set(["--json"]), model: new Set(), runtime: new Set(), effort: new Set(), "pi-distribution": new Set(["--import-external-profile"]), chats: new Set(), config: new Set(["--json"]),
 };
 const parsedValues = new Map<string, string>();
 const parsedBooleans = new Set<string>();
@@ -171,6 +173,7 @@ const flagAgent = parsedValues.get("--agent");
 const flagModel = parsedValues.get("--model");
 const flagChat = parsedValues.get("--chat");
 const flagJson = parsedBooleans.has("--json");
+const importExternalProfile = parsedBooleans.has("--import-external-profile");
 const value = positionals[0];
 
 function assertOnlyFlags(valueFlags: readonly string[], booleanFlags: readonly string[] = []): void {
@@ -195,6 +198,9 @@ if (kind === "agents") {
 } else if (kind === "effort") {
   assertOnlyFlags(["--agent"]);
   if (positionals.length > 1) die("用法: larkin effort [<level>|clear|default] [--agent <App ID>]");
+} else if (kind === "pi-distribution") {
+  assertOnlyFlags(["--agent", "--snapshot"], ["--import-external-profile"]);
+  if (positionals.length > 1) die("用法: larkin pi-distribution [show|builtin|external] [--agent <App ID>] [--snapshot <private-file>]");
 } else if (kind === "chats") {
   assertOnlyFlags(["--agent"]);
   if (![0, 2].includes(positionals.length)) die("用法: larkin chats [free|strict <oc_id>] [--agent <App ID>]");
@@ -229,6 +235,16 @@ const loaded = (() => {
 })();
 const { configDir, file, config } = loaded;
 if (!fs.existsSync(file)) die("未找到 Larkin 配置，请运行 larkin setup");
+const snapshotFile = parsedValues.get("--snapshot");
+if (kind === "pi-distribution" && value === "rollback") {
+  if (importExternalProfile) die("--import-external-profile 只允许与 builtin 一起使用");
+  if (!snapshotFile || flagAgent || positionals.length !== 1) die("用法: larkin pi-distribution rollback --snapshot <private-file>");
+  try {
+    const result = larkinConfig.rollbackConfig(process.env, snapshotFile as string);
+    say(JSON.stringify({ ok: true, rolledBackAgent: result.agentId, revision: result.revision }));
+  } catch (error) { die(`回滚失败：${error instanceof Error ? error.message : String(error)}`); }
+  process.exit(0);
+}
 
 if (kind === "agents") {
   const list = Object.values(config.agents || {});
@@ -314,11 +330,19 @@ if (kind === "agents") {
       && !!status?.inboundVerifiedAt
       && Date.parse(status.inboundVerifiedAt) >= Date.parse(String(daemon.startedAt || 0));
     const commentDiagnostic = projectDocumentCommentDiagnostic(commentCapability, status);
+    const projectedReadiness = projectAgentReadiness({ agentId: agent.agentId, daemon, status });
     say(`  ${agent.name}${agent.name === config.activeAgent ? " [active]" : ""}`);
     const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
     const effectiveEffort = status?.session?.runtime === agent.runtime && status.session.reasoningEffort ? status.session.reasoningEffort : agent.effort;
     say(`    runtime=${agent.runtime}  model=${effectiveModel}${effectiveModel !== agent.model ? `  stored=${agent.model}` : ""}${effectiveEffort ? `  effort=${effectiveEffort}` : ""}`);
-    if (status?.runtimeReadiness) say(`    runtime readiness=${status.runtimeReadiness.state || "incompatible"}${status.runtimeReadiness.reason ? `：${status.runtimeReadiness.reason}` : ""}${status.runtimeReadiness.nextAction ? `；下一步：${status.runtimeReadiness.nextAction}` : ""}`);
+    if (status?.runtimeReadiness) {
+      const current = projectedReadiness.readiness.runtime_ready;
+      const state = status.runtimeReadiness.state === "ready" && !current ? "unavailable" : status.runtimeReadiness.state || "incompatible";
+      const staleReason = status.runtimeReadiness.state === "ready" && !current
+        ? "：ready 证据不属于当前 owned daemon epoch 或当前 session，已拒绝展示为 ready"
+        : status.runtimeReadiness.reason ? `：${status.runtimeReadiness.reason}` : "";
+      say(`    runtime readiness=${state}${staleReason}${status.runtimeReadiness.nextAction ? `；下一步：${status.runtimeReadiness.nextAction}` : ""}`);
+    }
     if (status?.runtimeReadiness?.executable) say(`    runtime executable=${status.runtimeReadiness.executable}${status.runtimeReadiness.version ? `  version=${status.runtimeReadiness.version}` : ""}`);
     say(`    bot=${bot ? `${bot.name}(${bot.open_id})` : "（未连接过，无身份缓存）"}`);
     const reconnecting = connected && isChannelReconnecting(status);
@@ -428,6 +452,36 @@ if (!key) {
 }
 const selectedKey = key as string;
 const agent = config.agents[selectedKey];
+if (kind === "pi-distribution") {
+  traceProcessBoundary(process.env, "agent-config:pi-distribution-loaded", { configDir, agentId: selectedKey, targetDir: piAgentDirectory(configDir, selectedKey), requested: value || "show", importExternalProfile });
+  const requested = value || "show";
+  if (importExternalProfile && requested !== "builtin") die("--import-external-profile 只允许与 builtin 一起使用");
+  if (requested === "show") {
+    say(JSON.stringify({ agentId: selectedKey, runtime: agent.runtime, piDistribution: agent.piDistribution ?? "external" }));
+    process.exit(0);
+  }
+  if (requested !== "builtin" && requested !== "external") die("Pi distribution 只允许 show/builtin/external");
+  if (agent.runtime !== "pi") die(`Agent ${selectedKey} 不是 Pi runtime`);
+  if (!snapshotFile) die("修改 Pi distribution 必须提供 --snapshot <private-file>");
+  if (requested === "builtin" && !importExternalProfile) {
+    try {
+      assertBuiltinPiAgentDirectory(piAgentDirectory(configDir, selectedKey));
+    } catch {
+      die("内置 Pi provider 尚未为该 Agent 配置；请先运行 larkin setup 完成内置 Pi provider 配置，或使用 --import-external-profile");
+    }
+  }
+  try {
+    const result = larkinConfig.mutateConfig(process.env, { kind: "set-agent-pi-distribution", agentId: selectedKey, distribution: requested as "builtin" | "external" }, { kind: "user" }, {
+      snapshotFile: snapshotFile as string, ...(importExternalProfile ? { importExternalProfile: true } : {}),
+    });
+    traceProcessBoundary(process.env, "agent-config:pi-distribution-persisted", { configDir, agentId: selectedKey, targetDir: piAgentDirectory(configDir, selectedKey), requested, applyState: result.applyState });
+    say(JSON.stringify({ ok: true, agentId: selectedKey, piDistribution: requested, revision: result.revision, applyState: result.applyState }));
+  } catch (error) {
+    if (importExternalProfile) die("Pi external profile import failed; no secret or private path was disclosed");
+    die(`Pi distribution 修改失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  process.exit(0);
+}
 const catalog = larkinConfig.loadRuntimeModels();
 if ((["model", "effort"].includes(kind || "") && agent.runtime === "codex") || (kind === "runtime" && value === "codex")) {
   try {

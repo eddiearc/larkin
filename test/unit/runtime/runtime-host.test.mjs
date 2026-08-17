@@ -6,6 +6,7 @@ import { test } from "bun:test";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { createRuntimeHost as createProductionRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
 import { RuntimePrerequisiteError } from "../../../dist/runtime/runtime-readiness.mjs";
+import { calculatePiCompactionSettings } from "../../../dist/runtime/pi-compaction-recovery.mjs";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
 import { ProcessingEyeOrchestrator } from "../../../dist/feishu/host-processing-eye.mjs";
 
@@ -84,6 +85,187 @@ test("RuntimeHost manually compacts one exact overflow and retries the same stab
     assert.equal(session.prompts[1].inputId, inputId);
     assert.equal(session.prompts[1].deliveryId, session.prompts[0].deliveryId);
     assert.equal(session.compactCalls, 1);
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost refuses overflow retry when the Pi policy drifts before compact", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-overflow-policy-drift-"));
+  const agentId = "cli_piDriftA1";
+  const store = createAgentStateStore(root, agentId);
+  let createCalls = 0;
+  class DriftingSession extends FakeSession {
+    compactCalls = 0;
+    async compact() {
+      this.compactCalls += 1;
+      throw new Error("Pi model or context window changed after startup; compaction policy is no longer safe");
+    }
+  }
+  const session = new DriftingSession();
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession() {
+      createCalls += 1;
+      if (createCalls > 1) throw new Error("Pi model or context window changed between the isolated probe and runtime startup");
+      return session;
+    },
+  };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId, name: "drift", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    store.appendNdjson("inbox", { message_id: "om_pi_overflow_drift", chat_id: "oc_pi_overflow_drift", content: "stable" });
+    const first = await host.deliver(agentId, { message_id: "om_pi_overflow_drift", chat_id: "oc_pi_overflow_drift", content: "stable" });
+    assert.equal(first.status, "accepted");
+    const inputId = session.prompts[0].inputId;
+    session.emit({ type: "input-error", inputId, retryable: false, willRetry: false,
+      message: "Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "context_window" });
+    const deadline = Date.now() + 1_000;
+    while (session.compactCalls < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(session.compactCalls, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(session.prompts.length, 1, "policy drift must prevent the retry prompt submission");
+    const durable = store.readJson("runtimeDeliveries", { records: [] });
+    assert.equal(durable.records.some((record) => record.status === "consumed"), false);
+    assert.ok(durable.records.some((record) => record.status === "error" || record.status === "pending"));
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost proactively compacts only above each session's verified dynamic threshold", async () => {
+  for (const contextWindow of [272_000, 500_000]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-proactive-"));
+    const policy = calculatePiCompactionSettings(contextWindow);
+    class ProactiveSession extends FakeSession {
+      usage = { tokens: policy.threshold, contextWindow };
+      compactCalls = 0;
+      async getContextUsage() { return { ...this.usage }; }
+      async compact() { this.compactCalls += 1; this.usage.tokens = 100; }
+    }
+    const session = new ProactiveSession();
+    const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+    const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+    try {
+      await host.start([{ agentId: `cli_piProactive${contextWindow}`, name: "proactive", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+      session.usage.tokens = policy.threshold + 1;
+      session.emit({ type: "turn-start" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(session.compactCalls, 0, "busy turns must not trigger idle proactive compaction");
+      session.emit({ type: "turn-end" });
+      session.emit({ type: "turn-end" });
+      const deadline = Date.now() + 1_000;
+      while (session.compactCalls < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(session.compactCalls, 1);
+      assert.equal(session.usage.tokens, 100);
+      session.usage.tokens = policy.threshold + 1;
+      session.emit({ type: "turn-end" });
+      const secondDeadline = Date.now() + 1_000;
+      while (session.compactCalls < 2 && Date.now() < secondDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(session.compactCalls, 2, "a later idle turn may compact again after verified success");
+    } finally {
+      await host.shutdown("done");
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("RuntimeHost does not proactively compact at the strict threshold", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-proactive-equal-"));
+  const contextWindow = 500_000;
+  const policy = calculatePiCompactionSettings(contextWindow);
+  class EqualSession extends FakeSession {
+    compactCalls = 0;
+    async getContextUsage() { return { tokens: policy.threshold, contextWindow }; }
+    async compact() { this.compactCalls += 1; }
+  }
+  const session = new EqualSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piProactiveEqualA1", name: "equal", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(session.compactCalls, 0);
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost bounds proactive compact failure without retry or session reset", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-proactive-failure-"));
+  const policy = calculatePiCompactionSettings(272_000);
+  class FailingSession extends FakeSession {
+    compactCalls = 0;
+    async getContextUsage() { return { tokens: policy.threshold + 1, contextWindow: 272_000 }; }
+    async compact() { this.compactCalls += 1; throw new Error("fixture proactive compact failure"); }
+  }
+  const session = new FailingSession();
+  const store = createAgentStateStore(root, "cli_piProactiveFailureA1");
+  store.appendNdjson("inbox", { message_id: "om_pi_proactive_failure", chat_id: "oc_pi_proactive_failure", content: "pending" });
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId: "cli_piProactiveFailureA1", name: "failure", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(session.compactCalls, 1);
+    assert.equal(session.closes.length, 0, "proactive failure must not reset the session");
+    const receipt = await host.deliver("cli_piProactiveFailureA1", {
+      message_id: "om_pi_proactive_failure", chat_id: "oc_pi_proactive_failure", content: "pending",
+    });
+    assert.equal(receipt.status, "deferred");
+    assert.equal(session.prompts.length, 0, "degraded generation must not submit pending work");
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "pending");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost gates startup replay behind high-water proactive compaction", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-proactive-startup-"));
+  const agentId = "cli_piProactiveStartupA1";
+  const store = createAgentStateStore(root, agentId);
+  const policy = calculatePiCompactionSettings(500_000);
+  store.appendNdjson("inbox", { message_id: "om_pi_proactive_startup", chat_id: "oc_pi_proactive_startup", content: "startup" });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{
+    deliveryId: "startup-delivery", messageId: "om_pi_proactive_startup", status: "pending",
+    input: { inputId: "startup-input", deliveryId: "startup-delivery", kind: "wake", text: "startup", attempt: 0 },
+    updatedAt: "before",
+  }] });
+  const order = [];
+  let releaseCompact;
+  class StartupSession extends FakeSession {
+    usage = { tokens: policy.threshold + 1, contextWindow: 500_000 };
+    compactCalls = 0;
+    async getContextUsage() { return { ...this.usage }; }
+    async compact() {
+      order.push("compact"); this.compactCalls += 1;
+      await new Promise((resolve) => { releaseCompact = resolve; });
+      this.usage.tokens = 100;
+    }
+    async prompt(input) { order.push("prompt"); return super.prompt(input); }
+  }
+  const session = new StartupSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    const starting = host.start([{ agentId, name: "startup", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    const deadline = Date.now() + 1_000;
+    while (session.compactCalls < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(session.compactCalls, 1);
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(order, ["compact"]);
+    releaseCompact();
+    await starting;
+    assert.deepEqual(order, ["compact", "prompt"]);
   } finally {
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });

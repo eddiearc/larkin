@@ -818,8 +818,7 @@ export class AgentStateStore {
         if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
         const record = candidate as RuntimeDeliveryRecord;
         if (typeof record.messageId !== "string" || !messageIds.has(record.messageId)) return candidate;
-        return { ...record, status: "pending", retryable: true, updatedAt,
-          reason: "context-window recovery rearmed the retained Inbox delivery" };
+        return { ...record, status: "pending", retryable: true, updatedAt };
       });
       const committedLedger = { ...ledger, records };
       let restored = false;

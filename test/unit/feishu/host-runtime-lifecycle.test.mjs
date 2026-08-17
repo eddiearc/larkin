@@ -113,6 +113,63 @@ test("HostShell recovery lifecycle persists the new session but exposes only san
   }
 });
 
+test("HostShell reset publishes a current readiness observation and rejects stale ready during transition", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-reset-freshness-"));
+  const agentId = "cli_hostResetFreshA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  let channelCreated = false;
+  let releaseReset;
+  let resetStarted;
+  const runtimeHost = {
+    subscribe() { return () => {}; },
+    async start() {},
+    async resetSession() {
+      resetStarted?.();
+      return await new Promise((resolve) => { releaseReset = () => resolve({ generationChanged: true, sessionChanged: true, turns: 0, runtimeReady: true, pendingCount: 0, sessionId: null }); });
+    },
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = { agentId, name: agentId, runtime: "pi", model: "model", feishuAppId: agentId, feishuAppSecret: "fixture",
+    feishuProfile: agentId, feishuDomain: "https://open.feishu.cn", workspaceDir: path.join(root, "agents", agentId), stateDir };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-reset-freshness",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const channelPackage = { createLarkChannel() { channelCreated = true; return {
+    botIdentity: { openId: "ou_reset_fresh", name: "Reset Fresh" }, rawClient: null, dispatcher: { register() {} }, on() {},
+    async connect() {}, async disconnect() {},
+  }; } };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0 });
+  try {
+    await host.start();
+    const statusFile = path.join(stateDir, "status.json");
+    const deadline = Date.now() + 1_000;
+    while ((!channelCreated || !fs.existsSync(statusFile) || JSON.parse(fs.readFileSync(statusFile, "utf8")).connectedVia !== "channel") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(channelCreated, true);
+    let markStarted;
+    resetStarted = () => markStarted?.();
+    const resetStartedPromise = new Promise((resolve) => { markStarted = resolve; });
+    const resetPromise = host.resetSession(agentId, 0);
+    await resetStartedPromise;
+    const transitioning = JSON.parse(fs.readFileSync(statusFile, "utf8"));
+    assert.equal(transitioning.runtimeReadiness.state, "unavailable");
+    releaseReset();
+    const result = await resetPromise;
+    assert.equal(result.runtimeReady, true);
+    const final = JSON.parse(fs.readFileSync(statusFile, "utf8"));
+    const transitionObservedAt = Date.parse(transitioning.runtimeReadiness.observedAt);
+    assert.equal(final.runtimeReadiness.state, "ready");
+    assert.equal(Date.parse(final.runtimeReadiness.observedAt) >= transitionObservedAt, true);
+    assert.equal(Date.parse(final.session.startedAt) >= transitionObservedAt, true);
+  } finally {
+    releaseReset?.();
+    await host.shutdown("reset freshness test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("assembled HostShell recovery compensates persisted session/status after a later Runtime listener throws", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-context-listener-failure-"));
   const agentId = "cli_hostListenerA1";

@@ -2,11 +2,15 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
 
+/** Fallback values used while importing a Pi profile, before Pi reports its model. */
 export const PI_CONTEXT_WINDOW = 272_000;
 export const COMPACTION_RESERVE_TOKENS = 40_800;
 export const COMPACTION_KEEP_RECENT_TOKENS = 20_000;
 export const PI_COMPACTION_THRESHOLD = PI_CONTEXT_WINDOW - COMPACTION_RESERVE_TOKENS;
+const COMPACTION_RESERVE_RATIO_PERCENT = 15;
+const MAX_KEEP_RECENT_TOKENS = 20_000;
 export const PI_COMPACTION_RECOVERY_VERSION = 1;
 export const PI_COMPACTION_RECOVERY_FILE = "piCompactionRecovery.json";
 
@@ -65,24 +69,49 @@ export interface EffectivePiSettings {
   compaction?: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number };
 }
 
+export interface PiCompactionSettings {
+  reserveTokens: number;
+  keepRecentTokens: number;
+  threshold: number;
+}
+
 function requireFiniteBoolean(value: unknown, name: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
   return value;
 }
 
-export function isPiNativeCompactionRequired(contextTokens: number): boolean {
-  return Number.isFinite(contextTokens) && contextTokens > PI_COMPACTION_THRESHOLD;
+export function calculatePiCompactionSettings(contextWindow: number): PiCompactionSettings {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
+    throw new Error("Pi effective context window must be a positive safe integer");
+  }
+  const reserveTokens = Math.min(
+    contextWindow - 1,
+    Math.ceil(contextWindow * COMPACTION_RESERVE_RATIO_PERCENT / 100),
+  );
+  const threshold = contextWindow - reserveTokens;
+  if (reserveTokens < 1 || threshold <= 1) throw new Error("Pi effective context window is too small for safe compaction");
+  const keepRecentTokens = Math.min(MAX_KEEP_RECENT_TOKENS, threshold - 1);
+  return { reserveTokens, keepRecentTokens, threshold };
+}
+
+export function isPiNativeCompactionRequired(contextTokens: number, contextWindow = PI_CONTEXT_WINDOW): boolean {
+  if (!Number.isFinite(contextTokens)) return false;
+  try { return contextTokens > calculatePiCompactionSettings(contextWindow).threshold; }
+  catch { return false; }
 }
 
 export function assertEffectivePiCompactionSettings(settings: EffectivePiSettings): void {
   const contextWindow = settings.contextWindow ?? settings.model?.contextWindow;
-  if (contextWindow !== PI_CONTEXT_WINDOW) throw new Error(`Pi effective context window must be exactly ${PI_CONTEXT_WINDOW}`);
+  const expected = (() => {
+    try { return calculatePiCompactionSettings(contextWindow as number); }
+    catch { throw new Error("Pi effective context window must be a positive safe integer"); }
+  })();
   if (settings.compaction?.enabled !== true) throw new Error("Pi native compaction must be enabled");
-  if (settings.compaction.reserveTokens !== COMPACTION_RESERVE_TOKENS) {
-    throw new Error(`Pi reserveTokens must be exactly ${COMPACTION_RESERVE_TOKENS}`);
+  if (settings.compaction.reserveTokens !== expected.reserveTokens) {
+    throw new Error(`Pi reserveTokens must be exactly ${expected.reserveTokens} for context window ${contextWindow}`);
   }
-  if (settings.compaction.keepRecentTokens !== COMPACTION_KEEP_RECENT_TOKENS) {
-    throw new Error(`Pi keepRecentTokens must be exactly ${COMPACTION_KEEP_RECENT_TOKENS}`);
+  if (settings.compaction.keepRecentTokens !== expected.keepRecentTokens) {
+    throw new Error(`Pi keepRecentTokens must be exactly ${expected.keepRecentTokens} for context window ${contextWindow}`);
   }
 }
 
@@ -143,6 +172,7 @@ function ensureDirectoryChain(directory: string): void {
 
 export function ensureOwnedPiAgentDirectory(root: string, agentId: string): string {
   if (!AGENT_ID.test(agentId)) throw new Error("invalid Pi Agent ID");
+  ensureDirectoryChain(root);
   const resolvedRoot = path.resolve(root);
   ensureDirectory(resolvedRoot);
   const parent = path.join(resolvedRoot, "pi-agents");
@@ -156,16 +186,36 @@ export function ownedPiSettings(directory: string): string {
   return path.join(directory, "settings.json");
 }
 
-export function prepareOwnedPiDirectory(directory: string): string {
+export function prepareOwnedPiDirectory(directory: string, compaction?: PiCompactionSettings): string {
   ensureDirectoryChain(path.dirname(directory));
   ensureDirectory(path.dirname(directory));
   ensureDirectory(directory);
-  writeOwnedPiSettings(directory);
+  writeOwnedPiSettings(directory, compaction);
   return directory;
 }
 
-export function writeOwnedPiSettings(directory: string): void {
-  assertOwnedDirectory(directory);
+export function mergeOwnedPiSettings(value: unknown, compaction: PiCompactionSettings = {
+  reserveTokens: COMPACTION_RESERVE_TOKENS,
+  keepRecentTokens: COMPACTION_KEEP_RECENT_TOKENS,
+  threshold: PI_COMPACTION_THRESHOLD,
+}): Record<string, unknown> {
+  if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
+    throw new Error("Pi owned settings are invalid");
+  }
+  const object = (value || {}) as Record<string, unknown>;
+  const existing = object.compaction;
+  if (existing !== undefined && (!existing || typeof existing !== "object" || Array.isArray(existing))) {
+    throw new Error("Pi owned compaction settings are invalid");
+  }
+  return { ...object, compaction: {
+    ...(existing as Record<string, unknown> | undefined), enabled: true,
+    reserveTokens: compaction.reserveTokens, keepRecentTokens: compaction.keepRecentTokens,
+  } };
+}
+
+export function writeOwnedPiSettings(directory: string, compaction?: PiCompactionSettings): void {
+  ensureDirectoryChain(path.dirname(directory));
+  ensureDirectory(directory);
   const file = ownedPiSettings(directory);
   try {
     const existing = fs.lstatSync(file);
@@ -173,15 +223,14 @@ export function writeOwnedPiSettings(directory: string): void {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  let value: unknown;
+  try { value = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Pi owned settings are invalid");
+  }
   const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify({
-      compaction: {
-        enabled: true,
-        reserveTokens: COMPACTION_RESERVE_TOKENS,
-        keepRecentTokens: COMPACTION_KEEP_RECENT_TOKENS,
-      },
-    }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(temporary, `${JSON.stringify(mergeOwnedPiSettings(value, compaction), null, 2)}\n`, { flag: "wx", mode: 0o600 });
     fs.renameSync(temporary, file);
     fs.chmodSync(file, 0o600);
   } finally {
@@ -190,6 +239,8 @@ export function writeOwnedPiSettings(directory: string): void {
 }
 
 export function readOwnedPiSettings(directory: string): EffectivePiSettings {
+  ensureDirectoryChain(path.dirname(directory));
+  assertOwnedDirectory(directory);
   const file = ownedPiSettings(directory);
   const stat = fs.lstatSync(file);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Pi owned settings must be a regular file");
@@ -203,6 +254,18 @@ export function readOwnedPiSettings(directory: string): EffectivePiSettings {
     throw new Error("Pi owned compaction reserve/keep settings are invalid");
   }
   return { compaction: { enabled, reserveTokens: values.reserveTokens, keepRecentTokens: values.keepRecentTokens } };
+}
+
+export function parsePiExecutableVersion(output: string): typeof BUNDLED_PI_VERSION {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length !== 1) throw new Error("Pi executable version output must contain exactly one version line");
+  const line = lines[0];
+  // Pi's bare version is canonical; permit only the fixed official display prefix.
+  const escapedVersion = BUNDLED_PI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`^(?:${escapedVersion}|pi(?:-coding-agent)?(?:\\s+version)?\\s+v?${escapedVersion})$`, "i").test(line)) {
+    throw new Error(`Pi executable version must be exactly ${BUNDLED_PI_VERSION}`);
+  }
+  return BUNDLED_PI_VERSION;
 }
 
 export interface PiCapabilityProbe {
@@ -219,23 +282,26 @@ export interface PiCapabilityProbe {
 }
 
 export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
-  if (!/(?:^|\D)0\.83\.0(?:$|\D)/.test(capabilities.version || "")) {
-    throw new Error("trusted Pi version 0.83.0 is required");
+  if (capabilities.version !== BUNDLED_PI_VERSION) throw new Error(`trusted Pi version ${BUNDLED_PI_VERSION} is required`);
+  if (capabilities.distribution === "external" && capabilities.trustedProtocol === true) {
+    throw new Error("external Pi cannot use the bundled trusted protocol bypass");
   }
   const contextWindow = capabilities.contextWindow ?? capabilities.model?.contextWindow;
-  if (contextWindow !== PI_CONTEXT_WINDOW) throw new Error("Pi capability context window is not 272000");
+  const expected = (() => {
+    try { return calculatePiCompactionSettings(contextWindow as number); }
+    catch { throw new Error("Pi capability context window is invalid"); }
+  })();
   if (requireFiniteBoolean(capabilities.autoCompactionEnabled, "Pi autoCompactionEnabled") !== true) {
     throw new Error("Pi effective native compaction is disabled");
   }
   if (capabilities.compactRpc !== true) throw new Error("Pi compact RPC capability is missing");
-  if (capabilities.trustedProtocol !== true) {
-    if (capabilities.reserveTokens !== COMPACTION_RESERVE_TOKENS
-        || capabilities.keepRecentTokens !== COMPACTION_KEEP_RECENT_TOKENS) {
-      throw new Error("Pi external effective compaction reserve/keep settings are unproven");
-    }
-    const events = new Set(capabilities.events || []);
-    for (const event of REQUIRED_PI_EVENTS) if (!events.has(event)) throw new Error(`Pi capability event is unproven: ${event}`);
+  if (capabilities.distribution === "builtin" && capabilities.trustedProtocol === true) return;
+  if (capabilities.reserveTokens !== expected.reserveTokens
+      || capabilities.keepRecentTokens !== expected.keepRecentTokens) {
+    throw new Error(`Pi external effective compaction reserve/keep settings are unproven for context window ${contextWindow}`);
   }
+  const events = new Set(capabilities.events || []);
+  for (const event of REQUIRED_PI_EVENTS) if (!events.has(event)) throw new Error(`Pi capability event is unproven: ${event}`);
 }
 
 function stateFile(root: string): string {
@@ -290,7 +356,7 @@ export class PiCompactionBreaker {
   private readonly file: string;
   private readonly clock: () => string;
   private records: Map<string, PiCompactionRecord>;
-  private readonly withLock: <T>(operation: () => T) => T;
+  private readonly withLock?: <T>(operation: () => T) => T;
   constructor(private readonly root: string, options: { now?: () => string; retentionMs?: number; withLock?: <T>(operation: () => T) => T } = {}) {
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     fs.chmodSync(root, 0o700);
@@ -299,9 +365,14 @@ export class PiCompactionBreaker {
     this.clock = options.now ?? (() => new Date().toISOString());
     this.records = new Map(this.read().records.map((record) => [record.key, record]));
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
-    this.withLock = options.withLock ?? ((operation) => operation());
+    this.withLock = options.withLock;
   }
   private readonly retentionMs: number;
+
+  private runLocked<T>(operation: () => T): T {
+    if (!this.withLock) throw new Error("Pi compaction breaker requires the canonical Agent state lock");
+    return this.withLock(operation);
+  }
 
   private read(): PiCompactionFile {
     try {
@@ -343,15 +414,15 @@ export class PiCompactionBreaker {
   }
 
   get(key: string): PiCompactionRecord | undefined {
-    return this.withLock(() => { this.reload(); const record = this.records.get(key); return record ? { ...record } : undefined; });
+    return this.runLocked(() => { this.reload(); const record = this.records.get(key); return record ? { ...record } : undefined; });
   }
 
   listNonTerminal(): PiCompactionRecord[] {
-    return this.withLock(() => { this.reload(); return [...this.records.values()].filter((record) => !TERMINAL_STATES.has(record.state)).map((record) => ({ ...record })); });
+    return this.runLocked(() => { this.reload(); return [...this.records.values()].filter((record) => !TERMINAL_STATES.has(record.state)).map((record) => ({ ...record })); });
   }
 
   save(record: PiCompactionRecord): void {
-    this.withLock(() => { this.reload(); const checked = safeRecord({ ...record, updatedAt: this.clock() }); this.records.set(checked.key, checked); this.persist(); });
+    this.runLocked(() => { this.reload(); const checked = safeRecord({ ...record, updatedAt: this.clock() }); this.records.set(checked.key, checked); this.persist(); });
   }
 
   private transitionUnlocked(key: string, patch: Partial<PiCompactionRecord>, state: PiCompactionState): PiCompactionRecord {
@@ -390,7 +461,7 @@ export class PiCompactionBreaker {
   }
 
   transition(key: string, patch: Partial<PiCompactionRecord>, state: PiCompactionState): PiCompactionRecord {
-    return this.withLock(() => this.transitionUnlocked(key, patch, state));
+    return this.runLocked(() => this.transitionUnlocked(key, patch, state));
   }
 
   transitionInTransaction(key: string, patch: Partial<PiCompactionRecord>, state: PiCompactionState): PiCompactionRecord {
@@ -398,7 +469,7 @@ export class PiCompactionBreaker {
   }
 
   prune(consumedKeys: readonly string[] = []): number {
-    return this.withLock(() => this.pruneUnlocked(consumedKeys));
+    return this.runLocked(() => this.pruneUnlocked(consumedKeys));
   }
 
   private pruneUnlocked(consumedKeys: readonly string[] = []): number {
@@ -416,7 +487,7 @@ export class PiCompactionBreaker {
   }
 
   forceFallback(key: string, reason: string): PiCompactionRecord {
-    return this.withLock(() => {
+    return this.runLocked(() => {
       this.reload();
       const current = this.records.get(key);
       if (!current) throw new Error("Pi compaction breaker record is missing");

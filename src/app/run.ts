@@ -22,6 +22,7 @@ import {
   requestDashboardRecovery,
 } from "./local-control.js";
 import { internalCommandSpec, processCommandToken } from "./internal-command.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -81,8 +82,10 @@ export async function stopDashboardWithinBound(
 }
 
 export async function main(): Promise<void> {
+  process.env.LARKIN_DAEMON_EPOCH ||= new Date().toISOString();
   const argv = process.argv.slice(2);
   const { configDir, file: configFile, config } = larkinConfig.loadConfig(process.env);
+  for (const agent of Object.values(config.agents)) traceProcessBoundary(process.env, "supervisor:config-loaded", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId) });
   if (!fs.existsSync(configFile)) die(`没找到配置 ${configFile}，先跑 larkin setup`);
   if (!config.serverId || !Object.keys(config.agents).length) die("配置缺少 serverId/agents，请运行 larkin setup");
   let names: string[];
@@ -184,6 +187,7 @@ export async function main(): Promise<void> {
     LARKIN_CONTROL_AUTHORIZATION: controlToken,
   };
   if (argv.includes("--dry-run")) runtimeEnv.LARKIN_FEISHU_DRYRUN = "1";
+  for (const agent of agents) traceProcessBoundary(runtimeEnv, "supervisor:daemon-env-prepared", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId) });
 
   let stopping = false;
   let dashboard: ChildProcess | null = null;
@@ -211,6 +215,7 @@ export async function main(): Promise<void> {
   // external process manager (launchd) takes over as the final respawn layer.
   const launchDaemon = (): void => {
     daemon = spawn(daemonSpec.command, daemonSpec.args, { env: runtimeEnv, stdio: "inherit" });
+    for (const agent of agents) traceProcessBoundary(runtimeEnv, "supervisor:daemon-spawned", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId), childPid: daemon.pid ?? null });
     daemon.once("exit", (code, signal) => {
       if (stopping) {
         resolveDaemonFinal?.({ code, signal });

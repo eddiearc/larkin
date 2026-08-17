@@ -77,7 +77,7 @@ exit 0
 
 const piFixture = `import fs from "node:fs";
 import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log("0.83.0"); process.exit(0); }
+if (process.argv.includes("--version")) { console.log("0.84.2"); process.exit(0); }
 const marker = process.env.PI_PREFLIGHT_MARKER;
 const record = (value) => fs.appendFileSync(marker, JSON.stringify(value) + "\\n");
 const output = (value) => process.stdout.write(JSON.stringify(value) + "\\n");

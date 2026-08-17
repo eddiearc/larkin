@@ -221,9 +221,7 @@ test("legacy context-overflow rearm covers eight Inbox rows across multiple targ
     for (const row of rows) store.appendNdjson("inbox", { ...row, content: "synthetic" });
     const records = rows.map((row, index) => ({ deliveryId: `legacy-delivery-${index}`, messageId: row.message_id,
       status: "error", retryable: false,
-      reason: index < 6
-        ? "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again."
-        : "provider rejected the input because the context window was exceeded",
+      reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.",
       ...(index >= 6 ? { errorCategory: "context_window" } : {}),
       input: { inputId: `legacy-input-${index}`, deliveryId: `legacy-delivery-${index}`, kind: "wake", text: "redacted", attempt: 0 }, updatedAt: "before" }));
     store.writeJson("runtimeDeliveries", { version: 1, records });
@@ -241,6 +239,7 @@ test("legacy context-overflow rearm accepts the exact Codex reason but refuses a
     ["ambiguous", { status: "error", retryable: false, reason: "The context policy token limit may apply", errorCategory: "context_window" }],
     ["projection-one-character", { status: "error", retryable: false, reason: "provider rejected the input because the context window was exceedeD", errorCategory: "context_window" }],
     ["projection-ambiguous", { status: "error", retryable: false, reason: "provider rejected the input because context overflow happened", errorCategory: "context_window" }],
+    ["forged-category", { status: "error", retryable: false, reason: "provider reported a successful response", errorCategory: "context_window" }],
     ["retryable", { status: "error", retryable: true, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again." }],
     ["conflicting-category", { status: "error", retryable: false, reason: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.", errorCategory: "quota" }],
   ];

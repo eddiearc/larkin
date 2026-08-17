@@ -173,6 +173,86 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("Pi distribution CLI performs a locked snapshot mutation and rollback", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-distribution-cli-"));
+  const app = "cli_piDistributionA1";
+  const snapshot = path.join(temp, "pi-distribution.snapshot.json");
+  try {
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-pi-distribution", mentionPolicy: "require", activeAgent: app,
+      agents: { [app]: { runtime: "pi", model: "default", piDistribution: "external" } },
+    })}\n`, { mode: 0o600 });
+    const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
+    });
+    const shown = run("pi-distribution", "show", "--agent", app);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.equal(JSON.parse(shown.stdout).piDistribution, "external");
+    const providerDir = path.join(temp, "providers", "pi", app);
+    fs.mkdirSync(providerDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(providerDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "fixture-only" } }), { mode: 0o600 });
+    const changed = run("pi-distribution", "builtin", "--agent", app, "--snapshot", snapshot);
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "builtin");
+    const rollback = run("pi-distribution", "rollback", "--snapshot", snapshot);
+    assert.equal(rollback.status, 0, rollback.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "external");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("Pi distribution CLI refuses builtin without provider state before writing config or snapshot", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-distribution-preflight-"));
+  const app = "cli_piDistributionPreflightA1";
+  const snapshot = path.join(temp, "pi-distribution.snapshot.json");
+  try {
+    const initial = `${JSON.stringify({
+      version: 4, serverId: "server-pi-distribution-preflight", mentionPolicy: "require", activeAgent: app,
+      agents: { [app]: { runtime: "pi", model: "default", piDistribution: "external" } },
+    })}\n`;
+    fs.writeFileSync(path.join(temp, "config.json"), initial, { mode: 0o600 });
+    const result = spawnSync(process.execPath, [ENTRY, "pi-distribution", "builtin", "--agent", app, "--snapshot", snapshot], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /provider 尚未.*配置/);
+    assert.doesNotMatch(result.stderr, new RegExp(temp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(fs.readFileSync(path.join(temp, "config.json"), "utf8"), initial);
+    assert.equal(fs.existsSync(snapshot), false, "failed provider preflight must not create a rollback snapshot");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("Pi distribution import is explicit, byte-preserving, and reverse rollback removes only the imported target", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-distribution-import-cli-"));
+  const app = "cli_piDistributionImportA1";
+  const source = path.join(temp, "external");
+  const bin = path.join(temp, "bin");
+  const target = path.join(temp, "providers", "pi", app);
+  const snapshot = path.join(temp, "pi-distribution.snapshot.json");
+  try {
+    fs.mkdirSync(source, { recursive: true, mode: 0o755 }); fs.mkdirSync(bin, { mode: 0o700 });
+    fs.writeFileSync(path.join(bin, "pi"), `#!${process.execPath}\nconsole.log("0.84.2")\n`, { mode: 0o700 });
+    fs.writeFileSync(path.join(source, "auth.json"), JSON.stringify({ fixture: { key: "PRIVATE" } }) + "\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(source, "models.json"), JSON.stringify({ providers: { fixture: {} } }) + "\n", { mode: 0o644 });
+    fs.writeFileSync(path.join(source, "settings.json"), JSON.stringify({ theme: "dark", compaction: { enabled: false } }) + "\n", { mode: 0o644 });
+    const initial = { version: 4, serverId: "server-pi-distribution-import", mentionPolicy: "require", activeAgent: app,
+      agents: { [app]: { runtime: "pi", model: "fixture/model", piDistribution: "external" } } };
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify(initial)}\n`, { mode: 0o600 });
+    const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], { cwd: ROOT, encoding: "utf8",
+      env: { ...process.env, HOME: temp, PATH: `${bin}:/usr/bin:/bin`, LARKIN_CONFIG_DIR: temp, PI_CODING_AGENT_DIR: source } });
+    const imported = run("pi-distribution", "builtin", "--agent", app, "--snapshot", snapshot, "--import-external-profile");
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.deepEqual(fs.readFileSync(path.join(target, "auth.json")), fs.readFileSync(path.join(source, "auth.json")));
+    assert.deepEqual(fs.readFileSync(path.join(target, "models.json")), fs.readFileSync(path.join(source, "models.json")));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, "settings.json"))).compaction,
+      { enabled: true, reserveTokens: 40800, keepRecentTokens: 20000 });
+    assert.equal(JSON.parse(fs.readFileSync(snapshot, "utf8")).migration.sourceFiles["auth.json"].sha256.length, 64);
+    const rolled = run("pi-distribution", "rollback", "--snapshot", snapshot);
+    assert.equal(rolled.status, 0, rolled.stderr);
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"))).agents[app].piDistribution, "external");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("TypeScript agent-config bridge preserves listing, fail-closed selection, and chats writes", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-agent-config-ts-"));
   try {
@@ -189,6 +269,12 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
       },
     };
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
+    const staleStateDir = path.join(temp, "state", "agents", first);
+    fs.mkdirSync(staleStateDir, { recursive: true });
+    fs.writeFileSync(path.join(staleStateDir, "status.json"), JSON.stringify({
+      runtimeReadiness: { state: "ready", observedAt: "2026-08-15T00:00:00.000Z", executable: "/tmp/pi", version: "0.84.2" },
+      session: { runtime: "codex", startedAt: "2026-08-15T00:00:00.000Z" },
+    }));
     const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], {
       cwd: ROOT,
       encoding: "utf8",
@@ -201,6 +287,8 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
     assert.match(agents.stdout, /cli_configA1 \[active\]/);
     assert.match(agents.stdout, /cli_configB2/);
     assert.match(agents.stdout, /入站=本次运行尚未收到消息验证/);
+    assert.match(agents.stdout, /runtime readiness=unavailable：ready 证据不属于当前 owned daemon epoch 或当前 session/);
+    assert.doesNotMatch(agents.stdout, /runtime readiness=ready/);
 
     const agentsJson = run("agents", "--json");
     assert.equal(agentsJson.status, 0, agentsJson.stderr);
@@ -321,7 +409,8 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       connectedVia: "channel",
       inboundVerifiedAt: "2026-07-29T01:00:02.000Z",
       reconnectingAt: null,
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:01.000Z" },
+      session: { id: "fixture-session", startedAt: "2026-07-29T01:00:01.000Z" },
     });
     const run = (...args) => spawnSync(process.execPath, [ENTRY, "agents", ...args], {
       cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
@@ -338,7 +427,8 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       connectedVia: "channel",
       reconnectingAt: "2026-07-29T01:00:03.000Z",
       reconnectedAt: "2026-07-29T01:00:02.000Z",
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:01.000Z" },
+      session: { id: "fixture-session", startedAt: "2026-07-29T01:00:01.000Z" },
     });
     const reconnecting = JSON.parse(run("--json").stdout).agents[0];
     assert.equal(reconnecting.ready, false);
@@ -352,7 +442,8 @@ test("compiled agents --json becomes ready only for the current daemon Runtime a
       connectedVia: "channel",
       reconnectingAt: "2026-07-29T01:00:03.000Z",
       reconnectedAt: "2026-07-29T01:00:02.000Z",
-      runtimeReadiness: { state: "ready" },
+      runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:04.000Z" },
+      session: { id: "fixture-session", startedAt: "2026-07-29T01:00:04.000Z" },
     });
     const reconnected = JSON.parse(run("--json").stdout).agents[0];
     assert.equal(reconnected.ready, true);

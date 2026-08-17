@@ -87,7 +87,19 @@ test("production graph pins official Pi and exposes it only through the shared R
   const adapter = fs.readFileSync(path.join(ROOT, "src/runtime/runtime-adapters.ts"), "utf8");
   const binaryEntry = fs.readFileSync(path.join(ROOT, "src/app/binary-entry.ts"), "utf8");
   const inlineExtensions = fs.readFileSync(path.join(ROOT, "src/runtime/pi-inline-extensions.ts"), "utf8");
-  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "0.83.0");
+  const bundledPi = JSON.parse(fs.readFileSync(path.join(ROOT, "node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
+  const rpcTypes = fs.readFileSync(path.join(ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts"), "utf8");
+  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "0.84.2");
+  assert.equal(bundledPi.name, "@earendil-works/pi-coding-agent");
+  assert.equal(bundledPi.version, "0.84.2");
+  for (const dependency of ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-client", "@earendil-works/pi-protocol", "@earendil-works/pi-tui"]) {
+    assert.match(String(bundledPi.dependencies[dependency]), /^\^0\.84\.2$/);
+  }
+  assert.match(rpcTypes, /type: "prompt"/);
+  assert.match(rpcTypes, /type: "get_state"/);
+  assert.match(rpcTypes, /type: "compact"/);
+  assert.match(rpcTypes, /type: "response"/);
+  assert.match(rpcTypes, /success: true/);
   assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], "0.14.3");
   assert.equal(pkg.dependencies["@mariozechner/pi-coding-agent"], undefined);
   assert.equal(pkg.packageManager, "bun@1.3.14");
@@ -97,6 +109,8 @@ test("production graph pins official Pi and exposes it only through the shared R
   assert.doesNotMatch(adapter, /from\s+["'][^"']*pi-coding-agent/);
   assert.doesNotMatch(binaryEntry, /pi-coding-agent\/rpc-entry/);
   assert.match(binaryEntry, /main:\s*piMain/);
+  assert.match(binaryEntry, /pi-ai\/bun-oauth/);
+  assert.match(binaryEntry, /registerBunOAuthFlows\(\)/);
   assert.match(inlineExtensions, /@tintinweb\/pi-subagents\/dist\/index\.js/);
   assert.match(adapter, /--mode["'],\s*["']rpc/);
   assert.doesNotMatch(adapter, /available\s*\[\s*0\s*\]/);

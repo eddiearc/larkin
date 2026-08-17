@@ -17,6 +17,7 @@ import {
 import { classifyStrictProviderError } from "../../../dist/runtime/provider-error-classifier.mjs";
 
 const fakeProcesses = new Set();
+const temporaryRoots = new Set();
 
 afterEach(() => {
   for (const child of fakeProcesses) {
@@ -25,6 +26,8 @@ afterEach(() => {
     child.stderr.destroy();
   }
   fakeProcesses.clear();
+  for (const root of temporaryRoots) fs.rmSync(root, { recursive: true, force: true });
+  temporaryRoots.clear();
 });
 
 class FakeProcess extends EventEmitter {
@@ -52,6 +55,56 @@ const create = (overrides = {}) => ({
   model: "test-model",
   ...overrides,
 });
+
+function makeProductionPiCommand(root, mode = "stable") {
+  const log = path.join(root, "pi-rpc.log");
+  const script = path.join(root, "fake-pi.mjs");
+  fs.writeFileSync(script, `import fs from "node:fs";
+const args = process.argv.slice(2);
+const log = process.env.LARKIN_PI_TEST_LOG;
+const probe = args.includes("--no-session");
+let stateRequests = 0;
+const record = (value) => fs.appendFileSync(log + "." + process.pid, JSON.stringify(value) + "\\n");
+record({ kind: "argv", probe, args });
+if (args.includes("--version")) { process.stdout.write("0.84.2\\n"); process.exit(0); }
+const respond = (request, data) => process.stdout.write(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data }) + "\\n");
+const state = () => {
+  stateRequests += 1;
+  const drift = !probe && stateRequests > 1;
+  const contextWindow = ${mode === "context-mismatch" ? 'probe ? 333333 : 333334' : mode === "context-revalidate" ? 'drift ? 333334 : 333333' : '333333'};
+  const model = ${mode === "model-mismatch" ? 'probe ? { provider: "test-provider", id: "test-model" } : { provider: "other-provider", id: "other-model" }' : mode === "model-revalidate" ? 'drift ? { provider: "other-provider", id: "other-model" } : { provider: "test-provider", id: "test-model" }' : '{ provider: "test-provider", id: "test-model" }'};
+  const autoCompactionEnabled = ${mode === "auto-revalidate" ? 'drift ? false : true' : 'true'};
+  return { sessionId: "production-session", model: { ...model, contextWindow }, autoCompactionEnabled, thinkingLevel: "medium", compactionCapabilities: { reserveTokens: 50000, keepRecentTokens: 20000, events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"] } };
+};
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString();
+  while (true) {
+    const newline = buffer.indexOf("\\n");
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+    const request = JSON.parse(line); record({ kind: "request", probe, type: request.type });
+    if (request.type === "get_state") respond(request, state());
+    else if (request.type === "get_available_models") respond(request, { models: [{ provider: "test-provider", id: "test-model" }] });
+    else if (request.type === "prompt" || request.type === "steer" || request.type === "compact") respond(request, {});
+    else respond(request, {});
+  }
+});
+`, { mode: 0o600 });
+  temporaryRoots.add(root);
+  return { command: process.execPath, commandArgs: [script], log };
+}
+
+function readProductionPiLog(log) {
+  return fs.readdirSync(path.dirname(log)).filter((name) => name.startsWith(`${path.basename(log)}.`))
+    .flatMap((name) => fs.readFileSync(path.join(path.dirname(log), name), "utf8").trim().split(/\r?\n|\\n/).filter(Boolean).map((line) => JSON.parse(line)));
+}
+
+function clearProductionPiLog(log) {
+  for (const name of fs.readdirSync(path.dirname(log)).filter((entry) => entry.startsWith(`${path.basename(log)}.`))) {
+    fs.rmSync(path.join(path.dirname(log), name), { force: true });
+  }
+}
 
 async function startedCodexTurn(inputId = "input-A", turnId = "turn-A") {
   const child = new FakeProcess();
@@ -504,6 +557,121 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
   }
 });
 
+test("production Pi probe uses isolated get_state only and preserves the verified dynamic policy", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-production-probe-"));
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => ["-e", "fixture-extension"],
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    await adapter.probe(input);
+    clearProductionPiLog(log);
+    session = await adapter.createSession(input);
+    const rows = readProductionPiLog(log);
+    const probeArgs = rows.find((row) => row.kind === "argv" && row.probe);
+    const probeRequests = rows.filter((row) => row.kind === "request" && row.probe).map((row) => row.type);
+    const runtimeArgs = rows.find((row) => row.kind === "argv" && !row.probe && !row.args.includes("--version"));
+    assert.ok(probeArgs);
+    assert.ok(probeArgs.args.includes("--no-session"), JSON.stringify(probeArgs));
+    assert.ok(probeArgs.args.includes("--no-extensions"), JSON.stringify(rows));
+    assert.equal(probeArgs.args.includes("-e"), false);
+    assert.deepEqual(probeRequests, ["get_state"]);
+    assert.ok(runtimeArgs.args.includes("-e"));
+    assert.ok(runtimeArgs.args.includes("fixture-extension"));
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+    const settings = JSON.parse(fs.readFileSync(path.join(input.stateDir, "pi-agent", "settings.json"), "utf8"));
+    assert.deepEqual(settings.compaction, { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000 });
+  } finally {
+    await session?.close("production probe test complete").catch(() => {});
+  }
+});
+
+test.each(["context-mismatch", "model-mismatch"])("production Pi startup rejects isolated probe %s drift", async (mode) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-${mode}-`));
+  const { command, commandArgs, log } = makeProductionPiCommand(root, mode);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  const adapter = createNativeRuntimeAdapter("pi", { piCommand: command, piCommandArgs: commandArgs, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 } });
+  await adapter.probe(input);
+  clearProductionPiLog(log);
+  await assert.rejects(
+    adapter.createSession(input),
+    /changed between the isolated probe and runtime startup/,
+  );
+  const rows = readProductionPiLog(log);
+  assert.equal(rows.some((row) => row.kind === "request" && !row.probe && ["prompt", "steer", "compact"].includes(row.type)), false);
+});
+
+test.each(["context-revalidate", "model-revalidate", "auto-revalidate"])("production Pi backend rejects %s before prompt or compact submission", async (mode) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-revalidate-${mode}-`));
+  const { command, commandArgs, log } = makeProductionPiCommand(root, mode);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  const adapter = createNativeRuntimeAdapter("pi", {
+    piCommand: command, piCommandArgs: commandArgs, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+  });
+  await adapter.probe(input);
+  clearProductionPiLog(log);
+  const session = await adapter.createSession(input);
+  try {
+    const reason = mode === "auto-revalidate" ? /native compaction must be enabled/ : /changed after startup/;
+    const promptResult = await session.prompt({ inputId: "drift-prompt", kind: "user", text: "prompt", attempt: 0 });
+    assert.equal(promptResult.status, "rejected");
+    assert.match(promptResult.reason, reason);
+    await assert.rejects(session.compact(), reason);
+    await assert.rejects(session.getContextUsage(), reason);
+    const rows = readProductionPiLog(log);
+    const runtimeRequests = rows.filter((row) => row.kind === "request" && !row.probe).map((row) => row.type);
+    assert.equal(runtimeRequests.filter((type) => ["prompt", "compact", "steer"].includes(type)).length, 0);
+    assert.ok(runtimeRequests.filter((type) => type === "get_state").length >= 4);
+  } finally {
+    await session.close("production revalidation test complete").catch(() => {});
+  }
+});
+
+test.each(["reserveTokens", "keepRecentTokens"])("production Pi backend rejects owned %s drift before prompt or compact submission", async (field) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-owned-${field}-`));
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  const adapter = createNativeRuntimeAdapter("pi", {
+    piCommand: command, piCommandArgs: commandArgs, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+  });
+  await adapter.probe(input);
+  clearProductionPiLog(log);
+  const session = await adapter.createSession(input);
+  try {
+    const settingsFile = path.join(input.stateDir, "pi-agent", "settings.json");
+    const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+    settings.compaction[field] = field === "reserveTokens" ? 49_999 : 19_999;
+    fs.writeFileSync(settingsFile, JSON.stringify(settings));
+    const promptResult = await session.prompt({ inputId: `owned-${field}-prompt`, kind: "user", text: "prompt", attempt: 0 });
+    assert.equal(promptResult.status, "rejected");
+    assert.match(promptResult.reason, /must be exactly/);
+    await assert.rejects(session.compact(), /must be exactly/);
+    const rows = readProductionPiLog(log);
+    assert.equal(rows.some((row) => row.kind === "request" && !row.probe && ["prompt", "compact", "steer"].includes(row.type)), false);
+  } finally {
+    await session.close("production owned settings test complete").catch(() => {});
+  }
+});
+
 test("Pi prompt reports acceptance only after the RPC command acknowledgement", async () => {
   let acknowledge;
   const acceptedByRpc = new Promise((resolve) => { acknowledge = resolve; });
@@ -521,6 +689,32 @@ test("Pi prompt reports acceptance only after the RPC command acknowledgement", 
   acknowledge();
   const result = await pending;
   assert.deepEqual(result, { status: "accepted", inputId: "pi-input" });
+});
+
+test("Pi revalidates its startup policy before prompt and manual compact operations", async () => {
+  let validations = 0;
+  const sdk = {
+    sessionId: "pi-policy",
+    validatePolicy: async () => { validations += 1; },
+    prompt: async () => {},
+    compact: async () => {},
+    steer: async () => {},
+    abort: async () => {},
+  };
+  const session = await createNativeRuntimeAdapter("pi", { createPiSession: async () => sdk }).createSession(create());
+  await session.prompt({ inputId: "policy-prompt", kind: "user", text: "work", attempt: 0 });
+  await session.compact();
+  assert.equal(validations, 2);
+});
+
+test("Pi rejects malformed get_session_stats contextUsage instead of silently skipping proactive compaction", async () => {
+  const sdk = {
+    sessionId: "pi-malformed-stats",
+    prompt: async () => {}, steer: async () => {}, abort: async () => {},
+    getSessionStats: async () => ({ contextUsage: { tokens: "not-a-token-count", contextWindow: 272_000 } }),
+  };
+  const session = await createNativeRuntimeAdapter("pi", { createPiSession: async () => sdk }).createSession(create());
+  await assert.rejects(session.getContextUsage(), /invalid contextUsage/i);
 });
 
 test("bundled Pi normalizes preflight compaction, retry, and terminal timeout without payload fields or a false turn", async () => {

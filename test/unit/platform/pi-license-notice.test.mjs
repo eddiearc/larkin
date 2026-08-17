@@ -27,11 +27,11 @@ test("runtime notices include the bundled official Pi closure", () => {
 
 test("runtime notices are one locked superset across release target optional installs", () => {
   const targets = [
-    new Set(["@mariozechner/clipboard", "@mariozechner/clipboard-darwin-arm64", "@mariozechner/clipboard-darwin-universal"]),
-    new Set(["@mariozechner/clipboard", "@mariozechner/clipboard-darwin-x64", "@mariozechner/clipboard-darwin-universal"]),
-    new Set(["@mariozechner/clipboard", "@mariozechner/clipboard-linux-arm64-gnu", "@mariozechner/clipboard-linux-arm64-musl"]),
-    new Set(["@mariozechner/clipboard", "@mariozechner/clipboard-linux-x64-gnu", "@mariozechner/clipboard-linux-x64-musl"]),
-    new Set(["@mariozechner/clipboard", "@mariozechner/clipboard-win32-x64-msvc"]),
+    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-darwin-arm64", "@mariozechner/clipboard-darwin-universal"]),
+    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-darwin-x64", "@mariozechner/clipboard-darwin-universal"]),
+    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-linux-arm64-gnu", "@mariozechner/clipboard-linux-arm64-musl"]),
+    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-linux-x64-gnu", "@mariozechner/clipboard-linux-x64-musl"]),
+    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-win32-x64-msvc"]),
   ];
   const rendered = targets.map((installedOptionalPackageNames) => generateRuntimeNotices({ installedOptionalPackageNames }));
   assert.equal(new Set(rendered).size, 1, "target-specific optional installs must yield one release notice");

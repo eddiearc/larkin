@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
+import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
 
@@ -12,6 +13,8 @@ export interface RuntimeReadiness {
   version?: string;
   reason?: string;
   nextAction?: string;
+  /** Set only when a HostShell status projection records this observation. */
+  observedAt?: string;
 }
 
 function safeProviderLabel(value: unknown): string | null {
@@ -83,6 +86,7 @@ export interface ProbeNativeRuntimeReadinessOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   command?: string;
+  commandArgs?: readonly string[];
   agentId?: string;
 }
 
@@ -93,8 +97,8 @@ function selectedCommand(options: ProbeNativeRuntimeReadinessOptions): string {
   return options.env?.LARKIN_CLAUDE_COMMAND || process.env.LARKIN_CLAUDE_COMMAND || "claude";
 }
 
-function executableVersion(executable: string, env: NodeJS.ProcessEnv): string | undefined {
-  const result = spawnSync(executable, ["--version"], { env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
+function executableVersion(executable: string, env: NodeJS.ProcessEnv, commandArgs: readonly string[] = []): string | undefined {
+  const result = spawnSync(executable, [...commandArgs, "--version"], { env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
   if (result.status !== 0) return undefined;
   return String(result.stdout || result.stderr || "").replace(/[\r\n]+/g, " ").trim().slice(0, 120) || undefined;
 }
@@ -108,6 +112,7 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       assertBuiltinPiAgentDirectory(piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId));
       return { runtime: "pi", state: "ready", executable: process.execPath, version: `official-pi ${BUNDLED_PI_VERSION} (bundled)` };
     } catch (error) {
+      traceProcessBoundary(env, "readiness:builtin-pi-failure", { configDir: env.LARKIN_CONFIG_DIR, agentId: options.agentId, targetDir: options.agentId && env.LARKIN_CONFIG_DIR ? piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId) : undefined, error });
       return { runtime: "pi", state: "unauthenticated", reason: error instanceof Error ? error.message : String(error),
         nextAction: "重新运行 larkin setup，选择内置 Pi 并配置有效 API Key。" };
     }
@@ -121,11 +126,11 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       ? "Install Pi and ensure `pi` is on PATH, or set LARKIN_PI_COMMAND."
       : `Install ${options.runtime} and ensure it is on PATH.`,
   };
-  const version = executableVersion(executable, env);
+  const version = executableVersion(executable, env, options.commandArgs);
   try {
     if (options.runtime === "pi") {
       const { discoverPiModelCatalog } = await import("./pi-model-catalog.js");
-      await discoverPiModelCatalog({ cwd: options.cwd, command: executable, env });
+      await discoverPiModelCatalog({ cwd: options.cwd, command: executable, commandArgs: options.commandArgs, env });
     } else if (options.runtime === "codex") {
       const { discoverCodexModelCatalog } = await import("./codex-model-catalog.js");
       await discoverCodexModelCatalog({ cwd: options.cwd, command: executable, env });

@@ -11,9 +11,11 @@ import { createHostShell } from "../../dist/feishu/host-shell.mjs";
 import { loadConfig, toStored } from "../../dist/platform/config.mjs";
 import { acquireProcessLock, currentProcessMetadata, readProcessState } from "../../dist/platform/process-state.mjs";
 import { loadValidatedBotCredential } from "../../dist/setup/run-credential-preflight.mjs";
+import { traceProcessBoundary } from "../../dist/platform/process-boundary-trace.mjs";
 import {
   HOLD_DRIVER_BASENAME,
   HOLD_HOST_COMMAND_TOKEN,
+  HOLD_TRACE_BASENAME,
   assertProductionInspectUsesTrustedPs,
   claimHoldHostRoot,
   cleanupClaimedHoldHostRoot,
@@ -290,6 +292,7 @@ export async function main(env = process.env) {
       LARKIN_AGENTS_CONFIG: JSON.stringify([runtimeAgent]),
       LARKSUITE_CLI_CONFIG_DIR: runtimeAgent.larkConfigDir,
       LARKIN_INBOUND_DROUGHT_SEC: "0",
+      LARKIN_PROCESS_BOUNDARY_TRACE_FILE: path.join(claim.targetRoot, HOLD_TRACE_BASENAME),
     };
     let resolveStopped;
     const stopped = new Promise((resolve) => { resolveStopped = resolve; });
@@ -305,7 +308,20 @@ export async function main(env = process.env) {
     await host.start();
     if (requestedSignal) throw new Error(`hold-host interrupted during Host start (${requestedSignal})`);
     const connectedAt = await waitForConnected(path.join(runtimeAgent.stateDir, "status.json"), startedMs, stopped);
-    writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt }));
+    const daemonStatus = JSON.parse(fs.readFileSync(path.join(claim.targetRoot, "daemon-status.json"), "utf8"));
+    const daemonStartedAt = daemonStatus.startedAt;
+    const statusFile = path.join(runtimeAgent.stateDir, "status.json");
+    const status = JSON.parse(fs.readFileSync(statusFile, "utf8"));
+    const observedAt = new Date().toISOString();
+    fs.writeFileSync(statusFile, JSON.stringify({
+      ...status,
+      runtimeReadiness: { runtime: runtimeAgent.runtime, state: "ready", observedAt },
+      session: { runtime: runtimeAgent.runtime, id: `hold-${agentId}`, startedAt: observedAt, turns: 0 },
+    }, null, 2) + "\n", { mode: 0o600 });
+    fs.chmodSync(statusFile, 0o600);
+    traceProcessBoundary(hostEnv, "hold-host:ready-boundary", { configDir: claim.targetRoot, targetDir: path.join(claim.targetRoot, "providers", "pi", agentId), agentId, epoch: daemonStartedAt });
+    const boundaryAt = new Date().toISOString();
+    writePrivateJson(claim.readyFile, readyProofFor(claim, { agentId, identity, connectedAt, daemonStartedAt, boundaryAt }));
     ready = true;
     process.stderr.write(`[live-hold-host] ready; isolated root=${claim.targetRoot}; Runtime delivery=always-deferred\n`);
     exitCode = normalizeHoldHostExitCode(await stopped, requestedSignal, ready);

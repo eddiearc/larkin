@@ -10,7 +10,9 @@ export const HOLD_DRIVER_BASENAME = "runtime-agent-interface-v2-hold-host.mjs";
 export const HOLD_HOST_COMMAND_TOKEN = "app/runtime-process.mjs";
 export const HOLD_TEMP_ROOT_PREFIX = "larkin-runtime-interface-v2-hold-";
 export const HOLD_READY_BASENAME = "runtime-interface-v2-hold-host-ready.json";
+export const HOLD_TRACE_BASENAME = "runtime-interface-v2-hold-host-boundary.ndjson";
 export const HOLD_SENTINEL_BASENAME = ".runtime-interface-v2-hold-host-root.json";
+export const HOLD_ACTION_LEASE_BASENAME = ".runtime-interface-v2-hold-host-action-lease.json";
 export const HOLD_READY_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host-ready";
 export const HOLD_SENTINEL_SCHEMA = "larkin.runtime-agent-interface-v2.hold-host-root";
 export const HOLD_READY_MAX_AGE_MS = 120_000;
@@ -209,8 +211,26 @@ function assertSentinel(claim) {
   return sentinel;
 }
 
+function actionLeaseFile(configDir) { return path.join(configDir, HOLD_ACTION_LEASE_BASENAME); }
+
+function readActionLease(configDir) {
+  try { return readPrivateJson(actionLeaseFile(configDir), "hold-host action lease"); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+function assertNoActiveActionLease(configDir) {
+  const lease = readActionLease(configDir);
+  if (!lease) return;
+  const expiresAt = Date.parse(String(lease.expiresAt || ""));
+  const ownerPid = Number(lease.ownerPid);
+  const ownerLive = Number.isInteger(ownerPid) && ownerPid > 0 && inspectProcess(ownerPid)?.ok === true;
+  if (ownerLive && Number.isFinite(expiresAt) && expiresAt > Date.now()) throw new Error("hold-host action lease is active; refusing root cleanup");
+  fs.rmSync(actionLeaseFile(configDir), { force: true });
+}
+
 export function cleanupClaimedHoldHostRoot(claim) {
   assertSentinel(claim);
+  assertNoActiveActionLease(claim.targetRoot);
   fs.rmSync(claim.targetRoot, { recursive: true, force: false, maxRetries: 2 });
   if (fs.existsSync(claim.targetRoot)) throw new Error("hold-host root cleanup left the root present");
 }
@@ -223,10 +243,10 @@ function assertFresh(value, nowMs, label) {
   return observed;
 }
 
-export function readyProofFor(claim, { agentId, identity, connectedAt }) {
+export function readyProofFor(claim, { agentId, identity, connectedAt, daemonStartedAt = connectedAt, boundaryAt = connectedAt }) {
   return {
     schema: HOLD_READY_SCHEMA,
-    version: 1,
+    version: 2,
     ready: true,
     pid: identity.pid,
     processStartToken: identity.processStartToken,
@@ -239,6 +259,8 @@ export function readyProofFor(claim, { agentId, identity, connectedAt }) {
       sentinelNonce: claim.sentinel.nonce,
     },
     connectedAt,
+    daemonStartedAt,
+    boundaryAt,
     agentCount: 1,
     runtimeDelivery: "always-deferred",
   };
@@ -252,7 +274,7 @@ export function validateLiveHoldHostReady(configDir, agentId, { nowMs = Date.now
   const sentinelFile = path.join(targetRoot, HOLD_SENTINEL_BASENAME);
   const ready = readPrivateJson(readyFile, "hold-host ready proof");
   const sentinel = readPrivateJson(sentinelFile, "hold-host root sentinel");
-  if (ready.schema !== HOLD_READY_SCHEMA || ready.version !== 1 || ready.ready !== true
+  if (ready.schema !== HOLD_READY_SCHEMA || ready.version !== 2 || ready.ready !== true
       || ready.agentId !== agentId || ready.targetRoot !== targetRoot
       || ready.agentCount !== 1 || ready.runtimeDelivery !== "always-deferred"
       || ready.commandToken !== HOLD_HOST_COMMAND_TOKEN || ready.driverCommandToken !== HOLD_DRIVER_BASENAME) {
@@ -284,30 +306,148 @@ export function validateLiveHoldHostReady(configDir, agentId, { nowMs = Date.now
   const daemon = readPrivateJson(path.join(targetRoot, "daemon-status.json"), "hold-host daemon status");
   if (daemon.pid !== pid || daemon.processStartToken !== ready.processStartToken
       || daemon.commandToken !== HOLD_HOST_COMMAND_TOKEN
-      || !Array.isArray(daemon.agents) || daemon.agents.length !== 1 || daemon.agents[0] !== agentId) {
+      || !Array.isArray(daemon.agents) || daemon.agents.length !== 1 || daemon.agents[0] !== agentId
+      || daemon.startedAt !== ready.daemonStartedAt) {
     throw new Error("hold-host daemon status does not match ready proof");
   }
-  const status = readPrivateJson(path.join(targetRoot, "state", "agents", agentId, "status.json"), "hold-host channel status");
+  const daemonStarted = assertFresh(daemon.startedAt, nowMs, "hold-host current daemon startedAt");
+  const readyDaemonStarted = assertFresh(ready.daemonStartedAt, nowMs, "hold-host ready daemon epoch");
+  if (readyDaemonStarted !== daemonStarted) throw new Error("hold-host daemon epoch changed");
+  const statusFile = path.join(targetRoot, "state", "agents", agentId, "status.json");
+  const status = readPrivateJson(statusFile, "hold-host channel status");
   const statusConnected = assertFresh(status.connectedAt, nowMs, "hold-host current channel connectedAt");
+  const readinessObserved = assertFresh(status.runtimeReadiness?.observedAt, nowMs, "hold-host current Runtime readiness observedAt");
+  const sessionStarted = assertFresh(status.session?.startedAt, nowMs, "hold-host current session startedAt");
   const readyConnected = Date.parse(ready.connectedAt);
-  if (status.connectedVia !== "channel" || statusConnected < readyConnected || status.reconnectingAt) {
-    throw new Error("hold-host channel is not currently connected and fresh");
+  if (status.connectedVia !== "channel" || statusConnected < daemonStarted || readinessObserved < daemonStarted
+      || sessionStarted < daemonStarted || statusConnected < readyConnected || status.reconnectingAt
+      || fs.statSync(statusFile).mtimeMs < daemonStarted) {
+    throw new Error("hold-host channel, Runtime, session, or status boundary is not current");
   }
+  if (status.runtimeReadiness?.state !== "ready") throw new Error("hold-host Runtime readiness is not ready");
+  const traceFile = path.join(targetRoot, HOLD_TRACE_BASENAME);
+  const traceStat = fs.lstatSync(traceFile);
+  if (!traceStat.isFile() || traceStat.isSymbolicLink() || (traceStat.mode & 0o777) !== 0o600) throw new Error("hold-host trace boundary is unsafe");
+  const boundary = fs.readFileSync(traceFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((entry) =>
+    entry.phase === "hold-host:ready-boundary" && entry.pid === pid && Date.parse(String(entry.at || "")) >= daemonStarted);
+  if (!boundary) throw new Error("hold-host log-or-trace boundary is missing or stale");
+  assertFresh(ready.boundaryAt, nowMs, "hold-host ready boundary");
+  if (Date.parse(String(ready.boundaryAt)) < daemonStarted) throw new Error("hold-host ready boundary predates daemon epoch");
   const channelFailed = (Array.isArray(status.recentErrors) ? status.recentErrors : []).some((entry) =>
     entry?.text === "channel ws 连接错误" && Date.parse(String(entry.at || "")) >= statusConnected);
   if (channelFailed) throw new Error("hold-host channel reported a websocket error after connecting");
-  return { ready, status, inspected };
+  return { ready, status, inspected, daemon, boundary };
+}
+
+function sameLeaseEpoch(left, right) {
+  return left?.schema === right?.schema
+    && left?.version === right?.version
+    && left?.nonce === right?.nonce
+    && left?.ownerPid === right?.ownerPid
+    && left?.issuedAt === right?.issuedAt
+    && left?.expiresAt === right?.expiresAt
+    && left?.proofPath === right?.proofPath
+    && left?.daemon?.pid === right?.daemon?.pid
+    && left?.daemon?.processStartToken === right?.daemon?.processStartToken
+    && left?.daemon?.startedAt === right?.daemon?.startedAt
+    && left?.ready?.processStartToken === right?.ready?.processStartToken
+    && left?.ready?.boundaryAt === right?.ready?.boundaryAt;
+}
+
+export function executeProviderWithLiveHoldLease({ configDir, agentId, leaseToken, providerOperation, validate = validateLiveHoldHostReady }) {
+  if (!leaseToken || typeof providerOperation !== "function") throw new Error("provider executor requires an immutable lease token and operation");
+  const now = Date.now();
+  if (leaseToken.proofPath !== actionLeaseFile(configDir)
+      || Date.parse(String(leaseToken.expiresAt || "")) <= now) throw new Error("provider action lease is expired or bound to another proof path");
+  const currentLease = readActionLease(configDir);
+  if (Date.parse(String(currentLease?.expiresAt || "")) <= now) throw new Error("provider action lease is expired");
+  if (!sameLeaseEpoch(currentLease, leaseToken)) throw new Error("provider action lease token does not match the immutable lease");
+  const current = validate(configDir, agentId);
+  if (current.ready.processStartToken !== leaseToken.ready.processStartToken
+      || current.ready.boundaryAt !== leaseToken.ready.boundaryAt
+      || current.daemon.pid !== leaseToken.daemon.pid
+      || current.daemon.processStartToken !== leaseToken.daemon.processStartToken
+      || current.daemon.startedAt !== leaseToken.daemon.startedAt) {
+    throw new Error("provider action lease epoch is no longer current");
+  }
+  return providerOperation();
 }
 
 export function runProviderWithLiveHoldReady(
   configDir,
   agentId,
-  providerRunner,
-  { stage = "provider command", validate = validateLiveHoldHostReady } = {},
+  providerOperation,
+  { stage = "provider command", validate = validateLiveHoldHostReady, afterFinalValidation } = {},
 ) {
-  try { validate(configDir, agentId); }
+  let lease;
+  const acquireLease = (proof) => {
+    const file = actionLeaseFile(configDir);
+    const now = Date.now();
+    const value = {
+      schema: "larkin.runtime-agent-interface-v2.action-lease",
+      version: 1,
+      nonce: crypto.randomUUID(),
+      ownerPid: process.pid,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + HOLD_READY_MAX_AGE_MS).toISOString(),
+      proofPath: file,
+      daemon: {
+        pid: proof.daemon.pid,
+        processStartToken: proof.daemon.processStartToken,
+        startedAt: proof.daemon.startedAt,
+      },
+      ready: {
+        processStartToken: proof.ready.processStartToken,
+        boundaryAt: proof.ready.boundaryAt,
+      },
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { writePrivateJson(file, value); return value; }
+      catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const existing = readActionLease(configDir);
+        const expiresAt = Date.parse(String(existing?.expiresAt || ""));
+        const ownerPid = Number(existing?.ownerPid);
+        const ownerLive = Number.isInteger(ownerPid) && ownerPid > 0 && inspectProcess(ownerPid)?.ok === true;
+        if (ownerLive && Number.isFinite(expiresAt) && expiresAt > now) throw new Error("another provider action lease is active");
+        fs.rmSync(file, { force: true });
+      }
+    }
+    throw new Error("could not acquire provider action lease");
+  };
+  try {
+    const initial = validate(configDir, agentId);
+    lease = acquireLease(initial);
+    // The proof is bound to the immutable lease; this is not a second loose poll.
+    const final = validate(configDir, agentId);
+    if (final.ready.processStartToken !== lease.ready.processStartToken
+        || final.ready.boundaryAt !== lease.ready.boundaryAt
+        || final.daemon.pid !== lease.daemon.pid
+        || final.daemon.processStartToken !== lease.daemon.processStartToken
+        || final.daemon.startedAt !== lease.daemon.startedAt) {
+      throw new Error("live hold-host epoch changed before provider action");
+    }
+    afterFinalValidation?.();
+    const immutableLeaseToken = Object.freeze({
+      ...lease,
+      daemon: Object.freeze({ ...lease.daemon }),
+      ready: Object.freeze({ ...lease.ready }),
+    });
+    return executeProviderWithLiveHoldLease({
+      configDir,
+      agentId,
+      leaseToken: immutableLeaseToken,
+      providerOperation,
+      validate,
+    });
+  }
   catch (error) {
     throw new Error(`${stage} blocked because live hold-host proof failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return providerRunner();
+  finally {
+    if (lease) {
+      const current = readActionLease(configDir);
+      if (current?.nonce === lease.nonce && current.ownerPid === process.pid) fs.rmSync(actionLeaseFile(configDir), { force: true });
+    }
+  }
 }

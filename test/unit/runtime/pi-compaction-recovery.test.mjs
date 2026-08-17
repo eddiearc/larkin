@@ -6,31 +6,66 @@ import { test } from "bun:test";
 import {
   COMPACTION_KEEP_RECENT_TOKENS,
   COMPACTION_RESERVE_TOKENS,
+  calculatePiCompactionSettings,
   PI_CONTEXT_WINDOW,
   PI_COMPACTION_THRESHOLD,
   assertEffectivePiCompactionSettings,
   ensureOwnedPiAgentDirectory,
   prepareOwnedPiDirectory,
+  mergeOwnedPiSettings,
   hasProjectPiCompactionOverride,
   isPiNativeCompactionRequired,
   PiCompactionBreaker,
   PiCompactionRecoveryMachine,
+  parsePiExecutableVersion,
   verifyPiCapabilities,
 } from "../../../dist/runtime/pi-compaction-recovery.mjs";
 
-test("Pi policy uses the exact effective settings and strict threshold boundary", () => {
+test("Pi policy derives a strict 15% reserve and 85% idle threshold from the effective model window", () => {
   assert.equal(PI_CONTEXT_WINDOW, 272_000);
   assert.equal(COMPACTION_RESERVE_TOKENS, 40_800);
   assert.equal(COMPACTION_KEEP_RECENT_TOKENS, 20_000);
   assert.equal(PI_COMPACTION_THRESHOLD, 231_200);
-  assert.equal(isPiNativeCompactionRequired(231_200), false);
-  assert.equal(isPiNativeCompactionRequired(231_201), true);
+  assert.deepEqual(calculatePiCompactionSettings(272_000), {
+    reserveTokens: 40_800, keepRecentTokens: 20_000, threshold: 231_200,
+  });
+  assert.deepEqual(calculatePiCompactionSettings(500_000), {
+    reserveTokens: 75_000, keepRecentTokens: 20_000, threshold: 425_000,
+  });
+  assert.equal(isPiNativeCompactionRequired(231_200, 272_000), false);
+  assert.equal(isPiNativeCompactionRequired(231_201, 272_000), true);
+  assert.equal(isPiNativeCompactionRequired(425_000, 500_000), false);
+  assert.equal(isPiNativeCompactionRequired(425_001, 500_000), true);
   assert.doesNotThrow(() => assertEffectivePiCompactionSettings({
     contextWindow: 272_000, compaction: { enabled: true, reserveTokens: 40_800, keepRecentTokens: 20_000 },
+  }));
+  assert.doesNotThrow(() => assertEffectivePiCompactionSettings({
+    contextWindow: 333_333, compaction: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000 },
   }));
   assert.throws(() => assertEffectivePiCompactionSettings({
     contextWindow: 272_000, compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
   }), /reserveTokens/i);
+});
+
+test("Pi policy safely clamps recent history and rejects unsafe tiny windows", () => {
+  assert.deepEqual(calculatePiCompactionSettings(10_000), {
+    reserveTokens: 1_500, keepRecentTokens: 8_499, threshold: 8_500,
+  });
+  assert.throws(() => calculatePiCompactionSettings(2), /too small/i);
+  assert.throws(() => calculatePiCompactionSettings(0), /positive safe integer/i);
+});
+
+test("Pi owned settings merge preserves unrelated external settings while owning compaction", () => {
+  const merged = mergeOwnedPiSettings({ theme: "dark", packages: { enabled: true }, compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 2 } });
+  assert.equal(merged.theme, "dark");
+  assert.deepEqual(merged.packages, { enabled: true });
+  assert.deepEqual(merged.compaction, { enabled: true, reserveTokens: 40_800, keepRecentTokens: 20_000 });
+});
+
+test("Pi owned settings preserve user packages for distribution-specific resolution", () => {
+  const packages = ["npm:pi-codex-goal", "npm:@tintinweb/pi-subagents"];
+  const merged = mergeOwnedPiSettings({ packages });
+  assert.deepEqual(merged.packages, packages);
 });
 
 test("project compaction/context overrides are refused before Pi starts", () => {
@@ -51,13 +86,23 @@ test("owned Pi directory is 0700, current-user owned, and never a symlink", () =
   const linked = path.join(root, "linked-parent");
   fs.symlinkSync(outside, linked);
   assert.throws(() => prepareOwnedPiDirectory(path.join(linked, "agent")), /unsafe|symlink/i);
+  const linkedRoot = path.join(root, "linked-root"); fs.symlinkSync(outside, linkedRoot);
+  assert.throws(() => ensureOwnedPiAgentDirectory(linkedRoot, "cli_linkedA1"), /unsafe|symlink/i);
   fs.rmSync(outside, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("Pi executable version parsing rejects spoofed suffixes and extra tokens", () => {
+  assert.equal(parsePiExecutableVersion("0.84.2\n"), "0.84.2");
+  assert.equal(parsePiExecutableVersion("pi-coding-agent version v0.84.2\n"), "0.84.2");
+  for (const output of ["0.84.2-beta", "0.84.2 dirty", "0.84.2 extra", "pi 0.84.2 extra", "0.84.2\nattacker", "v0.84.2", "0x84x2", "0-84-2"]) {
+    assert.throws(() => parsePiExecutableVersion(output), /exactly|version/i);
+  }
+});
+
 test("external capability guard fails closed and accepts only the required Pi protocol", () => {
   assert.doesNotThrow(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }));
@@ -67,31 +112,46 @@ test("external capability guard fails closed and accepts only the required Pi pr
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /version|capabilit/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 128_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.2", contextWindow: 128_000, autoCompactionEnabled: true,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /context/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000, autoCompactionEnabled: true,
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true,
   }), /unproven|reserve|event/i);
   assert.throws(() => verifyPiCapabilities({
-    distribution: "external", version: "0.83.0", contextWindow: 272_000,
+    distribution: "external", version: "0.84.2", contextWindow: 272_000,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /boolean/i);
+  assert.throws(() => verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, trustedProtocol: true,
+  }), /external|trusted|unproven/i);
+  assert.doesNotThrow(() => verifyPiCapabilities({
+    distribution: "builtin", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, trustedProtocol: true,
+  }));
+});
+
+test("breaker refuses operations without an explicit canonical lock", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-breaker-no-lock-"));
+  const breaker = new PiCompactionBreaker(root);
+  assert.throws(() => breaker.get("missing"), /canonical Agent state lock/i);
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("durable breaker writes atomically and reloads ambiguous attempts without resending", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-breaker-"));
-  const breaker = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:00.000Z" });
+  const breaker = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:00.000Z", withLock: (operation) => operation() });
   const key = "delivery-1:input-1";
   breaker.transition(key, {
     messageId: "message-1", deliveryId: "delivery-1", inputId: "input-1", sessionGeneration: 3,
   }, "eligible");
   breaker.transition(key, {}, "settled_for_manual");
   breaker.transition(key, { compactDeadlineAt: "2026-01-01T00:00:01.000Z" }, "manual_sent");
-  const loaded = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:02.000Z" });
+  const loaded = new PiCompactionBreaker(root, { now: () => "2026-01-01T00:00:02.000Z", withLock: (operation) => operation() });
   assert.equal(loaded.get(key).state, "manual_sent");
   assert.equal(loaded.get(key).manualAttempt, 1);
   assert.throws(() => loaded.transition(key, {}, "manual_sent"), /invalid|duplicate|attempt/i);

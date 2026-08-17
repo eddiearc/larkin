@@ -296,12 +296,6 @@ type CommentReplyLedger = {
   document_comment_replies?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
 };
 
-type UrgentAppLedger = {
-  version: 1;
-  cursors?: Record<string, unknown>;
-  urgent_app?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
-};
-
 type ImWriteMemoEntry = { message_id: string; updated_at: string };
 type ImWriteMemoState = {
   version: 1;
@@ -325,39 +319,6 @@ function recordImWriteMemo(store: AgentStateStore, key: string, messageId: strin
     for (const stale of keys.slice(0, Math.max(0, keys.length - IM_WRITE_MEMO_LIMIT))) delete state.im_write_memo[stale];
   });
   return duplicate;
-}
-
-function urgentAppDigest(argv: readonly string[]): string {
-  return createHash("sha256").update(JSON.stringify([
-    policyFlagValue(argv, "--message-id"),
-    uniqueRawFlagValue(argv, "--user-id-type"),
-    uniqueRawFlagValue(argv, "--data"),
-  ])).digest("hex");
-}
-
-function claimUrgentApp(store: AgentStateStore, messageId: string, digest: string): "ready" | "sent" | "ambiguous" | "conflict" {
-  return store.mutateJson<UrgentAppLedger, "ready" | "sent" | "ambiguous" | "conflict">(
-    "freshnessState", { version: 1, cursors: {} }, (state) => {
-      state.urgent_app ??= {};
-      const prior = state.urgent_app[messageId];
-      if (prior?.status === "sent" && prior.digest === digest) return "sent";
-      if (prior?.status === "sending" && prior.digest === digest) return "ambiguous";
-      if (prior && prior.status !== "failed" && prior.digest !== digest) return "conflict";
-      state.urgent_app[messageId] = { digest, status: "sending", updated_at: new Date().toISOString() };
-      const keys = Object.keys(state.urgent_app);
-      for (const stale of keys.slice(0, Math.max(0, keys.length - 512))) delete state.urgent_app[stale];
-      return "ready";
-    },
-  );
-}
-
-function finalizeUrgentApp(
-  store: AgentStateStore, messageId: string, digest: string, status: "sent" | "failed",
-): void {
-  store.mutateJson<UrgentAppLedger, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
-    state.urgent_app ??= {};
-    state.urgent_app[messageId] = { digest, status, updated_at: new Date().toISOString() };
-  });
 }
 
 function runCommentReply(
@@ -1080,20 +1041,12 @@ export function runLarkCli(
     if (decision.operation === "urgent-app") {
       const userIds = assertUrgentAppPreconditions(effectiveArgv, urgent!.message, target, agent.feishuAppId);
       assertUrgentAppMembers(effectiveArgv, target, userIds, privateEnv, io, nativeDependencies);
-      const messageId = policyFlagValue(effectiveArgv, "--message-id")!;
-      const digest = urgentAppDigest(effectiveArgv);
-      const claim = claimUrgentApp(store, messageId, digest);
-      if (claim === "sent") {
-        io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target: targetKey })}\n`);
-        return 0;
-      }
-      if (claim === "ambiguous") throw new Error("im messages urgent_app 上次调用结果不明确，已 fail-closed 以避免重复加急");
-      if (claim === "conflict") throw new Error("im messages urgent_app 已对同一消息提交不同 user 名单，拒绝覆盖或重复加急");
-      const write = callNative(botArgv(effectiveArgv, intentId(targetKey, effectiveArgv), decision), privateEnv, io, nativeDependencies);
-      const accepted = !write.error && write.status === 0;
-      try { if (accepted) assertUrgentAppNativeAccepted(write); }
+    }
+    const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
+    const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
+    if (decision.operation === "urgent-app") {
+      try { assertUrgentAppNativeAccepted(write); }
       catch (error) {
-        finalizeUrgentApp(store, messageId, digest, "sent");
         io.stderr(`${JSON.stringify({
           ok: false,
           identity: "bot",
@@ -1102,12 +1055,8 @@ export function runLarkCli(
         })}\n`);
         return 2;
       }
-      if (accepted) finalizeUrgentApp(store, messageId, digest, "sent");
-      else if (definitiveProviderRejection(write)) finalizeUrgentApp(store, messageId, digest, "failed");
       return emitNativeResult(write, io);
     }
-    const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
-    const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
     const writeMessage = writeResponseMessage(write);
     const duplicate = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;

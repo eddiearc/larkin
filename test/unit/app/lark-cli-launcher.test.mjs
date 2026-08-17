@@ -381,10 +381,9 @@ test("protected urgent-app probes freshness then spawns native urgent_app for th
     });
     const again = f.run([...urgentArgv(), "--idempotency-key", "forced-urgent-key"]);
     assert.equal(again.code, 0, again.stderr);
-    assert.match(again.stdout, /"duplicate":true/);
     const writes = f.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "urgent_app");
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0].args.includes("--idempotency-key"), false);
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1].args.includes("--idempotency-key"), false);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

@@ -56,13 +56,10 @@ const create = (overrides = {}) => ({
   ...overrides,
 });
 
-const nodeShebang = ["#", "!", "/usr/bin/env node"].join("");
-
 function makeProductionPiCommand(root, mode = "stable") {
   const log = path.join(root, "pi-rpc.log");
-  const command = path.join(root, "fake-pi.mjs");
-  fs.writeFileSync(command, `${nodeShebang}
-import fs from "node:fs";
+  const script = path.join(root, "fake-pi.mjs");
+  fs.writeFileSync(script, `import fs from "node:fs";
 const args = process.argv.slice(2);
 const log = process.env.LARKIN_PI_TEST_LOG;
 const probe = args.includes("--no-session");
@@ -93,9 +90,9 @@ process.stdin.on("data", (chunk) => {
     else respond(request, {});
   }
 });
-`, { mode: 0o700 });
+`, { mode: 0o600 });
   temporaryRoots.add(root);
-  return { command, log };
+  return { command: process.execPath, commandArgs: [script], log };
 }
 
 function readProductionPiLog(log) {
@@ -562,7 +559,7 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
 
 test("production Pi probe uses isolated get_state only and preserves the verified dynamic policy", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-production-probe-"));
-  const { command, log } = makeProductionPiCommand(root);
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
   const input = create({
     workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
     env: { LARKIN_PI_TEST_LOG: log },
@@ -571,7 +568,7 @@ test("production Pi probe uses isolated get_state only and preserves the verifie
   let session;
   try {
     const adapter = createNativeRuntimeAdapter("pi", {
-      piCommand: command, resolvePiProcessExtensionArgs: () => ["-e", "fixture-extension"],
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => ["-e", "fixture-extension"],
       piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
     });
     await adapter.probe(input);
@@ -598,13 +595,13 @@ test("production Pi probe uses isolated get_state only and preserves the verifie
 
 test.each(["context-mismatch", "model-mismatch"])("production Pi startup rejects isolated probe %s drift", async (mode) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-${mode}-`));
-  const { command, log } = makeProductionPiCommand(root, mode);
+  const { command, commandArgs, log } = makeProductionPiCommand(root, mode);
   const input = create({
     workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
     env: { LARKIN_PI_TEST_LOG: log },
   });
   fs.mkdirSync(input.workspaceDir, { recursive: true });
-  const adapter = createNativeRuntimeAdapter("pi", { piCommand: command, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 } });
+  const adapter = createNativeRuntimeAdapter("pi", { piCommand: command, piCommandArgs: commandArgs, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 } });
   await adapter.probe(input);
   clearProductionPiLog(log);
   await assert.rejects(
@@ -617,14 +614,14 @@ test.each(["context-mismatch", "model-mismatch"])("production Pi startup rejects
 
 test.each(["context-revalidate", "model-revalidate", "auto-revalidate"])("production Pi backend rejects %s before prompt or compact submission", async (mode) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-revalidate-${mode}-`));
-  const { command, log } = makeProductionPiCommand(root, mode);
+  const { command, commandArgs, log } = makeProductionPiCommand(root, mode);
   const input = create({
     workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
     env: { LARKIN_PI_TEST_LOG: log },
   });
   fs.mkdirSync(input.workspaceDir, { recursive: true });
   const adapter = createNativeRuntimeAdapter("pi", {
-    piCommand: command, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    piCommand: command, piCommandArgs: commandArgs, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
   });
   await adapter.probe(input);
   clearProductionPiLog(log);
@@ -647,14 +644,14 @@ test.each(["context-revalidate", "model-revalidate", "auto-revalidate"])("produc
 
 test.each(["reserveTokens", "keepRecentTokens"])("production Pi backend rejects owned %s drift before prompt or compact submission", async (field) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-owned-${field}-`));
-  const { command, log } = makeProductionPiCommand(root);
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
   const input = create({
     workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
     env: { LARKIN_PI_TEST_LOG: log },
   });
   fs.mkdirSync(input.workspaceDir, { recursive: true });
   const adapter = createNativeRuntimeAdapter("pi", {
-    piCommand: command, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    piCommand: command, piCommandArgs: commandArgs, piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
   });
   await adapter.probe(input);
   clearProductionPiLog(log);

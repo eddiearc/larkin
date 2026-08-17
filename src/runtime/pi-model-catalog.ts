@@ -36,6 +36,7 @@ export interface DiscoverPiCatalogOptions {
   cwd: string;
   agentDir?: string;
   command?: string;
+  commandArgs?: readonly string[];
   env?: NodeJS.ProcessEnv;
   spawn?: (command: string, args: readonly string[], options: Record<string, unknown>) => PiRpcProcess;
   timeoutMs?: number;
@@ -73,7 +74,7 @@ const discoveryCache = new Map<string, Promise<PiModelCatalog>>();
 export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {
   if (!options.spawn) {
     const command = options.command ?? options.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
-    const key = `${command}|${options.env?.PI_CODING_AGENT_DIR ?? ""}|${options.agentDir ?? ""}`;
+    const key = `${command}|${(options.commandArgs ?? []).join("\0")}|${options.env?.PI_CODING_AGENT_DIR ?? ""}|${options.agentDir ?? ""}`;
     const cached = discoveryCache.get(key);
     if (cached) return cached;
     const pending = discoverPiModelCatalogUncached(options);
@@ -89,7 +90,7 @@ export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions):
 async function discoverPiModelCatalogUncached(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {
   const spawn = options.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, [...args], spawnOptions as any) as unknown as PiRpcProcess);
   const command = options.command ?? options.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
-  const child = spawn(command, ["--mode", "rpc", "--no-session"], {
+  const child = spawn(command, [...(options.commandArgs ?? []), "--mode", "rpc", "--no-session"], {
     cwd: options.cwd,
     env: { ...process.env, ...options.env, ...(options.agentDir ? { PI_CODING_AGENT_DIR: path.resolve(options.agentDir) } : {}), NO_COLOR: "1" },
     stdio: ["pipe", "pipe", "pipe"],

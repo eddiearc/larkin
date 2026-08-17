@@ -83,6 +83,7 @@ export interface NativeRuntimeAdapterDependencies {
   createPiSession?: (input: RuntimeSessionCreate) => Promise<PiSessionProcessLike>;
   piRpcClientOptions?: PiRpcClientOptions;
   piCommand?: string;
+  piCommandArgs?: readonly string[];
   resolvePiProcessExtensionArgs?: typeof resolvePiProcessExtensionArgs;
   codexCommand?: string;
   codexModelOverride?: string;
@@ -1004,9 +1005,10 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const builtin = mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin";
   const builtinSpec = builtin ? internalCommandSpec("pi-rpc", [], mergedEnv) : null;
   const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
-  const commandArgs = [...(builtinSpec?.args ?? []), ...args];
+  const commandPrefix = builtinSpec?.args ?? dependencies.piCommandArgs ?? [];
+  const commandArgs = [...commandPrefix, ...args];
   const reportedVersion = productionSpawn && !builtin
-    ? parsePiExecutableVersion(String(spawnSync(command, ["--version"], {
+    ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
       cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000,
     }).stdout || ""))
     : BUNDLED_PI_VERSION;
@@ -1026,7 +1028,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     // real session starts; no prompt, provider request, package, or extension
     // is loaded by the probe.
     probedModel = await discoverEffectivePiContextWindow(
-      input, command, builtinSpec?.args ?? [], requestedModel,
+      input, command, commandPrefix, requestedModel,
       mergedEnv, spawn, dependencies.piRpcClientOptions,
     );
     writeOwnedPiSettings(ownedPiDirectory, calculatePiCompactionSettings(probedModel.contextWindow));
@@ -1175,7 +1177,8 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
     capabilities: CAPABILITIES[id],
     async probe(input) {
       const readiness = await probeNativeRuntimeReadiness({ runtime: id, agentId: input.agentId, cwd: input.workspaceDir,
-        env: { ...dependencies.env, ...input.env }, command: configuredCommand });
+        env: { ...dependencies.env, ...input.env }, command: configuredCommand,
+        ...(id === "pi" && dependencies.piCommandArgs ? { commandArgs: dependencies.piCommandArgs } : {}) });
       resolvedExecutable = readiness.state === "ready" ? readiness.executable ?? null : null;
       return readiness;
     },

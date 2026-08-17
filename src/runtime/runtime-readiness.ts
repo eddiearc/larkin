@@ -86,6 +86,7 @@ export interface ProbeNativeRuntimeReadinessOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   command?: string;
+  commandArgs?: readonly string[];
   agentId?: string;
 }
 
@@ -96,8 +97,8 @@ function selectedCommand(options: ProbeNativeRuntimeReadinessOptions): string {
   return options.env?.LARKIN_CLAUDE_COMMAND || process.env.LARKIN_CLAUDE_COMMAND || "claude";
 }
 
-function executableVersion(executable: string, env: NodeJS.ProcessEnv): string | undefined {
-  const result = spawnSync(executable, ["--version"], { env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
+function executableVersion(executable: string, env: NodeJS.ProcessEnv, commandArgs: readonly string[] = []): string | undefined {
+  const result = spawnSync(executable, [...commandArgs, "--version"], { env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
   if (result.status !== 0) return undefined;
   return String(result.stdout || result.stderr || "").replace(/[\r\n]+/g, " ").trim().slice(0, 120) || undefined;
 }
@@ -125,11 +126,11 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       ? "Install Pi and ensure `pi` is on PATH, or set LARKIN_PI_COMMAND."
       : `Install ${options.runtime} and ensure it is on PATH.`,
   };
-  const version = executableVersion(executable, env);
+  const version = executableVersion(executable, env, options.commandArgs);
   try {
     if (options.runtime === "pi") {
       const { discoverPiModelCatalog } = await import("./pi-model-catalog.js");
-      await discoverPiModelCatalog({ cwd: options.cwd, command: executable, env });
+      await discoverPiModelCatalog({ cwd: options.cwd, command: executable, commandArgs: options.commandArgs, env });
     } else if (options.runtime === "codex") {
       const { discoverCodexModelCatalog } = await import("./codex-model-catalog.js");
       await discoverCodexModelCatalog({ cwd: options.cwd, command: executable, env });

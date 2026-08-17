@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { exactMode } from "../platform/secure-metadata.js";
 
 export const PI_RUNTIME_ARTIFACT_MANIFEST = ".larkin-pi-owned-artifacts.json";
 export const PI_RUNTIME_ARTIFACT_NAMES = [".larkin-official-pi-package", "models-store.json", "npm"] as const;
@@ -67,7 +68,7 @@ function sameIdentity(actual: PiArtifactIdentity, expected: PiArtifactIdentity):
 function readManifest(file: string): PiArtifactManifest | null {
   try {
     const stat = assertSafeEntry(file, "Pi artifact provenance manifest");
-    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.size > 1024 * 1024) throw new Error("Pi artifact provenance manifest is unsafe");
+    if (!stat.isFile() || !exactMode(stat, 0o600) || stat.size > 1024 * 1024) throw new Error("Pi artifact provenance manifest is unsafe");
     const value = JSON.parse(fs.readFileSync(file, "utf8")) as PiArtifactManifest;
     if (value?.version !== 1 || value.owner !== "larkin-builtin-pi" || !value.directory || !value.artifacts) throw new Error("Pi artifact provenance manifest is invalid");
     return value;
@@ -88,7 +89,7 @@ function writeManifest(file: string, value: PiArtifactManifest): void {
 /** Record only allowed entries that were absent at the runtime spawn boundary. */
 export function recordPiRuntimeArtifactProvenance(targetDir: string, beforeEntries: ReadonlySet<string>, boundaryAt = Date.now()): void {
   const target = assertSafeEntry(targetDir, "Pi provider target");
-  if (!target.isDirectory() || (target.mode & 0o777) !== 0o700) throw new Error("Pi provider target is unsafe");
+  if (!target.isDirectory() || !exactMode(target, 0o700)) throw new Error("Pi provider target is unsafe");
   const manifestFile = path.join(targetDir, PI_RUNTIME_ARTIFACT_MANIFEST);
   const existing = readManifest(manifestFile);
   const manifest: PiArtifactManifest = existing ?? {

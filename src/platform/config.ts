@@ -858,7 +858,7 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
       throw new Error("external Pi profile import is only valid for builtin Pi distribution");
     }
     const migrationPlan = options.importExternalProfile && mutation.kind === "set-agent-pi-distribution"
-      ? preparePiProfileMigration(env, layout.root, mutation.agentId)
+      ? preparePiProfileMigration(env, layout.root, mutation.agentId, "builtin")
       : undefined;
     const changed = applyMutation(config, mutation);
     const stored = toStored(config);

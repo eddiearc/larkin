@@ -58,6 +58,27 @@ function clean(f) { fs.rmSync(f.root, { recursive: true, force: true }); }
   } finally { clean(f); }
 });
 
+test("builtin import removes only bundled subagents while external import preserves it", () => {
+  const f = fixture();
+  try {
+    const sourceSettings = {
+      theme: "dark",
+      packages: ["npm:pi-codex-goal", "npm:@tintinweb/pi-subagents", "npm:@tintinweb/pi-subagents@latest"],
+    };
+    fs.writeFileSync(path.join(f.source, "settings.json"), `${JSON.stringify(sourceSettings)}\n`, { mode: 0o644 });
+
+    const builtin = migration.preparePiProfileMigration(f.env, f.config, f.agent, "builtin");
+    migration.applyPiProfileMigration(builtin);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.targetDir, "settings.json"))).packages, ["npm:pi-codex-goal"]);
+    migration.rollbackPiProfileMigration(builtin.state);
+
+    const external = migration.preparePiProfileMigration(f.env, f.config, f.agent, "external");
+    migration.applyPiProfileMigration(external);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.targetDir, "settings.json"))).packages, sourceSettings.packages);
+    migration.rollbackPiProfileMigration(external.state);
+  } finally { clean(f); }
+});
+
 test("preserves prior target and unrelated files on reverse rollback", () => {
   const f = fixture({ target: true });
   try {

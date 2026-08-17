@@ -10,6 +10,7 @@ import { attestedPiRuntimeArtifactNames, PI_RUNTIME_ARTIFACT_MANIFEST } from "./
 
 const AGENT_ID = /^cli_[A-Za-z0-9]+$/;
 const FILES = ["auth.json", "models.json", "settings.json"] as const;
+const BUILTIN_PI_PACKAGE = /^npm:@tintinweb\/pi-subagents(?:@[^/]+)?$|^@tintinweb\/pi-subagents(?:@[^/]+)?$/i;
 const FILE_LIMIT = 8 * 1024 * 1024;
 const EXECUTABLE_LIMIT = 256 * 1024 * 1024;
 const SOURCE_MODES = new Set([0o600, 0o644, 0o640]);
@@ -162,10 +163,17 @@ function sourceVersion(env: NodeJS.ProcessEnv, cwd: string): ExecutableState {
   }
   return executableState;
 }
-function mergeSettings(bytes: Buffer): Buffer {
+function mergeSettings(bytes: Buffer, distribution: "builtin" | "external"): Buffer {
   let value: unknown;
   try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("external Pi settings.json is invalid"); }
-  return Buffer.from(`${JSON.stringify(mergeOwnedPiSettings(value), null, 2)}\n`);
+  const merged = mergeOwnedPiSettings(value);
+  // Builtin Pi always loads Larkin's inline subagents factory. Remove only that
+  // duplicate package during builtin-profile import; external Pi must retain the
+  // user's package so its resolver can suppress inline injection.
+  if (distribution === "builtin" && Array.isArray(merged.packages)) {
+    merged.packages = merged.packages.filter((entry) => typeof entry !== "string" || !BUILTIN_PI_PACKAGE.test(entry));
+  }
+  return Buffer.from(`${JSON.stringify(merged, null, 2)}\n`);
 }
 function targetPrior(directory: string): { stat: fs.Stats | null; entries: string[]; files: Record<FileName, FileState> } {
   const stat = assertDirectory(directory, "Pi provider target", false);
@@ -179,7 +187,7 @@ function targetPrior(directory: string): { stat: fs.Stats | null; entries: strin
   return { stat, entries, files };
 }
 
-export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: string, agentId: string): PiProfileMigrationPlan {
+export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: string, agentId: string, distribution: "builtin" | "external" = "builtin"): PiProfileMigrationPlan {
   const sourceDir = sourceDirectory(env);
   verifySourceProfile(sourceDir);
   const sourceDirectoryState = assertDirectory(sourceDir, "external Pi profile") as fs.Stats;
@@ -197,7 +205,7 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
   const imported: Record<FileName, Buffer> = {
     "auth.json": sourceFiles["auth.json"].bytes,
     "models.json": sourceFiles["models.json"].bytes,
-    "settings.json": mergeSettings(sourceFiles["settings.json"].bytes),
+    "settings.json": mergeSettings(sourceFiles["settings.json"].bytes, distribution),
   };
   const afterFiles = Object.fromEntries(FILES.map((name) => [name, safeState({ bytes: imported[name], mode: 0o600 }, false)])) as Record<FileName, FileState>;
   return {

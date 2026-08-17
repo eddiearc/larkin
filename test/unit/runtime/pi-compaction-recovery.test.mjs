@@ -42,6 +42,12 @@ test("Pi owned settings merge preserves unrelated external settings while owning
   assert.deepEqual(merged.compaction, { enabled: true, reserveTokens: 40_800, keepRecentTokens: 20_000 });
 });
 
+test("Pi owned settings preserve user packages for distribution-specific resolution", () => {
+  const packages = ["npm:pi-codex-goal", "npm:@tintinweb/pi-subagents"];
+  const merged = mergeOwnedPiSettings({ packages });
+  assert.deepEqual(merged.packages, packages);
+});
+
 test("project compaction/context overrides are refused before Pi starts", () => {
   assert.equal(hasProjectPiCompactionOverride({}), false);
   assert.equal(hasProjectPiCompactionOverride({ compaction: { enabled: false } }), true);

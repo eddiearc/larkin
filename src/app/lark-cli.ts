@@ -44,7 +44,7 @@ function portableSignalCode(signal: NodeJS.Signals): number {
 
 export type LarkCliCommandDecision =
   | { kind: "passthrough" }
-  | { kind: "guarded"; operation: "send" | "reply" | "card" }
+  | { kind: "guarded"; operation: "send" | "reply" | "card" | "urgent-app" }
   | { kind: "comment-reply" }
   | { kind: "denied"; reason: string };
 
@@ -52,7 +52,7 @@ const HELP_FLAGS = new Set(["--help", "-h"]);
 const MANAGEMENT_COMMANDS = new Set(["auth", "config", "profile", "update", "install"]);
 const USER_ONLY_COMMANDS = new Set(["attendance", "mail", "okr"]);
 const POLICY_VALUE_FLAGS = new Set([
-  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--thread-id",
+  "--as", "--profile", "--config-dir", "--agent", "--chat-id", "--user-id", "--message-id", "--idempotency-key", "--thread-id", "--user-id-type", "--data",
 ]);
 const PROTECTED_VALUE_FLAGS = new Set([
   ...POLICY_VALUE_FLAGS,
@@ -69,7 +69,7 @@ const HISTORY_VALUE_FLAGS = new Set([
   "--format", "--jq", "-q", "--download-dir",
 ]);
 
-type ProtectedOperation = "send" | "reply" | "card-patch" | "card-update" | "raw-create" | "raw-reply"
+type ProtectedOperation = "send" | "reply" | "card-patch" | "card-update" | "urgent-app" | "raw-create" | "raw-reply"
   | "raw-forward" | "raw-merge_forward" | "raw-delete" | "raw-urgent_app" | "raw-urgent_phone" | "raw-urgent_sms"
   | "thread-forward" | "thread-merge_forward" | "api";
 
@@ -99,7 +99,7 @@ function hasCanonicalUnprotectedCommandPath(argv: readonly string[]): boolean {
   const command = nativeArgv[1];
   if (!service || service.startsWith("-") || !command || command.startsWith("-")) return false;
   if (service !== "im") return service !== "api" && service !== "larkin-draft";
-  if (command === "+messages-send" || command === "+messages-reply" || command === "api") {
+  if (command === "+messages-send" || command === "+messages-reply" || command === "+messages-urgent-app" || command === "api") {
     return false;
   }
   if (command.startsWith("+")) return true;
@@ -136,6 +136,7 @@ function protectedOperations(argv: readonly string[]): ProtectedOperation[] {
   for (const token of tokens) {
     if (token === "+messages-send") operations.push("send");
     else if (token === "+messages-reply") operations.push("reply");
+    else if (token === "+messages-urgent-app") operations.push("urgent-app");
     else if (token === "api") operations.push("api");
   }
   const hasIm = tokens.includes("im");
@@ -219,6 +220,9 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
     : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["im", "+messages-reply"])) return uniqueProtectedOperation(protectedPaths, "reply")
     ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "reply" })
+    : noncanonicalProtectedDecision();
+  if (exactPath(parsed.commandArgv, ["im", "+messages-urgent-app"])) return uniqueProtectedOperation(protectedPaths, "urgent-app")
+    ? (parsed.commandArgv.includes("--dry-run") ? { kind: "passthrough" } : { kind: "guarded", operation: "urgent-app" })
     : noncanonicalProtectedDecision();
   if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
     const expected = parsed.commandArgv[2] === "patch" ? "card-patch" : "card-update";
@@ -453,10 +457,14 @@ async function spawnNativeTransparent(
 }
 
 function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarded" }>, argv: readonly string[], store: AgentStateStore): FreshnessTarget {
-  if (decision.operation === "send") {
+  if (decision.operation === "send" || decision.operation === "urgent-app") {
     const chatId = policyFlagValue(argv, "--chat-id");
     const userId = policyFlagValue(argv, "--user-id");
-    if (!chatId || userId) throw new Error("Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
+    if (!chatId || userId) {
+      throw new Error(decision.operation === "urgent-app"
+        ? "Runtime +messages-urgent-app 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target"
+        : "Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
+    }
     return feishuImTarget(`chat:${chatId}`);
   }
   const messageId = policyFlagValue(argv, "--message-id");
@@ -466,16 +474,76 @@ function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarde
   return feishuImTarget(target);
 }
 
-function botArgv(argv: readonly string[], intentId: string): string[] {
+function botArgv(argv: readonly string[], intentId: string, decision?: Extract<LarkCliCommandDecision, { kind: "guarded" }>): string[] {
   const next = [...argv];
   const parsed = parsePolicyArgv(next);
   const boundary = next.indexOf("--");
   const insertion = boundary < 0 ? next.length : boundary;
   const injected: string[] = [];
   if (!parsed.flags.has("--as")) injected.push("--as", "bot");
-  if (!parsed.flags.has("--idempotency-key")) injected.push("--idempotency-key", intentId);
+  if (decision?.operation !== "urgent-app" && !parsed.flags.has("--idempotency-key")) injected.push("--idempotency-key", intentId);
   next.splice(insertion, 0, ...injected);
-  return next;
+  if (decision?.operation !== "urgent-app") return next;
+  const rewritten: string[] = [];
+  for (let index = 0; index < next.length; index += 1) {
+    const argument = next[index];
+    if (argument === "+messages-urgent-app") {
+      rewritten.push("messages", "urgent_app");
+      continue;
+    }
+    if (argument === "--chat-id") {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--chat-id=")) continue;
+    rewritten.push(argument);
+  }
+  return rewritten;
+}
+
+function parseJsonObject(value: string, label: string): Record<string, unknown> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new Error(`${label} 必须是 JSON 对象`); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${label} 必须是 JSON 对象`);
+  return parsed as Record<string, unknown>;
+}
+
+function senderRecord(message: FeishuImMessage): Record<string, unknown> | null {
+  const sender = message.sender;
+  return sender && typeof sender === "object" && !Array.isArray(sender) ? sender as Record<string, unknown> : null;
+}
+
+function isOwnBotMessage(message: FeishuImMessage, agentId: string): boolean {
+  const sender = senderRecord(message);
+  if (!sender) return false;
+  const senderType = sender.sender_type ?? sender.id_type;
+  const senderId = sender.id ?? sender.sender_id;
+  return senderType === "app" && senderId === agentId;
+}
+
+function assertUrgentAppPreconditions(
+  argv: readonly string[],
+  snapshot: FeishuImSnapshot,
+  target: FreshnessTarget,
+  agentId: string,
+): void {
+  const messageId = policyFlagValue(argv, "--message-id");
+  if (!messageId || !/^om_/.test(messageId)) throw new Error("Runtime +messages-urgent-app 只接受真实 Feishu om_ message_id");
+  const userIdType = policyFlagValue(argv, "--user-id-type");
+  if (userIdType !== "open_id") throw new Error("Runtime +messages-urgent-app 必须使用 --user-id-type open_id");
+  const data = policyFlagValue(argv, "--data");
+  if (!data) throw new Error("Runtime +messages-urgent-app 缺少 --data");
+  const body = parseJsonObject(data, "--data");
+  const userIds = body.user_id_list;
+  if (!Array.isArray(userIds) || userIds.length === 0 || userIds.some((value) => typeof value !== "string" || !value.startsWith("ou_"))) {
+    throw new Error("Runtime +messages-urgent-app 的 user_id_list 必须是非空 open_id 列表");
+  }
+  const message = snapshot.messages.find((row) => row.message_id === messageId);
+  if (!message) throw new Error(`无法在当前 freshness 窗口确认 ${messageId}；禁止旁路加急未知消息`);
+  if (target.resourceKind === "chat" && message.chat_id && message.chat_id !== target.resourceId) {
+    throw new Error("加急目标消息不属于当前 chat freshness target");
+  }
+  if (!isOwnBotMessage(message, agentId)) throw new Error("Runtime +messages-urgent-app 只能加急当前 Bot 自己发出的消息");
 }
 
 function probeArgv(target: FreshnessTarget): string[] {
@@ -854,8 +922,11 @@ export function runLarkCli(
       store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, generation);
       return 3;
     }
+    if (decision.operation === "urgent-app") {
+      assertUrgentAppPreconditions(effectiveArgv, gated.snapshot, target, agent.agentId);
+    }
     const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
-    const write = callNative(botArgv(effectiveArgv, intentKey), privateEnv, io, nativeDependencies);
+    const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
     const writeMessage = writeResponseMessage(write);
     const duplicate = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;

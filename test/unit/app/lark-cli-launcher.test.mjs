@@ -408,6 +408,8 @@ test("protected urgent-app fails closed for foreign, synthetic, malformed, and u
       urgentArgv({ data: JSON.stringify({ user_id_list: ["not-an-open-id"] }) }),
       urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_not_in_chat"] }) }),
       urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234", "ou_not_in_chat"] }) }),
+      [...urgentArgv(), "--data", JSON.stringify({ user_id_list: ["ou_not_in_chat"] })],
+      [...urgentArgv(), "--user-id-type", "user_id"],
       ["im", "+messages-urgent-app", "--message-id", "om_own_urgent", "--user-id-type", "open_id", "--data", JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] })],
     ]) {
       const before = f.calls.length;

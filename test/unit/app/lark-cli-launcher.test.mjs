@@ -20,15 +20,24 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
   const output = { stdout: "", stderr: "" };
   const calls = [];
   const historyHolder = { value: history };
+  const membersHolder = { value: {
+    ok: true,
+    identity: "bot",
+    data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], truncations: [] },
+  } };
   let writeResult = { status: 7, signal: null, output: [], pid: 1,
     stdout: "native-out\n", stderr: "native-err\n", error: undefined };
   const spawn = (command, args, options) => {
     calls.push({ command, args, options });
-    const isHistory = ["+chat-messages-list", "+threads-messages-list"].includes(args[2])
+    const isHistory = ["+chat-messages-list", "+threads-messages-list", "+messages-mget"].includes(args[2])
       || (args[1] === "api" && args[2] === "GET" && args[3] === "/open-apis/im/v1/messages");
-    return isHistory
-      ? { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(historyHolder.value), stderr: "", error: undefined }
-      : writeResult;
+    if (isHistory) {
+      return { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(historyHolder.value), stderr: "", error: undefined };
+    }
+    if (args[2] === "+chat-members-list") {
+      return { status: 0, signal: null, output: [], pid: 1, stdout: JSON.stringify(membersHolder.value), stderr: "", error: undefined };
+    }
+    return writeResult;
   };
   const run = (argv) => {
     output.stdout = "";
@@ -39,7 +48,12 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
     });
     return { code, ...output };
   };
-  return { root, store, calls, run, setWriteResult(value) { writeResult = value; }, setHistory(value) { historyHolder.value = value; } };
+  return {
+    root, store, calls, run,
+    setWriteResult(value) { writeResult = value; },
+    setHistory(value) { historyHolder.value = value; },
+    setMembers(value) { membersHolder.value = value; },
+  };
 }
 
 test("launcher classifies protected writes, removed drafts, bypasses, and observational help", () => {
@@ -287,13 +301,181 @@ test("forward merge urgent and raw/API write surfaces remain denied before spawn
       ["im", "messages", "reply", "--data", "{}"],
       ["im", "messages", "forward", "--message-id", "om_a"],
       ["im", "messages", "merge_forward", "--message-id", "om_a"],
-      ["im", "messages", "urgent_app", "--message-id", "om_a"],
       ["im", "messages", "urgent_phone", "--message-id", "om_a"],
       ["im", "messages", "urgent_sms", "--message-id", "om_a"],
       ["im", "threads", "forward", "--message-id", "om_a"],
       ["im", "threads", "merge_forward", "--message-id", "om_a"],
     ]) assert.equal(f.run(argv).code, 2, argv.join(" "));
     assert.equal(f.calls.length, 0);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+function ownBotMessage(overrides = {}) {
+  return {
+    message_id: "om_own_urgent",
+    chat_id: "oc_urgent",
+    create_time: "1786957010773",
+    sender: { id: "cli_nativeLarkA1", id_type: "app_id", sender_type: "app" },
+    ...overrides,
+  };
+}
+
+function urgentArgv(overrides = {}) {
+  return [
+    "im", "messages", "urgent_app",
+    "--message-id", overrides.messageId ?? "om_own_urgent",
+    "--user-id-type", overrides.userIdType ?? "open_id",
+    "--data", overrides.data ?? JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] }),
+  ];
+}
+
+function seedUrgentCursor(store, revisionTime = "1786957010773", messageIds = ["om_own_urgent"]) {
+  store.mergeFreshnessCursor("feishu.im/chat/oc_urgent", {
+    schema: 1, revisionTime, messageIds,
+  }, (seen, current) => current ?? seen);
+}
+
+test("protected urgent-app classifies as guarded and keeps invented shortcut denied", () => {
+  assert.equal(launcher.classifyLarkCliCommand(urgentArgv()).kind, "guarded");
+  assert.equal(launcher.classifyLarkCliCommand(urgentArgv()).operation, "urgent-app");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-urgent-app", "--message-id", "om_own_urgent"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "urgent_phone", "--message-id", "om_own_urgent"]).kind, "denied");
+  assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--dry-run"]).kind, "passthrough");
+  assert.equal(launcher.classifyLarkCliCommand([...urgentArgv(), "--help"]).kind, "passthrough");
+});
+
+test("protected urgent-app probes freshness then spawns native urgent_app for the bot's own message", () => {
+  const f = fixture({
+    ok: true,
+    identity: "bot",
+    data: { messages: [ownBotMessage()] },
+  });
+  try {
+    seedUrgentCursor(f.store);
+    f.setWriteResult({
+      status: 0, signal: null, output: [], pid: 1,
+      stdout: `${JSON.stringify({ ok: true, identity: "bot", data: { invalid_user_id_list: [] } })}\n`,
+      stderr: "", error: undefined,
+    });
+    const sent = f.run(urgentArgv());
+    assert.equal(sent.code, 0, sent.stderr);
+    const lookup = f.calls.find((call) => call.args[2] === "+messages-mget");
+    assert.ok(lookup, "urgent_app must resolve the native message before freshness");
+    assert.equal(lookup.args[lookup.args.indexOf("--message-ids") + 1], "om_own_urgent");
+    const memberCall = f.calls.find((call) => call.args[2] === "+chat-members-list");
+    assert.ok(memberCall, "urgent-app must probe chat members before write");
+    assert.equal(memberCall.args[memberCall.args.indexOf("--chat-id") + 1], "oc_urgent");
+    assert.equal(memberCall.args[memberCall.args.indexOf("--member-id-type") + 1], "open_id");
+    assert.equal(memberCall.args[memberCall.args.indexOf("--page-limit") + 1], "0");
+    const writeCall = f.calls.find((call) => call.args[2] === "messages" && call.args[3] === "urgent_app");
+    assert.ok(writeCall, "native urgent_app must be spawned after freshness");
+    const write = writeCall.args.slice(1);
+    assert.deepEqual(write.slice(0, 3), ["im", "messages", "urgent_app"]);
+    assert.equal(write.includes("+messages-urgent-app"), false);
+    assert.equal(write.includes("--idempotency-key"), false);
+    assert.equal(write[write.indexOf("--message-id") + 1], "om_own_urgent");
+    assert.equal(write[write.indexOf("--user-id-type") + 1], "open_id");
+    assert.equal(write[write.indexOf("--as") + 1], "bot");
+    assert.deepEqual(JSON.parse(write[write.indexOf("--data") + 1]), {
+      user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"],
+    });
+    const again = f.run([...urgentArgv(), "--idempotency-key", "forced-urgent-key"]);
+    assert.equal(again.code, 0, again.stderr);
+    const writes = f.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "urgent_app");
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1].args.includes("--idempotency-key"), false);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected urgent-app fails closed for foreign, synthetic, malformed, and unseen messages", () => {
+  const f = fixture({
+    ok: true,
+    identity: "bot",
+    data: { messages: [
+      ownBotMessage(),
+      ownBotMessage({ message_id: "om_other", sender: { id: "ou_human", sender_type: "user" } }),
+      ownBotMessage({ message_id: "om_other_app", sender: { id: "cli_otherAppA1", id_type: "app_id", sender_type: "app" } }),
+    ] },
+  });
+  try {
+    seedUrgentCursor(f.store, "1786957010773", ["om_own_urgent", "om_other", "om_other_app"]);
+    for (const argv of [
+      urgentArgv({ messageId: "om_other" }),
+      urgentArgv({ messageId: "om_other_app" }),
+      urgentArgv({ messageId: "rem_not_a_message" }),
+      urgentArgv({ messageId: "om_missing" }),
+      urgentArgv({ userIdType: "user_id" }),
+      urgentArgv({ data: JSON.stringify({ user_id_list: ["not-an-open-id"] }) }),
+      urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_not_in_chat"] }) }),
+      urgentArgv({ data: JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234", "ou_not_in_chat"] }) }),
+      [...urgentArgv(), "--data", JSON.stringify({ user_id_list: ["ou_not_in_chat"] })],
+      [...urgentArgv(), "--user-id-type", "user_id"],
+      ["im", "+messages-urgent-app", "--message-id", "om_own_urgent", "--user-id-type", "open_id", "--data", JSON.stringify({ user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] })],
+    ]) {
+      const before = f.calls.length;
+      assert.equal(f.run(argv).code, 2, argv.join(" "));
+      assert.equal(f.calls.slice(before).some((call) => call.args[2] === "urgent_app"), false, argv.join(" "));
+    }
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected urgent-app fails closed when member probe is truncated or native returns invalid users", () => {
+  const f = fixture({
+    ok: true,
+    identity: "bot",
+    data: { messages: [ownBotMessage()] },
+  });
+  try {
+    seedUrgentCursor(f.store);
+    f.setMembers({
+      ok: true,
+      identity: "bot",
+      data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], has_more: true, truncations: [] },
+    });
+    const incomplete = f.run(urgentArgv());
+    assert.equal(incomplete.code, 2, incomplete.stderr);
+    assert.match(incomplete.stderr, /incomplete/);
+    assert.equal(f.calls.some((call) => call.args[2] === "messages" && call.args[3] === "urgent_app"), false);
+    f.setMembers({
+      ok: true,
+      identity: "bot",
+      data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], truncations: ["users"] },
+    });
+    const truncated = f.run(urgentArgv());
+    assert.equal(truncated.code, 2, truncated.stderr);
+    assert.match(truncated.stderr, /truncated/);
+    assert.equal(f.calls.some((call) => call.args[2] === "messages" && call.args[3] === "urgent_app"), false);
+
+    f.setMembers({
+      ok: true,
+      identity: "bot",
+      data: { users: [{ member_id: "ou_10937ddc38cfd9fd239591c634fed234" }], truncations: [] },
+    });
+    f.setWriteResult({
+      status: 0, signal: null, output: [], pid: 1,
+      stdout: `${JSON.stringify({ ok: true, identity: "bot", data: { invalid_user_id_list: ["ou_10937ddc38cfd9fd239591c634fed234"] } })}\n`,
+      stderr: "", error: undefined,
+    });
+    const invalid = f.run(urgentArgv());
+    assert.equal(invalid.code, 2, invalid.stderr);
+    assert.match(invalid.stderr, /invalid_user_id_list/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected urgent-app does not submit after a freshness conflict", () => {
+  const f = fixture({
+    ok: true,
+    identity: "bot",
+    data: { messages: [ownBotMessage({ create_time: "1786957010774" })] },
+  });
+  try {
+    f.store.mergeFreshnessCursor("feishu.im/chat/oc_urgent", {
+      schema: 1, revisionTime: "1786957010773", messageIds: ["om_seen"],
+    }, (seen, current) => current ?? seen, "gen");
+    const conflicted = f.run(urgentArgv());
+    assert.equal(conflicted.code, 3, conflicted.stderr);
+    assert.match(conflicted.stderr, /freshness_conflict/);
+    assert.equal(f.calls.some((call) => call.args[2] === "urgent_app"), false);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

@@ -1605,3 +1605,56 @@ test("issue 138: leftover inbox_update is not promoted during Pi compaction reco
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("issue 138: reopening a terminal wake failure can be promoted again", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue138-reopen-"));
+  const agentId = "cli_issue138ReopenA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  let releasePrompt;
+  session.prompt = async (input) => {
+    session.prompts.push(input);
+    if (session.prompts.length === 1) await new Promise((resolve) => { releasePrompt = resolve; });
+    if (input.kind === "wake" && input.inputId !== session.prompts[0]?.inputId && input.attempt === 0) {
+      return { status: "rejected", inputId: input.inputId, retryable: false, reason: "terminal fixture rejection" };
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    const target = "chat:oc_issue138_reopen";
+    store.appendNdjson("inbox", { message_id: "om_issue138_reopen_owner", target, content: "owner" });
+    const first = host.deliver(agentId, { message_id: "om_issue138_reopen_owner", target });
+    await waitForCondition(() => session.prompts.length === 1);
+    session.emit({ type: "turn-start", turnId: "turn-reopen-1" });
+    store.pollInbox({ target, limit: 1 });
+    session.emit({ type: "turn-end", turnId: "turn-reopen-1" });
+    store.appendNdjson("inbox", { message_id: "om_issue138_reopen_late", target, content: "late" });
+    const late = await host.deliver(agentId, { message_id: "om_issue138_reopen_late", target });
+    releasePrompt();
+    await first;
+    await waitForCondition(() => session.prompts.some((input) => input.inputId === late.deliveryId && input.kind === "wake"));
+    await waitForCondition(() => store.readJson("runtimeDeliveries", { records: [] }).records
+      .some((record) => record.messageId === "om_issue138_reopen_late" && record.status === "error"));
+    store.appendNdjson("inbox", { message_id: "om_issue138_reopen_owner2", target, content: "owner2" });
+    const second = host.deliver(agentId, { message_id: "om_issue138_reopen_owner2", target });
+    await waitForCondition(() => session.prompts.length >= 3);
+    session.emit({ type: "turn-start", turnId: "turn-reopen-2" });
+    session.emit({ type: "turn-end", turnId: "turn-reopen-2" });
+    const retried = await host.deliver(agentId, { message_id: "om_issue138_reopen_late", target });
+    assert.equal(retried.deliveryId, late.deliveryId);
+    await second;
+    await host.scanPendingInboxUpdates(agentId);
+    await waitForCondition(() => session.prompts.filter((input) => input.inputId === late.deliveryId && input.kind === "wake").length >= 2);
+    const retryWake = session.prompts.filter((input) => input.inputId === late.deliveryId && input.kind === "wake").at(-1);
+    assert.ok(retryWake.attempt >= 1, "reopened delivery must be promotable again after a terminal wake failure");
+  } finally {
+    await host.shutdown("issue 138 reopen-promote test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

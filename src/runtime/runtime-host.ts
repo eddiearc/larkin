@@ -1636,6 +1636,7 @@ export function createRuntimeHost(options: {
             : { inputId: existing.deliveryId, deliveryId: existing.deliveryId, kind: "wake", text: "", attempt: priorAttempt + 1 };
           delete existing.reason;
           delete existing.retryable;
+          agent.promotedInboxUpdateIds.delete(existing.deliveryId);
           setRecord(agent, existing, "pending");
           const receipt = await (telemetry?.phase(messageId, "runtime.deliver", SpanKind.PRODUCER,
             () => submit(agent, existing, agent.busy || agent.submitting)) ?? submit(agent, existing, agent.busy || agent.submitting));

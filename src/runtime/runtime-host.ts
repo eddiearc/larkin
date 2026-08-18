@@ -226,7 +226,17 @@ function boundedRecords(agent: ManagedAgent): DeliveryRecord[] {
   const bounded = [...active, ...terminal].slice(-MAX_DELIVERIES);
   agent.records = new Map(bounded.map((record) => [record.deliveryId, record]));
   agent.byMessage = new Map(bounded.map((record) => [record.messageId, record.deliveryId]));
+  prunePromotedInboxUpdateIds(agent);
   return bounded;
+}
+
+function prunePromotedInboxUpdateIds(agent: ManagedAgent): void {
+  if (!agent.promotedInboxUpdateIds?.size) return;
+  for (const id of agent.promotedInboxUpdateIds) {
+    if (!agent.records.has(id)) agent.promotedInboxUpdateIds.delete(id);
+  }
+  if (agent.promotedInboxUpdateIds.size <= MAX_DELIVERIES) return;
+  agent.promotedInboxUpdateIds = new Set([...agent.promotedInboxUpdateIds].slice(-MAX_DELIVERIES));
 }
 
 export function createRuntimeHost(options: {
@@ -407,7 +417,7 @@ export function createRuntimeHost(options: {
       return agent.stateStore.readNdjson<Record<string, unknown>>("inbox")
         .some((row) => row?.message_id === record.messageId);
     } catch {
-      return true;
+      return false;
     }
   };
 
@@ -635,13 +645,19 @@ export function createRuntimeHost(options: {
     reconcileExternalConsumption(agent);
     let promoted = 0;
     for (const record of candidates) {
-      if (agent.records.get(record.deliveryId)?.status !== "accepted") continue;
-      agent.promotedInboxUpdateIds.add(record.deliveryId);
-      record.reason = INBOX_UPDATE_PROMOTE_REASON;
-      record.retryable = true;
-      setRecord(agent, record, "pending");
-      emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
-        messageId: record.messageId, status: "deferred", reason: INBOX_UPDATE_PROMOTE_REASON });
+      const current = agent.records.get(record.deliveryId);
+      if (current?.status !== "accepted") continue;
+      if (!acceptedInboxStillPending(agent, current)) {
+        reconcileAbsentCanonical(agent, current);
+        continue;
+      }
+      agent.promotedInboxUpdateIds.add(current.deliveryId);
+      current.reason = INBOX_UPDATE_PROMOTE_REASON;
+      current.retryable = true;
+      const finalRecord = setRecord(agent, current, "pending");
+      if (finalRecord.status === "consumed") continue;
+      emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: finalRecord.deliveryId,
+        messageId: finalRecord.messageId, status: "deferred", reason: INBOX_UPDATE_PROMOTE_REASON });
       promoted += 1;
     }
     if (!promoted) return;

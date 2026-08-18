@@ -1501,3 +1501,107 @@ test("issue 138: the same accepted inbox_update is not re-woken in a loop", asyn
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("issue 138: concurrent CLI poll does not emit a promoted-after-idle deferred", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue138-poll-skip-"));
+  const agentId = "cli_issue138PollSkipA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  let releasePrompt;
+  const target = "chat:oc_issue138_poll";
+  session.prompt = async (input) => {
+    session.prompts.push(input);
+    if (session.prompts.length === 1) await new Promise((resolve) => { releasePrompt = resolve; });
+    return { status: "accepted", inputId: input.inputId };
+  };
+  session.busyInput = async (input) => {
+    session.steers.push(input);
+    const polled = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(polled.envelopes.map((row) => row.message_id), ["om_issue138_consumed_late"]);
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const events = [];
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    store.appendNdjson("inbox", { message_id: "om_issue138_owner_poll", target, content: "owner" });
+    const first = host.deliver(agentId, { message_id: "om_issue138_owner_poll", target });
+    await waitForCondition(() => session.prompts.length === 1);
+    session.emit({ type: "turn-start", turnId: "turn-poll-skip" });
+    store.pollInbox({ target, limit: 1 });
+    session.emit({ type: "turn-end", turnId: "turn-poll-skip" });
+    store.appendNdjson("inbox", { message_id: "om_issue138_consumed_late", target, content: "already polled" });
+    const late = await host.deliver(agentId, { message_id: "om_issue138_consumed_late", target });
+    assert.equal(late.status, "accepted");
+    assert.equal(session.steers[0]?.kind, "inbox_update");
+    releasePrompt();
+    assert.equal((await first).status, "accepted");
+    await host.scanPendingInboxUpdates(agentId);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.filter((input) => input.inputId === late.deliveryId && input.kind === "wake").length, 0,
+      "a concurrently consumed Inbox row must not be promoted to a wake");
+    assert.equal(events.some((event) => event.type === "delivery" && event.deliveryId === late.deliveryId
+      && event.status === "deferred" && /promoted after Agent became idle/.test(event.reason)), false,
+      "must not emit a contradictory promoted-after-idle deferred after CLI poll consumption");
+    const lateRecord = store.readJson("runtimeDeliveries", { records: [] }).records
+      .find((record) => record.messageId === "om_issue138_consumed_late");
+    assert.equal(lateRecord?.status, "consumed");
+  } finally {
+    await host.shutdown("issue 138 poll-skip test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("issue 138: leftover inbox_update is not promoted during Pi compaction recovery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue138-compact-skip-"));
+  const agentId = "cli_issue138CompactSkipA1";
+  const store = createAgentStateStore(root, agentId);
+  let releaseCompact;
+  class CompactingSession extends FakeSession {
+    compactCalls = 0;
+    async compact() { this.compactCalls += 1; await new Promise((resolve) => { releaseCompact = resolve; }); return {}; }
+  }
+  const session = new CompactingSession();
+  const events = [];
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "pi", model: "model", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    const target = "chat:oc_issue138_compact";
+    store.appendNdjson("inbox", { message_id: "om_issue138_overflow", target, content: "overflow" });
+    const first = await host.deliver(agentId, { message_id: "om_issue138_overflow", target });
+    assert.equal(first.status, "accepted");
+    session.emit({ type: "turn-start", turnId: "turn-compact-skip" });
+    store.appendNdjson("inbox", { message_id: "om_issue138_late_compact", target, content: "late during overflow" });
+    const late = await host.deliver(agentId, { message_id: "om_issue138_late_compact", target });
+    assert.equal(late.status, "accepted");
+    assert.equal(session.steers[0]?.kind, "inbox_update");
+    session.emit({
+      type: "input-error", inputId: session.prompts[0].inputId, retryable: false, willRetry: false,
+      message: "Your input exceeds the context window of this model. Please adjust your input and try again.",
+      errorCategory: "context_window",
+    });
+    await waitForCondition(() => session.compactCalls === 1);
+    await host.scanPendingInboxUpdates(agentId);
+    assert.equal(session.prompts.filter((input) => input.inputId === late.deliveryId && input.kind === "wake").length, 0,
+      "Pi compaction recovery must not promote leftover inbox_update to a wake");
+    assert.equal(events.some((event) => event.type === "delivery" && event.deliveryId === late.deliveryId
+      && event.status === "deferred" && /promoted after Agent became idle/.test(event.reason)), false);
+    const lateRecord = store.readJson("runtimeDeliveries", { records: [] }).records
+      .find((record) => record.messageId === "om_issue138_late_compact");
+    assert.equal(lateRecord?.input?.kind, "inbox_update");
+    releaseCompact();
+  } finally {
+    await host.shutdown("issue 138 compact-skip test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

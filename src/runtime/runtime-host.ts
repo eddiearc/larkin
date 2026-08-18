@@ -628,12 +628,14 @@ export function createRuntimeHost(options: {
    */
   const scanAndPromoteAcceptedInboxUpdates = async (agent: ManagedAgent): Promise<void> => {
     if (!agentIsIdleForInboxScan(agent)) return;
+    if (agent.compactionMachines.size > 0 || agent.compactionRecoveryInFlight.size > 0) return;
+    const candidates = [...agent.records.values()].filter((record) => record.status === "accepted"
+      && isInboxUpdateKind(record.input?.kind) && !agent.promotedInboxUpdateIds.has(record.deliveryId));
+    if (!candidates.length) return;
     reconcileExternalConsumption(agent);
     let promoted = 0;
-    for (const record of agent.records.values()) {
-      if (record.status !== "accepted" || !isInboxUpdateKind(record.input?.kind)) continue;
-      if (agent.promotedInboxUpdateIds.has(record.deliveryId)) continue;
-      if (!acceptedInboxStillPending(agent, record)) continue;
+    for (const record of candidates) {
+      if (agent.records.get(record.deliveryId)?.status !== "accepted") continue;
       agent.promotedInboxUpdateIds.add(record.deliveryId);
       record.reason = INBOX_UPDATE_PROMOTE_REASON;
       record.retryable = true;
@@ -938,11 +940,10 @@ export function createRuntimeHost(options: {
         emit({ type: "agent-status", agentId: agent.config.agentId, status: "active", readiness: agent.readiness });
       }
       const proactive = proactivelyCompactPiAtIdle(agent, session);
-      void (proactive ?? Promise.resolve("noop" as const)).then(async (outcome) => {
-        if (outcome === "failed") return;
-        await scanAndPromoteAcceptedInboxUpdates(agent);
-        return retryPending(agent);
+      void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
+        if (outcome !== "failed") return retryPending(agent);
       });
+      queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
       emit({ type: "activity", agentId: agent.config.agentId, activity: event.activity, activityKind: event.activity });

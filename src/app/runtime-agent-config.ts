@@ -17,10 +17,15 @@ import { internalCommandSpec } from "./internal-command.js";
 import {
   assertAgentWorkspaceBound, larkChannelSourceConfigPath, larkChannelWorkspaceConfigPath, managedLarkCliEnv,
 } from "./agent-lark-cli-workspace.js";
+import {
+  accountTenantFromOpenHost,
+  openPlatformHost,
+  type OpenPlatformHost,
+} from "../feishu/platform-hosts.js";
 
 export interface RuntimeAgentConfig extends HydratedAgent {
   feishuAppSecret: string;
-  feishuDomain: "https://open.feishu.cn" | "https://open.larksuite.com";
+  feishuDomain: OpenPlatformHost;
   credentialRevision: string;
 }
 
@@ -157,7 +162,7 @@ export function hydrateRuntimeAgent(configDir: string, agent: HydratedAgent): Ru
   return {
     ...agent,
     feishuAppSecret: credential.appSecret,
-    feishuDomain: credential.tenant === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn",
+    feishuDomain: openPlatformHost(credential.tenant),
     credentialRevision,
   };
 }
@@ -266,7 +271,7 @@ export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stat
   return commandDir;
 }
 
-function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Record<string, unknown> {
+export function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Record<string, unknown> {
   const configDir = path.resolve(env.LARKIN_CONFIG_DIR || "");
   if (!configDir) throw new Error("LARKIN_CONFIG_DIR required for lark-channel source projection");
   const provider = internalCommandSpec("lark-channel-secret", [], {
@@ -278,7 +283,7 @@ function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Re
     accounts: { app: {
       id: agent.feishuAppId,
       secret: { source: "exec", provider: "larkin-bot-credential", id: agent.feishuAppId },
-      tenant: agent.feishuDomain === "https://open.larksuite.com" ? "lark" : "feishu",
+      tenant: accountTenantFromOpenHost(agent.feishuDomain),
     } },
     secrets: { providers: { "larkin-bot-credential": {
       source: "exec", command: provider.command, args: provider.args,
@@ -292,7 +297,7 @@ function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Re
   };
 }
 
-function validateSourceProjection(file: string, agent: Pick<RuntimeAgentConfig, "agentId" | "feishuAppId" | "credentialRevision">): void {
+function validateSourceProjection(file: string, agent: Pick<RuntimeAgentConfig, "agentId" | "feishuAppId" | "credentialRevision" | "feishuDomain">): void {
   const snapshot = captureProfileSnapshot(file);
   if (!snapshot) throw new Error(`Agent ${agent.agentId} lark-channel source projection missing`);
   const root = snapshot.value as Record<string, any>;
@@ -309,6 +314,9 @@ function validateSourceProjection(file: string, agent: Pick<RuntimeAgentConfig, 
   }
   if (JSON.stringify(snapshot.value).includes("appSecret")) throw new Error("lark-channel source projection 不得包含 plaintext secret 字段");
   if (root.credentialRevision !== agent.credentialRevision) throw new Error(`Agent ${agent.agentId} lark-channel credential revision mismatch`);
+  if (app?.tenant !== accountTenantFromOpenHost(agent.feishuDomain)) {
+    throw new Error(`Agent ${agent.agentId} lark-channel source projection tenant mismatch`);
+  }
 }
 
 export function syncAgentProfile(

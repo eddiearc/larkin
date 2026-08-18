@@ -37,6 +37,12 @@ import {
   type DocumentCommentSubscriptionCapability,
   type DocumentCommentSubscriptionDimension,
 } from "../platform/callback-capability.js";
+import {
+  openPlatformHost,
+  parseLarkinTenant,
+  registerAppAccountsHost,
+  type LarkinTenant,
+} from "../feishu/platform-hosts.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -55,6 +61,8 @@ interface StoredCredential {
 
 type RegisterApp = (options: {
   source: string;
+  domain?: string;
+  larkDomain?: string;
   addons: {
     scopes: { tenant: string[] };
     events: { items: { tenant: string[] } };
@@ -269,6 +277,42 @@ export async function applyDocumentCommentSubscription(input: {
   }
 }
 
+async function resolveSelectedTenant(): Promise<LarkinTenant> {
+  const raw = flag("--tenant");
+  if (raw !== undefined) {
+    const parsed = parseLarkinTenant(raw);
+    if (parsed === "feishu" || parsed === "lark") return parsed;
+    die("--tenant 只支持 feishu 或 lark");
+  }
+  if (process.stdin.isTTY && process.stdout.isTTY && !testFixture) {
+    const questioner = terminalSetupQuestioner();
+    try {
+      const answer = (await questioner.ask(
+        "选择平台（授权二维码必须对应正确品牌；lark-cli --domain 是业务域，品牌是 feishu|lark）：\n"
+        + "  1. 中国飞书 Feishu（accounts.feishu.cn / https://open.feishu.cn）\n"
+        + "  2. International Lark（accounts.larksuite.com / https://open.larksuite.com）\n> ",
+      )).trim();
+      if (answer === "1" || /^feishu$/i.test(answer)) return "feishu";
+      if (answer === "2" || /^lark$/i.test(answer)) return "lark";
+      die("必须选择 1/feishu 或 2/lark；未开始授权");
+    } finally { questioner.close?.(); }
+  }
+  return "feishu";
+}
+
+function persistTenant(selected: LarkinTenant, userInfo: RegistrationResult["user_info"]): LarkinTenant {
+  const brand = userInfo?.tenant_brand;
+  if (brand === undefined || brand === null || brand === "") return selected;
+  const observed = parseLarkinTenant(brand);
+  if (observed !== "feishu" && observed !== "lark") {
+    die("授权返回的租户品牌非法；未执行凭证同步、文件写入或 Agent 绑定");
+  }
+  if (observed !== selected) {
+    die(`授权返回的租户 ${observed} 与预先选择的 ${selected} 不一致；未执行凭证同步、文件写入或 Agent 绑定`);
+  }
+  return selected;
+}
+
 function botVerificationRetryable(result: { status: number | null; stdout?: unknown; stderr?: unknown }): boolean {
   const text = `${typeof result.stdout === "string" ? result.stdout : ""}\n${typeof result.stderr === "string" ? result.stderr : ""}`;
   return /\binvalid_client\b|specified app does not exist|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|temporary network|too many requests|\b(?:429|502|503|504)\b/i.test(text);
@@ -412,7 +456,7 @@ async function fetchBotInfoViaHttp(appId: string, tenant: "feishu" | "lark" | un
     credential = JSON.parse(fs.readFileSync(path.join(ensureSecureBotsDir(), `${appId}.json`), "utf8")) as { appSecret?: unknown };
   } catch { return null; }
   if (typeof credential.appSecret !== "string" || !credential.appSecret) return null;
-  const base = tenant === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn";
+  const base = openPlatformHost(tenant === "lark" ? "lark" : "feishu");
   try {
     const tokenResponse = await fetch(`${base}/open-apis/auth/v3/tenant_access_token/internal`, {
       method: "POST",
@@ -457,7 +501,10 @@ if (has("--help") || has("-h")) {
   say(`setup 内部机器人注册阶段
 
 用法:
-  bun bot-register.mjs --auto
+  bun bot-register.mjs --auto [--tenant feishu|lark]
+
+--tenant 在授权二维码之前选择品牌。默认 feishu（accounts.feishu.cn）；
+Lark 必须用 --tenant lark 或交互选择，授权主机是 accounts.larksuite.com。
 
 完成后自动：按返回 appId 判定新旧 → 同步并校验 lark-cli bot 凭证 →
   原子写 bots/<appId>.json（0600）→ 绑定 Agent。`);
@@ -479,7 +526,8 @@ if (argv.some((arg) => arg === "--app-id" || arg.startsWith("--app-id="))) {
   die("不支持 --app-id；机器人必须在飞书（Lark）网页中选择");
 }
 if (!autoSelect) die("setup 注册阶段必须由交互式选择流程启动");
-say("[setup 1/5] 在网页选择已有机器人或创建新机器人");
+const selectedTenant = await resolveSelectedTenant();
+say(`[setup 1/5] 在${selectedTenant === "lark" ? " International Lark" : "中国飞书 Feishu"}网页选择已有机器人或创建新机器人`);
 if (commentSubscription === "application") {
   say(`! 已显式选择 ${commentSubscription} 维度评论订阅：一旦平台状态验证为已订阅，Bot 可见文档中实际送达的每条支持评论都会进入 Inbox 并唤醒 Agent，不要求 @Bot。`);
   say("! setup 将通过官方 lark-cli 的结构化 API 请求创建该订阅，并以只读 subscription_status 二次核验；不会从意图或事件配置推断订阅已生效。");
@@ -516,6 +564,8 @@ let pollingCount = 0;
 
 const result = await registerApp({
   source: "larkin",
+  domain: registerAppAccountsHost(selectedTenant),
+  larkDomain: registerAppAccountsHost("lark"),
   addons: {
     scopes: { tenant: TENANT_SCOPES },
     events: { items: { tenant: TENANT_EVENTS } },
@@ -538,10 +588,9 @@ if (typeof rawId !== "string" || !APP_ID.test(rawId)) die("授权返回的 App I
 if (typeof rawSecret !== "string" || rawSecret.length === 0) die("授权完成但未取得有效凭证；未执行凭证同步、文件写入或 Agent 绑定");
 const id = rawId as string;
 const secret = rawSecret as string;
+const tenant = persistTenant(selectedTenant, userInfo);
 const botsDir = ensureSecureBotsDir();
 say(`[setup 3/5] 正在按 App ID ${id} 刷新凭证并配置 Agent`);
-
-const tenant = userInfo?.tenant_brand === "lark" ? "lark" : "feishu";
 const botFile = path.join(botsDir, `${id}.json`);
 const prior: StoredCredential = (() => {
   try { return JSON.parse(fs.readFileSync(botFile, "utf8")) as StoredCredential; }

@@ -37,6 +37,7 @@ import {
 } from "./document-comment.js";
 import type { CommentEvent, CommentTarget, FetchedComment } from "@larksuite/channel";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
+import { isOpenPlatformHost, requireOpenDomain } from "./platform-hosts.js";
 
 interface ConfiguredAgent {
   agentId: string;
@@ -216,7 +217,7 @@ function loadAgents(
       }
     }
     if (!testEventSource && (typeof candidate.feishuAppSecret !== "string" || !candidate.feishuAppSecret.trim()
-      || !["https://open.feishu.cn", "https://open.larksuite.com"].includes(String(candidate.feishuDomain)))) {
+      || !isOpenPlatformHost(candidate.feishuDomain))) {
       throw new Error(`LARKIN_AGENTS_CONFIG Agent ${id} 缺少有效 channel 凭证/domain`);
     }
     const expectedWorkspace = path.join(larkinHome, "agents", id);
@@ -791,7 +792,7 @@ export function createHostShell({
     const channel = createLarkChannel({
       appId: agent.feishuAppId,
       appSecret: agent.feishuAppSecret,
-      domain: agent.feishuDomain || "https://open.feishu.cn",
+      domain: requireOpenDomain(agent.feishuDomain),
       source: "larkin",
       policy: { dmMode: "open", requireMention: false, respondToMentionAll: true },
       // issue #88：关闭 SDK 的防抖批量合并（默认 600ms），逐条投递，
@@ -898,7 +899,7 @@ export function createHostShell({
       const channel = createLarkChannel({
         appId: agent.feishuAppId,
         appSecret: agent.feishuAppSecret,
-        domain: agent.feishuDomain || "https://open.feishu.cn",
+        domain: requireOpenDomain(agent.feishuDomain),
         source: "larkin",
         policy: { dmMode: "open", requireMention: false, respondToMentionAll: true },
         // issue #88：关闭 SDK 的防抖批量合并（默认 600ms），逐条投递，

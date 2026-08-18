@@ -9,6 +9,8 @@ import { registerApp as channelRegisterApp } from "@larksuite/channel";
 import { markSetupCapabilitiesRequested } from "../platform/callback-capability.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
+import { loadValidatedBotCredential } from "./run-credential-preflight.js";
+import { parseLarkinTenant, registerAppAccountsHost, type LarkinTenant } from "../feishu/platform-hosts.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -27,7 +29,7 @@ interface GrantOptions {
   source: string;
   appId: string;
   addons: { scopes: { tenant: string[] }; events: { items: { tenant: string[] } }; callbacks: { items: string[] } };
-  domain?: "lark";
+  domain?: string;
   onQRCodeReady(info: { url: string; expireIn: number }): void;
   onStatusChange(info: { status: string }): void;
 }
@@ -64,7 +66,18 @@ const APP_ID = selected.agentId;
 if (explicitAppId && explicitAppId !== selected.feishuAppId) throw new Error("--app-id 必须等于所选 Agent 的 App ID");
 if (!/^cli_[A-Za-z0-9]+$/.test(APP_ID)) throw new Error(`无效飞书（Lark） App ID：${APP_ID}`);
 const SEND_TO = flag("--send-to", "");
-const TENANT = flag("--tenant", "feishu");
+const explicitTenant = argv.includes("--tenant") ? flag("--tenant", "") : "";
+if (argv.includes("--tenant") && !parseLarkinTenant(explicitTenant)) {
+  throw new Error("--tenant 只支持 feishu 或 lark");
+}
+function storedCredentialTenant(): LarkinTenant {
+  try {
+    return loadValidatedBotCredential(path.join(config.larkinHome, "bots"), APP_ID).tenant;
+  } catch {
+    return "feishu";
+  }
+}
+const TENANT = parseLarkinTenant(explicitTenant) ?? storedCredentialTenant();
 const WAIT_MIN = Number(flag("--wait-min", "9"));
 const URL_FILE = flag("--url-file", "");
 
@@ -129,8 +142,8 @@ export async function main(): Promise<void> {
       sendUrlToChat(info.url, minutes);
     },
     onStatusChange: (info) => log(`[grant] 状态: ${info.status}`),
+    domain: registerAppAccountsHost(TENANT),
   };
-  if (TENANT === "lark") options.domain = "lark";
 
   let result: { client_id?: string } | null;
   try { result = await registerApp(options); }

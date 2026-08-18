@@ -1153,6 +1153,9 @@ export function createHostShell({
           }, 80);
           hostState.updateStatus(agent, { droughtReconnectAt, droughtReconnectAbandonedAt: null });
           reconnectFns.get(agent.agentId)?.();
+          void runtimeHost.scanPendingInboxUpdates?.(agent.agentId)?.catch((error) => {
+            log(`drought reconnect inbox scan failed agent=${agent.name}: ${errorMessage(error)}`);
+          });
         }).catch((error) => {
           maintenance.inFlight = false;
           if (shuttingDown || fataling) return;

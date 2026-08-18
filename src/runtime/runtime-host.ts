@@ -86,6 +86,8 @@ interface ManagedAgent {
   piProactiveCompactionFailedGeneration: number | null;
   readiness: RuntimeReadiness | null;
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
+  /** Delivery ids already promoted from accepted inbox_update to a wake while idle. */
+  promotedInboxUpdateIds: Set<string>;
 }
 
 export interface RuntimeHost {
@@ -97,6 +99,8 @@ export interface RuntimeHost {
   shutdown(reason: string): Promise<void>;
   subscribe(listener: (event: RuntimeHostEvent) => void): () => void;
   isBusy?(agentId: string): boolean;
+  /** Promote accepted inbox_update deliveries once after idle / drought reconnect. */
+  scanPendingInboxUpdates?(agentId?: string): Promise<void>;
   resetSession?(agentId: string): Promise<RuntimeSessionResetResult>;
   recoverSession?(agentId: string, reason: "context-overflow"): Promise<RuntimeSessionRecoveryResult>;
   /** Internal recovery boundary for Pi compaction failures; never exposed as session reset. */
@@ -393,6 +397,19 @@ export function createRuntimeHost(options: {
   };
 
   const TURN_END_RETRY_REASON = "runtime turn ended before Inbox consumption was observed";
+  const INBOX_UPDATE_PROMOTE_REASON = "accepted inbox_update promoted after Agent became idle";
+  const isInboxUpdateKind = (kind: unknown): boolean => kind === "inbox_update" || kind === "inbox-update";
+  const agentIsIdleForInboxScan = (agent: ManagedAgent): boolean =>
+    !agent.stopped && !agent.busy && !agent.submitting && !agent.turnInProgress && !agent.starting && Boolean(agent.session);
+  const acceptedInboxStillPending = (agent: ManagedAgent, record: DeliveryRecord): boolean => {
+    if (!agent.stateStore?.readNdjson) return true;
+    try {
+      return agent.stateStore.readNdjson<Record<string, unknown>>("inbox")
+        .some((row) => row?.message_id === record.messageId);
+    } catch {
+      return true;
+    }
+  };
 
   /**
    * Runtime acceptance acknowledges only the notification. At the safe turn
@@ -576,6 +593,7 @@ export function createRuntimeHost(options: {
         agent.retryAfterSubmit = false;
         queueMicrotask(() => { void retryPending(agent); });
       }
+      queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
     }
   };
 
@@ -602,6 +620,31 @@ export function createRuntimeHost(options: {
     try { await run; } finally {
       if (agent.retryPendingInFlight === run) agent.retryPendingInFlight = null;
     }
+  };
+
+  /**
+   * After busy/submitting clears, accepted inbox_update notices have no later
+   * turn boundary. Promote each delivery id at most once to a wake.
+   */
+  const scanAndPromoteAcceptedInboxUpdates = async (agent: ManagedAgent): Promise<void> => {
+    if (!agentIsIdleForInboxScan(agent)) return;
+    reconcileExternalConsumption(agent);
+    let promoted = 0;
+    for (const record of agent.records.values()) {
+      if (record.status !== "accepted" || !isInboxUpdateKind(record.input?.kind)) continue;
+      if (agent.promotedInboxUpdateIds.has(record.deliveryId)) continue;
+      if (!acceptedInboxStillPending(agent, record)) continue;
+      agent.promotedInboxUpdateIds.add(record.deliveryId);
+      record.reason = INBOX_UPDATE_PROMOTE_REASON;
+      record.retryable = true;
+      setRecord(agent, record, "pending");
+      emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
+        messageId: record.messageId, status: "deferred", reason: INBOX_UPDATE_PROMOTE_REASON });
+      promoted += 1;
+    }
+    if (!promoted) return;
+    if (agent.retryPendingInFlight) agent.retryAfterSubmit = true;
+    await retryPending(agent);
   };
 
   const scheduleRecreate = (agent: ManagedAgent, reason: string): void => {
@@ -895,8 +938,10 @@ export function createRuntimeHost(options: {
         emit({ type: "agent-status", agentId: agent.config.agentId, status: "active", readiness: agent.readiness });
       }
       const proactive = proactivelyCompactPiAtIdle(agent, session);
-      void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-        if (outcome !== "failed") return retryPending(agent);
+      void (proactive ?? Promise.resolve("noop" as const)).then(async (outcome) => {
+        if (outcome === "failed") return;
+        await scanAndPromoteAcceptedInboxUpdates(agent);
+        return retryPending(agent);
       });
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
@@ -1213,6 +1258,13 @@ export function createRuntimeHost(options: {
       };
     },
     isBusy(agentId): boolean { const agent = managed.get(agentId); return Boolean(agent?.busy || agent?.submitting || agent?.starting); },
+    async scanPendingInboxUpdates(agentId): Promise<void> {
+      const agents = agentId ? [managed.get(agentId)] : [...managed.values()];
+      for (const agent of agents) {
+        if (!agent || agent.stopped) continue;
+        await scanAndPromoteAcceptedInboxUpdates(agent);
+      }
+    },
     async resetSession(agentId): Promise<RuntimeSessionResetResult> {
       const agent = managed.get(agentId);
       if (!agent || agent.stopped) throw new RuntimeSessionResetError("unknown_agent", `unknown runtime Agent: ${agentId}`);
@@ -1481,7 +1533,8 @@ export function createRuntimeHost(options: {
           compactionMachines: new Map(), compactionRecoveryInFlight: new Set(), piOverflowCompactionFailed: new Set(),
           piProactiveCompaction: null, piProactiveCompactionGeneration: null, piProactiveCompactionSession: null,
           piProactiveCompactionFailedGeneration: null, readiness: null,
-          turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false };
+          turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false,
+          promotedInboxUpdateIds: new Set() };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
         for (const record of agent.records.values()) {

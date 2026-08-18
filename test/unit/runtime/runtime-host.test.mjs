@@ -1371,3 +1371,133 @@ test("short-lived successful creations share one crash epoch and reach bounded e
   assert.ok(errors.some((message) => /recreation exhausted after 2 attempts/.test(message)), errors.join("\n"));
   await host.shutdown("test complete");
 });
+
+const waitForCondition = async (predicate, timeout = 1_000) => {
+  const deadline = Date.now() + timeout;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(Boolean(predicate()), true, "condition was not reached before timeout");
+};
+
+test("issue 138: inbox_update accepted after turn_ended while submitting stays true is promoted to a wake", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue138-promote-"));
+  const agentId = "cli_issue138PromoteA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  let releasePrompt;
+  session.prompt = async (input) => {
+    session.prompts.push(input);
+    if (session.prompts.length === 1) await new Promise((resolve) => { releasePrompt = resolve; });
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const events = [];
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    const target = "chat:oc_issue138";
+    store.appendNdjson("inbox", { message_id: "om_issue138_first", target, content: "first" });
+    const first = host.deliver(agentId, { message_id: "om_issue138_first", target });
+    await waitForCondition(() => session.prompts.length === 1);
+    session.emit({ type: "turn-start", turnId: "turn-issue138" });
+    const polled = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(polled.envelopes.map((row) => row.message_id), ["om_issue138_first"]);
+    session.emit({ type: "turn-end", turnId: "turn-issue138" });
+    store.appendNdjson("inbox", { message_id: "om_issue138_late", target, content: "late after turn_ended" });
+    const late = await host.deliver(agentId, { message_id: "om_issue138_late", target });
+    assert.equal(late.status, "accepted");
+    assert.equal(session.steers.length, 1, "late arrival while submitting must take the busy inbox_update path");
+    assert.equal(session.steers[0].kind, "inbox_update");
+    assert.equal(session.prompts.length, 1, "no replacement wake can exist until submitting/busy clears");
+    releasePrompt();
+    assert.equal((await first).status, "accepted");
+    await waitForCondition(() => session.prompts.some((input) => input.inputId === late.deliveryId && input.kind === "wake"));
+    const promoted = session.prompts.find((input) => input.inputId === late.deliveryId);
+    assert.equal(promoted.kind, "wake");
+    assert.ok(events.some((event) => event.type === "delivery" && event.deliveryId === late.deliveryId
+      && event.status === "deferred" && /promoted after Agent became idle/.test(event.reason)));
+    const lateRecord = store.readJson("runtimeDeliveries", { records: [] }).records
+      .find((record) => record.messageId === "om_issue138_late");
+    assert.notEqual(lateRecord?.input?.kind, "inbox_update", "idle Agent must not keep an accepted inbox_update without a wake");
+  } finally {
+    await host.shutdown("issue 138 promote test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("issue 138: idle scan does not emit an extra wake when no accepted inbox_update remains", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue138-no-extra-"));
+  const agentId = "cli_issue138NoExtraA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    const target = "chat:oc_issue138_idle";
+    store.appendNdjson("inbox", { message_id: "om_issue138_consumed", target, content: "only wake" });
+    const receipt = await host.deliver(agentId, { message_id: "om_issue138_consumed", target });
+    assert.equal(receipt.status, "accepted");
+    assert.equal(session.prompts.length, 1);
+    assert.equal(session.prompts[0].kind, "wake");
+    store.pollInbox({ target, limit: 1 });
+    session.emit({ type: "turn-start", turnId: "turn-consumed" });
+    session.emit({ type: "turn-end", turnId: "turn-consumed" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await host.scanPendingInboxUpdates(agentId);
+    await host.scanPendingInboxUpdates(agentId);
+    assert.equal(session.prompts.length, 1, "drained Inbox must not synthesize a replacement wake");
+    assert.equal(session.steers.length, 0);
+  } finally {
+    await host.shutdown("issue 138 no-extra-wake test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("issue 138: the same accepted inbox_update is not re-woken in a loop", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue138-noloop-"));
+  const agentId = "cli_issue138NoLoopA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  let releasePrompt;
+  session.prompt = async (input) => {
+    session.prompts.push(input);
+    if (session.prompts.length === 1) await new Promise((resolve) => { releasePrompt = resolve; });
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: path.join(root, "agents", agentId), stateDir: store.paths.root }]);
+    const target = "chat:oc_issue138_noloop";
+    store.appendNdjson("inbox", { message_id: "om_issue138_owner", target, content: "owner" });
+    const first = host.deliver(agentId, { message_id: "om_issue138_owner", target });
+    await waitForCondition(() => session.prompts.length === 1);
+    session.emit({ type: "turn-start", turnId: "turn-noloop" });
+    store.pollInbox({ target, limit: 1 });
+    session.emit({ type: "turn-end", turnId: "turn-noloop" });
+    store.appendNdjson("inbox", { message_id: "om_issue138_stuck", target, content: "stuck update" });
+    const late = await host.deliver(agentId, { message_id: "om_issue138_stuck", target });
+    releasePrompt();
+    await first;
+    await waitForCondition(() => session.prompts.filter((input) => input.inputId === late.deliveryId).length === 1);
+    await host.scanPendingInboxUpdates(agentId);
+    await host.scanPendingInboxUpdates();
+    await host.scanPendingInboxUpdates(agentId);
+    const wakesForLate = session.prompts.filter((input) => input.inputId === late.deliveryId && input.kind === "wake");
+    assert.equal(wakesForLate.length, 1, "the same delivery id must be promoted to wake only once");
+    assert.equal(session.steers.filter((input) => input.inputId === late.deliveryId).length, 1);
+  } finally {
+    await host.shutdown("issue 138 no-loop test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

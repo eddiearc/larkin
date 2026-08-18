@@ -597,3 +597,46 @@ test("channel options disable inbound message merging (issue #88)", async () => 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("drought reconnect scans accepted inbox_update deliveries as a second fallback", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-drought-inbox-scan-"));
+  const agentId = "cli_droughtScanA1";
+  const scans = [];
+  const runtimeHost = {
+    subscribe() { return () => {}; },
+    async start() {},
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+    async scanPendingInboxUpdates(id) { scans.push(id ?? null); },
+  };
+  let disconnects = 0;
+  const channelPackage = {
+    createLarkChannel() {
+      return {
+        botIdentity: { openId: "ou_drought_scan", name: "DroughtScan" },
+        rawClient: null,
+        dispatcher: { register() {} },
+        on() {},
+        async connect() {},
+        async disconnect() { disconnects += 1; },
+      };
+    },
+  };
+  const agent = { agentId, name: agentId, runtime: "codex", model: "gpt", feishuAppId: agentId,
+    feishuAppSecret: "fixture-secret", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId), stateDir: path.join(root, "state", "agents", agentId) };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-drought-scan",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "1" };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0 });
+  try {
+    await host.start();
+    const deadline = Date.now() + 4_000;
+    while (scans.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(scans, [agentId], "preventive reconnect must scan pending inbox_update deliveries");
+    assert.ok(disconnects >= 1, "drought fallback must disconnect the silent channel before scanning");
+  } finally {
+    await host.shutdown("drought inbox scan test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

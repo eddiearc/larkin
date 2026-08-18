@@ -72,7 +72,10 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     });
     let result = run([]);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).appId, app);
+    const defaultGrant = JSON.parse(fs.readFileSync(marker, "utf8"));
+    assert.equal(defaultGrant.appId, app);
+    assert.equal(defaultGrant.domain, "accounts.feishu.cn");
+    assert.notEqual(defaultGrant.domain, "lark");
     const updatedCredential = JSON.parse(fs.readFileSync(path.join(root, "bots", `${app}.json`), "utf8"));
     const commentCapability = updatedCredential.capabilities.documentCommentEvent;
     assert.deepEqual({ status: commentCapability.status, event: commentCapability.event, scope: commentCapability.scope }, {

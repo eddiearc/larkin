@@ -87,6 +87,8 @@ Feishu clients do not reliably render Markdown links such as `[label](URL)` as c
 
 ## Setup and configuration
 
+Feishu (https://open.feishu.cn) and Lark (https://open.larksuite.com) are different platforms; `larkin setup` must be told which brand with `--tenant feishu|lark` or the interactive prompt before the authorization QR, and must never emit a `feishu.cn` host for a Lark tenant.
+
 During setup, a new Agent is offered Pi first, followed by Codex and Claude Code. Provider keys are stored only in the selected Agent's private provider directory, not in the ordinary Agent config. Setup also discovers every API-key and OAuth/subscription login exposed by the pinned official Pi registry and delegates those flows to Pi.
 
 Use `larkin pi-auth status` or `larkin pi-auth logout <provider>` to manage Pi auth. The builtin Pi runtime loads Larkin's two supported extensions inline: background subagents and the 60-second foreground bash timeout guard are enabled without writing extension files or arguments. A compatible external Pi installation keeps the existing explicit `-e` extension path.

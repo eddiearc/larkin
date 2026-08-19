@@ -524,6 +524,7 @@ class PiSession extends EventSession {
   private readonly observedAcceptedEpochs = new Set<number>();
   private readonly observedCompletedEpochs = new Set<number>();
   private readonly observedBackgroundCompletionKeys = new Set<string>();
+  private readonly pendingUnownedCompletionKeys = new Set<string>();
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
@@ -616,6 +617,7 @@ class PiSession extends EventSession {
       this.observedAcceptedEpochs.clear();
       this.observedCompletedEpochs.clear();
       this.observedBackgroundCompletionKeys.clear();
+      this.pendingUnownedCompletionKeys.clear();
       this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
@@ -664,12 +666,20 @@ class PiSession extends EventSession {
       if (completionNotificationKey
         && this.activeEpoch === null
         && !this.observedBackgroundCompletionKeys.has(completionNotificationKey)) {
-        this.observedBackgroundCompletionKeys.add(completionNotificationKey);
-        this.emitObservation("completed", { completionKey: completionNotificationKey });
+        // agent_end can still have an active Pi session. Prompting before
+        // unowned agent_settled is rejected as "Agent is already processing".
+        this.pendingUnownedCompletionKeys.add(completionNotificationKey);
       }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
-      if (epoch === null || this.settleArmedEpoch !== epoch) return;
+      if (epoch === null) {
+        this.flushPendingUnownedCompletions();
+        return;
+      }
+      if (this.settleArmedEpoch !== epoch) {
+        this.flushPendingUnownedCompletions();
+        return;
+      }
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       const error = this.finalAssistantError;
@@ -703,6 +713,7 @@ class PiSession extends EventSession {
       this.observedAcceptedEpochs.delete(epoch);
       this.observedCompletedEpochs.delete(epoch);
       this.observedAgentEndEpochs.delete(epoch);
+      this.flushPendingUnownedCompletions();
     }
     else if (event?.type === "tool_execution_start") {
       if (!this.firstOutputObserved) {
@@ -729,6 +740,15 @@ class PiSession extends EventSession {
       const kind = event.assistantMessageEvent.type?.startsWith("thinking") ? "thinking" : "text";
       this.emit({ type: "activity", activity: kind, text: String(event.assistantMessageEvent.delta) });
     }
+  }
+
+  private flushPendingUnownedCompletions(): void {
+    for (const completionKey of this.pendingUnownedCompletionKeys) {
+      if (this.observedBackgroundCompletionKeys.has(completionKey)) continue;
+      this.observedBackgroundCompletionKeys.add(completionKey);
+      this.emitObservation("completed", { completionKey });
+    }
+    this.pendingUnownedCompletionKeys.clear();
   }
 
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {

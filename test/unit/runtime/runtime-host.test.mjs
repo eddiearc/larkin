@@ -403,14 +403,83 @@ test("RuntimeHost retries a rejected background completion wake", async () => {
     assert.equal(session.prompts.length, 1);
     session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-retry-1" });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(session.prompts.length, 2);
-    assert.equal(session.prompts[1].kind, "wake");
-    assert.equal(wakeAttempts, 1);
-    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-retry-1" });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(wakeAttempts, 2);
+    assert.equal(wakeAttempts, 2, "a rejected idle wake must schedule another drain without a second completion event");
     assert.equal(session.prompts.length, 3, "the same completion must be able to wake again after a rejected prompt");
     assert.equal(session.prompts[2].kind, "wake");
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-retry-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 2, "the accepted retry must keep the completion deduped");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost keeps an accepted wake queued until the turn succeeds", async () => {
+  let wakeAttempts = 0;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (isBackgroundCompletionWake(input)) wakeAttempts += 1;
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeRearmA1", name: "wake-rearm", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeRearmA1", { message_id: "om_pi_wake_rearm", chat_id: "oc_pi_wake_rearm", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-rearm-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 1);
+    const wake = session.prompts.find(isBackgroundCompletionWake);
+    assert.ok(wake);
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "input-error", inputId: wake.inputId, retryable: true, willRetry: false, message: "Pi assistant turn aborted" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 2, "an accepted wake that aborts must be re-armed and drained again");
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 2, "a successful wake turn must dequeue the completion");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost preserves queued background completions across session replacement", async () => {
+  const sessions = [];
+  const adapter = { id: "pi", capabilities: {}, async createSession() {
+    const session = new FakeSession();
+    session.sessionId = `wake-replace-${sessions.length + 1}`;
+    sessions.push(session);
+    return session;
+  } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 5, maxDelayMs: 10, maxAttempts: 3 },
+  });
+  try {
+    await host.start([{ agentId: "cli_piWakeReplaceA1", name: "wake-replace", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeReplaceA1", { message_id: "om_pi_wake_replace", chat_id: "oc_pi_wake_replace", content: "start" });
+    sessions[0].emit({ type: "turn-start" });
+    sessions[0].emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-replace-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sessions[0].prompts.length, 1, "busy turn must queue the completion instead of waking immediately");
+    sessions[0].emit({ type: "closed", code: 1, signal: null });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(sessions.length, 2, "closed runtime must be recreated");
+    sessions[1].emit({ type: "turn-start" });
+    sessions[1].emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(sessions[1].prompts.some(isBackgroundCompletionWake),
+      "queued completion must wake on the replacement session");
   } finally {
     await host.shutdown("done");
   }

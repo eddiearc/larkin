@@ -378,6 +378,10 @@ test("Pi canonical late completion notifications bridge once and ignore assistan
   listener({ type: "agent_end", willRetry: false, messages: [canonical] });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(events.filter((event) => ["turn-start", "turn-end"].includes(event.type)), []);
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation"), [],
+    "unowned agent_end must not emit the completion bridge while Pi can still reject prompts");
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
   assert.equal(observations[0].completionKey, "task-bridge-1");
@@ -397,6 +401,7 @@ test("Pi assistant text lookalikes do not trigger the late completion bridge", a
   session.subscribe((event) => events.push(event));
   for (const content of ["ordinary assistant text mentioning subagent-notification", "ordinary assistant text mentioning not-subagent-notification"]) {
     listener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: "stop", content }] });
+    listener({ type: "agent_settled" });
   }
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(events.filter((event) => event.type !== "session-init"), []);
@@ -425,6 +430,7 @@ test("Pi failed and aborted late notifications still bridge a completion key", a
       result: "partial",
     })],
   });
+  listener({ type: "agent_settled" });
   listener({
     type: "agent_end",
     willRetry: false,
@@ -435,6 +441,7 @@ test("Pi failed and aborted late notifications still bridge a completion key", a
       result: "failed",
     })],
   });
+  listener({ type: "agent_settled" });
   await new Promise((resolve) => setImmediate(resolve));
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), ["completed", "completed"]);
@@ -485,6 +492,7 @@ test("Pi mixed-status late notification groups keep terminal successes", async (
       }],
     }],
   });
+  listener({ type: "agent_settled" });
   await new Promise((resolve) => setImmediate(resolve));
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
@@ -511,7 +519,9 @@ test("Pi repeated canonical late completion notifications only bridge once", asy
     result: "Repeat result.",
   });
   listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  listener({ type: "agent_settled" });
   listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  listener({ type: "agent_settled" });
   await new Promise((resolve) => setImmediate(resolve));
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), ["completed"]);

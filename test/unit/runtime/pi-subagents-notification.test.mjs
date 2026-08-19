@@ -94,6 +94,26 @@ test("mixed-status groups keep terminal successes instead of dropping the whole 
   assert.match(parsed.notifications[1].status, /^Error:/);
 });
 
+test("only customType subagent-notification content is parsed", () => {
+  const xml = buildCanonicalPiSubagentNotificationContent({
+    taskId: "task-other-type",
+    status: "Done",
+    summary: "Agent \"fixture\" completed",
+    result: "should not parse",
+  });
+  assert.equal(extractCanonicalPiSubagentCompletionKeyFromMessages([{
+    role: "assistant",
+    content: [{ type: "custom", customType: "other-notification", content: xml }],
+  }]), null);
+  assert.equal(extractCanonicalPiSubagentCompletionKeyFromMessages([{
+    role: "assistant",
+    content: xml,
+  }]), null);
+  assert.equal(extractCanonicalPiSubagentCompletionKeyFromMessages([
+    buildCanonicalPiSubagentAssistantMessage({ taskId: "task-official" }),
+  ]), "task-official");
+});
+
 test("queued or running notifications do not produce a completion key", () => {
   const key = extractCanonicalPiSubagentCompletionKeyFromMessages([
     buildCanonicalPiSubagentAssistantMessage({

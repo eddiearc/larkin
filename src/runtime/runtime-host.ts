@@ -89,6 +89,8 @@ interface ManagedAgent {
   /** Delivery ids already promoted from accepted inbox_update to a wake while idle. */
   promotedInboxUpdateIds: Set<string>;
   backgroundCompletionQueue: string[]; backgroundCompletionKeys: Set<string>;
+  backgroundCompletionInFlight: string | null; backgroundCompletionWakeInputId: string | null;
+  backgroundCompletionRejectStreak: number;
 }
 
 export interface RuntimeHost {
@@ -666,43 +668,83 @@ export function createRuntimeHost(options: {
     await retryPending(agent);
   };
 
-  const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<"accepted" | "retry" | "dropped"> => {
+  const scheduleBackgroundCompletionDrain = (agent: ManagedAgent): void => {
+    if (agent.stopped) return;
+    queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+  };
+
+  const rearmBackgroundCompletion = (agent: ManagedAgent, completionKey = agent.backgroundCompletionInFlight): void => {
+    if (!completionKey) return;
+    agent.backgroundCompletionKeys.delete(completionKey);
+    if (agent.backgroundCompletionInFlight === completionKey) {
+      agent.backgroundCompletionInFlight = null;
+      agent.backgroundCompletionWakeInputId = null;
+    }
+    if (!agent.backgroundCompletionQueue.includes(completionKey)) {
+      agent.backgroundCompletionQueue.unshift(completionKey);
+    }
+  };
+
+  const commitBackgroundCompletion = (agent: ManagedAgent): void => {
+    const completionKey = agent.backgroundCompletionInFlight;
+    if (!completionKey) return;
+    if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
+    agent.backgroundCompletionInFlight = null;
+    agent.backgroundCompletionWakeInputId = null;
+    agent.backgroundCompletionRejectStreak = 0;
+  };
+
+  const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<
+    { status: "accepted"; inputId: string } | { status: "retry" } | { status: "dropped" }
+  > => {
     // Caller already reserved submitting/busy so a concurrent idle drain cannot
     // dequeue another head while ensureSession/prompt yields.
     try {
       const session = await ensureSession(agent);
-      if (agent.session !== session || agent.stopped) return "dropped";
+      if (agent.session !== session || agent.stopped) return { status: "dropped" };
       const input = options.promptBuilder.buildRuntimeInput("wake", crypto.randomUUID(), { wakeReason: "background subagent completed" });
       const result = await session.prompt(input);
-      if (agent.session !== session || agent.stopped) return "dropped";
+      if (agent.session !== session || agent.stopped) return { status: "dropped" };
       if (result.status === "accepted") {
         markSessionStable(agent, session);
-        return "accepted";
+        return { status: "accepted", inputId: input.inputId };
       }
       agent.busy = false;
-      return "retry";
+      return { status: "retry" };
     } catch (error) {
       agent.busy = false;
       log("background completion wake failed", error instanceof Error ? error.message : String(error));
-      return "retry";
+      return { status: "retry" };
     }
   };
 
   const drainBackgroundCompletionQueue = async (agent: ManagedAgent): Promise<void> => {
     if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
-    if (!agent.backgroundCompletionQueue.length) return;
+    if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
     agent.submitting = true;
     agent.busy = true;
     const completionKey = agent.backgroundCompletionQueue[0];
     try {
       const outcome = await wakeOnBackgroundCompletion(agent);
-      if (outcome === "accepted" || outcome === "dropped") {
-        if (agent.backgroundCompletionQueue[0] === completionKey) {
-          agent.backgroundCompletionQueue.shift();
+      if (outcome.status === "accepted") {
+        agent.backgroundCompletionKeys.add(completionKey);
+        agent.backgroundCompletionInFlight = completionKey;
+        agent.backgroundCompletionWakeInputId = outcome.inputId;
+        agent.backgroundCompletionRejectStreak = 0;
+      } else if (outcome.status === "dropped") {
+        if (agent.stopped) {
+          if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
+          agent.backgroundCompletionKeys.delete(completionKey);
+        } else {
+          rearmBackgroundCompletion(agent, completionKey);
+          agent.busy = false;
         }
       } else {
         agent.busy = false;
-        agent.backgroundCompletionKeys.delete(completionKey);
+        agent.backgroundCompletionRejectStreak += 1;
+        // Leave the item at the queue head and schedule another drain. Without
+        // this, a rejected idle wake is never retried because Pi will not re-emit.
+        if (agent.backgroundCompletionRejectStreak < 5) scheduleBackgroundCompletionDrain(agent);
       }
     } finally {
       agent.submitting = false;
@@ -715,8 +757,8 @@ export function createRuntimeHost(options: {
     if (!agent.backgroundCompletionQueue.includes(completionKey)) {
       agent.backgroundCompletionQueue.push(completionKey);
     }
-    if (!agent.busy && !agent.turnInProgress && !agent.submitting) {
-      queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+    if (!agent.busy && !agent.turnInProgress && !agent.submitting && !agent.backgroundCompletionInFlight) {
+      scheduleBackgroundCompletionDrain(agent);
     }
   };
 
@@ -739,6 +781,7 @@ export function createRuntimeHost(options: {
         const proactive = session ? proactivelyCompactPiAtIdle(agent, session) : null;
         if (proactive && await proactive === "failed") return;
         await retryPending(agent);
+        if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
       }).catch((error) => {
         const readiness = error instanceof RuntimePrerequisiteError ? error.readiness
           : classifyRuntimePrerequisite(agent.adapter.id as RuntimeReadiness["runtime"], error);
@@ -757,7 +800,7 @@ export function createRuntimeHost(options: {
   const replaceSession = (agent: ManagedAgent, session: RuntimeSession, reason: string): void => {
     if (agent.session !== session || agent.stopped) return;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
-    agent.backgroundCompletionQueue = [];
+    rearmBackgroundCompletion(agent);
     agent.recreateReason = reason;
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
@@ -772,7 +815,7 @@ export function createRuntimeHost(options: {
     if (agent.session !== session || agent.stopped) return;
     agent.disabledReason = `runtime configuration recovery in progress: ${message}`;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
-    agent.backgroundCompletionQueue = [];
+    rearmBackgroundCompletion(agent);
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
     for (const record of agent.records.values()) {
@@ -1000,9 +1043,11 @@ export function createRuntimeHost(options: {
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
       reconcileAcceptedAtTurnEnd(agent);
-      if (agent.backgroundCompletionQueue.length > 0) {
-        queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+      if (agent.backgroundCompletionInFlight) {
+        if (agent.turnHadFailure) rearmBackgroundCompletion(agent);
+        else commitBackgroundCompletion(agent);
       }
+      if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
       telemetry?.runtimeEvent(agent.config.agentId, event);
       if (recoveredAuthentication) {
         agent.authFailureActive = false;
@@ -1028,6 +1073,12 @@ export function createRuntimeHost(options: {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
       emit({ type: "activity", agentId: agent.config.agentId, activity: event.activity, activityKind: event.activity });
     } else if (event.type === "input-error") {
+      if (agent.backgroundCompletionInFlight
+        && (!event.inputId || !agent.backgroundCompletionWakeInputId
+          || event.inputId === agent.backgroundCompletionWakeInputId)) {
+        agent.turnHadFailure = true;
+        rearmBackgroundCompletion(agent);
+      }
       const record = event.inputId
         ? agent.records.get(event.inputId) ?? [...agent.records.values()].find((candidate) => candidate.input.inputId === event.inputId)
         : undefined;
@@ -1616,7 +1667,9 @@ export function createRuntimeHost(options: {
           piProactiveCompactionFailedGeneration: null, readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false,
           promotedInboxUpdateIds: new Set(),
-          backgroundCompletionQueue: [], backgroundCompletionKeys: new Set() };
+          backgroundCompletionQueue: [], backgroundCompletionKeys: new Set(),
+          backgroundCompletionInFlight: null, backgroundCompletionWakeInputId: null,
+          backgroundCompletionRejectStreak: 0 };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
         for (const record of agent.records.values()) {

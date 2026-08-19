@@ -103,19 +103,17 @@ function collectCandidateContents(node: unknown, found = new Set<string>()): str
   const candidates: string[] = [];
   const visit = (value: unknown): void => {
     if (value === null || value === undefined) return;
-    if (typeof value === "string") {
-      if (!found.has(value)) { found.add(value); candidates.push(value); }
-      return;
-    }
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
       return;
     }
     if (typeof value !== "object") return;
     const record = value as Record<string, unknown>;
-    if (typeof record.customType === "string" && typeof record.content === "string") visit(record.content);
-    if (typeof record.content === "string") visit(record.content);
-    else if (Array.isArray(record.content)) visit(record.content);
+    if (record.customType === "subagent-notification" && typeof record.content === "string") {
+      if (!found.has(record.content)) { found.add(record.content); candidates.push(record.content); }
+    } else if (Array.isArray(record.content)) {
+      visit(record.content);
+    }
     if (Array.isArray(record.messages)) visit(record.messages);
     if (Array.isArray(record.parts)) visit(record.parts);
   };

@@ -43,6 +43,7 @@ import {
   registerAppAccountsHost,
   type LarkinTenant,
 } from "../feishu/platform-hosts.js";
+import { authorizationUrlFailureMessage, presentAuthorizationUrl } from "./setup-authorization-url.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -63,7 +64,7 @@ type RegisterApp = (options: {
   source: string;
   domain?: string;
   larkDomain?: string;
-  addons: {
+  addons?: {
     scopes: { tenant: string[] };
     events: { items: { tenant: string[] } };
     callbacks: { items: string[] };
@@ -79,6 +80,7 @@ const testFixture = process.env.LARKIN_TEST_BOT_REGISTER_MODULE
     spawnSync?: typeof systemSpawnSync;
     syncAgentProfile?: typeof syncAgentProfile;
     resolveOfficialLarkCli?: typeof resolveOfficialLarkCli;
+    spawn?: typeof systemSpawn;
     wait?: (milliseconds: number) => Promise<void>;
   }
   : null;
@@ -503,8 +505,10 @@ if (has("--help") || has("-h")) {
 用法:
   bun bot-register.mjs --auto [--tenant feishu|lark]
 
---tenant 在授权二维码之前选择品牌。默认 feishu（accounts.feishu.cn）；
-Lark 必须用 --tenant lark 或交互选择，授权主机是 accounts.larksuite.com。
+--tenant 在授权二维码之前选择品牌。默认 feishu（accounts.feishu.cn /page/launcher）。
+Lark 必须用 --tenant lark：授权二维码是官方 /page/cli（begin 仍走飞书 accounts，
+打开 open.larksuite.com），不要打开 /page/launcher（ack 10074 / 链接已失效）。
+扫码完成后凭证回传，无需手抄 App Secret。
 
 完成后自动：按返回 appId 判定新旧 → 同步并校验 lark-cli bot 凭证 →
   原子写 bots/<appId>.json（0600）→ 绑定 Agent。`);
@@ -523,10 +527,12 @@ if (resultFile && (path.dirname(resultFile) !== path.resolve(CFG_DIR) || !/^\.se
   die("--result-file 必须是配置根目录内的 .setup-result-<pid>.json");
 }
 if (argv.some((arg) => arg === "--app-id" || arg.startsWith("--app-id="))) {
-  die("不支持 --app-id；机器人必须在飞书（Lark）网页中选择");
+  die("不支持 --app-id；机器人必须在飞书（Lark）网页中选择。已有官方 lark-cli profile 时用 --from-cli-profile");
 }
+const fromCliProfile = flag("--from-cli-profile") || "";
+if (fromCliProfile && !/^[A-Za-z0-9._-]{1,64}$/.test(fromCliProfile)) die("--from-cli-profile 非法");
 if (!autoSelect) die("setup 注册阶段必须由交互式选择流程启动");
-const selectedTenant = await resolveSelectedTenant();
+let selectedTenant = await resolveSelectedTenant();
 say(`[setup 1/5] 在${selectedTenant === "lark" ? " International Lark" : "中国飞书 Feishu"}网页选择已有机器人或创建新机器人`);
 if (commentSubscription === "application") {
   say(`! 已显式选择 ${commentSubscription} 维度评论订阅：一旦平台状态验证为已订阅，Bot 可见文档中实际送达的每条支持评论都会进入 Inbox 并唤醒 Agent，不要求 @Bot。`);
@@ -560,28 +566,79 @@ const TENANT_SCOPES = [
   "docs:document.comment:create",
 ];
 const TENANT_EVENTS = ["im.message.receive_v1", "im.message.message_read_v1", "drive.notice.comment_add_v1"];
+const LARKIN_REGISTER_ADDONS = {
+  scopes: { tenant: TENANT_SCOPES },
+  events: { items: { tenant: TENANT_EVENTS } },
+  callbacks: { items: ["card.action.trigger"] },
+};
 let pollingCount = 0;
 
-const result = await registerApp({
-  source: "larkin",
-  domain: registerAppAccountsHost(selectedTenant),
-  larkDomain: registerAppAccountsHost("lark"),
-  addons: {
-    scopes: { tenant: TENANT_SCOPES },
-    events: { items: { tenant: TENANT_EVENTS } },
-    callbacks: { items: ["card.action.trigger"] },
-  },
-  onQRCodeReady: ({ url, expireIn }) => {
-    qrcode.generate(url, { small: true }, (code: string) => say(code));
-    say(`\n打开以下链接（或扫码），${Math.round(expireIn / 60)} 分钟内有效：\n\n  ${url}\n\n[setup 2/5] 等待飞书（Lark）网页完成授权并回传凭证…`);
-    say(openBrowser(url) ? "[setup] 已在默认浏览器打开授权页" : "[setup] 未能自动打开浏览器，请手动打开上面的链接");
-  },
-  onStatusChange: ({ status, interval }) => {
-    if (status === "domain_switched") say("[setup] 已切换到 Lark 域名");
-    if (status === "slow_down") say(`[setup] 飞书（Lark）要求降低轮询频率，${interval || "稍后"}秒后继续`);
-    if (status === "polling" && ++pollingCount % 12 === 0) say(`[setup] 仍在等待飞书（Lark）回传凭证（约 ${pollingCount / 12} 分钟）…`);
-  },
-}).catch(() => die("网页授权失败；未执行凭证同步、文件写入或 Agent 绑定，请重试 setup"));
+const presentUrl = (url: string, expireIn: number): void => {
+  qrcode.generate(url, { small: true }, (code: string) => say(code));
+  say(`\n打开以下链接（或扫码），${Math.round(expireIn / 60)} 分钟内有效：\n\n  ${url}\n\n[setup 2/5] 等待飞书（Lark）网页完成授权并回传凭证…`);
+  say(openBrowser(url) ? "[setup] 已在默认浏览器打开授权页" : "[setup] 未能自动打开浏览器，请手动打开上面的链接");
+};
+
+const importedSecret = typeof process.env.LARKIN_SETUP_APP_SECRET === "string"
+  ? process.env.LARKIN_SETUP_APP_SECRET.trim() : "";
+delete process.env.LARKIN_SETUP_APP_SECRET;
+let result: RegistrationResult | null = null;
+if (fromCliProfile) {
+  if (!importedSecret) die("--from-cli-profile 需要环境变量 LARKIN_SETUP_APP_SECRET（App Secret 不进 argv）");
+  const official = officialCliForProfile(process.env);
+  const listed = spawnSync(official.command, [...official.argsPrefix, "profile", "list"], { encoding: "utf8", env: process.env });
+  let profiles: Array<{ name?: unknown; appId?: unknown; brand?: unknown }> = [];
+  try { profiles = JSON.parse(listed.stdout || "[]") as Array<{ name?: unknown; appId?: unknown; brand?: unknown }>; }
+  catch { die("读取 lark-cli profile list 失败"); }
+  const matched = profiles.find((profile) => profile.name === fromCliProfile);
+  if (matched == null || typeof matched.appId !== "string" || !APP_ID.test(matched.appId)) {
+    die(`找不到 lark-cli profile ${fromCliProfile}`);
+  } else {
+    const brand = matched.brand === "lark" || matched.brand === "feishu" ? matched.brand : selectedTenant;
+    selectedTenant = brand;
+    result = { client_id: matched.appId, client_secret: importedSecret, user_info: { tenant_brand: brand } };
+    say(`[setup 1/5] 复用官方 lark-cli profile ${fromCliProfile} → ${matched.appId}`);
+  }
+} else if (selectedTenant === "lark") {
+  // Official lark-cli always begins on Feishu accounts, then presents
+  // open.larksuite.com/page/cli. Beginning on Lark accounts yields /page/launcher
+  // codes that open.larksuite.com ack rejects with 10074.
+  say("[setup 1/5] Lark 租户走官方 /page/cli 扫码授权；扫码完成后凭证回传，不要打开 /page/launcher");
+  const official = officialCliForProfile(process.env);
+  result = await registerApp({
+    source: "larkin",
+    domain: registerAppAccountsHost("feishu"),
+    larkDomain: registerAppAccountsHost("lark"),
+    addons: LARKIN_REGISTER_ADDONS,
+    onQRCodeReady: ({ url, expireIn }) => {
+      const presented = presentAuthorizationUrl(url, { tenant: "lark", larkCliVersion: official.version });
+      if (/\/page\/launcher(?:\?|$)/.test(presented)) {
+        throw new Error("Lark 租户拒绝把 /page/launcher 交给浏览器");
+      }
+      presentUrl(presented, expireIn);
+    },
+    onStatusChange: ({ status, interval }) => {
+      if (status === "domain_switched") say("[setup] 已切换到 Lark 域名");
+      if (status === "slow_down") say(`[setup] 飞书（Lark）要求降低轮询频率，${interval || "稍后"}秒后继续`);
+      if (status === "polling" && ++pollingCount % 12 === 0) say(`[setup] 仍在等待飞书（Lark）回传凭证（约 ${pollingCount / 12} 分钟）…`);
+    },
+  }).catch((error: unknown) => die(authorizationUrlFailureMessage(error)));
+} else {
+  result = await registerApp({
+    source: "larkin",
+    domain: registerAppAccountsHost(selectedTenant),
+    larkDomain: registerAppAccountsHost("lark"),
+    addons: LARKIN_REGISTER_ADDONS,
+    onQRCodeReady: ({ url, expireIn }) => {
+      presentUrl(url, expireIn);
+    },
+    onStatusChange: ({ status, interval }) => {
+      if (status === "domain_switched") say("[setup] 已切换到 Lark 域名");
+      if (status === "slow_down") say(`[setup] 飞书（Lark）要求降低轮询频率，${interval || "稍后"}秒后继续`);
+      if (status === "polling" && ++pollingCount % 12 === 0) say(`[setup] 仍在等待飞书（Lark）回传凭证（约 ${pollingCount / 12} 分钟）…`);
+    },
+  }).catch((error: unknown) => die(authorizationUrlFailureMessage(error)));
+}
 
 const { client_id: rawId, client_secret: rawSecret, user_info: userInfo } = result || {};
 if (typeof rawId !== "string" || !APP_ID.test(rawId)) die("授权返回的 App ID 格式非法；未执行凭证同步、文件写入或 Agent 绑定");

@@ -64,7 +64,9 @@ test("bot credential verification pins lark-cli identity explicitly to bot", () 
   assert.match(register, /\[\.\.\.official\.argsPrefix, "im", "\+chat-list", "--as", "bot"\]/);
   assert.match(register, /synchronizeAgentProfile\(agent/);
   assert.match(bind, /\["--profile", profile\.name, "im", "\+chat-list", "--as", "bot", "--json"\]/);
-  assert.match(bind, /profile\.name !== profile\.appId/);
+  assert.match(bind, /不要求名字等于 App ID/);
+  assert.doesNotMatch(bind, /profile\.name !== profile\.appId/);
+  assert.match(bind, /loadValidatedBotCredential/);
 });
 
 test("run fails closed for missing or malformed App-ID bot credentials before daemon spawn", () => {

@@ -10,7 +10,6 @@ import { fileURLToPath } from "node:url";
 import { isWindows } from "../platform/secure-metadata.js";
 import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
-import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { configureBuiltinPiProviderModel, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
 import { terminalSetupQuestioner, type OfficialPiAuthSelection, type SetupAgentChoice } from "./setup-agent-choice.js";
 import {
@@ -22,6 +21,7 @@ import {
 } from "../runtime/pi-official-auth.js";
 import * as larkinConfigImport from "../platform/config.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
+import { loadValidatedBotCredential } from "./run-credential-preflight.js";
 
 interface RuntimeModel {
   id: string;
@@ -135,20 +135,50 @@ function openAuthUrl(url: string): boolean {
   return result.status === 0;
 }
 
-function listProfiles(): Profile[] {
-  const result = larkJson(["profile", "list"]);
-  if (!result.ok || !Array.isArray(result.json)) {
-    die("读取 lark-cli profile 失败；未修改 Agent 配置，请检查隔离 profile 后重试 setup");
+function listProfilesFromEnv(env: NodeJS.ProcessEnv): Profile[] {
+  const official = resolveOfficialLarkCli({ env });
+  const result = spawnSync(official.command, [...official.argsPrefix, "profile", "list"], { encoding: "utf8", env });
+  try {
+    const parsed = JSON.parse(result.stdout || "[]") as unknown;
+    return Array.isArray(parsed) ? parsed as Profile[] : [];
+  } catch {
+    return [];
   }
-  return result.json as Profile[];
+}
+
+function listProfiles(): Profile[] {
+  const isolated = listProfilesFromEnv(larkEnv());
+  const globalEnv = { ...process.env };
+  delete globalEnv.LARKSUITE_CLI_CONFIG_DIR;
+  const global = listProfilesFromEnv(globalEnv);
+  const seen = new Set<string>();
+  const merged: Profile[] = [];
+  for (const profile of [...isolated, ...global]) {
+    const key = `${String(profile.name || "")}\0${String(profile.appId || "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(profile);
+  }
+  return merged;
+}
+
+function resolveProfile(requested: string, profiles: Profile[]): Profile | undefined {
+  return profiles.find((profile) => profile.name === requested)
+    || profiles.find((profile) => profile.appId === requested);
 }
 
 async function pickProfile(): Promise<Profile> {
-  if (options.profile) {
-    if (!APP_ID.test(options.profile)) die(`profile ${options.profile} 不是合法 App ID`);
+  if (options.profile && APP_ID.test(options.profile)) {
     return { name: options.profile, appId: options.profile, active: true };
   }
   const profiles = listProfiles();
+  if (options.profile) {
+    const matched = resolveProfile(options.profile, profiles);
+    if (matched && typeof matched.appId === "string" && APP_ID.test(matched.appId)) {
+      return { name: String(matched.name || matched.appId), appId: matched.appId, active: matched.active };
+    }
+    die(`找不到 lark-cli profile ${options.profile}（可用名字或 App ID，不要求名字等于 App ID）`);
+  }
   if (profiles.length === 0) die("lark-cli 里还没有 bot profile。请运行 larkin setup 创建或连接机器人");
 
   say("\n可复用的飞书（Lark）机器人（lark-cli profiles）：");
@@ -158,7 +188,19 @@ async function pickProfile(): Promise<Profile> {
   const answer = await ask(`选择 profile（回车=${activeIndex + 1}）: `);
   const selected = answer === "" ? activeIndex : Number(answer) - 1;
   if (!(selected >= 0 && selected < profiles.length)) die("无效的 profile 选择");
-  return profiles[selected]!;
+  const picked = profiles[selected]!;
+  if (typeof picked.appId !== "string" || !APP_ID.test(picked.appId)) {
+    die(`profile ${picked.name || "?"} 没有合法 App ID`);
+  }
+  return picked;
+}
+
+function requireUsableBotCredential(appId: string): void {
+  try {
+    loadValidatedBotCredential(path.join(CFG_DIR, "bots"), appId);
+  } catch {
+    die(`没有可用的 bot 凭证 ${appId}（bots/${appId}.json）；未修改 Agent 配置，请先运行 larkin setup 完成扫码授权`);
+  }
 }
 
 function verifyBot(profile: Profile): unknown[] {
@@ -271,9 +313,11 @@ export async function main(): Promise<void> {
 
   say("=== larkin 多 Agent onboarding ===");
   const profile = await pickProfile();
-  if (typeof profile?.appId !== "string" || !APP_ID.test(profile.appId) || profile.name !== profile.appId) {
-    die("profile name 与合法 App ID 必须完全一致；未修改 Agent 配置，请重新运行 larkin setup 刷新 profile");
+  if (typeof profile.appId !== "string" || !APP_ID.test(profile.appId)) {
+    die(`profile ${profile.name || "?"} 没有合法 App ID；未修改 Agent 配置`);
   }
+  say(`使用 profile ${profile.name} → App ID ${profile.appId}`);
+  requireUsableBotCredential(profile.appId);
   if (!options.profile) verifyBot(profile);
 
   const requestedAgent = options.agent || profile.appId;
@@ -287,15 +331,11 @@ export async function main(): Promise<void> {
   const selectedModel = selection?.runtime === "pi" && selection.distribution === "builtin" ? selection.model : undefined;
   const targetModelId = selectedModel || (prior?.runtime === runtime ? prior.model : defaultModel);
   let runtimeModels = larkinConfig.loadRuntimeModels()[runtime];
-  if (runtime === "pi" && piDistribution === "builtin") {
-    runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: [] }];
-  } else if (runtime === "pi") {
-    const piCatalog = await discoverPiModelCatalog({
-      cwd: layout.workspaceDir(profile.appId),
-      ...(process.env.PI_CODING_AGENT_DIR ? { agentDir: process.env.PI_CODING_AGENT_DIR } : {}),
-    });
-    const effective = piCatalog.models.find((model) => model.id === piCatalog.effectiveModel);
-    runtimeModels = [{ id: "default", supportedReasoningEfforts: effective?.supportedReasoningEfforts || [] }, ...piCatalog.models];
+  if (runtime === "pi") {
+    const preservedEffort = prior?.runtime === "pi" && typeof prior.effort === "string" && prior.effort.trim()
+      ? [prior.effort]
+      : [];
+    runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: preservedEffort }];
   }
   const targetModel = runtimeModels.find((model) => model.id === targetModelId);
   if (!targetModel) die(`目标模型 ${runtime}/${targetModelId} 不在 runtime 模型目录中；未修改 Agent 配置`);
@@ -304,7 +344,7 @@ export async function main(): Promise<void> {
     profile,
     requestedAgent,
     runtime: selection?.runtime || options.runtime,
-    ...(selection?.runtime === "pi" ? { piDistribution: selection.distribution } : {}),
+    ...(runtime === "pi" && piDistribution ? { piDistribution } : {}),
     ...(selectedModel ? { model: selectedModel } : {}),
     defaultModel,
     supportedReasoningEfforts: targetModel!.supportedReasoningEfforts || [],

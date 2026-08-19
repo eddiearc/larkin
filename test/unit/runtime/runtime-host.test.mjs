@@ -487,6 +487,116 @@ test("RuntimeHost keeps an accepted wake queued until the turn succeeds", async 
   }
 });
 
+test("RuntimeHost does not retry a terminal background wake input-error unbounded", async () => {
+  let wakeAttempts = 0;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (isBackgroundCompletionWake(input)) wakeAttempts += 1;
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 15, maxDelayMs: 20, maxAttempts: 1 },
+  });
+  try {
+    await host.start([{ agentId: "cli_piWakeBoundA1", name: "wake-bound", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeBoundA1", { message_id: "om_pi_wake_bound", chat_id: "oc_pi_wake_bound", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-bound-1" });
+    const deadline = Date.now() + 400;
+    while (Date.now() < deadline) {
+      const wake = session.prompts.filter(isBackgroundCompletionWake).at(-1);
+      if (wake) {
+        session.emit({ type: "turn-start" });
+        session.emit({
+          type: "input-error", inputId: wake.inputId, retryable: true, willRetry: false,
+          message: "persistent upstream failure",
+        });
+        session.emit({ type: "turn-end" });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(wakeAttempts, 6, "accepted+terminal input-error must consume the immediate streak and one delayed attempt");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(wakeAttempts, 6, "an accepted prompt must not reset the wake retry streak");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost consults the idle compaction gate before a background completion wake", async () => {
+  const policy = calculatePiCompactionSettings(272_000);
+  const order = [];
+  class GateSession extends FakeSession {
+    usage = { tokens: 100, contextWindow: 272_000 };
+    compactCalls = 0;
+    async getContextUsage() { order.push("usage"); return { ...this.usage }; }
+    async compact() { order.push("compact"); this.compactCalls += 1; this.usage.tokens = 100; }
+    async prompt(input) { order.push("prompt"); return super.prompt(input); }
+  }
+  const session = new GateSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeCompactA1", name: "wake-compact", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeCompactA1", { message_id: "om_pi_wake_compact", chat_id: "oc_pi_wake_compact", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    const firstPromptAt = order.lastIndexOf("prompt");
+    assert.equal(session.prompts.length, 1);
+    assert.equal(session.compactCalls, 0, "the first delivery stays below the idle threshold");
+    session.usage.tokens = policy.threshold + 1;
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-compact-1" });
+    const deadline = Date.now() + 1_000;
+    while (session.prompts.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(session.compactCalls, 1, "the wake drain must consult the idle compaction gate");
+    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.ok(order.indexOf("compact", firstPromptAt) >= 0);
+    assert.ok(order.indexOf("compact", firstPromptAt) < order.indexOf("prompt", firstPromptAt + 1));
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost does not let an exhausted background wake block a later completion", async () => {
+  let wakeAttempts = 0;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (isBackgroundCompletionWake(input)) {
+      wakeAttempts += 1;
+      if (wakeAttempts <= 6) return { status: "rejected", inputId: input.inputId, retryable: true, reason: "head still failing" };
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 15, maxDelayMs: 20, maxAttempts: 1 },
+  });
+  try {
+    await host.start([{ agentId: "cli_piWakeSkipA1", name: "wake-skip", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeSkipA1", { message_id: "om_pi_wake_skip", chat_id: "oc_pi_wake_skip", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-skip-head" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-skip-later" });
+    const deadline = Date.now() + 400;
+    while (wakeAttempts < 7 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(wakeAttempts, 7, "after the exhausted head is dropped the later completion must still wake");
+    assert.equal(session.prompts.filter(isBackgroundCompletionWake).length, 7);
+    assert.equal(session.prompts.at(-1).kind, "wake");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
 test("RuntimeHost preserves queued background completions across session replacement", async () => {
   const sessions = [];
   const adapter = { id: "pi", capabilities: {}, async createSession() {

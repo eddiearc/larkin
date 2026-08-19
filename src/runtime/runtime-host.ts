@@ -692,6 +692,22 @@ export function createRuntimeHost(options: {
     queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
   };
 
+  const dropBackgroundCompletion = (agent: ManagedAgent, completionKey: string | null): void => {
+    if (!completionKey) return;
+    if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
+    else {
+      const index = agent.backgroundCompletionQueue.indexOf(completionKey);
+      if (index >= 0) agent.backgroundCompletionQueue.splice(index, 1);
+    }
+    agent.backgroundCompletionKeys.add(completionKey);
+    if (agent.backgroundCompletionInFlight === completionKey) {
+      agent.backgroundCompletionInFlight = null;
+      agent.backgroundCompletionWakeInputId = null;
+    }
+    agent.backgroundCompletionRejectStreak = 0;
+    clearBackgroundCompletionRetryTimer(agent);
+  };
+
   const scheduleBackgroundCompletionRetry = (agent: ManagedAgent): void => {
     const streak = agent.backgroundCompletionRejectStreak;
     if (streak < BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT) {
@@ -699,9 +715,42 @@ export function createRuntimeHost(options: {
       return;
     }
     const delayedAttempt = streak - BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT;
-    if (delayedAttempt >= retryPolicy.maxAttempts) return;
+    if (delayedAttempt >= retryPolicy.maxAttempts) {
+      const exhausted = agent.backgroundCompletionQueue[0];
+      if (exhausted) {
+        log("background completion wake retries exhausted", exhausted);
+        dropBackgroundCompletion(agent, exhausted);
+      }
+      if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
+      return;
+    }
     const delay = Math.min(retryPolicy.maxDelayMs, retryPolicy.baseDelayMs * 2 ** delayedAttempt);
     scheduleBackgroundCompletionDrain(agent, delay);
+  };
+
+  const isPersistentBackgroundWakeFailure = (event?: {
+    retryable?: boolean; errorCategory?: string;
+  }): boolean => {
+    if (!event) return false;
+    const category = event.errorCategory;
+    if (category === "auth" || category === "billing" || category === "quota") return true;
+    return category === "provider" && event.retryable === false;
+  };
+
+  const failBackgroundCompletionWake = (agent: ManagedAgent, event?: {
+    retryable?: boolean; errorCategory?: string;
+  }): void => {
+    const completionKey = agent.backgroundCompletionInFlight ?? agent.backgroundCompletionQueue[0];
+    if (!completionKey) return;
+    rearmBackgroundCompletion(agent, completionKey);
+    if (isPersistentBackgroundWakeFailure(event)) {
+      log("background completion wake dropped", event?.errorCategory ?? "persistent");
+      dropBackgroundCompletion(agent, completionKey);
+      if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
+      return;
+    }
+    agent.backgroundCompletionRejectStreak += 1;
+    scheduleBackgroundCompletionRetry(agent);
   };
 
   const rearmBackgroundCompletion = (agent: ManagedAgent, completionKey = agent.backgroundCompletionInFlight): void => {
@@ -754,6 +803,18 @@ export function createRuntimeHost(options: {
     if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
     if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
     clearBackgroundCompletionRetryTimer(agent);
+    const proactive = agent.piProactiveCompaction
+      && agent.piProactiveCompactionGeneration === agent.generation
+      && agent.piProactiveCompactionSession === agent.session
+      ? agent.piProactiveCompaction : null;
+    if (proactive && await proactive === "failed") return;
+    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) return;
+    if (agent.adapter.id === "pi" && !agent.busy && !agent.turnInProgress && agent.session) {
+      const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
+      if (idleGate && await idleGate === "failed") return;
+    }
+    if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
+    if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
     agent.submitting = true;
     agent.busy = true;
     const completionKey = agent.backgroundCompletionQueue[0];
@@ -763,7 +824,8 @@ export function createRuntimeHost(options: {
         agent.backgroundCompletionKeys.add(completionKey);
         agent.backgroundCompletionInFlight = completionKey;
         agent.backgroundCompletionWakeInputId = outcome.inputId;
-        agent.backgroundCompletionRejectStreak = 0;
+        // Keep the reject streak until the wake turn actually succeeds. An accepted
+        // prompt that later terminal-fails must not reset the bounded retry budget.
         clearBackgroundCompletionRetryTimer(agent);
       } else if (outcome.status === "dropped") {
         if (agent.stopped) {
@@ -1080,10 +1142,12 @@ export function createRuntimeHost(options: {
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
       reconcileAcceptedAtTurnEnd(agent);
       if (agent.backgroundCompletionInFlight) {
-        if (agent.turnHadFailure) rearmBackgroundCompletion(agent);
+        if (agent.turnHadFailure) failBackgroundCompletionWake(agent);
         else commitBackgroundCompletion(agent);
       }
-      if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
+      if (agent.backgroundCompletionQueue.length > 0 && !agent.backgroundCompletionRetryTimer) {
+        scheduleBackgroundCompletionDrain(agent);
+      }
       telemetry?.runtimeEvent(agent.config.agentId, event);
       if (recoveredAuthentication) {
         agent.authFailureActive = false;
@@ -1111,9 +1175,10 @@ export function createRuntimeHost(options: {
     } else if (event.type === "input-error") {
       if (agent.backgroundCompletionInFlight
         && (!event.inputId || !agent.backgroundCompletionWakeInputId
-          || event.inputId === agent.backgroundCompletionWakeInputId)) {
+          || event.inputId === agent.backgroundCompletionWakeInputId)
+        && event.willRetry !== true) {
         agent.turnHadFailure = true;
-        rearmBackgroundCompletion(agent);
+        failBackgroundCompletionWake(agent, event);
       }
       const record = event.inputId
         ? agent.records.get(event.inputId) ?? [...agent.records.values()].find((candidate) => candidate.input.inputId === event.inputId)

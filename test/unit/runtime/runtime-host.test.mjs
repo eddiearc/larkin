@@ -320,6 +320,44 @@ test("RuntimeHost ignores background completion wake bridges while busy or mid-t
   }
 });
 
+test("RuntimeHost drains a completion queued while a rejected foreground prompt is submitting", async () => {
+  let releaseForeground;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (this.prompts.length === 1) {
+      return new Promise((_, reject) => {
+        releaseForeground = () => reject(new Error("foreground prompt rejected before turn-start"));
+      });
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeSubmitRejectA1", name: "wake-submit-reject", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    const delivering = host.deliver("cli_piWakeSubmitRejectA1", {
+      message_id: "om_pi_wake_submit_reject", chat_id: "oc_pi_wake_submit_reject", content: "start",
+    });
+    const waitForFirst = Date.now() + 1_000;
+    while (session.prompts.length < 1 && Date.now() < waitForFirst) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-submit-reject-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 1, "must not wake while the foreground prompt is still submitting");
+    releaseForeground();
+    const receipt = await delivering;
+    assert.equal(receipt.status, "deferred");
+    const deadline = Date.now() + 1_000;
+    while (session.prompts.length < 2 && Date.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2, "a later drain must still wake after submit clears without turn-start");
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.match(session.prompts[1].text, /reason=background subagent completed/i);
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
 test("RuntimeHost ignores additional completion wake bridges while a wake prompt is submitting", async () => {
   let releaseWake;
   const session = new FakeSession();
@@ -626,6 +664,53 @@ test("RuntimeHost preserves queued background completions across session replace
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok(sessions[1].prompts.some(isBackgroundCompletionWake),
       "queued completion must wake on the replacement session");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost reschedules an inherited completion drain after stage commit clears backoff", async () => {
+  let wakeAttempts = 0;
+  const sessions = [];
+  class StageSession extends FakeSession {
+    async prompt(input) {
+      this.prompts.push(input);
+      if (isBackgroundCompletionWake(input)) {
+        wakeAttempts += 1;
+        if (sessions[0] === this && wakeAttempts <= 5) throw new Error("preflight RPC unavailable");
+      }
+      return { status: "accepted", inputId: input.inputId };
+    }
+  }
+  const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+    const session = new StageSession();
+    session.sessionId = input.model === "next" ? "stage-next" : `stage-old-${sessions.length + 1}`;
+    sessions.push(session);
+    return session;
+  } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 250, maxDelayMs: 250, maxAttempts: 3 },
+  });
+  const base = { agentId: "cli_piWakeStageA1", name: "wake-stage", runtime: "pi", workspaceDir: "/tmp" };
+  try {
+    await host.start([{ ...base, model: "old" }]);
+    await host.deliver(base.agentId, { message_id: "om_pi_wake_stage", chat_id: "oc_pi_wake_stage", content: "start" });
+    sessions[0].emit({ type: "turn-start" });
+    sessions[0].emit({ type: "turn-end" });
+    sessions[0].emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-stage-1" });
+    for (let i = 0; i < 12; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 5, "five immediate rejects must arm the inherited backoff timer");
+    const staged = await host.stage({ ...base, model: "next" });
+    await staged.commit();
+    assert.equal(sessions.length, 2);
+    const deadline = Date.now() + 1_000;
+    while (!sessions[1].prompts.some(isBackgroundCompletionWake) && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(sessions[1].prompts.some(isBackgroundCompletionWake),
+      "stage commit that clears backoff must still drain the inherited queue");
   } finally {
     await host.shutdown("done");
   }

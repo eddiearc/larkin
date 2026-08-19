@@ -609,6 +609,12 @@ export function createRuntimeHost(options: {
         queueMicrotask(() => { void retryPending(agent); });
       }
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
+      // A completion queued during this submit has no turn-end if prompt
+      // rejected/threw before turn-start. Drain now that submitting is clear.
+      if (!agent.busy && !agent.turnInProgress && agent.backgroundCompletionQueue.length > 0
+        && !agent.backgroundCompletionRetryTimer) {
+        scheduleBackgroundCompletionDrain(agent);
+      }
     }
   };
 
@@ -1485,6 +1491,11 @@ export function createRuntimeHost(options: {
           candidate.poller.unref?.();
           if (!candidate.authFailureActive) {
             emit({ type: "agent-status", agentId: config.agentId, status: "active", readiness: candidate.readiness ?? readiness });
+          }
+          // Commit clears any inherited backoff timer; reschedule so a queued
+          // completion still drains on the new session.
+          if (candidate.backgroundCompletionQueue.length > 0) {
+            scheduleBackgroundCompletionDrain(candidate);
           }
           await previous.session?.close("runtime candidate committed")
             .catch((error) => log("previous runtime close after candidate commit failed", String(error)));

@@ -14,6 +14,10 @@ import {
   requirePiResumeSessionFile,
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
+import {
+  buildCanonicalPiSubagentAssistantMessage,
+  buildCanonicalPiSubagentNotificationContent,
+} from "../../../dist/runtime/pi-subagents-notification.mjs";
 import { classifyStrictProviderError } from "../../../dist/runtime/provider-error-classifier.mjs";
 
 const fakeProcesses = new Set();
@@ -350,6 +354,216 @@ test("Codex native notifications normalize start, intermediate output, and termi
   assert.deepEqual(events.filter((event) => ["turn-start", "activity", "turn-end"].includes(event.type))
     .map((event) => event.type === "activity" ? `${event.type}:${event.activity}` : event.type),
   ["turn-start", "activity:thinking", "activity:text", "turn-end"]);
+});
+
+test("Pi canonical late completion notifications bridge once and ignore assistant lookalikes", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  const canonical = buildCanonicalPiSubagentAssistantMessage({
+    taskId: "task-bridge-1",
+    toolUseId: "tool-use-bridge-1",
+    outputFile: "/tmp/task-bridge-1.output",
+    summary: "Agent \"fixture\" completed",
+    result: "Fixture result.",
+  });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => ["turn-start", "turn-end"].includes(event.type)), []);
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation"), [],
+    "unowned agent_end must not emit the completion bridge while Pi can still reject prompts");
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-bridge-1");
+});
+
+test("Pi assistant text lookalikes do not trigger the late completion bridge", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-lookalike", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  for (const content of ["ordinary assistant text mentioning subagent-notification", "ordinary assistant text mentioning not-subagent-notification"]) {
+    listener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: "stop", content }] });
+    listener({ type: "agent_settled" });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => event.type !== "session-init"), []);
+});
+
+test("Pi failed and aborted late notifications still bridge a completion key", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-failed",
+    prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  listener({
+    type: "agent_end",
+    willRetry: false,
+    messages: [buildCanonicalPiSubagentAssistantMessage({
+      taskId: "task-aborted-bridge",
+      status: "Aborted (max turns exceeded)",
+      summary: "Agent \"fixture\" aborted (aborted — hit the turn limit before completion; output may be incomplete)",
+      result: "partial",
+    })],
+  });
+  listener({ type: "agent_settled" });
+  listener({
+    type: "agent_end",
+    willRetry: false,
+    messages: [buildCanonicalPiSubagentAssistantMessage({
+      taskId: "task-error-bridge",
+      status: "Error: provider failed",
+      summary: "Agent \"fixture\" error",
+      result: "failed",
+    })],
+  });
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed", "completed"]);
+  assert.deepEqual(observations.map((event) => event.completionKey), ["task-aborted-bridge", "task-error-bridge"]);
+});
+
+test("Pi mixed-status late notification groups keep terminal successes", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-mixed",
+    prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  listener({
+    type: "agent_end",
+    willRetry: false,
+    messages: [{
+      role: "assistant",
+      content: [{
+        type: "custom",
+        customType: "subagent-notification",
+        content: [
+          buildCanonicalPiSubagentNotificationContent({
+            taskId: "task-running",
+            status: "running",
+            summary: "Agent \"still\" running",
+            result: "not done",
+          }),
+          buildCanonicalPiSubagentNotificationContent({
+            taskId: "task-mixed-ok",
+            status: "Done",
+            summary: "Agent \"ok\" completed",
+            result: "success",
+          }),
+          buildCanonicalPiSubagentNotificationContent({
+            taskId: "task-mixed-error",
+            status: "error",
+            summary: "Agent \"fail\" error",
+            result: "failed",
+          }),
+        ].join("\n"),
+      }],
+    }],
+  });
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-mixed-ok|task-mixed-error");
+});
+
+test("Pi batched agent_end messages bridge every canonical notification", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-batch",
+    prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  listener({
+    type: "agent_end",
+    willRetry: false,
+    messages: [
+      buildCanonicalPiSubagentAssistantMessage({
+        taskId: "task-batch-a",
+        status: "Done",
+        summary: "Agent \"a\" completed",
+        result: "a",
+      }),
+      buildCanonicalPiSubagentAssistantMessage({
+        taskId: "task-batch-b",
+        status: "Error: boom",
+        summary: "Agent \"b\" error",
+        result: "b",
+      }),
+    ],
+  });
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-batch-a|task-batch-b");
+});
+
+test("Pi repeated canonical late completion notifications only bridge once", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-repeat", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  const canonical = buildCanonicalPiSubagentAssistantMessage({
+    taskId: "task-bridge-repeat",
+    toolUseId: "tool-use-bridge-repeat",
+    outputFile: "/tmp/task-bridge-repeat.output",
+    summary: "Agent \"repeat fixture\" completed",
+    result: "Repeat result.",
+  });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  listener({ type: "agent_settled" });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-bridge-repeat");
 });
 
 test("Codex resume failure falls back to a fresh thread with the same standing prompt", async () => {

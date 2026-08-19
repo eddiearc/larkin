@@ -22,6 +22,7 @@ import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
+import { extractCanonicalPiSubagentCompletionKeyFromMessages } from "./pi-subagents-notification.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
   classifyRuntimePrerequisite,
@@ -522,6 +523,8 @@ class PiSession extends EventSession {
   private readonly observedSubmitEpochs = new Set<number>();
   private readonly observedAcceptedEpochs = new Set<number>();
   private readonly observedCompletedEpochs = new Set<number>();
+  private readonly observedBackgroundCompletionKeys = new Set<string>();
+  private readonly pendingUnownedCompletionKeys = new Set<string>();
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
@@ -613,6 +616,8 @@ class PiSession extends EventSession {
       this.observedSubmitEpochs.clear();
       this.observedAcceptedEpochs.clear();
       this.observedCompletedEpochs.clear();
+      this.observedBackgroundCompletionKeys.clear();
+      this.pendingUnownedCompletionKeys.clear();
       this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
@@ -657,9 +662,24 @@ class PiSession extends EventSession {
         this.observedCompletedEpochs.add(this.activeEpoch);
         this.emitObservation("completed");
       }
+      const completionNotificationKey = extractCanonicalPiSubagentCompletionKeyFromMessages(event.messages);
+      if (completionNotificationKey
+        && this.activeEpoch === null
+        && !this.observedBackgroundCompletionKeys.has(completionNotificationKey)) {
+        // agent_end can still have an active Pi session. Prompting before
+        // unowned agent_settled is rejected as "Agent is already processing".
+        this.pendingUnownedCompletionKeys.add(completionNotificationKey);
+      }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
-      if (epoch === null || this.settleArmedEpoch !== epoch) return;
+      if (epoch === null) {
+        this.flushPendingUnownedCompletions();
+        return;
+      }
+      if (this.settleArmedEpoch !== epoch) {
+        this.flushPendingUnownedCompletions();
+        return;
+      }
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       const error = this.finalAssistantError;
@@ -693,6 +713,7 @@ class PiSession extends EventSession {
       this.observedAcceptedEpochs.delete(epoch);
       this.observedCompletedEpochs.delete(epoch);
       this.observedAgentEndEpochs.delete(epoch);
+      this.flushPendingUnownedCompletions();
     }
     else if (event?.type === "tool_execution_start") {
       if (!this.firstOutputObserved) {
@@ -721,8 +742,17 @@ class PiSession extends EventSession {
     }
   }
 
+  private flushPendingUnownedCompletions(): void {
+    for (const completionKey of this.pendingUnownedCompletionKeys) {
+      if (this.observedBackgroundCompletionKeys.has(completionKey)) continue;
+      this.observedBackgroundCompletionKeys.add(completionKey);
+      this.emitObservation("completed", { completionKey });
+    }
+    this.pendingUnownedCompletionKeys.clear();
+  }
+
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
-    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean;
+    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; completionKey?: string;
   } = {}): void {
     const inputId = this.oldestOwnedInput();
     const observation = { type: "runtime-observation" as const, runtime: "pi" as const,
@@ -730,6 +760,7 @@ class PiSession extends EventSession {
     // Correlation is host-internal metadata, not telemetry payload.
     if (this.sessionId) Object.defineProperty(observation, "sessionId", { value: this.sessionId, enumerable: false });
     if (inputId) Object.defineProperty(observation, "inputId", { value: inputId, enumerable: false });
+    if (fields.completionKey) Object.defineProperty(observation, "completionKey", { value: fields.completionKey, enumerable: false });
     this.emit(observation as NormalizedRuntimeEvent);
   }
 

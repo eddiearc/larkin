@@ -67,7 +67,9 @@ test("registration publishes the credential before binding, then verifies the bo
     "comment subscription reconciliation must keep the credential heartbeat event loop live");
   assert.match(source, /synchronizeAgentProfile\([\s\S]*\{ forceRebind: true \}\)/,
     "new setup credentials must explicitly force one authoritative rebind");
-  assert.doesNotMatch(source, /config["', ]+init/);
+  assert.match(source, /presentAuthorizationUrl/);
+  assert.match(source, /page\/cli/);
+  assert.match(source, /--from-cli-profile/);
   assert.match(source, /mode: 0o700/);
   assert.match(source, /mode: 0o600, flag: "wx"/);
   assert.match(source, /JSON\.stringify\(\{ \.\.\.raw, runtime: "pi", model: validated\.model, authCompleted: true, readinessCompleted: true \}\)/,

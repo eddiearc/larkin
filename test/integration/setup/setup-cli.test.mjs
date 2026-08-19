@@ -267,6 +267,14 @@ assert.match(setupSource, /acquireProcessLock\(path\.join\(CFG_DIR, "setup\.lock
 assert.match(setupSource, /process\.on\("exit", releaseMutationLock\)/);
 assert.match(setupSource, /!OPT\.start[\s\S]*releaseMutationLock\(\)/);
 assert.match(setupSource, /requestAgentUpsert\(\{ larkinHome: CFG_DIR, agentId: selectedAgentId \}\)/);
+{
+  const registerChild = setupSource.indexOf('runForeground("bot-register"');
+  const scrubSecret = setupSource.indexOf("delete process.env.LARKIN_SETUP_APP_SECRET");
+  const upsert = setupSource.indexOf("requestAgentUpsert({ larkinHome: CFG_DIR, agentId: selectedAgentId })");
+  const startRun = setupSource.indexOf('runForeground("run"');
+  assert.equal(registerChild >= 0 && scrubSecret > registerChild, true, "setup must scrub App Secret after bot-register");
+  assert.equal(scrubSecret < upsert && scrubSecret < startRun, true, "App Secret must not reach daemon upsert or supervisor start");
+}
 assert.doesNotMatch(setupSource, /stopDaemonForReload|terminateOwnedProcess|dashboard\.mjs/);
 assert.doesNotMatch(setupSource, /\bpreviousAgentId\b|\binferRunningAgents\b|workspace-service|reconcileAgentWorkspace/);
 assert.doesNotMatch(setupSource, /flag\("--app-id"\)|OPT\.appId/);

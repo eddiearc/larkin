@@ -180,10 +180,20 @@ else console.log(JSON.stringify({ ok: true, identity: "bot", data: { chats: [] }
 `, { mode: 0o755 });
 }
 
+function writeBotCredential(root, appId = APP) {
+  const botsDir = path.join(root, "bots");
+  fs.mkdirSync(botsDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(botsDir, 0o700);
+  fs.writeFileSync(path.join(botsDir, `${appId}.json`), `${JSON.stringify({
+    appId, appSecret: "secret-value", tenant: "feishu",
+  }, null, 2)}\n`, { mode: 0o600 });
+}
+
 function runFreshSetupWithRuntime(runtime) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-runtime-"));
   const binDir = path.join(root, "bin");
   writeStubLarkCli(binDir);
+  writeBotCredential(root);
   const result = spawnSync(process.execPath, [
     path.join(ROOT, "dist/setup/setup-bind.mjs"), "--profile", APP, "--agent", APP, "--runtime", runtime, "--yes",
   ], {
@@ -216,6 +226,7 @@ test("real setup-bind integration rewrites v3 config without a workspace symlink
     assert.equal(fs.existsSync(BUILT), true, "setup-binding build artifact must exist before integration");
     const binDir = path.join(root, "bin");
     writeStubLarkCli(binDir);
+    writeBotCredential(root);
     fs.writeFileSync(path.join(root, "config.json"), JSON.stringify(twoAgentConfig(), null, 2) + "\n", { mode: 0o600 });
     const result = spawnSync(process.execPath, [
       path.join(ROOT, "dist/setup/setup-bind.mjs"), "--profile", APP, "--agent", APP, "--yes",

@@ -85,11 +85,10 @@ Options:
   --base-url <url>                      custom 端点（provider=custom 时必填；也可覆盖 preset 默认端点）
   --model <id>                          模型 ID；默认取 provider 预设。不同 runtime 的模型可用
                                           \`larkin model\` 查看 / 切换
-  --tenant feishu|lark                  授权二维码之前选择品牌。默认 feishu（accounts.feishu.cn /
-                                          https://open.feishu.cn）。Lark 用 --tenant lark
-                                          （accounts.larksuite.com / https://open.larksuite.com）。
-                                          交互式未指定时会先询问。飞书与 Lark 是不同平台，
-                                          Lark 租户不得使用 feishu.cn 主机。
+  --from-cli-profile <name>            可选：复用已有官方 lark-cli profile（需 LARKIN_SETUP_APP_SECRET）
+  --tenant feishu|lark                  授权二维码之前选择品牌。默认 feishu（扫码 /page/launcher）。
+                                          Lark 用 --tenant lark：扫码 /page/cli，完成后凭证回传，
+                                          不要打开 /page/launcher。交互式未指定时会先询问。
 
 setup handles browser authorization, permission grants, credential storage, Agent configuration,
 and target-only hot attach. Each Agent is identified by its bot App ID: selecting the same bot reuses
@@ -163,11 +162,12 @@ export async function main(): Promise<void> {
     if (tenant !== "feishu" && tenant !== "lark") die("--tenant 只支持 feishu 或 lark");
     registerArgs.push("--tenant", tenant === "lark" ? "lark" : "feishu");
   }
-  for (const name of ["--provider", "--api-key", "--base-url", "--model"] as const) {
+  for (const name of ["--provider", "--api-key", "--base-url", "--model", "--from-cli-profile"] as const) {
     const value = flag(name);
     if (value) registerArgs.push(name, value);
   }
   const result = await runForeground("bot-register", registerArgs);
+  delete process.env.LARKIN_SETUP_APP_SECRET;
   if (result.code !== 0) die("机器人授权或 Agent 配置未完成");
 
   let agentId: string | undefined;

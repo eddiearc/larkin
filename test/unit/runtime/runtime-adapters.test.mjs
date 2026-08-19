@@ -499,6 +499,44 @@ test("Pi mixed-status late notification groups keep terminal successes", async (
   assert.equal(observations[0].completionKey, "task-mixed-ok|task-mixed-error");
 });
 
+test("Pi batched agent_end messages bridge every canonical notification", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-late-complete-batch",
+    prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  listener({
+    type: "agent_end",
+    willRetry: false,
+    messages: [
+      buildCanonicalPiSubagentAssistantMessage({
+        taskId: "task-batch-a",
+        status: "Done",
+        summary: "Agent \"a\" completed",
+        result: "a",
+      }),
+      buildCanonicalPiSubagentAssistantMessage({
+        taskId: "task-batch-b",
+        status: "Error: boom",
+        summary: "Agent \"b\" error",
+        result: "b",
+      }),
+    ],
+  });
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observations = events.filter((event) => event.type === "runtime-observation");
+  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
+  assert.equal(observations[0].completionKey, "task-batch-a|task-batch-b");
+});
+
 test("Pi repeated canonical late completion notifications only bridge once", async () => {
   let listener;
   const sdk = {

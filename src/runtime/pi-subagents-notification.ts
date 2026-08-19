@@ -156,11 +156,22 @@ export function buildCanonicalPiSubagentAssistantMessage(options: CanonicalPiSub
 }
 
 export function extractCanonicalPiSubagentNotification(messages: unknown): CanonicalPiSubagentNotification | null {
+  const seen = new Set<string>();
+  const notifications: CanonicalPiSubagentNotificationBlock[] = [];
+  const contents: string[] = [];
   for (const content of collectCandidateContents(messages)) {
     const parsed = parseCanonicalNotificationContent(content);
-    if (parsed) return parsed;
+    if (!parsed) continue;
+    contents.push(parsed.content);
+    for (const notification of parsed.notifications) {
+      if (seen.has(notification.taskId)) continue;
+      seen.add(notification.taskId);
+      notifications.push(notification);
+    }
   }
-  return null;
+  if (notifications.length === 0) return null;
+  const taskIds = notifications.map((notification) => notification.taskId);
+  return { taskIds, notifications, content: contents.join("\n"), key: taskIds.join("|") };
 }
 
 export function extractCanonicalPiSubagentCompletionKeyFromMessages(messages: unknown): string | null {

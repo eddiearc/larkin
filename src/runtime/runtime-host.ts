@@ -91,6 +91,7 @@ interface ManagedAgent {
   backgroundCompletionQueue: string[]; backgroundCompletionKeys: Set<string>;
   backgroundCompletionInFlight: string | null; backgroundCompletionWakeInputId: string | null;
   backgroundCompletionRejectStreak: number;
+  backgroundCompletionRetryTimer: NodeJS.Timeout | null;
 }
 
 export interface RuntimeHost {
@@ -151,6 +152,7 @@ export interface StagedRuntimeCandidate {
 }
 
 const MAX_DELIVERIES = 2048;
+const BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT = 5;
 const now = (): string => new Date().toISOString();
 const isActiveDelivery = (status: DeliveryStatus): boolean => ["pending", "submitting", "accepted"].includes(status);
 type ReplayFailureCode = "canonical_inbox_row_missing" | "canonical_inbox_malformed" | "duplicate_message_id"
@@ -668,9 +670,38 @@ export function createRuntimeHost(options: {
     await retryPending(agent);
   };
 
-  const scheduleBackgroundCompletionDrain = (agent: ManagedAgent): void => {
+  const clearBackgroundCompletionRetryTimer = (agent: ManagedAgent): void => {
+    if (!agent.backgroundCompletionRetryTimer) return;
+    clearTimeout(agent.backgroundCompletionRetryTimer);
+    agent.backgroundCompletionRetryTimer = null;
+  };
+
+  const scheduleBackgroundCompletionDrain = (agent: ManagedAgent, delayMs = 0): void => {
     if (agent.stopped) return;
+    if (delayMs > 0) {
+      if (agent.backgroundCompletionRetryTimer) return;
+      agent.backgroundCompletionRetryTimer = setTimeout(() => {
+        agent.backgroundCompletionRetryTimer = null;
+        if (agent.stopped) return;
+        void drainBackgroundCompletionQueue(agent);
+      }, delayMs);
+      agent.backgroundCompletionRetryTimer.unref?.();
+      return;
+    }
+    clearBackgroundCompletionRetryTimer(agent);
     queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+  };
+
+  const scheduleBackgroundCompletionRetry = (agent: ManagedAgent): void => {
+    const streak = agent.backgroundCompletionRejectStreak;
+    if (streak < BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT) {
+      scheduleBackgroundCompletionDrain(agent);
+      return;
+    }
+    const delayedAttempt = streak - BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT;
+    if (delayedAttempt >= retryPolicy.maxAttempts) return;
+    const delay = Math.min(retryPolicy.maxDelayMs, retryPolicy.baseDelayMs * 2 ** delayedAttempt);
+    scheduleBackgroundCompletionDrain(agent, delay);
   };
 
   const rearmBackgroundCompletion = (agent: ManagedAgent, completionKey = agent.backgroundCompletionInFlight): void => {
@@ -692,6 +723,7 @@ export function createRuntimeHost(options: {
     agent.backgroundCompletionInFlight = null;
     agent.backgroundCompletionWakeInputId = null;
     agent.backgroundCompletionRejectStreak = 0;
+    clearBackgroundCompletionRetryTimer(agent);
   };
 
   const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<
@@ -721,6 +753,7 @@ export function createRuntimeHost(options: {
   const drainBackgroundCompletionQueue = async (agent: ManagedAgent): Promise<void> => {
     if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
     if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
+    clearBackgroundCompletionRetryTimer(agent);
     agent.submitting = true;
     agent.busy = true;
     const completionKey = agent.backgroundCompletionQueue[0];
@@ -731,10 +764,12 @@ export function createRuntimeHost(options: {
         agent.backgroundCompletionInFlight = completionKey;
         agent.backgroundCompletionWakeInputId = outcome.inputId;
         agent.backgroundCompletionRejectStreak = 0;
+        clearBackgroundCompletionRetryTimer(agent);
       } else if (outcome.status === "dropped") {
         if (agent.stopped) {
           if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
           agent.backgroundCompletionKeys.delete(completionKey);
+          clearBackgroundCompletionRetryTimer(agent);
         } else {
           rearmBackgroundCompletion(agent, completionKey);
           agent.busy = false;
@@ -742,9 +777,10 @@ export function createRuntimeHost(options: {
       } else {
         agent.busy = false;
         agent.backgroundCompletionRejectStreak += 1;
-        // Leave the item at the queue head and schedule another drain. Without
-        // this, a rejected idle wake is never retried because Pi will not re-emit.
-        if (agent.backgroundCompletionRejectStreak < 5) scheduleBackgroundCompletionDrain(agent);
+        // Leave the item queued+deduped. Immediate microtask retries cover a
+        // brief reject; after that a bounded timer still drains because Pi will
+        // not re-emit the same completion.
+        scheduleBackgroundCompletionRetry(agent);
       }
     } finally {
       agent.submitting = false;
@@ -1363,10 +1399,12 @@ export function createRuntimeHost(options: {
           if (previous.poller) clearInterval(previous.poller);
           if (previous.retryTimer) clearTimeout(previous.retryTimer);
           if (previous.stabilityTimer) clearTimeout(previous.stabilityTimer);
+          if (previous.backgroundCompletionRetryTimer) clearTimeout(previous.backgroundCompletionRetryTimer);
           const candidate: ManagedAgent = {
             ...previous, config, adapter, session, launchId: crypto.randomUUID(), busy: false, submitting: false,
             starting: null, retryAfterSubmit: false, generation: 0, poller: null, retryTimer: null,
             recreateAttempts: 0, stabilityTimer: null, recreateReason: null, stopped: false,
+            backgroundCompletionRetryTimer: null,
             disabledReason: null, configurationRecovery: null,
             readiness: previous.authFailureActive ? previous.readiness : readiness,
           };
@@ -1669,7 +1707,7 @@ export function createRuntimeHost(options: {
           promotedInboxUpdateIds: new Set(),
           backgroundCompletionQueue: [], backgroundCompletionKeys: new Set(),
           backgroundCompletionInFlight: null, backgroundCompletionWakeInputId: null,
-          backgroundCompletionRejectStreak: 0 };
+          backgroundCompletionRejectStreak: 0, backgroundCompletionRetryTimer: null };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
         for (const record of agent.records.values()) {
@@ -1796,6 +1834,7 @@ export function createRuntimeHost(options: {
       if (agent.poller) clearInterval(agent.poller);
       if (agent.retryTimer) clearTimeout(agent.retryTimer);
       if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
+      if (agent.backgroundCompletionRetryTimer) clearTimeout(agent.backgroundCompletionRetryTimer);
       if (agent.busy) await agent.session?.cancel(reason);
       await agent.session?.close(reason); managed.delete(agentId);
       emit({ type: "agent-status", agentId, status: "inactive" });

@@ -415,6 +415,42 @@ test("RuntimeHost retries a rejected background completion wake", async () => {
   }
 });
 
+test("RuntimeHost still wakes after five immediate rejected background completion drains", async () => {
+  let wakeAttempts = 0;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (isBackgroundCompletionWake(input)) {
+      wakeAttempts += 1;
+      if (wakeAttempts <= 5) throw new Error("preflight RPC unavailable");
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 20, maxDelayMs: 40, maxAttempts: 3 },
+  });
+  try {
+    await host.start([{ agentId: "cli_piWakeBackoffA1", name: "wake-backoff", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeBackoffA1", { message_id: "om_pi_wake_backoff", chat_id: "oc_pi_wake_backoff", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-backoff-1" });
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 5, "five immediate rejects must not abandon the queued completion");
+    assert.equal(session.prompts.filter(isBackgroundCompletionWake).length, 5);
+    const deadline = Date.now() + 200;
+    while (wakeAttempts < 6 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(wakeAttempts, 6, "a later backoff drain must still wake while the item remains queued");
+    assert.equal(session.prompts.at(-1).kind, "wake");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
 test("RuntimeHost keeps an accepted wake queued until the turn succeeds", async () => {
   let wakeAttempts = 0;
   const session = new FakeSession();

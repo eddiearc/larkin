@@ -114,6 +114,38 @@ test("only customType subagent-notification content is parsed", () => {
   ]), "task-official");
 });
 
+test("batched agent_end messages keep every canonical notification", () => {
+  const parsed = extractCanonicalPiSubagentNotification([
+    buildCanonicalPiSubagentAssistantMessage({
+      taskId: "task-batch-a",
+      status: "Done",
+      summary: "Agent \"a\" completed",
+      result: "a",
+    }),
+    {
+      role: "assistant",
+      content: "ordinary assistant text mentioning subagent-notification",
+    },
+    buildCanonicalPiSubagentAssistantMessage({
+      taskId: "task-batch-b",
+      status: "Error: boom",
+      summary: "Agent \"b\" error",
+      result: "b",
+    }),
+    buildCanonicalPiSubagentAssistantMessage({
+      taskId: "task-batch-a",
+      status: "Done",
+      summary: "Agent \"a\" completed again",
+      result: "duplicate",
+    }),
+  ]);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.taskIds, ["task-batch-a", "task-batch-b"]);
+  assert.equal(parsed.key, "task-batch-a|task-batch-b");
+  assert.equal(parsed.notifications[0].status, "Done");
+  assert.match(parsed.notifications[1].status, /^Error:/);
+});
+
 test("queued or running notifications do not produce a completion key", () => {
   const key = extractCanonicalPiSubagentCompletionKeyFromMessages([
     buildCanonicalPiSubagentAssistantMessage({

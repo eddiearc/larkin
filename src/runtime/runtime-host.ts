@@ -666,40 +666,55 @@ export function createRuntimeHost(options: {
     await retryPending(agent);
   };
 
-  const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<void> => {
-    if (agent.busy || agent.turnInProgress || agent.submitting) return;
-    const session = await ensureSession(agent);
-    if (agent.session !== session || agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
-    const input = options.promptBuilder.buildRuntimeInput("wake", crypto.randomUUID(), { wakeReason: "background subagent completed" });
-    agent.submitting = true;
-    agent.busy = true;
+  const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<"accepted" | "retry" | "dropped"> => {
+    // Caller already reserved submitting/busy so a concurrent idle drain cannot
+    // dequeue another head while ensureSession/prompt yields.
     try {
+      const session = await ensureSession(agent);
+      if (agent.session !== session || agent.stopped) return "dropped";
+      const input = options.promptBuilder.buildRuntimeInput("wake", crypto.randomUUID(), { wakeReason: "background subagent completed" });
       const result = await session.prompt(input);
-      if (agent.session !== session || agent.stopped) return;
-      if (result.status === "accepted") markSessionStable(agent, session);
-      else agent.busy = false;
+      if (agent.session !== session || agent.stopped) return "dropped";
+      if (result.status === "accepted") {
+        markSessionStable(agent, session);
+        return "accepted";
+      }
+      agent.busy = false;
+      return "retry";
     } catch (error) {
       agent.busy = false;
       log("background completion wake failed", error instanceof Error ? error.message : String(error));
-    } finally {
-      agent.submitting = false;
+      return "retry";
     }
   };
 
   const drainBackgroundCompletionQueue = async (agent: ManagedAgent): Promise<void> => {
     if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
     if (!agent.backgroundCompletionQueue.length) return;
-    agent.backgroundCompletionQueue.shift();
-    await wakeOnBackgroundCompletion(agent);
-    if (!agent.stopped && !agent.busy && !agent.turnInProgress && !agent.submitting && agent.backgroundCompletionQueue.length > 0) {
-      queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
+    agent.submitting = true;
+    agent.busy = true;
+    const completionKey = agent.backgroundCompletionQueue[0];
+    try {
+      const outcome = await wakeOnBackgroundCompletion(agent);
+      if (outcome === "accepted" || outcome === "dropped") {
+        if (agent.backgroundCompletionQueue[0] === completionKey) {
+          agent.backgroundCompletionQueue.shift();
+        }
+      } else {
+        agent.busy = false;
+        agent.backgroundCompletionKeys.delete(completionKey);
+      }
+    } finally {
+      agent.submitting = false;
     }
   };
 
   const noteBackgroundCompletion = (agent: ManagedAgent, completionKey: string): void => {
     if (agent.backgroundCompletionKeys.has(completionKey)) return;
     agent.backgroundCompletionKeys.add(completionKey);
-    agent.backgroundCompletionQueue.push(completionKey);
+    if (!agent.backgroundCompletionQueue.includes(completionKey)) {
+      agent.backgroundCompletionQueue.push(completionKey);
+    }
     if (!agent.busy && !agent.turnInProgress && !agent.submitting) {
       queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
     }

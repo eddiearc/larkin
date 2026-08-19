@@ -352,6 +352,70 @@ test("RuntimeHost ignores additional completion wake bridges while a wake prompt
   }
 });
 
+test("RuntimeHost wakes both concurrent idle background completions", async () => {
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeBothA1", name: "wake-both", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeBothA1", { message_id: "om_pi_wake_both", chat_id: "oc_pi_wake_both", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-concurrent-1" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-concurrent-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2, "first idle completion must reserve and wake before the second drain can drop the queue head");
+    assert.equal(session.prompts[1].kind, "wake");
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 3, "second concurrent idle completion must still wake after the first turn ends");
+    assert.equal(session.prompts[2].kind, "wake");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+const isBackgroundCompletionWake = (input) => input?.kind === "wake"
+  && /reason=background subagent completed/i.test(String(input.text || ""));
+
+test("RuntimeHost retries a rejected background completion wake", async () => {
+  let wakeAttempts = 0;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (isBackgroundCompletionWake(input)) {
+      wakeAttempts += 1;
+      if (wakeAttempts === 1) {
+        return { status: "rejected", inputId: input.inputId, retryable: true, reason: "wake rejected" };
+      }
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  try {
+    await host.start([{ agentId: "cli_piWakeRetryA1", name: "wake-retry", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piWakeRetryA1", { message_id: "om_pi_wake_retry", chat_id: "oc_pi_wake_retry", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-retry-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.equal(wakeAttempts, 1);
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-retry-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(wakeAttempts, 2);
+    assert.equal(session.prompts.length, 3, "the same completion must be able to wake again after a rejected prompt");
+    assert.equal(session.prompts[2].kind, "wake");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
 test("RuntimeHost treats a failed manual compact as an internal fresh-session fallback", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-fallback-"));
   const agentId = "cli_piFallbackA1";

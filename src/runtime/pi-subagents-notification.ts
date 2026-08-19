@@ -35,14 +35,43 @@ function extractTag(content: string, tagName: string): string | null {
   return match ? match[1].trim() : null;
 }
 
+/**
+ * Pi subagents emit terminal <status> as Done or a display label
+ * (Error: ..., Aborted (...), Stopped, Wrapped up (turn limit)).
+ * Raw tokens completed/error/aborted/stopped/steered/turn-limit are also accepted.
+ */
+const TERMINAL_STATUS_TOKENS = new Set([
+  "done",
+  "completed",
+  "error",
+  "aborted",
+  "stopped",
+  "steered",
+  "turn-limit",
+  "turn_limit",
+]);
+
+export function isCanonicalTerminalPiSubagentStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  if (!normalized) return false;
+  if (TERMINAL_STATUS_TOKENS.has(normalized)) return true;
+  if (normalized.startsWith("error:") || normalized.startsWith("error ")) return true;
+  if (normalized.startsWith("aborted")) return true;
+  if (normalized.startsWith("stopped")) return true;
+  if (normalized.includes("turn limit") || normalized.includes("turn-limit") || normalized.includes("turn_limit")) {
+    return true;
+  }
+  if (normalized.includes("steered")) return true;
+  return false;
+}
+
 function parseTaskNotificationBlock(block: string): CanonicalPiSubagentNotificationBlock | null {
   const taskId = extractTag(block, "task-id");
   const status = extractTag(block, "status");
   const summary = extractTag(block, "summary");
   const result = extractTag(block, "result");
   if (!taskId || !status || !summary || !result) return null;
-  if (status !== "Done") return null;
-  if (!/completed\b/i.test(summary)) return null;
+  if (!isCanonicalTerminalPiSubagentStatus(status)) return null;
   return {
     taskId,
     toolUseId: extractTag(block, "tool-use-id") ?? undefined,
@@ -57,12 +86,17 @@ function parseCanonicalNotificationContent(content: string): CanonicalPiSubagent
   const blocks = [...content.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)]
     .map((match) => match[1]);
   if (blocks.length === 0) return null;
-  const notifications = blocks.map((block) => parseTaskNotificationBlock(block));
-  if (notifications.some((notification) => notification === null)) return null;
-  const canonical = notifications as CanonicalPiSubagentNotificationBlock[];
-  const taskIds = canonical.map((notification) => notification.taskId);
-  if (taskIds.some((taskId) => !taskId)) return null;
-  return { taskIds, notifications: canonical, content, key: taskIds.join("|") };
+  const seen = new Set<string>();
+  const notifications: CanonicalPiSubagentNotificationBlock[] = [];
+  for (const block of blocks) {
+    const parsed = parseTaskNotificationBlock(block);
+    if (!parsed || seen.has(parsed.taskId)) continue;
+    seen.add(parsed.taskId);
+    notifications.push(parsed);
+  }
+  if (notifications.length === 0) return null;
+  const taskIds = notifications.map((notification) => notification.taskId);
+  return { taskIds, notifications, content, key: taskIds.join("|") };
 }
 
 function collectCandidateContents(node: unknown, found = new Set<string>()): string[] {

@@ -338,10 +338,13 @@ function runCommentReply(
       const prior = state.document_comment_replies[ledgerKey]
         ?? (legacy?.digest === digest ? legacy : undefined);
       if (prior?.status === "sent") return "sent";
-      if (prior?.status === "sending") return "ambiguous";
+      const messageEntries = Object.entries(state.document_comment_replies)
+        .filter(([key]) => key === input.messageId || key.startsWith(`${input.messageId}::`));
+      if (messageEntries.some(([, entry]) => entry.status === "sending")) return "ambiguous";
       state.document_comment_replies[ledgerKey] = { digest, status: "sending", updated_at: new Date().toISOString() };
-      const keys = Object.keys(state.document_comment_replies);
-      for (const stale of keys.slice(0, Math.max(0, keys.length - 512))) delete state.document_comment_replies[stale];
+      const terminalKeys = Object.keys(state.document_comment_replies)
+        .filter((key) => state.document_comment_replies![key]?.status !== "sending");
+      for (const stale of terminalKeys.slice(0, Math.max(0, terminalKeys.length - 512))) delete state.document_comment_replies[stale];
       return "ready";
     },
   );

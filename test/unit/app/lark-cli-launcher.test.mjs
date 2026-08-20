@@ -174,10 +174,11 @@ test("document comment reply retains ambiguous native outcomes as sending and re
       assert.equal(retry.code, 2);
       assert.match(retry.stderr, /结果不明确/);
       assert.equal(f.calls.length, 1, "ambiguous outcome must never resend same body");
-      f.setWriteResult({ status: 0, signal: null, output: [], pid: 1, stdout: "{}\n", stderr: "", error: undefined });
-      const completion = f.run(["comment", "reply", "--message-id", messageId, "--text", "completion"]);
-      assert.equal(completion.code, 0, completion.stderr);
-      assert.equal(f.calls.length, 2, "a different body remains a separate delivery identity");
+      const changed = f.run(["comment", "reply", "--message-id", messageId, "--text", "changed"]);
+      assert.equal(changed.code, 2);
+      assert.match(changed.stderr, /请勿改写正文重试/);
+      assert.match(changed.stderr, /检查原评论线程/);
+      assert.equal(f.calls.length, 1, "an unresolved body blocks changed-body retries before the provider");
     } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
   }
 
@@ -195,6 +196,8 @@ test("document comment reply retains ambiguous native outcomes as sending and re
     assert.equal(Object.values(rejectedLedger)[0].status, "failed");
     assert.equal(rejected.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]).code, 7);
     assert.equal(rejected.calls.length, 2, "definitive provider rejection may be retried");
+    assert.equal(rejected.run(["comment", "reply", "--message-id", messageId, "--text", "changed"]).code, 7);
+    assert.equal(rejected.calls.length, 3, "a changed body is allowed once all prior identities are terminal");
   } finally { fs.rmSync(rejected.root, { recursive: true, force: true }); }
 });
 

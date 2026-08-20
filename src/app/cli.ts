@@ -92,7 +92,7 @@ Reset replaces one idle, zero-backlog Runtime session. Recover is an explicit op
        larkin pi-auth logout <provider> [--agent <App ID>]
 Show non-sensitive official Pi credential metadata or remove one target provider credential.`,
   comment: `Usage: larkin comment reply --message-id <doc_comment_message_id> --text '<reply>' --json
-Reply once, as the Runtime-bound Bot, to the exact cloud-document comment locator supplied by canonical Inbox.`,
+Reply as the Runtime-bound Bot to the exact cloud-document comment locator supplied by canonical Inbox. Retrying the same body is idempotent; a different body appends a follow-up reply to the same comment.`,
   telemetry: `Usage: larkin telemetry <status|export|import|flush>
 Inspect the durable local trace queue, move an offline bundle, or upload queued OTLP traces.`,
 };

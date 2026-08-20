@@ -227,10 +227,10 @@ test("document comment Mock workflow traces safe rejection, pending replay, Inbo
       { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, cliDependencies);
     assert.equal(code, 0, output.stderr);
     assert.equal(nativeCalls.length, 1, "fixture must exercise the real locator-bound reply path once without Feishu I/O");
-    const rejectedReply = runLarkCli(["comment", "reply", "--message-id", envelope.message_id, "--text", "FORBIDDEN_CHANGED_BODY", "--json"],
+    const followUp = runLarkCli(["comment", "reply", "--message-id", envelope.message_id, "--text", "FORBIDDEN_CHANGED_BODY", "--json"],
       { LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId }, cliDependencies);
-    assert.equal(rejectedReply, 2);
-    assert.equal(nativeCalls.length, 1, "local reply rejection must not perform another Feishu write");
+    assert.equal(followUp, 0, output.stderr);
+    assert.equal(nativeCalls.length, 2, "a different body appends a follow-up on the same locator");
     telemetry.runtimeEvent(agentId, { type: "turn-end" });
     await telemetry.shutdown();
 
@@ -251,8 +251,8 @@ test("document comment Mock workflow traces safe rejection, pending replay, Inbo
     const replies = spans.filter((span) => span.name === "document.comment.reply");
     assert.equal(replies.length, 2);
     assert.ok(replies.every((reply) => reply.parentSpanId === turn.spanId));
-    assert.deepEqual(replies.map((reply) => reply.attributes.find((attribute) => attribute.key === "larkin.operation.outcome")?.value?.stringValue).sort(), ["error", "success"]);
-    assert.equal(replies.filter((reply) => reply.status.code === 2).length, 1);
+    assert.deepEqual(replies.map((reply) => reply.attributes.find((attribute) => attribute.key === "larkin.operation.outcome")?.value?.stringValue).sort(), ["success", "success"]);
+    assert.equal(replies.filter((reply) => reply.status.code === 2).length, 0);
     const serialized = JSON.stringify(records);
     for (const forbidden of ["doc_private_token", "comment_private", "reply_private", "ou_recovery_human", "FORBIDDEN_PROVIDER_ERROR",
       "FORBIDDEN_REPLY_BODY", "FORBIDDEN_CHANGED_BODY", "/fixed/", stateDir]) assert.equal(serialized.includes(forbidden), false, forbidden);

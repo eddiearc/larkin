@@ -330,16 +330,21 @@ function runCommentReply(
   if (!target) throw new Error("comment reply 无法从当前 Agent Inbox 绑定文档评论 locator；先 poll 该消息且不得跨 Agent/评论回复");
   if (!store.inboxTargetIsFresh(targetKey!)) throw new Error("comment reply 需要先 poll 当前 document-comment target 的最新 Inbox 消息");
   const digest = createHash("sha256").update(input.text).digest("hex");
-  const claim = store.mutateJson<CommentReplyLedger, "ready" | "sent" | "ambiguous" | "conflict">(
+  const ledgerKey = `${input.messageId}::${digest}`;
+  const claim = store.mutateJson<CommentReplyLedger, "ready" | "sent" | "ambiguous">(
     "freshnessState", { version: 1, cursors: {} }, (state) => {
       state.document_comment_replies ??= {};
-      const prior = state.document_comment_replies[input.messageId];
-      if (prior?.status === "sent" && prior.digest === digest) return "sent";
-      if (prior?.status === "sending" && prior.digest === digest) return "ambiguous";
-      if (prior && prior.status !== "failed" && prior.digest !== digest) return "conflict";
-      state.document_comment_replies[input.messageId] = { digest, status: "sending", updated_at: new Date().toISOString() };
-      const keys = Object.keys(state.document_comment_replies);
-      for (const stale of keys.slice(0, Math.max(0, keys.length - 512))) delete state.document_comment_replies[stale];
+      const legacy = state.document_comment_replies[input.messageId];
+      const prior = state.document_comment_replies[ledgerKey]
+        ?? (legacy?.digest === digest ? legacy : undefined);
+      if (prior?.status === "sent") return "sent";
+      const messageEntries = Object.entries(state.document_comment_replies)
+        .filter(([key]) => key === input.messageId || key.startsWith(`${input.messageId}::`));
+      if (messageEntries.some(([, entry]) => entry.status === "sending")) return "ambiguous";
+      state.document_comment_replies[ledgerKey] = { digest, status: "sending", updated_at: new Date().toISOString() };
+      const terminalKeys = Object.keys(state.document_comment_replies)
+        .filter((key) => state.document_comment_replies![key]?.status !== "sending");
+      for (const stale of terminalKeys.slice(0, Math.max(0, terminalKeys.length - 512))) delete state.document_comment_replies[stale];
       return "ready";
     },
   );
@@ -347,8 +352,7 @@ function runCommentReply(
     io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target: targetKey })}\n`);
     return 0;
   }
-  if (claim === "ambiguous") throw new Error("comment reply 上次调用结果不明确，已 fail-closed 以避免重复评论；请由用户检查原评论线程");
-  if (claim === "conflict") throw new Error("comment reply 已为同一 Inbox 消息提交不同正文，拒绝覆盖或重复发送");
+  if (claim === "ambiguous") throw new Error("comment reply 上次调用结果不明确，已 fail-closed 以避免重复评论；请勿改写正文重试，请由用户检查原评论线程");
   const nativeArgs = target.topLevel
     ? [
         "drive", "file.comments", "create_v2",
@@ -375,7 +379,7 @@ function runCommentReply(
   if (terminalStatus) {
     store.mutateJson<CommentReplyLedger, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
       state.document_comment_replies ??= {};
-      state.document_comment_replies[input.messageId] = {
+      state.document_comment_replies[ledgerKey] = {
         digest,
         status: terminalStatus,
         updated_at: new Date().toISOString(),

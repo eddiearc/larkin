@@ -271,6 +271,19 @@ export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stat
   return commandDir;
 }
 
+function validateRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">): void {
+  const commandDir = path.join(path.resolve(agent.stateDir), "runtime-bin");
+  const directory = fs.lstatSync(commandDir);
+  if (!directory.isDirectory() || directory.isSymbolicLink()
+      || (typeof process.getuid === "function" && directory.uid !== process.getuid())
+      || (!exactMode(directory, 0o700) && !exactMode(directory, 0o500))) throw new Error("Runtime command shim 目录不安全");
+  const file = path.join(commandDir, "larkin");
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || (!exactMode(stat, 0o700) && !exactMode(stat, 0o500))) throw new Error("Runtime command shim 不安全");
+}
+
 export function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Record<string, unknown> {
   const configDir = path.resolve(env.LARKIN_CONFIG_DIR || "");
   if (!configDir) throw new Error("LARKIN_CONFIG_DIR required for lark-channel source projection");
@@ -319,11 +332,30 @@ function validateSourceProjection(file: string, agent: Pick<RuntimeAgentConfig, 
   }
 }
 
+export function validateAgentProfile(agent: RuntimeAgentConfig): void {
+  const sourceFile = larkChannelSourceConfigPath(agent);
+  const workspaceFile = larkChannelWorkspaceConfigPath(agent);
+  const source = captureProfileSnapshot(sourceFile);
+  if (!source) throw new Error(`Agent ${agent.agentId} lark-channel source projection missing`);
+  validateSourceProjection(sourceFile, agent);
+  const workspace = captureProfileSnapshot(workspaceFile);
+  if (!workspace) throw new Error(`Agent ${agent.agentId} lark-channel workspace config missing`);
+  validateExclusiveBotProfile(workspace, agent);
+  validateRuntimeCommandShims(agent);
+  assertAgentWorkspaceBound(agent);
+}
+
 export function syncAgentProfile(
   agent: RuntimeAgentConfig,
   env: NodeJS.ProcessEnv,
   dependencies: RuntimeAgentConfigDependencies = {},
 ): void {
+  if (!dependencies.forceRebind) {
+    try {
+      validateAgentProfile(agent);
+      return;
+    } catch { /* absent or stale state requires exactly one bind */ }
+  }
   const expected = path.join(path.resolve(env.LARKIN_CONFIG_DIR || ""), "state", "agents", agent.agentId, "lark-cli-config");
   if (path.resolve(agent.larkConfigDir) !== expected) throw new Error("lark-cli profile 路径不是 canonical contained 路径");
   fs.mkdirSync(expected, { recursive: true, mode: 0o700 });

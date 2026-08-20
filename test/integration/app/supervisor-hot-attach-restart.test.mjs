@@ -35,7 +35,25 @@ function configFor(agentIds) {
   };
 }
 
-test("hot-attached Agent survives supervised daemon restart", { timeout: 30_000 }, async () => {
+function readOnlyProfile(root, agentId) {
+  const stateDir = path.join(root, "state", "agents", agentId);
+  for (const directory of [path.join(stateDir, "lark-cli-config"), path.join(stateDir, "lark-cli-config", "lark-channel"),
+    path.join(stateDir, "lark-channel-source"), path.join(stateDir, "runtime-bin")]) fs.chmodSync(directory, 0o500);
+  for (const file of [path.join(stateDir, "lark-cli-config", "lark-channel", "config.json"),
+    path.join(stateDir, "lark-channel-source", "config.json")]) fs.chmodSync(file, 0o400);
+  fs.chmodSync(path.join(stateDir, "runtime-bin", "larkin"), 0o500);
+}
+
+function writableProfile(root, agentId) {
+  const stateDir = path.join(root, "state", "agents", agentId);
+  for (const directory of [path.join(stateDir, "lark-cli-config"), path.join(stateDir, "lark-cli-config", "lark-channel"),
+    path.join(stateDir, "lark-channel-source"), path.join(stateDir, "runtime-bin")]) fs.chmodSync(directory, 0o700);
+  for (const file of [path.join(stateDir, "lark-cli-config", "lark-channel", "config.json"),
+    path.join(stateDir, "lark-channel-source", "config.json")]) fs.chmodSync(file, 0o600);
+  fs.chmodSync(path.join(stateDir, "runtime-bin", "larkin"), 0o700);
+}
+
+test("selector hot attach survives restart with read-only valid profiles", { timeout: 30_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-hot-attach-restart-"));
   fs.chmodSync(root, 0o700);
   const binDir = path.join(root, "bin");
@@ -80,7 +98,7 @@ process.exit(0);
     LARKIN_TEST_DASHBOARD_SCRIPT: path.join(ROOT, "test/support/dashboard-stable.mjs"),
     PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
   };
-  const supervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--dry-run"], {
+  const supervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agents", AGENTS.join(","), "--dry-run"], {
     cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -105,6 +123,13 @@ process.exit(0);
     assert.ok(hotAttached, `hot attach did not update daemon ownership\n${output}`);
     assert.deepEqual(hotAttached.agents, [...AGENTS, HOT_AGENT]);
 
+    const profileFiles = [...AGENTS, HOT_AGENT].flatMap((agentId) => {
+      const stateDir = path.join(root, "state", "agents", agentId);
+      return [path.join(stateDir, "lark-cli-config", "lark-channel", "config.json"),
+        path.join(stateDir, "lark-channel-source", "config.json"), path.join(stateDir, "runtime-bin", "larkin")];
+    });
+    const profileMtimes = new Map(profileFiles.map((file) => [file, fs.statSync(file).mtimeNs]));
+    for (const agentId of [...AGENTS, HOT_AGENT]) readOnlyProfile(root, agentId);
     const oldDaemonPid = Number(hotAttached.pid);
     process.kill(oldDaemonPid, "SIGKILL");
     const restarted = await waitUntil(() => {
@@ -115,7 +140,11 @@ process.exit(0);
     assert.ok(restarted, `supervisor did not restart daemon\n${output}`);
     assert.deepEqual(restarted.daemon.agents, [...AGENTS, HOT_AGENT]);
     assert.deepEqual(restarted.daemon.connectedAgents, [...AGENTS, HOT_AGENT]);
+    for (const [file, mtime] of profileMtimes) assert.equal(fs.statSync(file).mtimeNs, mtime, `restart rewrote ${file}`);
   } finally {
+    for (const agentId of [...AGENTS, HOT_AGENT]) {
+      try { writableProfile(root, agentId); } catch { /* profile may not have been created */ }
+    }
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGTERM");
     await waitUntil(() => supervisor.exitCode !== null || supervisor.signalCode !== null, 3_000);
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");

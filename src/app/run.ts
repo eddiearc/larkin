@@ -13,7 +13,7 @@ import {
   terminateOwnedProcess,
   waitForProcessExit,
 } from "../platform/process-state.js";
-import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfig } from "./runtime-agent-config.js";
+import { hydrateRuntimeAgent, syncAgentProfile, validateAgentProfile, type RuntimeAgentConfig } from "./runtime-agent-config.js";
 import {
   cleanupStaleAgentControlSocket,
   createSupervisorControlServer,
@@ -145,22 +145,6 @@ export async function main(): Promise<void> {
   }
   let agents: RuntimeAgentConfig[] = [];
 
-  if (before.dashboard.state === "owned") {
-    console.error(`[start] 正在把旧 dashboard PID ${before.dashboard.pid} 收归统一 supervisor…`);
-    terminateOwnedProcess(before.dashboard, "SIGTERM");
-    if (!await waitForProcessExit(before.dashboard)) {
-      await supervisorControl.close().catch(() => {});
-      try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
-      launchLock.release();
-      die("旧 dashboard 10 秒内未退出；拒绝并行启动");
-    }
-  } else if (before.dashboard.state === "unknown") {
-    await supervisorControl.close().catch(() => {});
-    try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
-    launchLock.release();
-    die(`dashboard PID ${before.dashboard.pid} 身份无法确认；拒绝替换`);
-  }
-
   const serverId = config.serverId;
   if (!serverId) die("配置缺少 serverId");
   const runtimeEnv: NodeJS.ProcessEnv = {
@@ -177,17 +161,25 @@ export async function main(): Promise<void> {
   // Durable config is the recovery source of truth. Re-read it for every daemon
   // launch instead of reusing the startup snapshot: a hot attach updates the
   // child and durable config, but cannot mutate this supervisor's old closure.
-  const refreshDaemonAgents = (): void => {
+  const refreshDaemonAgents = (reuseExistingProfiles: boolean): void => {
     const latest = larkinConfig.loadConfig(process.env);
     if (latest.configDir !== configDir) throw new Error("配置目录在 supervisor 运行期间发生变化");
     if (!latest.config.serverId || !Object.keys(latest.config.agents).length) throw new Error("配置缺少 serverId/agents");
-    const latestNames = selectedAgentIds(argv, Object.keys(latest.config.agents));
+    const selectedNames = selectedAgentIds(argv, Object.keys(latest.config.agents));
+    const applyState = larkinConfig.configApplyState(process.env, latest.config) as {
+      agents?: Record<string, { applyState?: string }>;
+    };
+    const appliedNames = Object.entries(applyState.agents || {})
+      .filter(([, state]) => state.applyState === "applied")
+      .map(([name]) => name);
+    const latestNames = [...new Set([...selectedNames, ...appliedNames])];
     const refreshed: RuntimeAgentConfig[] = [];
     for (const name of latestNames) {
       const stored = latest.config.agents[name];
       if (!stored) throw new Error(`Agent ${name} 不存在`);
       const agent = hydrateRuntimeAgent(configDir, stored);
-      syncAgentProfile(agent, { ...process.env, LARKIN_CONFIG_DIR: configDir });
+      if (reuseExistingProfiles) validateAgentProfile(agent);
+      else syncAgentProfile(agent, { ...process.env, LARKIN_CONFIG_DIR: configDir });
       refreshed.push(agent);
     }
     agents = refreshed;
@@ -196,12 +188,28 @@ export async function main(): Promise<void> {
     runtimeEnv.LARKIN_AGENTS_CONFIG = JSON.stringify(agents);
     for (const agent of agents) traceProcessBoundary(runtimeEnv, "supervisor:daemon-env-prepared", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId) });
   };
-  try { refreshDaemonAgents(); }
+  try { refreshDaemonAgents(false); }
   catch (error) {
     await supervisorControl.close().catch(() => {});
     try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
     launchLock.release();
     die(`Agent 启动校验失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (before.dashboard.state === "owned") {
+    console.error(`[start] 正在把旧 dashboard PID ${before.dashboard.pid} 收归统一 supervisor…`);
+    terminateOwnedProcess(before.dashboard, "SIGTERM");
+    if (!await waitForProcessExit(before.dashboard)) {
+      await supervisorControl.close().catch(() => {});
+      try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
+      launchLock.release();
+      die("旧 dashboard 10 秒内未退出；拒绝并行启动");
+    }
+  } else if (before.dashboard.state === "unknown") {
+    await supervisorControl.close().catch(() => {});
+    try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
+    launchLock.release();
+    die(`dashboard PID ${before.dashboard.pid} 身份无法确认；拒绝替换`);
   }
 
   let stopping = false;
@@ -228,8 +236,10 @@ export async function main(): Promise<void> {
   // exiting on transient failures (e.g. network/proxy ECONNRESET during Feishu
   // auth). Only when the budget is exhausted does the supervisor exit so the
   // external process manager (launchd) takes over as the final respawn layer.
+  let initialRefreshPending = true;
   const launchDaemon = (): void => {
-    try { refreshDaemonAgents(); }
+    if (initialRefreshPending) initialRefreshPending = false;
+    else try { refreshDaemonAgents(true); }
     catch (error) {
       console.error(`✗ daemon 启动前重新加载配置失败：${error instanceof Error ? error.message : String(error)}`);
       resolveDaemonFinal?.({ code: null, signal: null });
@@ -266,7 +276,6 @@ export async function main(): Promise<void> {
         const oldDashboard = dashboard;
         if (oldDashboard && oldDashboard.exitCode === null && oldDashboard.signalCode === null) {
           intentionalDashboardExit = oldDashboard;
-          dashboard = null;
           oldDashboard.kill("SIGTERM");
           // If the old dashboard ignores SIGTERM (observed in production holding
           // the dashboard port for minutes), escalate so the port is released

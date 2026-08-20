@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createAgentControlServer } from "../../dist/app/local-control.mjs";
 import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../../dist/platform/config.mjs";
+import { loadAndSyncRuntimeAgent } from "../../dist/app/runtime-process.mjs";
 import { currentProcessMetadata } from "../../dist/platform/process-state.mjs";
 
 const root = process.env.LARKIN_CONFIG_DIR;
@@ -25,6 +26,7 @@ const control = createAgentControlServer({
   async upsert({ agentId }) {
     const loaded = loadConfig(process.env);
     if (!loaded.config.agents[agentId]) throw new Error(`Agent ${agentId} missing from durable config`);
+    loadAndSyncRuntimeAgent(process.env, agentId);
     if (!agents.includes(agentId)) agents.push(agentId);
     markConfigApplied(process.env, agentId, runtimeConfigSignature(loaded.config, agentId));
     writeStatus();

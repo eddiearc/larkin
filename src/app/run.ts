@@ -131,11 +131,16 @@ export async function main(): Promise<void> {
     die("无法取得 supervisor start identity");
   }
   const controlToken = initializeControlAuthority(configDir, { pid: process.pid, processStartToken: supervisorStartToken });
+  // This supervisor's successful hot-attaches are the only membership additions
+  // that survive a daemon crash. Durable config apply state describes freshness,
+  // not which Agents this explicitly selected supervisor owns.
+  const hotAttachedNames = new Set<string>();
   let ensureDashboardHandler = (): string => "starting";
   const supervisorControl = createSupervisorControlServer({
     larkinHome: configDir,
     authorityToken: controlToken,
     ensureDashboard: () => ensureDashboardHandler(),
+    onAgentUpserted: (agentId) => { hotAttachedNames.add(agentId); },
   });
   try { await supervisorControl.start(); }
   catch (error) {
@@ -166,13 +171,7 @@ export async function main(): Promise<void> {
     if (latest.configDir !== configDir) throw new Error("配置目录在 supervisor 运行期间发生变化");
     if (!latest.config.serverId || !Object.keys(latest.config.agents).length) throw new Error("配置缺少 serverId/agents");
     const selectedNames = selectedAgentIds(argv, Object.keys(latest.config.agents));
-    const applyState = larkinConfig.configApplyState(process.env, latest.config) as {
-      agents?: Record<string, { applyState?: string }>;
-    };
-    const appliedNames = Object.entries(applyState.agents || {})
-      .filter(([, state]) => state.applyState === "applied")
-      .map(([name]) => name);
-    const latestNames = [...new Set([...selectedNames, ...appliedNames])];
+    const latestNames = [...new Set([...selectedNames, ...hotAttachedNames])];
     const refreshed: RuntimeAgentConfig[] = [];
     for (const name of latestNames) {
       const stored = latest.config.agents[name];

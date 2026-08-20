@@ -8,7 +8,7 @@ import { createRuntimeHost, type RuntimeHost } from "../runtime/runtime-host.js"
 import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../platform/config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
-import { createAgentControlServer } from "./local-control.js";
+import { createAgentControlServer, requestSupervisorAgentUpsert } from "./local-control.js";
 import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
 import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
@@ -111,6 +111,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
       // Only the selected profile is synchronized; active profiles and their directory
       // are never quarantined or rebuilt during hot attach.
       await hostShell.upsertAgent(agent);
+      const tracked = await requestSupervisorAgentUpsert({
+        larkinHome: env.LARKIN_HOME as string, agentId: agent.agentId, operationId: request.operationId,
+      });
+      if (!tracked.ok) throw new Error(tracked.error || "supervisor 未记录 Agent 热挂载");
     },
     async resetSession(request) {
       const result = await hostShell.resetSession(request.agentId, request.waitReadyMs);

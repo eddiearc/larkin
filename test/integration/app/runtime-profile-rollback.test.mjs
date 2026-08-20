@@ -80,6 +80,20 @@ test("profile sync binds one Bot through the verified official lark-channel work
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("stale runtime shim content is refreshed without another bind", () => {
+  const f = fixture("stale-runtime-shim");
+  const runner = fakeOfficialRunner();
+  try {
+    const env = { ...process.env, LARKIN_CONFIG_DIR: f.root, LARKIN_HOME: f.root };
+    loadAndSyncRuntimeAgent(env, f.target, runner);
+    const shim = path.join(f.root, "state", "agents", f.target, "runtime-bin", "larkin");
+    fs.writeFileSync(shim, `#!/bin/sh\nexec /obsolete/larkin "$@"\n`, { mode: 0o700 });
+    loadAndSyncRuntimeAgent(env, f.target, runner);
+    assert.equal(runner.calls.length, 1);
+    assert.ok(fs.readFileSync(shim, "utf8").includes(`exec '${process.execPath}`));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("credential revision change causes exactly one new bind", () => {
   const f = fixture("credential-revision");
   const runner = fakeOfficialRunner();

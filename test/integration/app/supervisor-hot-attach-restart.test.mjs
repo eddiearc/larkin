@@ -7,6 +7,7 @@ import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { requestAgentUpsert } from "../../../dist/app/local-control.mjs";
 import { readProcessState } from "../../../dist/platform/process-state.mjs";
+import { loadConfig, runtimeConfigSignature } from "../../../dist/platform/config.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENTS = ["cli_restartA1", "cli_restartB2", "cli_restartC3"];
@@ -101,6 +102,7 @@ process.exit(0);
   const supervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agents", AGENTS.join(","), "--dry-run"], {
     cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"],
   });
+  let secondSupervisor = null;
   let output = "";
   supervisor.stdout.on("data", (chunk) => { output += chunk; });
   supervisor.stderr.on("data", (chunk) => { output += chunk; });
@@ -141,6 +143,39 @@ process.exit(0);
     assert.deepEqual(restarted.daemon.agents, [...AGENTS, HOT_AGENT]);
     assert.deepEqual(restarted.daemon.connectedAgents, [...AGENTS, HOT_AGENT]);
     for (const [file, mtime] of profileMtimes) assert.equal(fs.statSync(file).mtimeNs, mtime, `restart rewrote ${file}`);
+
+    // Historical apply state is deliberately present, but must not expand a
+    // later explicit selector. Membership additions belong to the supervisor
+    // lifetime, not to the durable freshness projection.
+    supervisor.kill("SIGTERM");
+    await waitUntil(() => supervisor.exitCode !== null || supervisor.signalCode !== null, 3_000);
+    const loaded = loadConfig(env);
+    const historicalAgents = Object.fromEntries(Object.keys(loaded.config.agents).map((agentId) => {
+      const signature = runtimeConfigSignature(loaded.config, agentId);
+      return [agentId, { persistedSignature: signature, appliedSignature: signature }];
+    }));
+    writePrivate(path.join(root, "config-apply-state.json"), {
+      version: 1, persistedRevision: "historical", agents: historicalAgents,
+    });
+    secondSupervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agent", AGENTS[0], "--dry-run"], {
+      cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    secondSupervisor.stdout.on("data", (chunk) => { output += chunk; });
+    secondSupervisor.stderr.on("data", (chunk) => { output += chunk; });
+    const selected = await waitUntil(() => {
+      const state = readProcessState(root);
+      return state.daemon.state === "owned" && state.daemon.agents?.length === 1 ? state : null;
+    });
+    assert.ok(selected, `explicit selector included historical Agents\n${output}`);
+    assert.deepEqual(selected.daemon.agents, [AGENTS[0]]);
+    const selectedDaemonPid = Number(selected.daemon.pid);
+    process.kill(selectedDaemonPid, "SIGKILL");
+    const selectedRestarted = await waitUntil(() => {
+      const state = readProcessState(root);
+      return state.daemon.state === "owned" && Number(state.daemon.pid) !== selectedDaemonPid ? state : null;
+    }, 10_000);
+    assert.ok(selectedRestarted, `selected supervisor did not restart daemon\n${output}`);
+    assert.deepEqual(selectedRestarted.daemon.agents, [AGENTS[0]]);
   } finally {
     for (const agentId of [...AGENTS, HOT_AGENT]) {
       try { writableProfile(root, agentId); } catch { /* profile may not have been created */ }
@@ -148,6 +183,11 @@ process.exit(0);
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGTERM");
     await waitUntil(() => supervisor.exitCode !== null || supervisor.signalCode !== null, 3_000);
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
+    if (secondSupervisor && secondSupervisor.exitCode === null && secondSupervisor.signalCode === null) secondSupervisor.kill("SIGTERM");
+    if (secondSupervisor) {
+      await waitUntil(() => secondSupervisor.exitCode !== null || secondSupervisor.signalCode !== null, 3_000);
+      if (secondSupervisor.exitCode === null && secondSupervisor.signalCode === null) secondSupervisor.kill("SIGKILL");
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

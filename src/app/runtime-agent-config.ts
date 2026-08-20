@@ -254,17 +254,23 @@ function runOfficialLarkCliAsync(command: OfficialLarkCliCommand, args: readonly
   });
 }
 
+function expectedRuntimeCommandShim(): string {
+  const standalone = process.env.LARKIN_STANDALONE === "1";
+  const binaryEntry = fileURLToPath(new URL("./binary-entry.mjs", import.meta.url));
+  const argumentsPrefix = standalone ? [] : [binaryEntry];
+  const command = [process.execPath, ...argumentsPrefix].map(shellQuote).join(" ");
+  return `#!/bin/sh\nexec ${command} "$@"\n`;
+}
+
 export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">): string {
   const stateDir = path.resolve(agent.stateDir);
   const commandDir = path.join(stateDir, "runtime-bin");
   assertSecureRuntimeCommandDirectory(commandDir);
-  const standalone = process.env.LARKIN_STANDALONE === "1";
-  const binaryEntry = fileURLToPath(new URL("./binary-entry.mjs", import.meta.url));
-  for (const [name, argumentsPrefix] of [["larkin", standalone ? [] : [binaryEntry]]] as const) {
+  const fileContents = expectedRuntimeCommandShim();
+  for (const name of ["larkin"] as const) {
     const file = path.join(commandDir, name);
     const temporary = path.join(commandDir, `.${name}.${process.pid}.${crypto.randomUUID()}.tmp`);
-    const command = [process.execPath, ...argumentsPrefix].map(shellQuote).join(" ");
-    fs.writeFileSync(temporary, `#!/bin/sh\nexec ${command} "$@"\n`, { mode: 0o700, flag: "wx" });
+    fs.writeFileSync(temporary, fileContents, { mode: 0o700, flag: "wx" });
     fs.renameSync(temporary, file);
     fs.chmodSync(file, 0o700);
   }
@@ -282,6 +288,9 @@ function validateRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">
   if (!stat.isFile() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
       || (!exactMode(stat, 0o700) && !exactMode(stat, 0o500))) throw new Error("Runtime command shim 不安全");
+  if (fs.readFileSync(file, "utf8") !== expectedRuntimeCommandShim()) {
+    throw new Error("Runtime command shim 内容无效");
+  }
 }
 
 export function sourceProjection(agent: RuntimeAgentConfig, env: NodeJS.ProcessEnv): Record<string, unknown> {

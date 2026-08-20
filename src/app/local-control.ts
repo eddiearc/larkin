@@ -13,6 +13,7 @@ export interface AgentUpsertRequest { operationId: string; agentId: string; auth
 export type AgentUpsertOperation = Pick<AgentUpsertRequest, "operationId" | "agentId">;
 export interface AgentUpsertResponse { ok: boolean; operationId: string; agentId: string; code?: string; error?: string; readiness?: RuntimeReadiness }
 export interface DashboardRecoveryResponse { ok: boolean; operationId: string; state?: string; error?: string }
+export interface SupervisorAgentUpsertResponse { ok: boolean; operationId: string; state?: string; error?: string }
 export interface SessionResetResponse {
   ok: boolean; agentId: string; code?: string; error?: string;
   resetCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
@@ -489,15 +490,17 @@ export function createSupervisorControlServer({
   larkinHome,
   authorityToken,
   ensureDashboard,
+  onAgentUpserted,
 }: {
   larkinHome: string;
   authorityToken: string;
   ensureDashboard(): Promise<string> | string;
+  onAgentUpserted?(agentId: string): Promise<void> | void;
 }): { start(): Promise<void>; close(): Promise<void> } {
   let socket = "";
   let socketRoot = "";
   let socketIdentity: SocketBinding | null = null;
-  const completed = new Map<string, DashboardRecoveryResponse>();
+  const completed = new Map<string, DashboardRecoveryResponse | SupervisorAgentUpsertResponse>();
   let server: net.Server | null = null;
   return {
     async start(): Promise<void> {
@@ -516,12 +519,18 @@ export function createSupervisorControlServer({
           const line = input.slice(0, newline);
           input = "";
           void (async () => {
-            let request: { operationId: string; operation: string; authorization: string };
+            let request: { operationId: string; operation: string; authorization: string; agentId?: string };
             try {
               request = JSON.parse(line) as typeof request;
-              if (!OPERATION_ID.test(String(request.operationId || "")) || request.operation !== "ensure-dashboard"
+              const isDashboardRecovery = request.operation === "ensure-dashboard";
+              const isAgentUpsert = request.operation === "agent-upserted";
+              const allowedKeys = isDashboardRecovery
+                ? ["operationId", "operation", "authorization"]
+                : isAgentUpsert ? ["operationId", "operation", "authorization", "agentId"] : [];
+              if (!OPERATION_ID.test(String(request.operationId || "")) || (!isDashboardRecovery && !isAgentUpsert)
                   || !AUTHORIZATION.test(String(request.authorization || ""))
-                  || Object.keys(request).some((key) => !["operationId", "operation", "authorization"].includes(key))) {
+                  || (isAgentUpsert && !AGENT_ID.test(String(request.agentId || "")))
+                  || Object.keys(request).some((key) => !allowedKeys.includes(key))) {
                 throw new Error("invalid supervisor control request");
               }
               const authority = assertSupervisorAuthority(larkinHome, authorityToken);
@@ -532,8 +541,15 @@ export function createSupervisorControlServer({
             }
             const replay = completed.get(request.operationId);
             if (replay) { connection.end(`${JSON.stringify(replay)}\n`); return; }
-            let response: DashboardRecoveryResponse;
-            try { response = { ok: true, operationId: request.operationId, state: await ensureDashboard() }; }
+            let response: DashboardRecoveryResponse | SupervisorAgentUpsertResponse;
+            try {
+              if (request.operation === "agent-upserted") {
+                await onAgentUpserted?.(request.agentId as string);
+                response = { ok: true, operationId: request.operationId, state: "agent-recorded" };
+              } else {
+                response = { ok: true, operationId: request.operationId, state: await ensureDashboard() };
+              }
+            }
             catch (error) { response = { ok: false, operationId: request.operationId, error: error instanceof Error ? error.message : String(error) }; }
             completed.set(request.operationId, response);
             while (completed.size > 256) completed.delete(completed.keys().next().value as string);
@@ -814,6 +830,49 @@ async function sendSupervisorRecovery(larkinHome: string, operationId: string, t
       catch (error) { reject(error); }
     });
   });
+}
+
+async function sendSupervisorAgentUpsert(larkinHome: string, agentId: string, operationId: string, timeoutMs: number): Promise<SupervisorAgentUpsertResponse> {
+  const authority = assertSupervisorAuthority(larkinHome);
+  assertSecureSocketDirectory(authority.socketRoot);
+  const socket = authority.supervisorSocketPath;
+  const stat = fs.lstatSync(socket);
+  if (!stat.isSocket() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || !notGroupOrWorldAccessible(stat)) throw new Error("supervisor control socket 不安全");
+  return await new Promise<SupervisorAgentUpsertResponse>((resolve, reject) => {
+    const client = net.createConnection(socket);
+    const timer = setTimeout(() => { client.destroy(); reject(new Error("supervisor agent upsert control timeout")); }, timeoutMs);
+    let input = "";
+    client.setEncoding("utf8");
+    client.once("error", (error) => { clearTimeout(timer); reject(error); });
+    client.once("connect", () => client.write(`${JSON.stringify({
+      operationId, operation: "agent-upserted", agentId, authorization: authority.token,
+    })}\n`));
+    client.on("data", (chunk) => {
+      input += chunk;
+      const newline = input.indexOf("\n");
+      if (newline < 0) return;
+      clearTimeout(timer);
+      client.end();
+      try { resolve(JSON.parse(input.slice(0, newline)) as SupervisorAgentUpsertResponse); }
+      catch (error) { reject(error); }
+    });
+  });
+}
+
+export async function requestSupervisorAgentUpsert({
+  larkinHome,
+  agentId,
+  operationId = crypto.randomUUID(),
+  timeoutMs = 30_000,
+}: {
+  larkinHome: string;
+  agentId: string;
+  operationId?: string;
+  timeoutMs?: number;
+}): Promise<SupervisorAgentUpsertResponse> {
+  return sendSupervisorAgentUpsert(larkinHome, agentId, operationId, timeoutMs);
 }
 
 export async function requestDashboardRecovery({

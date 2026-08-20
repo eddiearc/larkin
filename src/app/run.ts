@@ -143,21 +143,7 @@ export async function main(): Promise<void> {
     try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
     die(`supervisor control 启动失败：${error instanceof Error ? error.message : String(error)}`);
   }
-  const agents: RuntimeAgentConfig[] = [];
-  try {
-    for (const name of names) {
-      const stored = config.agents[name];
-      if (!stored) throw new Error(`Agent ${name} 不存在`);
-      const agent = hydrateRuntimeAgent(configDir, stored);
-      syncAgentProfile(agent, { ...process.env, LARKIN_CONFIG_DIR: configDir });
-      agents.push(agent);
-    }
-  } catch (error) {
-    await supervisorControl.close().catch(() => {});
-    try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
-    launchLock.release();
-    die(`Agent 启动校验失败：${error instanceof Error ? error.message : String(error)}`);
-  }
+  let agents: RuntimeAgentConfig[] = [];
 
   if (before.dashboard.state === "owned") {
     console.error(`[start] 正在把旧 dashboard PID ${before.dashboard.pid} 收归统一 supervisor…`);
@@ -183,11 +169,40 @@ export async function main(): Promise<void> {
     LARKIN_CONFIG_DIR: configDir,
     LARKIN_AGENT_TRANSPORT_MODULE: path.join(HERE, "..", "agent", "agent-transport.cjs"),
     LARKIN_SERVER_ID: String(serverId),
-    LARKIN_AGENTS_CONFIG: JSON.stringify(agents),
+    LARKIN_AGENTS_CONFIG: "[]",
     LARKIN_CONTROL_AUTHORIZATION: controlToken,
   };
   if (argv.includes("--dry-run")) runtimeEnv.LARKIN_FEISHU_DRYRUN = "1";
-  for (const agent of agents) traceProcessBoundary(runtimeEnv, "supervisor:daemon-env-prepared", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId) });
+
+  // Durable config is the recovery source of truth. Re-read it for every daemon
+  // launch instead of reusing the startup snapshot: a hot attach updates the
+  // child and durable config, but cannot mutate this supervisor's old closure.
+  const refreshDaemonAgents = (): void => {
+    const latest = larkinConfig.loadConfig(process.env);
+    if (latest.configDir !== configDir) throw new Error("配置目录在 supervisor 运行期间发生变化");
+    if (!latest.config.serverId || !Object.keys(latest.config.agents).length) throw new Error("配置缺少 serverId/agents");
+    const latestNames = selectedAgentIds(argv, Object.keys(latest.config.agents));
+    const refreshed: RuntimeAgentConfig[] = [];
+    for (const name of latestNames) {
+      const stored = latest.config.agents[name];
+      if (!stored) throw new Error(`Agent ${name} 不存在`);
+      const agent = hydrateRuntimeAgent(configDir, stored);
+      syncAgentProfile(agent, { ...process.env, LARKIN_CONFIG_DIR: configDir });
+      refreshed.push(agent);
+    }
+    agents = refreshed;
+    names = latestNames;
+    runtimeEnv.LARKIN_SERVER_ID = String(latest.config.serverId);
+    runtimeEnv.LARKIN_AGENTS_CONFIG = JSON.stringify(agents);
+    for (const agent of agents) traceProcessBoundary(runtimeEnv, "supervisor:daemon-env-prepared", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId) });
+  };
+  try { refreshDaemonAgents(); }
+  catch (error) {
+    await supervisorControl.close().catch(() => {});
+    try { removeControlAuthority(configDir, controlToken); } catch { /* best effort */ }
+    launchLock.release();
+    die(`Agent 启动校验失败：${error instanceof Error ? error.message : String(error)}`);
+  }
 
   let stopping = false;
   let dashboard: ChildProcess | null = null;
@@ -214,6 +229,12 @@ export async function main(): Promise<void> {
   // auth). Only when the budget is exhausted does the supervisor exit so the
   // external process manager (launchd) takes over as the final respawn layer.
   const launchDaemon = (): void => {
+    try { refreshDaemonAgents(); }
+    catch (error) {
+      console.error(`✗ daemon 启动前重新加载配置失败：${error instanceof Error ? error.message : String(error)}`);
+      resolveDaemonFinal?.({ code: null, signal: null });
+      return;
+    }
     daemon = spawn(daemonSpec.command, daemonSpec.args, { env: runtimeEnv, stdio: "inherit" });
     for (const agent of agents) traceProcessBoundary(runtimeEnv, "supervisor:daemon-spawned", { configDir, agentId: agent.agentId, targetDir: path.join(configDir, "providers", "pi", agent.agentId), childPid: daemon.pid ?? null });
     daemon.once("exit", (code, signal) => {

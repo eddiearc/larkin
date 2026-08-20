@@ -1,0 +1,124 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { requestAgentUpsert } from "../../../dist/app/local-control.mjs";
+import { readProcessState } from "../../../dist/platform/process-state.mjs";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const AGENTS = ["cli_restartA1", "cli_restartB2", "cli_restartC3"];
+const HOT_AGENT = "cli_restartD4";
+
+function writePrivate(file, value) {
+  fs.writeFileSync(file, `${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function waitUntil(predicate, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = predicate();
+    if (result) return result;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return null;
+}
+
+function configFor(agentIds) {
+  return {
+    version: 3,
+    serverId: "00000000-0000-0000-0000-000000000145",
+    activeAgent: agentIds[0],
+    agents: Object.fromEntries(agentIds.map((agentId) => [agentId, { runtime: "codex", model: "gpt-5.5" }])),
+  };
+}
+
+test("hot-attached Agent survives supervised daemon restart", { timeout: 30_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-hot-attach-restart-"));
+  fs.chmodSync(root, 0o700);
+  const binDir = path.join(root, "bin");
+  const cliPackage = path.join(binDir, "node_modules", "@larksuite", "cli");
+  fs.mkdirSync(path.join(cliPackage, "scripts"), { recursive: true, mode: 0o700 });
+  writePrivate(path.join(cliPackage, "package.json"), {
+    name: "@larksuite/cli", version: "1.0.80", bin: { "lark-cli": "scripts/run.mjs" },
+  });
+  const cliScript = path.join(cliPackage, "scripts", "run.mjs");
+  fs.writeFileSync(cliScript, `#!/usr/bin/env bun
+import fs from "node:fs";
+import path from "node:path";
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("1.0.80"); process.exit(0); }
+if (args[0] === "config" && args[1] === "bind" && args[2] === "--help") { console.log("--source lark-channel --identity bot-only"); process.exit(0); }
+if (args[0] === "config" && args[1] === "bind") {
+  const source = JSON.parse(fs.readFileSync(process.env.LARK_CHANNEL_CONFIG, "utf8"));
+  const appId = source.accounts.app.id;
+  const directory = path.join(process.env.LARKSUITE_CLI_CONFIG_DIR, "lark-channel");
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ apps: [{ appId, name: appId, appSecret: { source: "keychain", id: \`appsecret:\${appId}\` }, defaultAs: "bot", strictMode: "bot", users: [] }] }) + "\\n", { mode: 0o600 });
+  process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o700 });
+  fs.symlinkSync(cliScript, path.join(binDir, "lark-cli"));
+
+  writePrivate(path.join(root, "config.json"), configFor(AGENTS));
+  const botsDir = path.join(root, "bots");
+  fs.mkdirSync(botsDir, { mode: 0o700 });
+  for (const agentId of [...AGENTS, HOT_AGENT]) writePrivate(path.join(botsDir, `${agentId}.json`), {
+    appId: agentId, appSecret: "fixture-secret", tenant: "feishu",
+  });
+
+  const env = {
+    ...process.env,
+    LARKIN_CONFIG_DIR: root,
+    LARKIN_INTERNAL_DISPATCH: "0",
+    LARKIN_BUN_TEST_RUNNER: "1",
+    LARKIN_FEISHU_DRYRUN: "1",
+    LARKIN_TEST_DAEMON_SCRIPT: path.join(ROOT, "test/support/supervisor-hot-attach-daemon.mjs"),
+    LARKIN_TEST_DASHBOARD_SCRIPT: path.join(ROOT, "test/support/dashboard-stable.mjs"),
+    PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+  };
+  const supervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--dry-run"], {
+    cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  supervisor.stdout.on("data", (chunk) => { output += chunk; });
+  supervisor.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    const initial = await waitUntil(() => {
+      const state = readProcessState(root);
+      return state.daemon.state === "owned" && state.daemon.agents?.length === 3 ? state : null;
+    });
+    assert.ok(initial, `initial daemon did not own three Agents\n${output}`);
+
+    // Simulate setup's durable config commit before its supported daemon upsert.
+    writePrivate(path.join(root, "config.json"), configFor([...AGENTS, HOT_AGENT]));
+    const attached = await requestAgentUpsert({ larkinHome: root, agentId: HOT_AGENT });
+    assert.equal(attached.ok, true, JSON.stringify(attached));
+    const hotAttached = await waitUntil(() => {
+      const state = readProcessState(root).daemon;
+      return state.state === "owned" && state.agents?.length === 4 ? state : null;
+    });
+    assert.ok(hotAttached, `hot attach did not update daemon ownership\n${output}`);
+    assert.deepEqual(hotAttached.agents, [...AGENTS, HOT_AGENT]);
+
+    const oldDaemonPid = Number(hotAttached.pid);
+    process.kill(oldDaemonPid, "SIGKILL");
+    const restarted = await waitUntil(() => {
+      const state = readProcessState(root);
+      return state.supervisor.state === "owned" && state.daemon.state === "owned"
+        && Number(state.daemon.pid) !== oldDaemonPid ? state : null;
+    }, 10_000);
+    assert.ok(restarted, `supervisor did not restart daemon\n${output}`);
+    assert.deepEqual(restarted.daemon.agents, [...AGENTS, HOT_AGENT]);
+    assert.deepEqual(restarted.daemon.connectedAgents, [...AGENTS, HOT_AGENT]);
+  } finally {
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGTERM");
+    await waitUntil(() => supervisor.exitCode !== null || supervisor.signalCode !== null, 3_000);
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

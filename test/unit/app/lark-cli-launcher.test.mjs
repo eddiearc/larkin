@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -77,7 +78,7 @@ test("launcher classifies protected writes, removed drafts, bypasses, and observ
   ]).kind, "passthrough", "native help remains observational even for unsupported write flags");
 });
 
-test("document comment reply is bound to a polled Inbox locator, Bot identity, exact route, and local idempotency ledger", () => {
+test("document comment reply uses body-hash delivery identity for same-locator follow-ups", () => {
   const f = fixture();
   try {
     const messageId = `doc_comment_${"a".repeat(32)}`;
@@ -108,12 +109,17 @@ test("document comment reply is bound to a polled Inbox locator, Bot identity, e
     assert.equal(duplicate.code, 0);
     assert.match(duplicate.stdout, /"duplicate":true/);
     assert.equal(f.calls.length, 1, "committed reply must not reach the provider twice");
-    assert.equal(f.run(["comment", "reply", "--message-id", messageId, "--text", "changed", "--json"]).code, 2);
-    assert.equal(f.calls.length, 1);
+    const changed = f.run(["comment", "reply", "--message-id", messageId, "--text", "changed", "--json"]);
+    assert.equal(changed.code, 0, changed.stderr);
+    assert.equal(f.calls.length, 2, "a different body appends a follow-up on the same locator");
+    assert.equal(f.calls[1].args.includes("--idempotency-key"), false);
+    const ledger = f.store.readJson("freshnessState", {}).document_comment_replies;
+    assert.equal(Object.keys(ledger).length, 2);
+    assert.ok(Object.keys(ledger).every((key) => key.startsWith(`${messageId}::`)));
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("whole-document Inbox locators select the explicit top-level fallback and reject guessed messages", () => {
+test("whole-document Inbox locators route same-locator follow-ups through create_v2", () => {
   const f = fixture();
   try {
     const messageId = `doc_comment_${"b".repeat(32)}`;
@@ -131,8 +137,17 @@ test("whole-document Inbox locators select the explicit top-level fallback and r
       reply_elements: [{ type: "text", text: "answer" }],
     });
     assert.equal(native[native.indexOf("--as") + 1], "bot");
+    const followUp = f.run(["comment", "reply", "--message-id", messageId, "--text", "follow-up"]);
+    assert.equal(followUp.code, 0, followUp.stderr);
+    assert.equal(f.calls.length, 2);
+    const followUpNative = f.calls[1].args.slice(1);
+    assert.deepEqual(JSON.parse(followUpNative[followUpNative.indexOf("--data") + 1]), {
+      file_type: "sheet",
+      reply_elements: [{ type: "text", text: "follow-up" }],
+    });
+    assert.equal(followUpNative.includes("--idempotency-key"), false);
     assert.equal(f.run(["comment", "reply", "--message-id", `doc_comment_${"c".repeat(32)}`, "--text", "answer"]).code, 2);
-    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls.length, 2);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -152,11 +167,17 @@ test("document comment reply retains ambiguous native outcomes as sending and re
       f.store.pollInbox({ target, limit: 1 });
       f.setWriteResult(result);
       assert.notEqual(f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]).code, 0);
-      assert.equal(f.store.readJson("freshnessState", {}).document_comment_replies[messageId].status, "sending");
+      const ledger = f.store.readJson("freshnessState", {}).document_comment_replies;
+      assert.equal(Object.values(ledger)[0].status, "sending");
+      assert.ok(Object.keys(ledger)[0].startsWith(`${messageId}::`));
       const retry = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]);
       assert.equal(retry.code, 2);
       assert.match(retry.stderr, /结果不明确/);
-      assert.equal(f.calls.length, 1, "ambiguous outcome must never resend");
+      assert.equal(f.calls.length, 1, "ambiguous outcome must never resend same body");
+      f.setWriteResult({ status: 0, signal: null, output: [], pid: 1, stdout: "{}\n", stderr: "", error: undefined });
+      const completion = f.run(["comment", "reply", "--message-id", messageId, "--text", "completion"]);
+      assert.equal(completion.code, 0, completion.stderr);
+      assert.equal(f.calls.length, 2, "a different body remains a separate delivery identity");
     } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
   }
 
@@ -170,10 +191,51 @@ test("document comment reply retains ambiguous native outcomes as sending and re
       ok: false, error: { code: 1069302, message: "provider rejected" },
     }), error: undefined });
     assert.equal(rejected.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]).code, 7);
-    assert.equal(rejected.store.readJson("freshnessState", {}).document_comment_replies[messageId].status, "failed");
+    const rejectedLedger = rejected.store.readJson("freshnessState", {}).document_comment_replies;
+    assert.equal(Object.values(rejectedLedger)[0].status, "failed");
     assert.equal(rejected.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]).code, 7);
     assert.equal(rejected.calls.length, 2, "definitive provider rejection may be retried");
   } finally { fs.rmSync(rejected.root, { recursive: true, force: true }); }
+});
+
+test("comment reply rejects synthetic idempotency keys without invoking the provider", () => {
+  const f = fixture();
+  try {
+    const messageId = `doc_comment_${"f".repeat(32)}`;
+    const target = "document-comment:docx:doc_tokenF:comment_F:in-thread";
+    f.store.appendInboxOnce({ message_id: messageId, target, kind: "document_comment", content: "question" });
+    f.store.pollInbox({ target, limit: 1 });
+    const result = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer", "--idempotency-key", "legacy-key"]);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /不支持参数 --idempotency-key/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.store.readJson("freshnessState", {}).document_comment_replies, undefined);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("legacy bare message-id ledger entries migrate by same digest and allow follow-ups", () => {
+  const f = fixture();
+  try {
+    const messageId = `doc_comment_${"7".repeat(32)}`;
+    const target = "document-comment:docx:doc_tokenG:comment_G:in-thread";
+    const text = "legacy answer";
+    f.store.appendInboxOnce({ message_id: messageId, target, kind: "document_comment", content: "question" });
+    f.store.pollInbox({ target, limit: 1 });
+    f.store.writeJson("freshnessState", { version: 1, cursors: {}, document_comment_replies: {
+      [messageId]: { digest: createHash("sha256").update(text).digest("hex"), status: "sent", updated_at: new Date().toISOString() },
+    }});
+    const duplicate = f.run(["comment", "reply", "--message-id", messageId, "--text", text]);
+    assert.equal(duplicate.code, 0, duplicate.stderr);
+    assert.match(duplicate.stdout, /"duplicate":true/);
+    assert.equal(f.calls.length, 0);
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1, stdout: "{}\n", stderr: "", error: undefined });
+    const followUp = f.run(["comment", "reply", "--message-id", messageId, "--text", "new answer"]);
+    assert.equal(followUp.code, 0, followUp.stderr);
+    assert.equal(f.calls.length, 1);
+    const ledger = f.store.readJson("freshnessState", {}).document_comment_replies;
+    assert.equal(ledger[messageId].status, "sent");
+    assert.equal(Object.keys(ledger).length, 2);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("guarded writes probe with locked Bot identity before preserving provider write bytes", () => {

@@ -56,6 +56,13 @@ function assertSecureProfileDirectory(directory: string): void {
       || !exactMode(stat, 0o700)) throw new Error("lark-cli profile 目录不安全");
 }
 
+function assertValidProfileDirectory(directory: string): void {
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || (!exactMode(stat, 0o700) && !exactMode(stat, 0o500))) throw new Error("lark-cli profile 目录不安全");
+}
+
 function captureProfileSnapshot(file: string): ProfileSnapshot | null {
   let fd: number | null = null;
   try {
@@ -342,6 +349,9 @@ function validateSourceProjection(file: string, agent: Pick<RuntimeAgentConfig, 
 }
 
 export function validateAgentProfile(agent: RuntimeAgentConfig): void {
+  // Validate the profile root before resolving any leaf paths. The supervisor's
+  // restart fast path must not follow a replaced symlink or unsafe root.
+  assertValidProfileDirectory(agent.larkConfigDir);
   const sourceFile = larkChannelSourceConfigPath(agent);
   const workspaceFile = larkChannelWorkspaceConfigPath(agent);
   const source = captureProfileSnapshot(sourceFile);

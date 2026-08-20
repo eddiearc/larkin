@@ -91,6 +91,9 @@ export async function main(): Promise<void> {
   let names: string[];
   try { names = selectedAgentIds(argv, Object.keys(config.agents)); }
   catch (error) { return die((error as Error).message); }
+  // Capture this supervisor's startup membership before setup can persist a new
+  // Agent. Unqualified selection must not expand from later durable config.
+  const initialNames = new Set(names);
 
   const before = readProcessState(configDir);
   if (before.supervisor.state === "owned") {
@@ -163,15 +166,15 @@ export async function main(): Promise<void> {
   };
   if (argv.includes("--dry-run")) runtimeEnv.LARKIN_FEISHU_DRYRUN = "1";
 
-  // Durable config is the recovery source of truth. Re-read it for every daemon
-  // launch instead of reusing the startup snapshot: a hot attach updates the
-  // child and durable config, but cannot mutate this supervisor's old closure.
+  // Re-read durable config for every daemon launch instead of reusing the startup
+  // snapshot: a hot attach updates the child and durable config, but cannot mutate
+  // this supervisor's old closure. Membership remains initialNames plus successful
+  // hot attaches recorded during this supervisor lifetime.
   const refreshDaemonAgents = (reuseExistingProfiles: boolean): void => {
     const latest = larkinConfig.loadConfig(process.env);
     if (latest.configDir !== configDir) throw new Error("配置目录在 supervisor 运行期间发生变化");
     if (!latest.config.serverId || !Object.keys(latest.config.agents).length) throw new Error("配置缺少 serverId/agents");
-    const selectedNames = selectedAgentIds(argv, Object.keys(latest.config.agents));
-    const latestNames = [...new Set([...selectedNames, ...hotAttachedNames])];
+    const latestNames = [...new Set([...initialNames, ...hotAttachedNames])];
     const refreshed: RuntimeAgentConfig[] = [];
     for (const name of latestNames) {
       const stored = latest.config.agents[name];

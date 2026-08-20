@@ -30,6 +30,9 @@ const control = createAgentControlServer({
     loadAndSyncRuntimeAgent(process.env, agentId);
     if (!agents.includes(agentId)) agents.push(agentId);
     writeStatus();
+    if (process.env.LARKIN_TEST_FAIL_SUPERVISOR_AGENT === agentId) {
+      throw new Error(`fixture supervisor tracking failure for ${agentId}`);
+    }
     const tracked = await requestSupervisorAgentUpsert({
       larkinHome: root, agentId, operationId: request.operationId,
     });

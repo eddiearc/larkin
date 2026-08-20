@@ -5,13 +5,15 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { requestAgentUpsert } from "../../../dist/app/local-control.mjs";
+import { requestAgentUpsert, requestSupervisorAgentUpsert } from "../../../dist/app/local-control.mjs";
 import { readProcessState } from "../../../dist/platform/process-state.mjs";
 import { loadConfig, runtimeConfigSignature } from "../../../dist/platform/config.mjs";
+import { hydrateRuntimeAgent, validateAgentProfile } from "../../../dist/app/runtime-agent-config.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENTS = ["cli_restartA1", "cli_restartB2", "cli_restartC3"];
 const HOT_AGENT = "cli_restartD4";
+const FAILED_HOT_AGENT = "cli_restartE5";
 
 function writePrivate(file, value) {
   fs.writeFileSync(file, `${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
@@ -85,7 +87,7 @@ process.exit(0);
   writePrivate(path.join(root, "config.json"), configFor(AGENTS));
   const botsDir = path.join(root, "bots");
   fs.mkdirSync(botsDir, { mode: 0o700 });
-  for (const agentId of [...AGENTS, HOT_AGENT]) writePrivate(path.join(botsDir, `${agentId}.json`), {
+  for (const agentId of [...AGENTS, HOT_AGENT, FAILED_HOT_AGENT]) writePrivate(path.join(botsDir, `${agentId}.json`), {
     appId: agentId, appSecret: "fixture-secret", tenant: "feishu",
   });
 
@@ -97,9 +99,10 @@ process.exit(0);
     LARKIN_FEISHU_DRYRUN: "1",
     LARKIN_TEST_DAEMON_SCRIPT: path.join(ROOT, "test/support/supervisor-hot-attach-daemon.mjs"),
     LARKIN_TEST_DASHBOARD_SCRIPT: path.join(ROOT, "test/support/dashboard-stable.mjs"),
+    LARKIN_TEST_FAIL_SUPERVISOR_AGENT: FAILED_HOT_AGENT,
     PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
   };
-  const supervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--agents", AGENTS.join(","), "--dry-run"], {
+  const supervisor = spawn(process.execPath, [path.join(ROOT, "dist/app/run.mjs"), "--dry-run"], {
     cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"],
   });
   let secondSupervisor = null;
@@ -114,10 +117,32 @@ process.exit(0);
     });
     assert.ok(initial, `initial daemon did not own three Agents\n${output}`);
 
-    // Simulate setup's durable config commit before its supported daemon upsert.
-    writePrivate(path.join(root, "config.json"), configFor([...AGENTS, HOT_AGENT]));
-    const attached = await requestAgentUpsert({ larkinHome: root, agentId: HOT_AGENT });
+    // Simulate setup's durable config commit before its failed daemon upsert.
+    writePrivate(path.join(root, "config.json"), configFor([...AGENTS, FAILED_HOT_AGENT]));
+    const failed = await requestAgentUpsert({ larkinHome: root, agentId: FAILED_HOT_AGENT });
+    assert.equal(failed.ok, false, JSON.stringify(failed));
+    const oldDaemonPid = Number(initial.daemon.pid);
+    process.kill(oldDaemonPid, "SIGKILL");
+    const restartedWithoutFailedAgent = await waitUntil(() => {
+      const state = readProcessState(root);
+      return state.supervisor.state === "owned" && state.daemon.state === "owned"
+        && Number(state.daemon.pid) !== oldDaemonPid ? state : null;
+    }, 10_000);
+    assert.ok(restartedWithoutFailedAgent, `supervisor did not restart after failed hot attach\n${output}`);
+    assert.deepEqual(restartedWithoutFailedAgent.daemon.agents, AGENTS);
+
+    // A successful hot attach is explicitly added to this supervisor lifetime.
+    writePrivate(path.join(root, "config.json"), configFor([...AGENTS, FAILED_HOT_AGENT, HOT_AGENT]));
+    const hotAttachOperationId = "operation_hot_attach_1";
+    const attached = await requestAgentUpsert({ larkinHome: root, agentId: HOT_AGENT, operationId: hotAttachOperationId });
     assert.equal(attached.ok, true, JSON.stringify(attached));
+    const replayConflict = await requestSupervisorAgentUpsert({
+      larkinHome: root, agentId: FAILED_HOT_AGENT, operationId: hotAttachOperationId,
+    });
+    assert.deepEqual(replayConflict, {
+      ok: false, operationId: hotAttachOperationId, agentId: FAILED_HOT_AGENT,
+      code: "operation_conflict", error: "operationId 已绑定其他 Agent 或操作",
+    });
     const hotAttached = await waitUntil(() => {
       const state = readProcessState(root).daemon;
       return state.state === "owned" && state.agents?.length === 4 ? state : null;
@@ -131,13 +156,21 @@ process.exit(0);
         path.join(stateDir, "lark-channel-source", "config.json"), path.join(stateDir, "runtime-bin", "larkin")];
     });
     const profileMtimes = new Map(profileFiles.map((file) => [file, fs.statSync(file).mtimeNs]));
+    const hotRuntimeAgent = hydrateRuntimeAgent(root, loadConfig(env).config.agents[HOT_AGENT]);
+    const hotProfileRoot = hotRuntimeAgent.larkConfigDir;
+    const movedHotProfileRoot = `${hotProfileRoot}.moved`;
+    fs.renameSync(hotProfileRoot, movedHotProfileRoot);
+    fs.symlinkSync(movedHotProfileRoot, hotProfileRoot);
+    assert.throws(() => validateAgentProfile(hotRuntimeAgent), /lark-cli profile 目录不安全/);
+    fs.unlinkSync(hotProfileRoot);
+    fs.renameSync(movedHotProfileRoot, hotProfileRoot);
     for (const agentId of [...AGENTS, HOT_AGENT]) readOnlyProfile(root, agentId);
-    const oldDaemonPid = Number(hotAttached.pid);
-    process.kill(oldDaemonPid, "SIGKILL");
+    const hotAttachedDaemonPid = Number(hotAttached.pid);
+    process.kill(hotAttachedDaemonPid, "SIGKILL");
     const restarted = await waitUntil(() => {
       const state = readProcessState(root);
       return state.supervisor.state === "owned" && state.daemon.state === "owned"
-        && Number(state.daemon.pid) !== oldDaemonPid ? state : null;
+        && Number(state.daemon.pid) !== hotAttachedDaemonPid ? state : null;
     }, 10_000);
     assert.ok(restarted, `supervisor did not restart daemon\n${output}`);
     assert.deepEqual(restarted.daemon.agents, [...AGENTS, HOT_AGENT]);
@@ -177,7 +210,7 @@ process.exit(0);
     assert.ok(selectedRestarted, `selected supervisor did not restart daemon\n${output}`);
     assert.deepEqual(selectedRestarted.daemon.agents, [AGENTS[0]]);
   } finally {
-    for (const agentId of [...AGENTS, HOT_AGENT]) {
+    for (const agentId of [...AGENTS, HOT_AGENT, FAILED_HOT_AGENT]) {
       try { writableProfile(root, agentId); } catch { /* profile may not have been created */ }
     }
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGTERM");

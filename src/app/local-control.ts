@@ -13,7 +13,9 @@ export interface AgentUpsertRequest { operationId: string; agentId: string; auth
 export type AgentUpsertOperation = Pick<AgentUpsertRequest, "operationId" | "agentId">;
 export interface AgentUpsertResponse { ok: boolean; operationId: string; agentId: string; code?: string; error?: string; readiness?: RuntimeReadiness }
 export interface DashboardRecoveryResponse { ok: boolean; operationId: string; state?: string; error?: string }
-export interface SupervisorAgentUpsertResponse { ok: boolean; operationId: string; state?: string; error?: string }
+export interface SupervisorAgentUpsertResponse {
+  ok: boolean; operationId: string; agentId?: string; code?: string; state?: string; error?: string;
+}
 export interface SessionResetResponse {
   ok: boolean; agentId: string; code?: string; error?: string;
   resetCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
@@ -500,7 +502,15 @@ export function createSupervisorControlServer({
   let socket = "";
   let socketRoot = "";
   let socketIdentity: SocketBinding | null = null;
-  const completed = new Map<string, DashboardRecoveryResponse | SupervisorAgentUpsertResponse>();
+  const completed = new Map<string, {
+    operation: string;
+    agentId?: string;
+    response: DashboardRecoveryResponse | SupervisorAgentUpsertResponse;
+  }>();
+  const operationConflict = (operationId: string, agentId?: string): SupervisorAgentUpsertResponse => ({
+    ok: false, operationId, ...(agentId ? { agentId } : {}), code: "operation_conflict",
+    error: "operationId 已绑定其他 Agent 或操作",
+  });
   let server: net.Server | null = null;
   return {
     async start(): Promise<void> {
@@ -540,7 +550,13 @@ export function createSupervisorControlServer({
               return;
             }
             const replay = completed.get(request.operationId);
-            if (replay) { connection.end(`${JSON.stringify(replay)}\n`); return; }
+            if (replay) {
+              const sameRequest = replay.operation === request.operation
+                && replay.agentId === request.agentId;
+              const response = sameRequest ? replay.response : operationConflict(request.operationId, request.agentId);
+              connection.end(`${JSON.stringify(response)}\n`);
+              return;
+            }
             let response: DashboardRecoveryResponse | SupervisorAgentUpsertResponse;
             try {
               if (request.operation === "agent-upserted") {
@@ -551,7 +567,9 @@ export function createSupervisorControlServer({
               }
             }
             catch (error) { response = { ok: false, operationId: request.operationId, error: error instanceof Error ? error.message : String(error) }; }
-            completed.set(request.operationId, response);
+            completed.set(request.operationId, {
+              operation: request.operation, agentId: request.agentId, response,
+            });
             while (completed.size > 256) completed.delete(completed.keys().next().value as string);
             connection.end(`${JSON.stringify(response)}\n`);
           })();

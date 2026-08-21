@@ -26,7 +26,8 @@ async function waitFor(condition, label, timeoutMs = 10_000) {
 
 function fixture(reminders) {
   const deliveries = [], inbox = [];
-  const state = { paths: { reminders: "/state/reminders.json", inbox: "/state/inbox.ndjson" }, appendNdjson(_key, value) { inbox.push(value); } };
+  const state = { paths: { reminders: "/state/reminders.json", inbox: "/state/inbox.ndjson" },
+    bindInboxDeliveryAnchor() {}, appendNdjson(_key, value) { inbox.push(value); } };
   const api = {
     load: () => ({ reminders }),
     mutate(_file, fn) { return fn({ reminders }); },
@@ -99,6 +100,8 @@ test("Runtime accepted, duplicate, and empty receipts remain pending until Feish
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(reminder.events.at(-1).eventType, "delivery_pending");
     assert.deepEqual(reminder.events.at(-1).metadata, { outcome, deliveryTarget: "chat:oc_receipt" });
+    assert.equal(reminder.events.some((event) => event.eventType === "delivery_succeeded"), false,
+      "Runtime acceptance is not a committed Feishu delivery");
   }
 });
 
@@ -128,6 +131,53 @@ test("thread reminder fire carries the thread target and remains exactly-once", 
   assert.equal(f.deliveries.length, 1);
   assert.equal(f.deliveries[0].deliveryTarget, "thread:oc_thread:omt_topic");
   assert.equal(f.deliveries[0].deliveryAnchor, "om_thread");
+});
+
+test("fire pins evicted thread and document-comment anchors for protected outbound routing", {
+  timeout: 60_000,
+}, () => {
+  for (const route of [
+    { anchor: "om_evicted_thread", target: "thread:oc_evicted:omt_topic", kind: undefined },
+    { anchor: "doc_comment_evicted", target: "document-comment:doc_evicted/comment_evicted", kind: "document_comment" },
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-anchor-rebind-"));
+    try {
+      const store = deterministicStateStore(root, agent.agentId);
+      store.appendNdjson("inbox", { message_id: route.anchor, target: route.target, ...(route.kind ? { kind: route.kind } : {}), content: "source" });
+      store.pollInbox({ target: route.target, limit: 1 });
+      for (let index = 0; index < 2_048; index += 1) {
+        store.appendNdjson("inbox", { message_id: `om_later_${index}`, target: "chat:oc_later", content: "later" });
+      }
+      assert.equal(store.resolveInboxMessageTarget(route.anchor), null, "the source must be evicted before fire");
+
+      const reminder = { reminderId: `rebind-${route.anchor}`, version: 1, ownerAgentId: agent.agentId,
+        fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "rebind", status: "scheduled",
+        deliveryTarget: route.target, deliveryAnchor: route.anchor };
+      const reminders = [reminder];
+      const deliveries = [];
+      const reminderStore = {
+        load: () => ({ reminders }), mutate(_file, fn) { return fn({ reminders }); }, parseRepeat: () => null,
+        nowIso: (ms) => new Date(ms).toISOString(), appendEvent(record, eventType, _actorType, _actorId, _nextFireAt, _ms, metadata) {
+          (record.events ||= []).push({ eventType, metadata: metadata ?? null });
+        },
+      };
+      const projector = {
+        createReminderEnvelope(_agentId, value) { return { kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1,
+          wake: true, target: "runtime:reminder", deliveryTarget: value.deliveryTarget, deliveryAnchor: value.deliveryAnchor }; },
+        createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_unused", seq: 2, target: "runtime:redelivery" }; },
+      };
+      const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => store, envelopeProjector: projector,
+        deliveryTarget: { deliver(_id, envelope) { deliveries.push(envelope); } }, reminderStore,
+        now: () => Date.parse("2026-07-16T03:00:00Z") });
+      orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+
+      assert.equal(store.resolveInboxMessageTarget(route.anchor), route.target);
+      assert.deepEqual(store.readJson("inboxState", {}).delivery_anchors[route.anchor], { target: route.target });
+      assert.equal(deliveries.length, 1);
+      assert.equal(deliveries[0].deliveryTarget, route.target);
+      assert.equal(deliveries[0].deliveryAnchor, route.anchor);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 // Native Windows exposed both slow process inspection and async ledger races. This test is not

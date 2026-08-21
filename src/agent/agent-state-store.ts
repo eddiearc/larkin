@@ -129,6 +129,8 @@ interface InboxStateFile {
   version: 2;
   targets: Record<string, InboxTargetState>;
   messages: Record<string, { target: string; seq: number; kind?: string }>;
+  /** Pinned reminder anchors survive the bounded messages index. */
+  delivery_anchors?: Record<string, { target: string }>;
   last_source?: InboxSourceState;
   drafts: Record<string, InboxDraft>;
   intents: Record<string, InboxSendIntent>;
@@ -166,6 +168,17 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       if (typeof row.target === "string" && row.target && validSequence(row.seq)) state.messages[messageId] = {
         target: row.target, seq: row.seq, ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}),
       };
+    }
+  }
+  const rawAnchors = (raw as { delivery_anchors?: unknown }).delivery_anchors;
+  if (rawAnchors && typeof rawAnchors === "object" && !Array.isArray(rawAnchors)) {
+    for (const [messageId, candidate] of Object.entries(rawAnchors)) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const target = (candidate as { target?: unknown }).target;
+      if (typeof target === "string" && isUserDeliveryTarget(target)) {
+        state.delivery_anchors ??= {};
+        state.delivery_anchors[messageId] = { target };
+      }
     }
   }
   const source = raw.last_source;
@@ -1027,9 +1040,32 @@ export class AgentStateStore {
     return this.pollInbox<T>(hooks).envelopes;
   }
 
+  /** Pin a fired reminder's user-facing anchor outside the bounded message index. */
+  bindInboxDeliveryAnchor(messageId: string, target: string): void {
+    if (typeof messageId !== "string" || !messageId) throw new Error("Inbox delivery anchor requires message_id");
+    const validAnchor = target.startsWith("document-comment:")
+      ? /^doc_comment_[A-Za-z0-9_-]+$/.test(messageId)
+      : /^om_[A-Za-z0-9_-]+$/.test(messageId);
+    if (!validAnchor) throw new Error(`Invalid Inbox delivery anchor ${JSON.stringify(messageId)} for target ${JSON.stringify(target)}`);
+    const canonicalTarget = targetKeyOfInboxEnvelope({
+      message_id: messageId, target,
+      ...(target.startsWith("document-comment:") ? { kind: "document_comment" } : {}),
+    });
+    const file = this.file("inbox");
+    this.withInboxLock(file, () => {
+      const state = this.inboxState();
+      state.delivery_anchors ??= {};
+      state.delivery_anchors[messageId] = { target: canonicalTarget };
+      this.writeJson("inboxState", state);
+    });
+  }
+
   resolveInboxMessageTarget(messageId: string): string | null {
     return this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
+      const pinned = state.delivery_anchors?.[messageId];
+      if (pinned) return targetKeyOfInboxEnvelope({ message_id: messageId, target: pinned.target,
+        ...(pinned.target.startsWith("document-comment:") ? { kind: "document_comment" } : {}) });
       const known = state.messages[messageId];
       if (known) return targetKeyOfInboxEnvelope({ message_id: messageId, target: known.target,
         ...(known.kind ? { kind: known.kind } : {}) });

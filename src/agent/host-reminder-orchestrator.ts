@@ -17,6 +17,8 @@ interface DeliveryReceipt {
 interface StateStore {
   paths: AgentStatePaths;
   appendNdjson(key: "inbox", value: unknown): void;
+  /** Pin a reminder's user-facing source before the Runtime wake can be consumed. */
+  bindInboxDeliveryAnchor(messageId: string, target: string): void;
 }
 function withCanonicalTarget<T extends object>(envelope: T): T & { target: string } {
   const input = envelope as InboxEnvelope;
@@ -127,7 +129,13 @@ export class HostReminderOrchestrator {
       // overwrite that migration result with the absent fields from the record.
       deliveryTarget: reminder.deliveryTarget ?? projected.deliveryTarget ?? null,
       deliveryAnchor: reminder.deliveryAnchor ?? projected.deliveryAnchor ?? null });
-    try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }
+    try {
+      const stateStore = this.options.stateStore(agent);
+      if (envelope.deliveryTarget && envelope.deliveryAnchor) {
+        stateStore.bindInboxDeliveryAnchor(envelope.deliveryAnchor, envelope.deliveryTarget);
+      }
+      stateStore.appendNdjson("inbox", envelope);
+    }
     catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
     if (!this.options.deliveryTarget) {
       this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);

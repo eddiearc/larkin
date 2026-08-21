@@ -10,6 +10,10 @@ interface ReminderAgent extends HostAgent { stateDir?: string | null }
 interface ReminderDeliveryTarget {
   deliver(agentId: string, envelope: ReminderEnvelope | object): Promise<unknown> | unknown;
 }
+interface DeliveryReceipt {
+  status?: unknown;
+  reason?: unknown;
+}
 interface StateStore {
   paths: AgentStatePaths;
   appendNdjson(key: "inbox", value: unknown): void;
@@ -119,7 +123,10 @@ export class HostReminderOrchestrator {
       reminder.repeat && recurrence && !("error" in recurrence) ? (recurrence.description || null) : null,
     );
     const envelope = withCanonicalTarget({ ...projected,
-      deliveryTarget: reminder.deliveryTarget ?? null, deliveryAnchor: reminder.deliveryAnchor ?? null });
+      // The projector also derives safe routing for pre-0.4.14 records; do not
+      // overwrite that migration result with the absent fields from the record.
+      deliveryTarget: reminder.deliveryTarget ?? projected.deliveryTarget ?? null,
+      deliveryAnchor: reminder.deliveryAnchor ?? projected.deliveryAnchor ?? null });
     try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }
     catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
     if (!this.options.deliveryTarget) {
@@ -128,17 +135,35 @@ export class HostReminderOrchestrator {
       return;
     }
     try {
+      const recordReceipt = (receipt: unknown): void => {
+        const status = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).status || "") : "";
+        const reason = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).reason || "") : "";
+        if (!status || status === "accepted" || status === "duplicate") {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_succeeded", {
+            outcome: status === "duplicate" ? "duplicate" : "accepted", deliveryTarget: envelope.deliveryTarget,
+          });
+        } else if (status === "deferred") {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+            outcome: "deferred", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget,
+          });
+        } else {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+            outcome: "error", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget,
+          });
+        }
+      };
       const result = this.options.deliveryTarget.deliver(agent.agentId, envelope);
       if (result && typeof (result as Promise<unknown>).then === "function") {
-        void Promise.resolve(result).then(
-          () => this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_succeeded", { outcome: "accepted", deliveryTarget: envelope.deliveryTarget }),
-          (error) => this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", { outcome: "rejected", reason: String(error?.message || error) }),
-        );
+        void Promise.resolve(result).then(recordReceipt, (error) => this.recordDeliveryOutcome(
+          agent, reminder.reminderId, "delivery_failed", { outcome: "rejected", reason: String(error?.message || error), deliveryTarget: envelope.deliveryTarget },
+        ));
       } else {
-        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_succeeded", { outcome: "accepted", deliveryTarget: envelope.deliveryTarget });
+        recordReceipt(result);
       }
     } catch (error) {
-      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", { outcome: "rejected", reason: String((error as Error).message || error) });
+      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+        outcome: "rejected", reason: String((error as Error).message || error), deliveryTarget: envelope.deliveryTarget,
+      });
       this.log(`reminder delivery 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
     }
   }

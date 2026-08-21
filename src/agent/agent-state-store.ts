@@ -553,7 +553,6 @@ export class AgentStateStore {
       state.targets[target] = current;
       if (typeof row.message_id === "string" && row.message_id) state.messages[row.message_id] = { target, seq: targetSeq,
         ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}) };
-      this.rememberInboxSource(state, row, target, targetSeq);
       return { ...row, envelope_version: 2, target, target_seq: targetSeq };
     });
   }
@@ -1008,6 +1007,7 @@ export class AgentStateStore {
           targetState.latest_received_seq = Math.max(targetState.latest_received_seq, targetSeq);
           targetState.model_seen_seq = Math.max(targetState.model_seen_seq, targetSeq);
           seenThroughSeq = seenThroughSeq === null ? targetSeq : Math.max(seenThroughSeq, targetSeq);
+          this.rememberInboxSource(state, envelope, target, targetSeq);
         }
         state.targets[target] = targetState;
       }

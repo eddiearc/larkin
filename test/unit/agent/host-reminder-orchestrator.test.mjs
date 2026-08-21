@@ -88,6 +88,20 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   assert.equal(f.deliveries.length, 1, "duplicate fire attempts do not duplicate the user-visible delivery");
 });
 
+test("Runtime deferred and error receipts are audited without false delivery success", async () => {
+  for (const receipt of [{ status: "deferred", reason: "backlog" }, { status: "error", reason: "invalid target" }]) {
+    const reminder = { reminderId: `receipt-${receipt.status}`, version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "receipt", status: "scheduled", deliveryTarget: "chat:oc_receipt", deliveryAnchor: "om_receipt" };
+    const f = fixture([reminder]);
+    const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+      deliveryTarget: { deliver() { return Promise.resolve(receipt); } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+    orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.notEqual(reminder.events.at(-1).eventType, "delivery_succeeded");
+    assert.equal(reminder.events.at(-1).eventType, receipt.status === "deferred" ? "delivery_pending" : "delivery_failed");
+    assert.equal(reminder.events.at(-1).metadata.outcome, receipt.status);
+  }
+});
+
 test("thread reminder fire carries the thread target and remains exactly-once", () => {
   const reminder = { reminderId: "thread-reminder", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
     createdAt: "2026-07-15T00:00:00Z", title: "thread due", status: "scheduled", deliveryTarget: "thread:oc_thread:omt_topic", deliveryAnchor: "om_thread" };

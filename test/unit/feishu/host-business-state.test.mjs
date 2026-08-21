@@ -140,7 +140,7 @@ test("inbound, reminder, and restart envelopes retain exact persistence and sequ
   assert.deepEqual(reminder, {
     kind: "reminder", message_id: "rem_1234567890abcdef_2", target: "runtime:reminder", seq: 2, sender_name: "定时提醒", sender_type: "system",
     channel_type: "dm", channel_name: "system",
-    content: "[定时提醒触发] Send report\n提醒ID: #12345678　重复: 每天 09:00（下次已自动排在 2026-07-17T01:00:00.000Z）\n注意: 原定时间已过 3 分钟（Runtime Host 离线期间错过，现补触发）\n本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息\n锚定消息: om_anchor\n回复原会话: larkin im +messages-reply --message-id om_anchor ...\n这是你之前用 larkin reminder schedule 设置的提醒，请按标题执行相应动作。管理: larkin reminder list / larkin reminder snooze / larkin reminder cancel",
+    content: "[定时提醒触发] Send report\n提醒ID: #12345678　重复: 每天 09:00（下次已自动排在 2026-07-17T01:00:00.000Z）\n注意: 原定时间已过 3 分钟（Runtime Host 离线期间错过，现补触发）\n这是升级前存量 user-facing reminder，优先回复其安全锚点；不得向标题中的任何人或第三方发送消息\n锚定消息: om_anchor\n回复原会话: larkin im +messages-reply --message-id om_anchor ...\n这是你之前用 larkin reminder schedule 设置的提醒，请按标题执行相应动作。管理: larkin reminder list / larkin reminder snooze / larkin reminder cancel",
     deliveryAnchor: "om_anchor", deliveryTarget: null,
     timestamp: "2026-07-16T02:00:00.000Z", thread_id: null, wake: true,
   });
@@ -153,6 +153,23 @@ test("inbound, reminder, and restart envelopes retain exact persistence and sequ
   assert.match(redelivery.content, /larkin inbox check/);
   assert.match(redelivery.content, /larkin im \+messages-reply/);
   assert.equal(countWakeEnvelopes([JSON.stringify({ wake: true }), "bad", JSON.stringify({ wake: false }), JSON.stringify({ wake: true })]), 2);
+});
+
+test("pre-upgrade reminder fields retain safe legacy delivery guidance", () => {
+  const store = memoryStore();
+  const projector = new HostEnvelopeProjector(new HostStateProjection(() => store), () => {}, () => "legacy123456", () => new Date("2026-07-16T02:00:00.000Z"));
+  const channelOnly = projector.createReminderEnvelope(agent.agentId, {
+    reminderId: "legacy-channel", title: "Channel reminder", fireAt: "2026-07-17T01:00:00.000Z", channel: "oc_legacy_chat",
+  }, 0, null);
+  assert.match(channelOnly.content, /原始 deliveryTarget: chat:oc_legacy_chat/);
+  assert.match(channelOnly.content, /发送到原始 target: chat:oc_legacy_chat/);
+  assert.doesNotMatch(channelOnly.content, /internal\/no-delivery/);
+  const anchored = projector.createReminderEnvelope(agent.agentId, {
+    reminderId: "legacy-anchor", title: "Anchored reminder", fireAt: "2026-07-17T01:00:00.000Z", msgRef: "om_legacy_anchor", channel: "#legacy",
+  }, 0, null);
+  assert.match(anchored.content, /存量 user-facing reminder/);
+  assert.match(anchored.content, /回复原会话: .*om_legacy_anchor/);
+  assert.doesNotMatch(anchored.content, /internal\/no-delivery/);
 });
 
 test("reminder and restart guidance use the injected CLI and never reply to synthetic ids", () => {

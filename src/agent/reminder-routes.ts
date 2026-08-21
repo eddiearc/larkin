@@ -40,13 +40,17 @@ function versionOf(reminder: ReminderRecord): number {
 
 const VALID_IM_ANCHOR = /^om_[A-Za-z0-9_-]+$/;
 const VALID_COMMENT_ANCHOR = /^doc_comment_[A-Za-z0-9_-]+$/;
+const VALID_CHAT_TARGET = /^chat:oc_[A-Za-z0-9_-]+$/;
+const VALID_THREAD_TARGET = /^thread:oc_[A-Za-z0-9_-]+:omt_[A-Za-z0-9_-]+$/;
+const VALID_DOCUMENT_COMMENT_TARGET = /^document-comment:(doc|docx|sheet|file):[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:(in-thread|top-level)$/;
 
 function userTarget(value: unknown, field: string): string {
   const raw = String(value ?? "").trim();
   // --channel historically accepted an oc_ chat id; retain that unambiguous form.
   const target = /^oc_[A-Za-z0-9_-]+$/.test(raw) ? `chat:${raw}` : raw;
-  if (!isCanonicalInboxTarget(target) || !isUserDeliveryTarget(target)) {
-    throw new Error(`${field} 必须是可投递的 canonical target（chat:<id>、thread:<chat>:<thread> 或 document-comment:<locator>）`);
+  const complete = VALID_CHAT_TARGET.test(target) || VALID_THREAD_TARGET.test(target) || VALID_DOCUMENT_COMMENT_TARGET.test(target);
+  if (!complete || !isCanonicalInboxTarget(target) || !isUserDeliveryTarget(target)) {
+    throw new Error(`${field} 必须是完整可投递的 canonical target（chat:oc_<id>、thread:oc_<chat>:omt_<thread> 或完整 document-comment locator）`);
   }
   return target;
 }
@@ -89,6 +93,9 @@ export function createReminderRoutes(options: ReminderRouteOptions) {
           if (body.msgId !== undefined && body.msgId !== null && String(body.msgId).trim()) {
             const anchorTarget = options.resolveMessageTarget?.(String(body.msgId).trim()) || null;
             deliveryAnchor = validAnchor(body.msgId, "message-id", anchorTarget || deliveryTarget);
+            if (deliveryTarget && (deliveryTarget.startsWith("thread:") || deliveryTarget.startsWith("document-comment:")) && !anchorTarget) {
+              return { ok: false, status: 400, error: `${deliveryTarget} 必须同时提供可验证的 message-id anchor` };
+            }
             if (!deliveryTarget && !anchorTarget) {
               return { ok: false, status: 400, error: `message-id ${deliveryAnchor} 没有当前 Inbox 的 canonical delivery target` };
             }
@@ -99,6 +106,9 @@ export function createReminderRoutes(options: ReminderRouteOptions) {
               }
               deliveryTarget = deliveryTarget || normalizedAnchorTarget;
             }
+          }
+          if (deliveryTarget && (deliveryTarget.startsWith("thread:") || deliveryTarget.startsWith("document-comment:")) && !deliveryAnchor) {
+            return { ok: false, status: 400, error: `${deliveryTarget} 必须同时提供可验证的 message-id anchor` };
           }
           if (!deliveryTarget) {
             const source = options.currentInboxSource?.() || null;

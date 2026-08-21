@@ -178,6 +178,21 @@ test("canonical Inbox append returns the exact persisted shape and deduplicates 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("targeted Inbox poll binds implicit reminder source to the selected target", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-targeted-source-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateTargetedSourceA1");
+    store.appendNdjson("inbox", { message_id: "om_source_a", target: "chat:oc_source_a", content: "A" });
+    store.appendNdjson("inbox", { message_id: "om_source_b", target: "chat:oc_source_b", content: "B" });
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_source_b", deliveryAnchor: "om_source_b" });
+    const polled = store.pollInbox({ target: "chat:oc_source_a", limit: 1 });
+    assert.deepEqual(polled.envelopes.map((row) => row.message_id), ["om_source_a"]);
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_source_a", deliveryAnchor: "om_source_a" });
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_source_b"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("context-overflow rearm preserves Inbox bytes and delivery identities while changing only matching terminal records", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-context-recovery-"));
   try {

@@ -416,12 +416,15 @@ export class HostEnvelopeProjector {
     repeatDescription: string | null,
   ): ReminderEnvelope {
     const seq = this.nextSequence(agentId);
+    const legacyChannel = typeof reminder.channel === "string" ? reminder.channel.trim() : "";
+    const legacyChatTarget = /^oc_[A-Za-z0-9_-]+$/.test(legacyChannel) ? `chat:${legacyChannel}` : null;
+    const deliveryTarget = typeof reminder.deliveryTarget === "string" && reminder.deliveryTarget
+      ? reminder.deliveryTarget : legacyChatTarget;
     const anchorMessageId = typeof reminder.deliveryAnchor === "string" && /^om_[A-Za-z0-9_-]+$/.test(reminder.deliveryAnchor)
       ? reminder.deliveryAnchor
       : typeof reminder.msgRef === "string" && /^om_[A-Za-z0-9_-]+$/.test(reminder.msgRef)
         ? reminder.msgRef
         : null;
-    const deliveryTarget = typeof reminder.deliveryTarget === "string" && reminder.deliveryTarget ? reminder.deliveryTarget : null;
     const commentAnchorId = deliveryTarget?.startsWith("document-comment:") && typeof reminder.deliveryAnchor === "string"
       && /^doc_comment_[A-Za-z0-9_-]+$/.test(reminder.deliveryAnchor) ? reminder.deliveryAnchor : null;
     const anchorId = anchorMessageId || commentAnchorId;
@@ -431,7 +434,9 @@ export class HostEnvelopeProjector {
         ? `　重复: ${repeatDescription}（下次已自动排在 ${reminder.fireAt}）`
         : "　类型: 一次性"),
       overdueMs > 120_000 ? `注意: 原定时间已过 ${Math.round(overdueMs / 60_000)} 分钟（Runtime Host 离线期间错过，现补触发）` : null,
-      deliveryTarget ? `原始 deliveryTarget: ${deliveryTarget}` : "本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息",
+      deliveryTarget ? `原始 deliveryTarget: ${deliveryTarget}`
+        : anchorId ? "这是升级前存量 user-facing reminder，优先回复其安全锚点；不得向标题中的任何人或第三方发送消息"
+          : "本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息",
       anchorId ? `锚定消息: ${anchorId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是可用的 delivery anchor，不能用于回复` : null,
       anchorMessageId
         ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId} ...`)}`

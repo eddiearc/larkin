@@ -109,6 +109,22 @@ test("current Inbox source derives DM, thread, and document-comment targets with
   }
 });
 
+test("explicit routes require complete surface-specific anchors", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-explicit-route-"));
+  try {
+    const f = fixture(temp);
+    assert.equal(f.request("POST", "/reminders", { title: "bad chat", delaySeconds: 60, deliveryTarget: "chat:foo" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad thread", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad comment", delaySeconds: 60, deliveryTarget: "document-comment:doc:token:comment:in-thread" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad unresolved", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic", msgId: "om_unresolved" }).status, 400);
+    const chat = f.request("POST", "/reminders", { title: "chat", delaySeconds: 60, deliveryTarget: "chat:oc_chat" });
+    assert.equal(chat.ok, true);
+    const thread = fixture(temp, { resolveMessageTarget: () => "thread:oc_chat:omt_topic" })
+      .request("POST", "/reminders", { title: "thread", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic", msgId: "om_thread" });
+    assert.equal(thread.ok, true);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("message anchor derives its Inbox target and rejects invalid or conflicting routing", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-anchor-"));
   try {

@@ -396,7 +396,11 @@ export function createTransportBusinessContext(env: Env = process.env) {
     },
     mappedChannels: loadMap, larkJsonOut, feishuError, botDisplayName, feishuAppInfo, log,
   });
-  const reminderRoutes = createReminderRoutes({ stateFile: paths.reminders, agentId, query, log });
+  const reminderRoutes = createReminderRoutes({
+    stateFile: paths.reminders, agentId, query, log,
+    currentInboxSource: () => stateStore.resolveCurrentInboxSource(),
+    resolveMessageTarget: (messageId) => stateStore.resolveInboxMessageTarget(messageId),
+  });
 
   try {
     fs.appendFileSync(transportLogFile, `${new Date().toISOString()} INIT profile=${selectedAgent.feishuProfile} larkCfgDir=${selectedAgent.larkConfigDir} inbox=${paths.inbox}\n`);

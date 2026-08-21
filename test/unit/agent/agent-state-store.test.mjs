@@ -12,6 +12,7 @@ process.env.LARKIN_BUN_TEST_RUNNER = "1";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const moduleUrl = pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href;
 const processStateUrl = pathToFileURL(path.join(ROOT, "dist/platform/process-state.mjs")).href;
+const reminderRoutesUrl = pathToFileURL(path.join(ROOT, "dist/agent/reminder-routes.mjs")).href;
 
 test("Agent state layout owns every canonical persistence path", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-layout-"));
@@ -192,6 +193,21 @@ test("implicit reminder source stays bound to the active poll when an unpolled I
     // must not replace A as the implicit target for a targetless schedule.
     store.appendNdjson("inbox", { message_id: "om_source_b", target: "chat:oc_source_b", content: "B" });
     assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_source_a", deliveryAnchor: "om_source_a" });
+    const { createReminderRoutes } = await import(reminderRoutesUrl);
+    const routes = createReminderRoutes({
+      stateFile: store.paths.reminders,
+      agentId: "cli_stateTargetedSourceA1",
+      query: (requestPath, name) => new URL(requestPath, "http://local").searchParams.get(name),
+      log: () => undefined,
+      now: () => Date.parse("2026-07-16T00:00:00.000Z"),
+      currentInboxSource: () => store.resolveCurrentInboxSource(),
+      resolveMessageTarget: (messageId) => store.resolveInboxMessageTarget(messageId),
+    });
+    const scheduled = routes.handle({ path: "/reminders", pathNoQuery: "/reminders", method: "POST",
+      body: { title: "bound to A", delaySeconds: 60 } });
+    assert.equal(scheduled.ok, true);
+    assert.equal(scheduled.data.reminder.deliveryTarget, "chat:oc_source_a");
+    assert.equal(scheduled.data.reminder.deliveryAnchor, "om_source_a");
     assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_source_b"]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

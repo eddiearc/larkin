@@ -34,7 +34,7 @@ function fixture(temp, extras = {}) {
 test("reminder route service preserves schedule/list/snooze/update/cancel schemas and persistence", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-routes-"));
   try {
-    const f = fixture(temp);
+    const f = fixture(temp, { resolveMessageTarget: () => "chat:oc_1" });
     const scheduled = f.request("POST", "/reminders", { title: "follow up", delaySeconds: 60, msgId: "om_1", channel: "oc_1" });
     assert.equal(scheduled.ok, true);
     assert.equal(scheduled.data.reminder.fireAt, "2026-07-16T00:01:00.000Z");
@@ -119,6 +119,10 @@ test("explicit routes require complete surface-specific anchors", () => {
     assert.equal(f.request("POST", "/reminders", { title: "bad unresolved", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic", msgId: "om_unresolved" }).status, 400);
     const chat = f.request("POST", "/reminders", { title: "chat", delaySeconds: 60, deliveryTarget: "chat:oc_chat" });
     assert.equal(chat.ok, true);
+    const unresolvedChatAnchor = f.request("POST", "/reminders", {
+      title: "bad chat anchor", delaySeconds: 60, deliveryTarget: "chat:oc_chat", msgId: "om_unresolved_chat",
+    });
+    assert.equal(unresolvedChatAnchor.status, 400);
     const thread = fixture(temp, { resolveMessageTarget: () => "thread:oc_chat:omt_topic" })
       .request("POST", "/reminders", { title: "thread", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic", msgId: "om_thread" });
     assert.equal(thread.ok, true);

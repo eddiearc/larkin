@@ -93,8 +93,8 @@ export function createReminderRoutes(options: ReminderRouteOptions) {
           if (body.msgId !== undefined && body.msgId !== null && String(body.msgId).trim()) {
             const anchorTarget = options.resolveMessageTarget?.(String(body.msgId).trim()) || null;
             deliveryAnchor = validAnchor(body.msgId, "message-id", anchorTarget || deliveryTarget);
-            if (deliveryTarget && (deliveryTarget.startsWith("thread:") || deliveryTarget.startsWith("document-comment:")) && !anchorTarget) {
-              return { ok: false, status: 400, error: `${deliveryTarget} 必须同时提供可验证的 message-id anchor` };
+            if (deliveryTarget && !anchorTarget) {
+              return { ok: false, status: 400, error: `message-id ${String(body.msgId).trim()} 无法验证其所属 Inbox target；请省略 anchor 或提供可验证的 anchor` };
             }
             if (!deliveryTarget && !anchorTarget) {
               return { ok: false, status: 400, error: `message-id ${deliveryAnchor} 没有当前 Inbox 的 canonical delivery target` };

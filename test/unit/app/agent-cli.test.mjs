@@ -424,7 +424,7 @@ test("reminder commands wire the existing schedule/list/snooze/update/cancel/log
   try {
     let current = Date.parse("2026-07-19T01:00:00.000Z");
     const deps = { now: () => current, timeZone: () => "Asia/Shanghai" };
-    const scheduled = f.run(["reminder", "schedule", "--title", "follow up", "--delay-seconds", "60", "--message-id", "om_1", "--channel", "oc_1"], deps);
+    const scheduled = f.run(["reminder", "schedule", "--title", "follow up", "--delay-seconds", "60", "--channel", "oc_1"], deps);
     assert.equal(scheduled.code, 0, scheduled.stderr);
     const id = JSON.parse(scheduled.stdout).reminder.reminderId;
     assert.equal(JSON.parse(f.run(["reminder", "list"], deps).stdout).reminders.length, 1);
@@ -440,6 +440,7 @@ test("Agent CLI derives a reminder target and anchor from the current canonical 
   const f = fixture();
   try {
     f.store.appendNdjson("inbox", { message_id: "om_current_source", chat_id: "oc_current_source", thread_id: "omt_current_source", kind: "message", wake: true });
+    f.store.pollInbox({ target: "thread:oc_current_source:omt_current_source", limit: 1 });
     const result = f.run(["reminder", "schedule", "--title", "source-bound", "--delay-seconds", "60"]);
     assert.equal(result.code, 0, result.stderr);
     const reminder = JSON.parse(result.stdout).reminder;

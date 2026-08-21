@@ -394,14 +394,15 @@ test("corrupt queue and diagnostics files are isolated from manual and backgroun
 
 test("corrupt and crash remnants share bounded file, byte, and age retention", () => {
   const root = temp(); const bounded = new TelemetrySpool(config(root, { maxFiles: 3, maxBytes: 900, maxAgeMs: 100 }));
-  bounded.enqueue(payload()); const spoolDir = config(root).spoolDir;
+  const now = 1_000_000; const markNow = (file) => fs.utimesSync(file, new Date(now), new Date(now));
+  const queued = bounded.enqueue(payload()); markNow(queued); const spoolDir = config(root).spoolDir;
   for (const [name, size] of [[".corrupt-a.json", 500], [".write-b.tmp", 500], [".ack-c.tmp", 500], [".delete-d.tmp", 500]]) {
-    fs.writeFileSync(path.join(spoolDir, name), "x".repeat(size));
+    const file = path.join(spoolDir, name); fs.writeFileSync(file, "x".repeat(size)); markNow(file);
   }
-  bounded.prune(); let status = bounded.status();
+  bounded.prune(now); let status = bounded.status(now);
   assert.ok(status.queuedFiles + status.remnantFiles <= 3, JSON.stringify(status)); assert.ok(status.queuedBytes + status.remnantBytes <= 900, JSON.stringify(status));
-  const aged = path.join(spoolDir, ".write-aged.tmp"); fs.writeFileSync(aged, "old"); fs.utimesSync(aged, new Date(0), new Date(0));
-  bounded.prune(Date.now()); status = bounded.status(); assert.equal(fs.existsSync(aged), false); assert.ok(status.oldestRemnantAgeMs === null || status.oldestRemnantAgeMs <= 100);
+  const aged = path.join(spoolDir, ".write-aged.tmp"); fs.writeFileSync(aged, "old"); fs.utimesSync(aged, new Date(now - 101), new Date(now - 101));
+  bounded.prune(now); status = bounded.status(now); assert.equal(fs.existsSync(aged), false); assert.ok(status.oldestRemnantAgeMs === null || status.oldestRemnantAgeMs <= 100);
 });
 
 test("directory remnants recursively count contained bytes and cleanup does not double-count dropped records", async () => {

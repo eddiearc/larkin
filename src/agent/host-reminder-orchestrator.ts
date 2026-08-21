@@ -143,7 +143,19 @@ export class HostReminderOrchestrator {
       return;
     }
     try {
+      const auditableDelivery = typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0;
+      // RuntimeHost.deliver may execute the whole Agent turn before its promise
+      // settles (notably with Pi). Persist the pending audit marker first so an
+      // outbound Feishu write during that turn can observe it synchronously.
+      // Internal/no-delivery reminders still wake the Runtime, but have no
+      // user-facing delivery to audit.
+      if (auditableDelivery) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+          outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget,
+        });
+      }
       const recordReceipt = (receipt: unknown): void => {
+        if (!auditableDelivery) return;
         const status = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).status || "") : "";
         const reason = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).reason || "") : "";
         // RuntimeHost.deliver only acknowledges Inbox persistence/wake submission.
@@ -172,9 +184,11 @@ export class HostReminderOrchestrator {
         recordReceipt(result);
       }
     } catch (error) {
-      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
-        outcome: "rejected", reason: String((error as Error).message || error), deliveryTarget: envelope.deliveryTarget,
-      });
+      if (typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+          outcome: "rejected", reason: String((error as Error).message || error), deliveryTarget: envelope.deliveryTarget,
+        });
+      }
       this.log(`reminder delivery 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
     }
   }
@@ -184,6 +198,9 @@ export class HostReminderOrchestrator {
       this.store.mutate(this.options.stateStore(agent).paths.reminders, (store) => {
         const reminder = store.reminders.find((candidate) => candidate.reminderId === reminderId);
         if (!reminder) return;
+        // A synchronous outbound can finish inside deliveryTarget.deliver().
+        // Never let its later Runtime receipt callback downgrade that success.
+        if (eventType !== "delivery_succeeded" && reminder.events?.at(-1)?.eventType === "delivery_succeeded") return;
         this.store.appendEvent(reminder, eventType, "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, this.now(), metadata);
       });
     } catch (error) {

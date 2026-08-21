@@ -72,10 +72,15 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   });
   const order = [];
   f.state.appendNdjson = (_key, value) => { order.push("persist"); f.inbox.push(value); };
-  const target = { deliver(_agentId, envelope) { order.push("deliver"); f.deliveries.push(envelope); } };
+  const target = { deliver(_agentId, envelope) {
+    order.push(reminder.events.at(-1)?.eventType || "missing-pending");
+    order.push("deliver");
+    f.deliveries.push(envelope);
+  } };
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector, deliveryTarget: target, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
   orchestrator.handleFire({ agentId: "cli_rem", reminderId: reminder.reminderId });
-  assert.deepEqual(order, ["persist", "deliver"]);
+  assert.deepEqual(order, ["persist", "delivery_pending", "deliver"],
+    "delivery_pending must be durable before RuntimeHost.deliver can execute the turn");
   assert.equal(reminder.status, "fired");
   assert.equal(reminder.version, 2);
   assert.equal(f.inbox[0].target, "runtime:reminder");
@@ -103,6 +108,18 @@ test("Runtime accepted, duplicate, and empty receipts remain pending until Feish
     assert.equal(reminder.events.some((event) => event.eventType === "delivery_succeeded"), false,
       "Runtime acceptance is not a committed Feishu delivery");
   }
+});
+
+test("internal reminders do not create a user-delivery audit record", async () => {
+  const reminder = { reminderId: "internal-reminder", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "internal", status: "scheduled" };
+  const f = fixture([reminder]);
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    deliveryTarget: { deliver() { return Promise.resolve({ status: "accepted" }); } }, reminderStore: f.api,
+    now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reminder.events?.some((event) => event.eventType.startsWith("delivery_")), false);
 });
 
 test("Runtime deferred and error receipts are audited without false delivery success", async () => {

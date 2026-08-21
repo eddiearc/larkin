@@ -139,7 +139,9 @@ interface InboxStateFile {
   /** Pinned reminder anchors survive the bounded messages index. */
   delivery_anchors?: Record<string, { target: string }>;
   last_source?: InboxSourceState;
-  /** Current consumed reminder context for the guarded outbound hook; not an IM ledger. */
+  /** Consumed reminder contexts for the guarded outbound hook; not an IM ledger. */
+  reminder_contexts?: InboxReminderState[];
+  /** Legacy single-slot reminder context, accepted only during migration. */
   last_reminder?: InboxReminderState;
   drafts: Record<string, InboxDraft>;
   intents: Record<string, InboxSendIntent>;
@@ -190,15 +192,21 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       }
     }
   }
-  const rawReminder = (raw as { last_reminder?: unknown }).last_reminder;
-  if (rawReminder && typeof rawReminder === "object" && !Array.isArray(rawReminder)) {
+  const rawReminderContexts = (raw as { reminder_contexts?: unknown }).reminder_contexts;
+  const reminderContexts: InboxReminderState[] = [];
+  const candidates = Array.isArray(rawReminderContexts) ? rawReminderContexts
+    : [(raw as { last_reminder?: unknown }).last_reminder];
+  for (const rawReminder of candidates) {
+    if (!rawReminder || typeof rawReminder !== "object" || Array.isArray(rawReminder)) continue;
     const row = rawReminder as Partial<InboxReminderState>;
     if (typeof row.delivery_target === "string" && isUserDeliveryTarget(row.delivery_target)
       && typeof row.reminder_id === "string" && !!row.reminder_id
-      && typeof row.message_id === "string" && /^rem_[A-Za-z0-9_-]+$/.test(row.message_id) && validSequence(row.seq)) {
-      state.last_reminder = { reminder_id: row.reminder_id, delivery_target: row.delivery_target, message_id: row.message_id, seq: row.seq };
+      && typeof row.message_id === "string" && /^rem_[A-Za-z0-9_-]+$/.test(row.message_id) && validSequence(row.seq)
+      && !reminderContexts.some((candidate) => candidate.reminder_id === row.reminder_id)) {
+      reminderContexts.push({ reminder_id: row.reminder_id, delivery_target: row.delivery_target, message_id: row.message_id, seq: row.seq });
     }
   }
+  if (reminderContexts.length) state.reminder_contexts = reminderContexts;
   const source = raw.last_source;
   if (source && typeof source === "object" && !Array.isArray(source)) {
     const row = source as Partial<InboxSourceState>;
@@ -551,11 +559,15 @@ export class AgentStateStore {
       && typeof input.reminderId === "string" && !!input.reminderId
       && typeof input.deliveryTarget === "string" && isUserDeliveryTarget(input.deliveryTarget)
       && typeof messageId === "string" && /^rem_[A-Za-z0-9_-]+$/.test(messageId)) {
-      state.last_reminder = { reminder_id: input.reminderId, delivery_target: input.deliveryTarget, message_id: messageId, seq: targetSeq };
+      const contexts = state.reminder_contexts ?? [];
+      if (!contexts.some((candidate) => candidate.reminder_id === input.reminderId)) {
+        contexts.push({ reminder_id: input.reminderId, delivery_target: input.deliveryTarget, message_id: messageId, seq: targetSeq });
+      }
+      state.reminder_contexts = contexts;
+      delete state.last_reminder;
       delete state.last_source;
       return;
     }
-    delete state.last_reminder;
     const validAnchor = typeof messageId === "string"
       && (/^om_[A-Za-z0-9_-]+$/.test(messageId) || (target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(messageId)));
     if (!isUserDeliveryTarget(target)) {
@@ -1119,19 +1131,37 @@ export class AgentStateStore {
     });
   }
 
-  /** Return the consumed reminder context for the guarded outbound audit hook. */
+  /** Return every consumed reminder context for the guarded outbound audit hook. */
+  resolveCurrentReminders(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string }> {
+    return this.withInboxLock(this.file("inbox"), () => (this.inboxState().reminder_contexts ?? []).map((reminder) => ({
+      reminderId: reminder.reminder_id, deliveryTarget: reminder.delivery_target, deliveryAnchor: reminder.message_id,
+    })));
+  }
+
+  /** Return the oldest consumed reminder context for legacy callers. */
   resolveCurrentReminder(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null {
-    return this.withInboxLock(this.file("inbox"), () => {
-      const reminder = this.inboxState().last_reminder;
-      return reminder ? { reminderId: reminder.reminder_id, deliveryTarget: reminder.delivery_target, deliveryAnchor: reminder.message_id } : null;
-    });
+    return this.resolveCurrentReminders()[0] ?? null;
   }
 
   /** Clear a reminder context after its first committed user-facing outbound. */
   clearCurrentReminder(reminderId: string): void {
     this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      if (state.last_reminder?.reminder_id !== reminderId) return;
+      const contexts = (state.reminder_contexts ?? []).filter((reminder) => reminder.reminder_id !== reminderId);
+      if (contexts.length === (state.reminder_contexts ?? []).length && !state.last_reminder) return;
+      if (contexts.length) state.reminder_contexts = contexts;
+      else delete state.reminder_contexts;
+      delete state.last_reminder;
+      this.writeJson("inboxState", state);
+    });
+  }
+
+  /** Expire all consumed reminder contexts at the Runtime turn boundary. */
+  clearCurrentReminders(): void {
+    this.withInboxLock(this.file("inbox"), () => {
+      const state = this.inboxState();
+      if (!state.reminder_contexts && !state.last_reminder) return;
+      delete state.reminder_contexts;
       delete state.last_reminder;
       this.writeJson("inboxState", state);
     });

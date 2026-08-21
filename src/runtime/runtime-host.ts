@@ -51,6 +51,8 @@ interface DeliveryStateStore {
   resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
   /** A polled source is valid only for the Runtime turn that consumed it. */
   clearCurrentInboxSource?(): void;
+  /** Reminder delivery audit contexts are also scoped to one Runtime turn. */
+  clearCurrentReminders?(): void;
   rearmContextOverflow?(onCommit?: (messageIds: readonly string[], rollback: () => void) => void, expected?: {
     messageId?: string; deliveryId?: string; inputId?: string;
   }): ContextOverflowRearmResult;
@@ -1152,10 +1154,11 @@ export function createRuntimeHost(options: {
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
       reconcileAcceptedAtTurnEnd(agent);
-      // last_source is an in-turn capability, never a cross-turn default
-      // recipient. A later direct Runtime task must fail closed instead of
-      // inheriting the previous turn's chat.
+      // last_source and reminder audit contexts are in-turn capabilities,
+      // never cross-turn defaults. A later direct Runtime task must fail
+      // closed instead of inheriting a previous turn's chat or reminder.
       agent.stateStore?.clearCurrentInboxSource?.();
+      agent.stateStore?.clearCurrentReminders?.();
       if (agent.backgroundCompletionInFlight) {
         if (agent.turnHadFailure) failBackgroundCompletionWake(agent);
         else commitBackgroundCompletion(agent);

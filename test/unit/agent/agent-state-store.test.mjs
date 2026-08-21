@@ -505,6 +505,28 @@ test("consumed reminder context is available to the outbound audit hook without 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("polling a batch retains every reminder context until each is cleared", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-reminder-batch-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_reminderBatchA1");
+    for (const [reminderId, messageId, target] of [
+      ["reminder-batch-1", "rem_batch_1", "chat:oc_batch"],
+      ["reminder-batch-2", "rem_batch_2", "chat:oc_batch"],
+    ]) {
+      store.appendNdjson("inbox", { kind: "reminder", message_id: messageId, target: "runtime:reminder",
+        reminderId, deliveryTarget: target, content: reminderId });
+    }
+    store.appendNdjson("inbox", { message_id: "om_batch_other", chat_id: "oc_other", content: "other" });
+    store.pollInbox({ limit: 100 });
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.reminderId), ["reminder-batch-1", "reminder-batch-2"]);
+    store.clearCurrentReminder("reminder-batch-1");
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.reminderId), ["reminder-batch-2"]);
+    store.clearCurrentReminders();
+    assert.deepEqual(store.resolveCurrentReminders(), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-stable-inbox-id-"));
   try {

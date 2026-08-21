@@ -72,6 +72,25 @@ test("topic send preserves text-before-attachments order and per-item idempotenc
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("delivery outcome hook runs only after the guarded outbound result", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-outbound-reminder-outcome-"));
+  try {
+    const outcomes = [];
+    const success = fixture(temp, { onDeliveryOutcome: (outcome) => outcomes.push(outcome) });
+    const sent = success.service.handleSend({ target: "#room", content: "reminder" });
+    assert.equal(sent.ok, true);
+    assert.deepEqual(outcomes, [{ target: "#room", succeeded: true, messageId: "om_text" }]);
+
+    const failed = fixture(temp, {
+      onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+      sendText: () => ({ code: 1, stdout: "", stderr: "provider down" }),
+    });
+    const rejected = failed.service.handleSend({ target: "#room", content: "reminder retry" });
+    assert.equal(rejected.ok, false);
+    assert.deepEqual(outcomes.at(-1), { target: "#room", succeeded: false, reason: "lark-cli send failed: provider down" });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("plain, attachment-only, unknown-target, and failure behavior remains fail-closed", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-outbound-edges-"));
   try {
@@ -144,11 +163,17 @@ process.stdout.write(JSON.stringify({data:{message_id:process.argv.includes("--i
     fs.writeFileSync(loginShell, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(official)}\n`, { mode: 0o755 });
     const script = `
 const {transport}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-transport.cjs"))});
+const {createAgentStateStore}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-state-store.cjs"))});
+const state=createAgentStateStore(${JSON.stringify(temp)}, ${JSON.stringify(agentId)});
+state.appendNdjson("inbox", {kind:"reminder", message_id:"rem_reminder_1", reminderId:"reminder-full-id", target:"runtime:reminder", deliveryTarget:"chat:oc_chat", content:"reminder"});
+state.pollInbox({target:"runtime:reminder", limit:1});
+const fs=require("node:fs"); fs.writeFileSync(state.paths.reminders, JSON.stringify({reminders:[{reminderId:"reminder-full-id", status:"fired", fireAt:"2026-07-16T02:00:00.000Z", deliveryTarget:"chat:oc_chat", events:[{eventType:"delivery_pending"}]}]}));
 (async()=>{
   const form=new FormData(); form.set("file",new File([Buffer.from("png")],"pic.png",{type:"image/png"}));
   const upload=await transport.requestMultipart("POST","/attachments/upload",form);
   const sent=await transport.request({method:"POST",path:"/messages/send",body:{target:"#room:topic123",content:"hello",attachmentIds:[upload.data.id],idempotencyKey:"fixed-idem"}});
-  process.stdout.write("\\nRESULT="+JSON.stringify({upload,sent}));
+  const reminders=JSON.parse(fs.readFileSync(state.paths.reminders,"utf8"));
+  process.stdout.write("\\nRESULT="+JSON.stringify({upload,sent,reminders}));
 })().catch(e=>{console.error(e);process.exit(1)});`;
     const result = spawnSync(process.execPath, ["--eval", script], {
       cwd: ROOT, encoding: "utf8",
@@ -158,6 +183,8 @@ const {transport}=require(${JSON.stringify(path.join(ROOT, "dist/agent/agent-tra
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const observed = JSON.parse(result.stdout.slice(result.stdout.indexOf("RESULT=") + 7));
     assert.equal(observed.upload.ok, true); assert.equal(observed.sent.data.messageId, "om_image");
+    assert.equal(observed.reminders.reminders[0].events.at(-1).eventType, "delivery_succeeded");
+    assert.equal(observed.reminders.reminders[0].events.at(-1).metadata.messageId, "om_image");
     const calls = fs.readFileSync(sink, "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(calls.length, 3, JSON.stringify(calls));
     assert.deepEqual(calls[0].args, ["im", "+chat-members-list", "--chat-id", "oc_chat", "--member-id-type", "user_id", "--json"]);

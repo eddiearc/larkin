@@ -482,6 +482,23 @@ test("context-overflow rearm refuses missing, mismatched, or duplicate stable id
   }
 });
 
+test("consumed reminder context is available to the outbound audit hook without becoming a user source", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-reminder-context-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_reminderContextA1");
+    store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_1234567890_1", reminderId: "reminder-full-id",
+      target: "runtime:reminder", deliveryTarget: "chat:oc_reminder", content: "reminder" });
+    store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    assert.deepEqual(store.resolveCurrentReminder(), {
+      reminderId: "reminder-full-id", deliveryTarget: "chat:oc_reminder", deliveryAnchor: "rem_1234567890_1",
+    });
+    assert.equal(store.resolveCurrentInboxSource(), null);
+    store.clearCurrentReminder("reminder-full-id");
+    assert.equal(store.resolveCurrentReminder(), null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-stable-inbox-id-"));
   try {

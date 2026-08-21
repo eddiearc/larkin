@@ -321,6 +321,7 @@ export interface InboundEnvelopeOptions {
 export interface ReminderEnvelope {
   kind: "reminder";
   message_id: string;
+  reminderId: string;
   /** Runtime wake target; deliveryTarget is the original user-facing destination. */
   target: typeof RUNTIME_REMINDER_TARGET;
   deliveryTarget: string | null;
@@ -456,6 +457,7 @@ export class HostEnvelopeProjector {
     const envelope = {
       kind: "reminder" as const,
       message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}`,
+      reminderId: reminder.reminderId,
       seq,
       sender_name: "定时提醒" as const,
       sender_type: "system" as const,

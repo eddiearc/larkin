@@ -138,7 +138,7 @@ test("inbound, reminder, and restart envelopes retain exact persistence and sequ
     msgRef: "om_anchor", channel: "#team",
   }, 180_000, "每天 09:00");
   assert.deepEqual(reminder, {
-    kind: "reminder", message_id: "rem_1234567890abcdef_2", target: "runtime:reminder", seq: 2, sender_name: "定时提醒", sender_type: "system",
+    kind: "reminder", message_id: "rem_1234567890abcdef_2", reminderId: "1234567890abcdef1234", target: "runtime:reminder", seq: 2, sender_name: "定时提醒", sender_type: "system",
     channel_type: "dm", channel_name: "system",
     content: "[定时提醒触发] Send report\n提醒ID: #12345678　重复: 每天 09:00（下次已自动排在 2026-07-17T01:00:00.000Z）\n注意: 原定时间已过 3 分钟（Runtime Host 离线期间错过，现补触发）\n这是升级前存量 user-facing reminder，优先回复其安全锚点；不得向标题中的任何人或第三方发送消息\n锚定消息: om_anchor\n回复原会话: larkin im +messages-reply --message-id om_anchor ...\n这是你之前用 larkin reminder schedule 设置的提醒，请按标题执行相应动作。管理: larkin reminder list / larkin reminder snooze / larkin reminder cancel",
     deliveryAnchor: "om_anchor", deliveryTarget: null,

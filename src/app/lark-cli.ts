@@ -1089,14 +1089,17 @@ export function runLarkCli(
       : store.resolveInboxMessageTarget(policyFlagValue(effectiveArgv, "--message-id") || "") || targetKey;
     const matchingReminderContexts = store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === deliveryTarget);
     // When recurring firings overlap, attach this write to one occurrence rather
-    // than dropping audit state merely because reminder_id is shared.
+    // than dropping audit state merely because reminder_id is shared. Reuse this
+    // exact anchor for both the memo and audit so they cannot select different
+    // occurrences.
     const currentReminder = matchingReminderContexts.at(-1) ?? null;
+    const deliveryAnchor = currentReminder?.deliveryAnchor;
     const memo = !write.error && write.status === 0 && writeMessage
-      ? recordImWriteMemo(store, intentKey, writeMessage.message_id, currentReminder?.deliveryAnchor) : { duplicate: false };
+      ? recordImWriteMemo(store, intentKey, writeMessage.message_id, deliveryAnchor) : { duplicate: false };
     const duplicateOfEarlierReminder = memo.duplicate && Boolean(currentReminder)
       && memo.priorSourceMessageId !== currentReminder?.deliveryAnchor;
     try {
-      auditReminderDelivery({ stateStore: store, agentId: agent.agentId, target: deliveryTarget,
+      auditReminderDelivery({ stateStore: store, agentId: agent.agentId, target: deliveryTarget, deliveryAnchor,
         succeeded: !write.error && write.status === 0 && !duplicateOfEarlierReminder,
         ...(!write.error && write.status === 0 && !duplicateOfEarlierReminder ? {} : {
           reason: duplicateOfEarlierReminder

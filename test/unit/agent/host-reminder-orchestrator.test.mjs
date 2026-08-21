@@ -113,6 +113,35 @@ test("recurring fires get distinct occurrence audit identities", () => {
   ]);
 });
 
+test("pending audit persistence failure prevents Runtime delivery", () => {
+  const reminder = { reminderId: "pending-audit-fail", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-16T00:00:00Z", title: "audit", status: "scheduled", deliveryTarget: "chat:oc_pending_audit", deliveryAnchor: "om_pending_audit" };
+  const f = fixture([reminder]);
+  const originalMutate = f.api.mutate;
+  let mutations = 0;
+  f.api.mutate = (file, fn) => {
+    mutations += 1;
+    if (mutations === 2) throw new Error("reminders.json unavailable");
+    return originalMutate(file, fn);
+  };
+  let deliveryCalls = 0;
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    deliveryTarget: { deliver() { deliveryCalls += 1; } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(deliveryCalls, 0, "Runtime delivery must be fail-closed when pending audit persistence fails");
+  assert.equal(reminder.events.at(-1).eventType, "fired", "the failed pending write must not claim an auditable delivery");
+});
+
+test("internal reminders without a Runtime delivery target do not create delivery failures", () => {
+  const reminder = { reminderId: "internal-unavailable", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-16T00:00:00Z", title: "internal", status: "scheduled", deliveryMode: "internal" };
+  const f = fixture([reminder]);
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(reminder.events?.some((event) => event.eventType === "delivery_failed"), false);
+});
+
 test("Runtime accepted, duplicate, and empty receipts remain pending until Feishu commit", async () => {
   for (const receipt of [{ status: "accepted" }, { status: "duplicate" }, undefined]) {
     const outcome = receipt?.status || "empty";

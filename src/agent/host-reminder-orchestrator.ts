@@ -139,9 +139,11 @@ export class HostReminderOrchestrator {
     catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
     if (!this.options.deliveryTarget) {
       this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
-      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
-        outcome: "runtime_unavailable", occurrenceId: envelope.message_id,
-      });
+      if (envelope.deliveryTarget) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+          outcome: "runtime_unavailable", occurrenceId: envelope.message_id,
+        });
+      }
       return;
     }
     try {
@@ -151,10 +153,11 @@ export class HostReminderOrchestrator {
       // outbound Feishu write during that turn can observe it synchronously.
       // Internal/no-delivery reminders still wake the Runtime, but have no
       // user-facing delivery to audit.
-      if (auditableDelivery) {
-        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
-          outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
-        });
+      if (auditableDelivery && !this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+        outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+      })) {
+        this.log(`reminder delivery pending 审计写失败 id=#${reminder.reminderId.slice(0, 8)}（拒绝唤醒）`);
+        return;
       }
       const recordReceipt = (receipt: unknown): void => {
         if (!auditableDelivery) return;
@@ -198,11 +201,11 @@ export class HostReminderOrchestrator {
     }
   }
 
-  private recordDeliveryOutcome(agent: ReminderAgent, reminderId: string, eventType: string, metadata: Record<string, unknown>): void {
+  private recordDeliveryOutcome(agent: ReminderAgent, reminderId: string, eventType: string, metadata: Record<string, unknown>): boolean {
     try {
-      this.store.mutate(this.options.stateStore(agent).paths.reminders, (store) => {
+      return this.store.mutate(this.options.stateStore(agent).paths.reminders, (store) => {
         const reminder = store.reminders.find((candidate) => candidate.reminderId === reminderId);
-        if (!reminder) return;
+        if (!reminder) return false;
         const occurrenceId = typeof metadata.occurrenceId === "string" ? metadata.occurrenceId : null;
         const occurrenceEvents = occurrenceId
           ? reminder.events?.filter((event) => event.metadata?.occurrenceId === occurrenceId)
@@ -212,16 +215,18 @@ export class HostReminderOrchestrator {
           ? (occurrenceEvents?.at(-1) ?? (hasOccurrenceMetadata && reminder.events?.at(-1)?.eventType !== "fired"
             ? undefined : reminder.events?.at(-1)))
           : reminder.events?.at(-1);
-        if (!last || !["fired", "delivery_pending", "delivery_failed"].includes(last.eventType)) return;
+        if (!last || !["fired", "delivery_pending", "delivery_failed"].includes(last.eventType)) return false;
         // A late Runtime receipt must not resurrect an occurrence finalized as failed.
-        if (eventType === "delivery_pending" && last.eventType === "delivery_failed") return;
+        if (eventType === "delivery_pending" && last.eventType === "delivery_failed") return false;
         // A synchronous outbound can finish inside deliveryTarget.deliver().
         // Never let its later Runtime receipt callback downgrade that success.
-        if (eventType !== "delivery_succeeded" && last.eventType === "delivery_succeeded") return;
+        if (eventType !== "delivery_succeeded" && last.eventType === "delivery_succeeded") return false;
         this.store.appendEvent(reminder, eventType, "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, this.now(), metadata);
+        return true;
       });
     } catch (error) {
       this.log(`reminder delivery audit 写失败 id=#${reminderId.slice(0, 8)}: ${(error as Error).message}`);
+      return false;
     }
   }
 

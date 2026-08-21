@@ -587,8 +587,17 @@ test("a recurring reminder provider duplicate is not recorded as success for the
       reminderId, deliveryTarget: "chat:oc_recurring_duplicate", content: "reminder" });
     f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
     const reminders = f.store.readJson("reminders", { reminders: [] });
-    reminders.reminders[0].events.push({ eventType: "delivery_pending" });
+    reminders.reminders[0].events = [
+      { eventType: "delivery_pending", metadata: { occurrenceId: "rem_occurrence_1" } },
+      { eventType: "delivery_pending", metadata: { occurrenceId: "rem_occurrence_2" } },
+    ];
     f.store.writeJson("reminders", reminders);
+    const inboxState = f.store.readJson("inboxState", {});
+    inboxState.reminder_contexts = [
+      { reminder_id: reminderId, delivery_target: "chat:oc_recurring_duplicate", message_id: "rem_occurrence_1", seq: 1 },
+      { reminder_id: reminderId, delivery_target: "chat:oc_recurring_duplicate", message_id: "rem_occurrence_2", seq: 2 },
+    ];
+    f.store.writeJson("inboxState", inboxState);
     f.setHistory({ ok: true, identity: "bot", data: { messages: [
       { message_id: "om_recurring_first", chat_id: "oc_recurring_duplicate", create_time: "1786553650354" },
     ] } });
@@ -599,6 +608,8 @@ test("a recurring reminder provider duplicate is not recorded as success for the
     assert.equal(duplicate.code, 0, duplicate.stderr);
     const reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
     assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    assert.equal(reminder.events.at(-1).metadata.occurrenceId, "rem_occurrence_2",
+      "the audit must finalize the same occurrence selected for the write memo");
     assert.match(reminder.events.at(-1).metadata.reason, /earlier reminder firing/);
     assert.ok(f.store.resolveCurrentReminder(), "the later occurrence remains auditable after provider deduplication");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

@@ -1102,6 +1102,30 @@ export function createRuntimeHost(options: {
     return tracked;
   };
 
+  // Reminder audit contexts are in-turn capabilities. Finalize any survivors
+  // at both turn boundaries: turn end reconciles the turn that consumed them,
+  // and turn start expires contexts left by a crashed/aborted prior turn so a
+  // direct outbound cannot be falsely attributed to a stale reminder.
+  const finalizeReminderContexts = (agent: ManagedAgent, reason: string): void => {
+    const legacyReminder = agent.stateStore?.resolveCurrentReminders ? null : agent.stateStore?.resolveCurrentReminder?.() ?? null;
+    const reminderContexts = agent.stateStore?.resolveCurrentReminders?.() ?? (legacyReminder ? [legacyReminder] : []);
+    let reminderAuditComplete = true;
+    if (agent.stateStore?.paths?.reminders && agent.stateStore.clearCurrentReminder) {
+      for (const reminder of reminderContexts) {
+        try {
+          auditReminderDelivery({ stateStore: agent.stateStore as Parameters<typeof auditReminderDelivery>[0]["stateStore"], agentId: agent.config.agentId,
+            reminderId: reminder.reminderId, deliveryAnchor: reminder.deliveryAnchor, target: reminder.deliveryTarget,
+            succeeded: false, finalize: true, reason });
+        } catch {
+          // Retain the context if the failure could not be durably recorded;
+          // a later matching outbound or turn can reconcile it.
+          reminderAuditComplete = false;
+        }
+      }
+    }
+    if (reminderAuditComplete) agent.stateStore?.clearCurrentReminders?.();
+  };
+
   const observe = (agent: ManagedAgent, session: RuntimeSession, event: NormalizedRuntimeEvent): void => {
     if (agent.session !== session) return; // Ignore late output from a replaced child.
     // Keep the trace parent published until authoritative Inbox reconciliation
@@ -1141,6 +1165,7 @@ export function createRuntimeHost(options: {
       // Clear a source left by a crashed/aborted prior turn before a new turn
       // can execute a direct task without an Inbox poll.
       agent.stateStore?.clearCurrentInboxSource?.();
+      finalizeReminderContexts(agent, "Runtime turn started before a prior turn reconciled this reminder delivery");
       agent.busy = true;
       agent.turnInProgress = true;
       agent.turnHadFailure = false;
@@ -1163,23 +1188,7 @@ export function createRuntimeHost(options: {
       // never cross-turn defaults. A later direct Runtime task must fail
       // closed instead of inheriting a previous turn's chat or reminder.
       agent.stateStore?.clearCurrentInboxSource?.();
-      const legacyReminder = agent.stateStore?.resolveCurrentReminders ? null : agent.stateStore?.resolveCurrentReminder?.() ?? null;
-      const reminderContexts = agent.stateStore?.resolveCurrentReminders?.() ?? (legacyReminder ? [legacyReminder] : []);
-      let reminderAuditComplete = true;
-      if (agent.stateStore?.paths?.reminders && agent.stateStore.clearCurrentReminder) {
-        for (const reminder of reminderContexts) {
-          try {
-            auditReminderDelivery({ stateStore: agent.stateStore as Parameters<typeof auditReminderDelivery>[0]["stateStore"], agentId: agent.config.agentId,
-              reminderId: reminder.reminderId, deliveryAnchor: reminder.deliveryAnchor, target: reminder.deliveryTarget,
-              succeeded: false, finalize: true, reason: "Runtime turn ended without a matching Feishu write" });
-          } catch {
-            // Retain the context if the failure could not be durably recorded;
-            // a later matching outbound or turn can reconcile it.
-            reminderAuditComplete = false;
-          }
-        }
-      }
-      if (reminderAuditComplete) agent.stateStore?.clearCurrentReminders?.();
+      finalizeReminderContexts(agent, "Runtime turn ended without a matching Feishu write");
       if (agent.backgroundCompletionInFlight) {
         if (agent.turnHadFailure) failBackgroundCompletionWake(agent);
         else commitBackgroundCompletion(agent);

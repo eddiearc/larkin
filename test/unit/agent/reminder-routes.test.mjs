@@ -64,6 +64,25 @@ test("reminder route service preserves schedule/list/snooze/update/cancel schema
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("schedule rejects a deliveryTarget that contradicts channel instead of preferring one", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-destination-conflict-"));
+  try {
+    const f = fixture(temp);
+    const conflicting = f.request("POST", "/reminders", {
+      title: "conflict", delaySeconds: 60, deliveryTarget: "chat:oc_route_a", channel: "oc_route_b",
+    });
+    assert.equal(conflicting.ok, false);
+    assert.equal(conflicting.status, 400);
+    assert.match(conflicting.error, /指向不同目的地/);
+    assert.equal(fs.existsSync(path.join(temp, "reminders.json")), false, "a rejected schedule must not persist");
+    const agreeing = f.request("POST", "/reminders", {
+      title: "agreeing aliases", delaySeconds: 60, deliveryTarget: "chat:oc_route_a", channel: "oc_route_a",
+    });
+    assert.equal(agreeing.ok, true, agreeing.error);
+    assert.equal(agreeing.data.reminder.deliveryTarget, "chat:oc_route_a");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("reminder route service preserves validation and recurrence behavior", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-validation-"));
   try {

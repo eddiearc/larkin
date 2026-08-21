@@ -1217,6 +1217,38 @@ test("implicit Inbox source expires when its Runtime turn ends and before a dire
   }
 });
 
+test("a stale reminder context from a crashed turn is finalized before the next turn starts", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-reminder-turn-start-"));
+  const agentId = "cli_reminderTurnStartA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: "/tmp", stateDir: store.paths.root }]);
+    // A prior turn polled the reminder and then crashed without turn-end.
+    session.emit({ type: "turn-start", turnId: "crashed-turn" });
+    store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_crashed_turn", target: "runtime:reminder",
+      reminderId: "reminder-crashed-turn", deliveryTarget: "chat:oc_crashed_turn", content: "reminder" });
+    store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    store.writeJson("reminders", { reminders: [{ reminderId: "reminder-crashed-turn", status: "fired",
+      fireAt: "2026-07-16T02:00:00.000Z", events: [{ eventType: "delivery_pending", metadata: { occurrenceId: "rem_crashed_turn" } }] }] });
+    assert.ok(store.resolveCurrentReminder());
+
+    session.emit({ type: "turn-start", turnId: "next-turn" });
+    const finalized = store.readJson("reminders", { reminders: [] }).reminders[0];
+    assert.equal(finalized.events.at(-1).eventType, "delivery_failed", "turn start must finalize a stale pending delivery");
+    assert.equal(finalized.events.at(-1).metadata.occurrenceId, "rem_crashed_turn");
+    assert.equal(store.resolveCurrentReminder(), null, "a direct outbound in the new turn cannot inherit the stale reminder context");
+    session.emit({ type: "turn-end", turnId: "next-turn" });
+  } finally {
+    await host.shutdown("reminder turn-start expiry test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex compatibility recovery closes, updates once, recreates, and retries the owned delivery", async () => {
   const sessions = [];
   let recoveries = 0;

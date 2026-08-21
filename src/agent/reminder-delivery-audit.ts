@@ -36,13 +36,18 @@ export function auditReminderDelivery(input: ReminderDeliveryAuditInput): void {
     return candidate.deliveryTarget === input.target || outboundChatId === currentChatId;
   });
   if (!current) return;
+  // Match events against the consumed occurrence even when the outbound did
+  // not name one: a snooze/update/cancel appended after polling must not hide
+  // the pending occurrence that this committed write actually fulfilled.
+  const anchor = input.deliveryAnchor || current.deliveryAnchor;
+  let persisted = false;
   ReminderStore.mutate(input.stateStore.paths.reminders, (store) => {
     const reminder = store.reminders.find((candidate) => candidate.reminderId === current.reminderId);
-    const occurrenceEvents = input.deliveryAnchor
-      ? reminder?.events?.filter((event) => event.metadata?.occurrenceId === input.deliveryAnchor)
+    const occurrenceEvents = anchor
+      ? reminder?.events?.filter((event) => event.metadata?.occurrenceId === anchor)
       : undefined;
     const hasOccurrenceMetadata = reminder?.events?.some((event) => typeof event.metadata?.occurrenceId === "string");
-    const last = input.deliveryAnchor
+    const last = anchor
       ? (occurrenceEvents?.at(-1) ?? (hasOccurrenceMetadata ? undefined : reminder?.events?.at(-1)))
       : reminder?.events?.at(-1);
     if (!reminder || !last || !["delivery_pending", "delivery_failed"].includes(last.eventType)) return;
@@ -55,6 +60,10 @@ export function auditReminderDelivery(input: ReminderDeliveryAuditInput): void {
         ...(input.messageId ? { messageId: input.messageId } : {}),
         ...(input.reason ? { reason: input.reason } : {}),
       });
+    persisted = true;
   });
-  if (input.succeeded) input.stateStore.clearCurrentReminder(current.reminderId, current.deliveryAnchor);
+  // Clear only after delivery_succeeded was durably appended; otherwise keep
+  // the occurrence context so a later reconciliation can still record the
+  // committed write instead of silently dropping its audit trail.
+  if (input.succeeded && persisted) input.stateStore.clearCurrentReminder(current.reminderId, current.deliveryAnchor);
 }

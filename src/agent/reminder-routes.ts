@@ -88,8 +88,17 @@ export function createReminderRoutes(options: ReminderRouteOptions) {
         }
       } else {
         try {
-          const explicit = body.deliveryTarget !== undefined ? body.deliveryTarget : body.channel;
-          if (explicit !== undefined && explicit !== null && String(explicit).trim()) deliveryTarget = userTarget(explicit, "delivery target");
+          const hasExplicitTarget = body.deliveryTarget !== undefined && body.deliveryTarget !== null && Boolean(String(body.deliveryTarget).trim());
+          const hasExplicitChannel = body.channel !== undefined && body.channel !== null && Boolean(String(body.channel).trim());
+          // deliveryTarget and channel are destination aliases. Preferring one
+          // over a contradicting other could route to the wrong conversation,
+          // so a disagreement fails closed instead of being silently resolved.
+          if (hasExplicitTarget && hasExplicitChannel
+            && userTarget(body.deliveryTarget, "delivery target") !== userTarget(body.channel, "channel")) {
+            return { ok: false, status: 400, error: "deliveryTarget 与 channel 指向不同目的地；请只提供其中一个" };
+          }
+          const explicit = hasExplicitTarget ? body.deliveryTarget : hasExplicitChannel ? body.channel : undefined;
+          if (explicit !== undefined) deliveryTarget = userTarget(explicit, "delivery target");
           if (body.msgId !== undefined && body.msgId !== null && String(body.msgId).trim()) {
             const anchorTarget = options.resolveMessageTarget?.(String(body.msgId).trim()) || null;
             deliveryAnchor = validAnchor(body.msgId, "message-id", anchorTarget || deliveryTarget);

@@ -436,6 +436,27 @@ test("reminder commands wire the existing schedule/list/snooze/update/cancel/log
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("reminder schedule fails closed when destination aliases are combined", () => {
+  const f = fixture();
+  try {
+    const conflicts = [
+      ["--delivery-target", "chat:oc_dest_a", "--target", "chat:oc_dest_b"],
+      ["--delivery-target", "chat:oc_dest_a", "--channel", "oc_dest_b"],
+      ["--target", "chat:oc_dest_a", "--channel", "oc_dest_b"],
+      ["--delivery-target", "chat:oc_dest_a", "--target", "chat:oc_dest_a"],
+    ];
+    for (const flags of conflicts) {
+      const rejected = f.run(["reminder", "schedule", "--title", "conflict", "--delay-seconds", "60", ...flags]);
+      assert.notEqual(rejected.code, 0, `conflicting destination flags must fail closed: ${flags.join(" ")}`);
+      assert.match(rejected.stderr, /只能指定其中一个/);
+    }
+    assert.equal(JSON.parse(f.run(["reminder", "list"]).stdout).reminders.length, 0, "no reminder may persist from a rejected schedule");
+    const single = f.run(["reminder", "schedule", "--title", "single destination", "--delay-seconds", "60", "--target", "chat:oc_dest_a"]);
+    assert.equal(single.code, 0, single.stderr);
+    assert.equal(JSON.parse(single.stdout).reminder.deliveryTarget, "chat:oc_dest_a");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("Agent CLI derives a reminder target and anchor from the current canonical Inbox source", () => {
   const f = fixture();
   try {

@@ -280,7 +280,7 @@ function reminderRequest(
   let requestPath = "/reminders";
   const body: JsonObject = {};
   switch (operation) {
-    case "schedule":
+    case "schedule": {
       method = "POST";
       body.title = options.values.get("--title") || "";
       if (options.values.has("--fire-at")) body.fireAt = options.values.get("--fire-at");
@@ -288,11 +288,18 @@ function reminderRequest(
       if (options.values.has("--repeat")) body.repeat = options.values.get("--repeat");
       if (options.values.has("--tz")) body.tz = options.values.get("--tz");
       if (options.values.has("--message-id")) body.msgId = options.values.get("--message-id");
+      // The destination controls the recipient. Aliases must never silently
+      // overwrite each other, so any combination fails closed at parse time.
+      const destinationFlags = ["--delivery-target", "--target", "--channel"].filter((flag) => options.values.has(flag));
+      if (destinationFlags.length > 1) {
+        throw new Error(`reminder schedule 收到多个 delivery 目的地 flag（${destinationFlags.join("、")}）；它们互为别名且可能指向不同会话，只能指定其中一个`);
+      }
       if (options.values.has("--channel")) body.channel = options.values.get("--channel");
       if (options.values.has("--delivery-target")) body.deliveryTarget = options.values.get("--delivery-target");
       if (options.values.has("--target")) body.deliveryTarget = options.values.get("--target");
       if (options.booleans.has("--no-delivery") || options.booleans.has("--internal")) body.noDelivery = true;
       break;
+    }
     case "list": {
       const search = new URLSearchParams();
       if (options.values.has("--status")) search.set("status", options.values.get("--status")!);

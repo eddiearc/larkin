@@ -537,7 +537,6 @@ export class AgentStateStore {
       const messageIds = Object.keys(state.messages);
       for (const stale of messageIds.slice(0, Math.max(0, messageIds.length - 2_048))) delete state.messages[stale];
     }
-    this.rememberInboxSource(state, input, target, targetSeq);
     return { ...input, envelope_version: 2, target, target_seq: targetSeq };
   }
 

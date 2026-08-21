@@ -81,11 +81,25 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   assert.equal(f.deliveries[0].target, "runtime:reminder");
   assert.equal(f.deliveries[0].deliveryTarget, "chat:oc_due");
   assert.equal(f.deliveries[0].deliveryAnchor, "om_due");
-  assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded");
-  assert.deepEqual(reminder.events.at(-1).metadata, { outcome: "accepted", deliveryTarget: "chat:oc_due" });
+  assert.equal(reminder.events.at(-1).eventType, "delivery_pending");
+  assert.deepEqual(reminder.events.at(-1).metadata, { outcome: "empty", deliveryTarget: "chat:oc_due" });
   assert.strictEqual(f.inbox[0], f.deliveries[0], "the same target-complete envelope is persisted and delivered");
   orchestrator.handleFire({ agentId: "cli_rem", reminderId: reminder.reminderId });
   assert.equal(f.deliveries.length, 1, "duplicate fire attempts do not duplicate the user-visible delivery");
+});
+
+test("Runtime accepted, duplicate, and empty receipts remain pending until Feishu commit", async () => {
+  for (const receipt of [{ status: "accepted" }, { status: "duplicate" }, undefined]) {
+    const outcome = receipt?.status || "empty";
+    const reminder = { reminderId: `receipt-${outcome}`, version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-16T00:00:00Z", title: "receipt", status: "scheduled", deliveryTarget: "chat:oc_receipt", deliveryAnchor: "om_receipt" };
+    const f = fixture([reminder]);
+    const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+      deliveryTarget: { deliver() { return Promise.resolve(receipt); } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+    orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reminder.events.at(-1).eventType, "delivery_pending");
+    assert.deepEqual(reminder.events.at(-1).metadata, { outcome, deliveryTarget: "chat:oc_receipt" });
+  }
 });
 
 test("Runtime deferred and error receipts are audited without false delivery success", async () => {

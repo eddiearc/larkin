@@ -138,9 +138,12 @@ export class HostReminderOrchestrator {
       const recordReceipt = (receipt: unknown): void => {
         const status = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).status || "") : "";
         const reason = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).reason || "") : "";
+        // RuntimeHost.deliver only acknowledges Inbox persistence/wake submission.
+        // It does not prove that the Agent later committed an outbound Feishu
+        // message, so accepted, duplicate, and an empty receipt remain pending.
         if (!status || status === "accepted" || status === "duplicate") {
-          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_succeeded", {
-            outcome: status === "duplicate" ? "duplicate" : "accepted", deliveryTarget: envelope.deliveryTarget,
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+            outcome: status || "empty", deliveryTarget: envelope.deliveryTarget,
           });
         } else if (status === "deferred") {
           this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {

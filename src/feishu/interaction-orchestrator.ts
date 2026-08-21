@@ -108,7 +108,9 @@ export class HostInteractionOrchestrator {
           version: 1,
           events: [],
         };
-        ReminderStore.appendEvent(created, "scheduled", "interaction", run.run_id, created.fireAt, current);
+        ReminderStore.appendEvent(created, "scheduled", "interaction", run.run_id, created.fireAt, current, {
+          deliveryTarget, deliveryAnchor, deliveryMode: "user",
+        });
         store.reminders.push(created);
         return created;
       }, Math.max(1, Math.min(350, deadline - this.now() - 100)));

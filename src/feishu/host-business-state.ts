@@ -428,6 +428,7 @@ export class HostEnvelopeProjector {
     const commentAnchorId = deliveryTarget?.startsWith("document-comment:") && typeof reminder.deliveryAnchor === "string"
       && /^doc_comment_[A-Za-z0-9_-]+$/.test(reminder.deliveryAnchor) ? reminder.deliveryAnchor : null;
     const anchorId = anchorMessageId || commentAnchorId;
+    const chatId = deliveryTarget?.match(/^chat:(oc_[A-Za-z0-9_-]+)$/)?.[1] || null;
     const lines = [
       `[定时提醒触发] ${reminder.title}`,
       `提醒ID: #${reminder.reminderId.slice(0, 8)}` + (reminder.repeat && repeatDescription
@@ -439,11 +440,16 @@ export class HostEnvelopeProjector {
           : "本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息",
       anchorId ? `锚定消息: ${anchorId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是可用的 delivery anchor，不能用于回复` : null,
       anchorMessageId
-        ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId}${deliveryTarget?.startsWith("thread:") ? " --reply-in-thread" : ""} ...`)}`
+        ? [
+            `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId}${deliveryTarget?.startsWith("thread:") ? " --reply-in-thread" : ""} ...`)}`,
+            chatId ? `若 ${anchorMessageId} 无法由当前 Inbox 解析（例如 interaction_* 卡片锚点或已淘汰的历史消息），改用聊天兜底发送: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}；仅使用这个持久化 chat_id，不得猜测收件人` : null,
+          ].filter((line): line is string => Boolean(line)).join("\n")
         : commentAnchorId
           ? `回复原文档评论: ${this.agentCommand(`comment reply --message-id ${commentAnchorId} --text ...`)}`
           : deliveryTarget
-          ? `发送到原始 target: ${deliveryTarget}（不得从提醒标题推断收件人）`
+          ? chatId
+            ? `发送到原始 target: ${deliveryTarget}: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}（不得从提醒标题推断收件人）`
+            : `发送到原始 target: ${deliveryTarget}（不得从提醒标题推断收件人）`
           : null,
       `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
     ].filter((line): line is string => Boolean(line));

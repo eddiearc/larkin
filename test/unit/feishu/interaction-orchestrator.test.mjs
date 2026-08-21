@@ -149,6 +149,9 @@ test("reminder.schedule Reflex is idempotent and its structured result still wak
     assert.equal(reminders[0].payload.run_id, f.machine.snapshot().runs[0].run_id);
     assert.equal(reminders[0].deliveryTarget, "chat:oc_interaction");
     assert.equal(reminders[0].deliveryAnchor, "om_card");
+    assert.deepEqual(reminders[0].events[0].metadata, {
+      deliveryTarget: "chat:oc_interaction", deliveryAnchor: "om_card", deliveryMode: "user",
+    });
     assert.equal(f.deliveries.length, 1);
     assert.equal(f.deliveries[0].envelope.reflex.data.reminder_id, reminders[0].reminderId);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

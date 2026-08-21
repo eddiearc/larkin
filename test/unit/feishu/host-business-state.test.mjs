@@ -172,6 +172,18 @@ test("pre-upgrade reminder fields retain safe legacy delivery guidance", () => {
   assert.doesNotMatch(anchored.content, /internal\/no-delivery/);
 });
 
+test("chat reminder guidance keeps a persisted chat-send fallback when its anchor is unresolvable", () => {
+  const store = memoryStore();
+  const projector = new HostEnvelopeProjector(new HostStateProjection(() => store), () => {}, () => "chatfallback123", () => new Date("2026-07-16T02:00:00.000Z"));
+  const reminder = projector.createReminderEnvelope(agent.agentId, {
+    reminderId: "interaction-card-reminder", title: "Card follow-up", fireAt: "2026-07-17T01:00:00.000Z",
+    deliveryTarget: "chat:oc_interaction", deliveryAnchor: "om_card",
+  }, 0, null);
+  assert.match(reminder.content, /回复原会话: .*om_card/);
+  assert.match(reminder.content, /interaction_\* 卡片锚点/);
+  assert.match(reminder.content, /im \+messages-send --chat-id oc_interaction \.\.\./);
+});
+
 test("thread reminder guidance keeps +messages-reply inside the source thread", () => {
   const store = memoryStore();
   const projector = new HostEnvelopeProjector(new HostStateProjection(() => store), () => {}, () => "thread123456", () => new Date("2026-07-16T02:00:00.000Z"));
@@ -180,6 +192,7 @@ test("thread reminder guidance keeps +messages-reply inside the source thread", 
     deliveryTarget: "thread:oc_thread:omt_topic", deliveryAnchor: "om_thread_anchor",
   }, 0, null);
   assert.match(reminder.content, /im \+messages-reply --message-id om_thread_anchor --reply-in-thread \.\.\./);
+  assert.doesNotMatch(reminder.content, /im \+messages-send --chat-id oc_thread/);
 });
 
 test("reminder and restart guidance use the injected CLI and never reply to synthetic ids", () => {

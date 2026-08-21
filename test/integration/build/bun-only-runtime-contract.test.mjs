@@ -11,6 +11,7 @@ const SELF = path.relative(ROOT, import.meta.filename);
 const BUN_RUNNER_SEAM_ALLOWLIST = [
   "src/platform/process-inspect.cts",
   "test/integration/app/runtime-profile-rollback.test.mjs",
+  "test/integration/app/supervisor-hot-attach-restart.test.mjs",
   "test/integration/platform/process-idempotency.test.mjs",
   "test/integration/platform/process-ownership.test.mjs",
   "test/unit/agent/agent-state-store.test.mjs",

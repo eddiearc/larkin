@@ -209,8 +209,19 @@ test("implicit reminder source stays bound to the active poll when an unpolled I
     assert.equal(scheduled.data.reminder.deliveryTarget, "chat:oc_source_a");
     assert.equal(scheduled.data.reminder.deliveryAnchor, "om_source_a");
 
-    // A consumed runtime reminder is not a user source. It must invalidate A
-    // so a later targetless schedule cannot reuse that stale conversation.
+    // An interaction wake is user-targeted by chat locator but its synthetic
+    // interaction_* id is not a reply anchor. Polling it must invalidate A so
+    // a later targetless schedule fails closed instead of reusing A.
+    store.appendNdjson("inbox", { message_id: "interaction_run_source", kind: "interaction", chat_id: "oc_interaction", content: "interaction wake" });
+    assert.deepEqual(store.pollInbox({ target: "chat:oc_interaction", limit: 1 }).envelopes.map((row) => row.message_id), ["interaction_run_source"]);
+    assert.equal(store.resolveCurrentInboxSource(), null);
+    const failedClosedInteraction = routes.handle({ path: "/reminders", pathNoQuery: "/reminders", method: "POST",
+      body: { title: "must fail closed after interaction", delaySeconds: 60 } });
+    assert.equal(failedClosedInteraction.ok, false);
+    assert.match(failedClosedInteraction.error, /必须显式指定 delivery target/);
+
+    // A consumed runtime reminder is not a user source. It must keep the
+    // invalidation fail-closed for a later targetless schedule too.
     store.appendNdjson("inbox", { message_id: "rem_source_runtime", kind: "reminder", target: "runtime:reminder", content: "runtime wake" });
     assert.deepEqual(store.pollInbox({ target: "runtime:reminder", limit: 1 }).envelopes.map((row) => row.message_id), ["rem_source_runtime"]);
     assert.equal(store.resolveCurrentInboxSource(), null);

@@ -522,7 +522,10 @@ export class AgentStateStore {
       delete state.last_source;
       return;
     }
-    if (!validAnchor) return;
+    if (!validAnchor) {
+      delete state.last_source;
+      return;
+    }
     state.last_source = { target, message_id: messageId, seq: targetSeq,
       ...(typeof input.kind === "string" && input.kind ? { kind: input.kind } : {}) };
   }

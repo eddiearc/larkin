@@ -51,8 +51,8 @@ interface DeliveryStateStore {
   withInboxTransaction<T>(operation: () => T): T;
   resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
   paths?: { reminders: string };
-  resolveCurrentReminder?(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null;
-  resolveCurrentReminders?(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string }>;
+  resolveCurrentReminder?(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string } | null;
+  resolveCurrentReminders?(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string }>;
   clearCurrentReminder?(reminderId: string, occurrenceId?: string): void;
   /** A polled source is valid only for the Runtime turn that consumed it. */
   clearCurrentInboxSource?(): void;
@@ -1115,7 +1115,9 @@ export function createRuntimeHost(options: {
         try {
           auditReminderDelivery({ stateStore: agent.stateStore as Parameters<typeof auditReminderDelivery>[0]["stateStore"], agentId: agent.config.agentId,
             reminderId: reminder.reminderId, deliveryAnchor: reminder.deliveryAnchor, target: reminder.deliveryTarget,
-            succeeded: false, finalize: true, reason });
+            succeeded: reminder.deliveryCommitted === true, finalize: true,
+            ...(reminder.deliveryMessageId ? { messageId: reminder.deliveryMessageId } : {}),
+            ...(!reminder.deliveryCommitted ? { reason } : {}) });
         } catch {
           // Retain the context if the failure could not be durably recorded;
           // a later matching outbound or turn can reconcile it.

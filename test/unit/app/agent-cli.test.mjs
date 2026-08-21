@@ -457,6 +457,19 @@ test("reminder schedule fails closed when destination aliases are combined", () 
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("reminder schedule rejects unknown flags before implicit Inbox source fallback", () => {
+  const f = fixture();
+  try {
+    f.store.appendNdjson("inbox", { message_id: "om_unknown_destination_source", chat_id: "oc_unknown_destination_source", content: "source" });
+    f.store.pollInbox({ target: "chat:oc_unknown_destination_source", limit: 1 });
+    const rejected = f.run(["reminder", "schedule", "--title", "must not route", "--delay-seconds", "60",
+      "--delivery-targte", "chat:oc_other"]);
+    assert.equal(rejected.code, 2);
+    assert.match(rejected.stderr, /不支持参数.*--delivery-targte/);
+    assert.equal(JSON.parse(f.run(["reminder", "list"]).stdout).reminders.length, 0);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("Agent CLI derives a reminder target and anchor from the current canonical Inbox source", () => {
   const f = fixture();
   try {

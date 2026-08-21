@@ -75,6 +75,31 @@ test("a success that could not be persisted retains the occurrence context for r
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a committed provider write is reconciled as success after audit persistence recovers", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-audit-committed-marker-"));
+  try {
+    const agentId = "cli_auditCommittedA1";
+    const store = createAgentStateStore(root, agentId);
+    const reminderId = "reminder-audit-committed";
+    store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_committed_occurrence", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_committed", content: "reminder" });
+    store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    store.writeJson("reminders", { reminders: [{ reminderId, status: "fired", fireAt: "2026-07-16T02:00:00.000Z",
+      events: [{ eventType: "delivery_pending" }] }] });
+
+    store.markCurrentReminderDeliveryCommitted(reminderId, "rem_committed_occurrence", "om_committed_write");
+    const context = store.resolveCurrentReminder();
+    assert.equal(context.deliveryCommitted, true);
+    assert.equal(context.deliveryMessageId, "om_committed_write");
+    auditReminderDelivery({ stateStore: store, agentId, target: "chat:oc_committed", deliveryAnchor: "rem_committed_occurrence",
+      succeeded: context.deliveryCommitted, finalize: true, messageId: context.deliveryMessageId });
+    const reminder = JSON.parse(fs.readFileSync(store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded");
+    assert.equal(reminder.events.at(-1).metadata.messageId, "om_committed_write");
+    assert.equal(store.resolveCurrentReminder(), null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("recurring audit finalizes one occurrence without resurrecting it from a late receipt", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-audit-occurrence-"));
   try {

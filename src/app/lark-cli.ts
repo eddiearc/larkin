@@ -404,10 +404,20 @@ function runCommentReply(
       };
     });
   }
+  const committedWrite = !result.error && result.status === 0;
+  const currentReminder = committedWrite
+    ? store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === targetKey).at(-1) ?? null
+    : null;
   try {
-    auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, succeeded: !result.error && result.status === 0,
-      ...(!result.error && result.status === 0 ? {} : { reason: (result.stderr || result.stdout || "comment provider failed").trim().split("\n")[0] }) });
-  } catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
+    auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, succeeded: committedWrite,
+      ...(committedWrite ? {} : { reason: (result.stderr || result.stdout || "comment provider failed").trim().split("\n")[0] }) });
+  } catch (error) {
+    if (committedWrite && currentReminder) {
+      try { store.markCurrentReminderDeliveryCommitted(currentReminder.reminderId, currentReminder.deliveryAnchor); }
+      catch (markerError) { io.stderr(`lark-cli: reminder committed marker failed: ${markerError instanceof Error ? markerError.message : String(markerError)}\n`); }
+    }
+    io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
   return emitNativeResult(result, io);
 }
 
@@ -1098,16 +1108,23 @@ export function runLarkCli(
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id, deliveryAnchor) : { duplicate: false };
     const duplicateOfEarlierReminder = memo.duplicate && Boolean(currentReminder)
       && memo.priorSourceMessageId !== currentReminder?.deliveryAnchor;
+    const committedWrite = !write.error && write.status === 0 && !duplicateOfEarlierReminder;
     try {
       auditReminderDelivery({ stateStore: store, agentId: agent.agentId, target: deliveryTarget, deliveryAnchor,
-        succeeded: !write.error && write.status === 0 && !duplicateOfEarlierReminder,
-        ...(!write.error && write.status === 0 && !duplicateOfEarlierReminder ? {} : {
+        succeeded: committedWrite,
+        ...(!committedWrite ? {
           reason: duplicateOfEarlierReminder
             ? "provider deduplicated this write to an earlier reminder firing"
             : (write.stderr || write.stdout || "provider write failed").trim().split("\n")[0],
-        }),
+        } : {}),
         ...(writeMessage?.message_id ? { messageId: writeMessage.message_id } : {}) });
-    } catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
+    } catch (error) {
+      if (committedWrite && currentReminder) {
+        try { store.markCurrentReminderDeliveryCommitted(currentReminder.reminderId, currentReminder.deliveryAnchor, writeMessage?.message_id); }
+        catch (markerError) { io.stderr(`lark-cli: reminder committed marker failed: ${markerError instanceof Error ? markerError.message : String(markerError)}\n`); }
+      }
+      io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
     const duplicate = memo.duplicate;
     if (duplicate) {
       observeSuccessfulWrite(write, target, targetKey, store, generation);

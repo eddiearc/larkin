@@ -134,6 +134,10 @@ export function createTransportBusinessContext(env: Env = process.env) {
       auditReminderDelivery({ stateStore, agentId, target, succeeded, ...(messageId ? { messageId } : {}),
         ...(reason ? { reason } : {}), resolveChatId });
     } catch (error) {
+      if (succeeded && current && stateStore.markCurrentReminderDeliveryCommitted) {
+        try { stateStore.markCurrentReminderDeliveryCommitted(current.reminderId, current.deliveryAnchor, messageId); }
+        catch (markerError) { log(`reminder committed marker 写失败 id=#${current.reminderId.slice(0, 8)}: ${(markerError as Error).message}`); }
+      }
       log(`reminder outbound audit 写失败 id=#${current?.reminderId.slice(0, 8) || "unknown"}: ${(error as Error).message}`);
     }
   };

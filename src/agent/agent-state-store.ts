@@ -133,6 +133,9 @@ interface InboxReminderState {
   seq: number;
   /** Original user-facing routing anchor pinned by this occurrence. */
   delivery_anchor?: string;
+  /** Provider write committed, but the reminder audit may still be pending. */
+  delivery_committed?: boolean;
+  delivery_message_id?: string;
 }
 
 interface InboxStateFile {
@@ -211,7 +214,9 @@ function normalizeInboxState(value: unknown): InboxStateFile {
           : /^om_[A-Za-z0-9_-]+$/.test(row.delivery_anchor))))
       && !reminderContexts.some((candidate) => candidate.message_id === row.message_id)) {
       reminderContexts.push({ reminder_id: row.reminder_id, delivery_target: row.delivery_target, message_id: row.message_id, seq: row.seq,
-        ...(typeof row.delivery_anchor === "string" ? { delivery_anchor: row.delivery_anchor } : {}) });
+        ...(typeof row.delivery_anchor === "string" ? { delivery_anchor: row.delivery_anchor } : {}),
+        ...(row.delivery_committed === true ? { delivery_committed: true } : {}),
+        ...(typeof row.delivery_message_id === "string" && row.delivery_message_id ? { delivery_message_id: row.delivery_message_id } : {}) });
     }
   }
   if (reminderContexts.length) state.reminder_contexts = reminderContexts;
@@ -1137,6 +1142,18 @@ export class AgentStateStore {
     });
   }
 
+  /** Roll back a delivery anchor that was pinned before an Inbox append failed. */
+  unbindInboxDeliveryAnchor(messageId: string, target?: string): void {
+    this.withInboxLock(this.file("inbox"), () => {
+      const state = this.inboxState();
+      const pinned = state.delivery_anchors?.[messageId];
+      if (!pinned || (target && pinned.target !== target)) return;
+      delete state.delivery_anchors?.[messageId];
+      if (state.delivery_anchors && Object.keys(state.delivery_anchors).length === 0) delete state.delivery_anchors;
+      this.writeJson("inboxState", state);
+    });
+  }
+
   resolveInboxMessageTarget(messageId: string): string | null {
     return this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
@@ -1170,14 +1187,28 @@ export class AgentStateStore {
   }
 
   /** Return every consumed reminder context for the guarded outbound audit hook. */
-  resolveCurrentReminders(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string }> {
+  resolveCurrentReminders(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string }> {
     return this.withInboxLock(this.file("inbox"), () => (this.inboxState().reminder_contexts ?? []).map((reminder) => ({
       reminderId: reminder.reminder_id, deliveryTarget: reminder.delivery_target, deliveryAnchor: reminder.message_id,
+      ...(reminder.delivery_committed ? { deliveryCommitted: true } : {}),
+      ...(reminder.delivery_message_id ? { deliveryMessageId: reminder.delivery_message_id } : {}),
     })));
   }
 
+  /** Mark a provider write as committed when its reminder audit could not persist. */
+  markCurrentReminderDeliveryCommitted(reminderId: string, occurrenceId: string, messageId?: string): void {
+    this.withInboxLock(this.file("inbox"), () => {
+      const state = this.inboxState();
+      const context = state.reminder_contexts?.find((reminder) => reminder.reminder_id === reminderId && reminder.message_id === occurrenceId);
+      if (!context) return;
+      context.delivery_committed = true;
+      if (messageId) context.delivery_message_id = messageId;
+      this.writeJson("inboxState", state);
+    });
+  }
+
   /** Return the oldest consumed reminder context for legacy callers. */
-  resolveCurrentReminder(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null {
+  resolveCurrentReminder(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string } | null {
     return this.resolveCurrentReminders()[0] ?? null;
   }
 

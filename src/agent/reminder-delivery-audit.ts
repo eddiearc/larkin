@@ -2,8 +2,8 @@ import * as ReminderStore from "./reminder-store.js";
 
 export interface ReminderAuditState {
   paths: { reminders: string };
-  resolveCurrentReminder(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null;
-  resolveCurrentReminders?(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string }>;
+  resolveCurrentReminder(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string } | null;
+  resolveCurrentReminders?(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string }>;
   clearCurrentReminder(reminderId: string, occurrenceId?: string): void;
 }
 
@@ -27,7 +27,7 @@ export interface ReminderDeliveryAuditInput {
 export function auditReminderDelivery(input: ReminderDeliveryAuditInput): void {
   if (input.dryRun) return;
   const current = (input.stateStore.resolveCurrentReminders?.() ?? [input.stateStore.resolveCurrentReminder()]).filter(
-    (candidate): candidate is { reminderId: string; deliveryTarget: string; deliveryAnchor: string } => Boolean(candidate),
+    (candidate): candidate is { reminderId: string; deliveryTarget: string; deliveryAnchor: string; deliveryCommitted?: boolean; deliveryMessageId?: string } => Boolean(candidate),
   ).find((candidate) => {
     if (input.reminderId && candidate.reminderId !== input.reminderId) return false;
     if (input.deliveryAnchor && candidate.deliveryAnchor !== input.deliveryAnchor) return false;
@@ -57,7 +57,7 @@ export function auditReminderDelivery(input: ReminderDeliveryAuditInput): void {
       reminder.status === "scheduled" ? reminder.fireAt : null, Date.now(), {
         deliveryTarget: input.target,
         occurrenceId: current.deliveryAnchor,
-        ...(input.messageId ? { messageId: input.messageId } : {}),
+        ...((input.messageId || current.deliveryMessageId) ? { messageId: input.messageId || current.deliveryMessageId } : {}),
         ...(input.reason ? { reason: input.reason } : {}),
       });
     persisted = true;

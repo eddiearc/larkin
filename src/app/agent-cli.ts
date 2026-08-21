@@ -274,6 +274,15 @@ function reminderRequest(
   if (!fs.existsSync(stateStore.paths.reminders)) stateStore.writeJson("reminders", { reminders: [] });
   const [operation, ...rest] = groupArgv;
   const options = parseOptions(rest, new Set(["--all", "--json", "--no-delivery", "--internal"]));
+  const assertOnlyFlags = (valueFlags: readonly string[], booleanFlags: readonly string[] = []): void => {
+    const allowedValues = new Set(valueFlags);
+    const allowedBooleans = new Set(booleanFlags);
+    const unsupported = [
+      ...[...options.values.keys()].filter((flag) => !allowedValues.has(flag)),
+      ...[...options.booleans].filter((flag) => !allowedBooleans.has(flag)),
+    ];
+    if (unsupported.length) throw new Error(`reminder ${operation || ""} 不支持参数：${unsupported.join(", ")}`);
+  };
   if (options.positionals.length) throw new Error(`reminder ${operation || ""} 不接受位置参数：${options.positionals.join(" ")}`);
   const id = options.values.get("--id");
   let method = "GET";
@@ -281,6 +290,7 @@ function reminderRequest(
   const body: JsonObject = {};
   switch (operation) {
     case "schedule": {
+      assertOnlyFlags(["--title", "--fire-at", "--delay-seconds", "--repeat", "--tz", "--message-id", "--delivery-target", "--target", "--channel"], ["--json", "--no-delivery", "--internal"]);
       method = "POST";
       body.title = options.values.get("--title") || "";
       if (options.values.has("--fire-at")) body.fireAt = options.values.get("--fire-at");
@@ -301,6 +311,7 @@ function reminderRequest(
       break;
     }
     case "list": {
+      assertOnlyFlags(["--status"], ["--all", "--json"]);
       const search = new URLSearchParams();
       if (options.values.has("--status")) search.set("status", options.values.get("--status")!);
       if (options.booleans.has("--all")) search.set("all", "true");
@@ -308,12 +319,14 @@ function reminderRequest(
       break;
     }
     case "snooze":
+      assertOnlyFlags(["--id", "--delay-seconds"], ["--json"]);
       if (!id) throw new Error("reminder snooze 需要 --id");
       method = "POST";
       requestPath += `/${encodeURIComponent(id)}/snooze`;
       body.delaySeconds = numberOption(options, "--delay-seconds");
       break;
     case "update":
+      assertOnlyFlags(["--id", "--title", "--fire-at", "--delay-seconds", "--repeat", "--tz"], ["--json"]);
       if (!id) throw new Error("reminder update 需要 --id");
       method = "PATCH";
       requestPath += `/${encodeURIComponent(id)}`;
@@ -324,11 +337,13 @@ function reminderRequest(
       if (options.values.has("--tz")) body.tz = options.values.get("--tz");
       break;
     case "cancel":
+      assertOnlyFlags(["--id"], ["--json"]);
       if (!id) throw new Error("reminder cancel 需要 --id");
       method = "DELETE";
       requestPath += `/${encodeURIComponent(id)}`;
       break;
     case "log":
+      assertOnlyFlags(["--id"], ["--json"]);
       if (!id) throw new Error("reminder log 需要 --id");
       requestPath += `/${encodeURIComponent(id)}/log`;
       break;

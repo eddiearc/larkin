@@ -19,6 +19,8 @@ interface StateStore {
   appendNdjson(key: "inbox", value: unknown): void;
   /** Pin a reminder's user-facing source before the Runtime wake can be consumed. */
   bindInboxDeliveryAnchor(messageId: string, target: string): void;
+  /** Remove a pin created for an Inbox wake that failed to append. */
+  unbindInboxDeliveryAnchor?(messageId: string, target?: string): void;
 }
 function withCanonicalTarget<T extends object>(envelope: T): T & { target: string } {
   const input = envelope as InboxEnvelope;
@@ -142,13 +144,20 @@ export class HostReminderOrchestrator {
       this.log(`reminder delivery pending 审计写失败 id=#${reminder.reminderId.slice(0, 8)}（拒绝唤醒）`);
       return;
     }
+    let stateStore: StateStore | undefined;
+    let deliveryAnchorBound = false;
     try {
-      const stateStore = this.options.stateStore(agent);
+      stateStore = this.options.stateStore(agent);
       if (envelope.deliveryTarget && envelope.deliveryAnchor) {
         stateStore.bindInboxDeliveryAnchor(envelope.deliveryAnchor, envelope.deliveryTarget);
+        deliveryAnchorBound = true;
       }
       stateStore.appendNdjson("inbox", envelope);
     } catch (error) {
+      if (deliveryAnchorBound && stateStore?.unbindInboxDeliveryAnchor && envelope.deliveryTarget && envelope.deliveryAnchor) {
+        try { stateStore.unbindInboxDeliveryAnchor(envelope.deliveryAnchor, envelope.deliveryTarget); }
+        catch (rollbackError) { this.log("reminder Inbox anchor 回滚失败", (rollbackError as Error).message); }
+      }
       this.log("reminder inbox 写失败", (error as Error).message);
       // The wake row never became durable, so the pending marker must not stay
       // open awaiting a Runtime turn that can never poll this occurrence.

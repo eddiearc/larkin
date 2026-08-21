@@ -25,9 +25,13 @@ async function waitFor(condition, label, timeoutMs = 10_000) {
 }
 
 function fixture(reminders) {
-  const deliveries = [], inbox = [];
+  const deliveries = [], inbox = [], deliveryAnchors = new Map();
   const state = { paths: { reminders: "/state/reminders.json", inbox: "/state/inbox.ndjson" },
-    bindInboxDeliveryAnchor() {}, appendNdjson(_key, value) { inbox.push(value); } };
+    bindInboxDeliveryAnchor(messageId, target) { deliveryAnchors.set(messageId, target); },
+    unbindInboxDeliveryAnchor(messageId, target) {
+      if (deliveryAnchors.get(messageId) === target) deliveryAnchors.delete(messageId);
+    },
+    appendNdjson(_key, value) { inbox.push(value); } };
   const api = {
     load: () => ({ reminders }),
     mutate(_file, fn) { return fn({ reminders }); },
@@ -42,7 +46,7 @@ function fixture(reminders) {
     createReminderEnvelope(_agentId, reminder) { return { kind: "reminder", message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true, target: "runtime:reminder" }; },
     createRedeliveryEnvelope(_agentId, count) { return { kind: "redelivery", message_id: `redeliver_${count}`, seq: 2, target: "runtime:redelivery" }; },
   };
-  return { deliveries, inbox, state, api, projector };
+  return { deliveries, inbox, deliveryAnchors, state, api, projector };
 }
 
 test("reminder schedules deduplicate unless forced", () => {
@@ -149,6 +153,7 @@ test("Inbox append failure after the pending audit finalizes the occurrence as f
   assert.equal(reminder.events.at(-1).eventType, "delivery_failed",
     "the pending marker must not stay open for a wake row that never became durable");
   assert.equal(reminder.events.at(-1).metadata.outcome, "inbox_write_failed");
+  assert.equal(f.deliveryAnchors.size, 0, "a failed Inbox append must roll back its temporary delivery anchor");
 });
 
 test("internal reminders without a Runtime delivery target do not create delivery failures", () => {

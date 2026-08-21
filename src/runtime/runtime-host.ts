@@ -53,7 +53,7 @@ interface DeliveryStateStore {
   paths?: { reminders: string };
   resolveCurrentReminder?(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null;
   resolveCurrentReminders?(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string }>;
-  clearCurrentReminder?(reminderId: string): void;
+  clearCurrentReminder?(reminderId: string, occurrenceId?: string): void;
   /** A polled source is valid only for the Runtime turn that consumed it. */
   clearCurrentInboxSource?(): void;
   /** Reminder delivery audit contexts are also scoped to one Runtime turn. */
@@ -1170,8 +1170,8 @@ export function createRuntimeHost(options: {
         for (const reminder of reminderContexts) {
           try {
             auditReminderDelivery({ stateStore: agent.stateStore as Parameters<typeof auditReminderDelivery>[0]["stateStore"], agentId: agent.config.agentId,
-              reminderId: reminder.reminderId, target: reminder.deliveryTarget, succeeded: false, finalize: true,
-              reason: "Runtime turn ended without a matching Feishu write" });
+              reminderId: reminder.reminderId, deliveryAnchor: reminder.deliveryAnchor, target: reminder.deliveryTarget,
+              succeeded: false, finalize: true, reason: "Runtime turn ended without a matching Feishu write" });
           } catch {
             // Retain the context if the failure could not be durably recorded;
             // a later matching outbound or turn can reconcile it.

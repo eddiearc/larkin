@@ -128,8 +128,11 @@ interface InboxSourceState {
 interface InboxReminderState {
   reminder_id: string;
   delivery_target: string;
+  /** Unique Runtime wake occurrence; recurring firings share reminder_id. */
   message_id: string;
   seq: number;
+  /** Original user-facing routing anchor pinned by this occurrence. */
+  delivery_anchor?: string;
 }
 
 interface InboxStateFile {
@@ -202,8 +205,13 @@ function normalizeInboxState(value: unknown): InboxStateFile {
     if (typeof row.delivery_target === "string" && isUserDeliveryTarget(row.delivery_target)
       && typeof row.reminder_id === "string" && !!row.reminder_id
       && typeof row.message_id === "string" && /^rem_[A-Za-z0-9_-]+$/.test(row.message_id) && validSequence(row.seq)
-      && !reminderContexts.some((candidate) => candidate.reminder_id === row.reminder_id)) {
-      reminderContexts.push({ reminder_id: row.reminder_id, delivery_target: row.delivery_target, message_id: row.message_id, seq: row.seq });
+      && (!row.delivery_anchor || (typeof row.delivery_anchor === "string"
+        && (row.delivery_target.startsWith("document-comment:")
+          ? /^doc_comment_[A-Za-z0-9_-]+$/.test(row.delivery_anchor)
+          : /^om_[A-Za-z0-9_-]+$/.test(row.delivery_anchor))))
+      && !reminderContexts.some((candidate) => candidate.message_id === row.message_id)) {
+      reminderContexts.push({ reminder_id: row.reminder_id, delivery_target: row.delivery_target, message_id: row.message_id, seq: row.seq,
+        ...(typeof row.delivery_anchor === "string" ? { delivery_anchor: row.delivery_anchor } : {}) });
     }
   }
   if (reminderContexts.length) state.reminder_contexts = reminderContexts;
@@ -531,6 +539,10 @@ export class AgentStateStore {
     return normalizeInboxState(this.readJson<unknown>("inboxState", emptyInboxState()));
   }
 
+  private hasPendingReminderDeliveryAnchor(anchor: string): boolean {
+    return this.readNdjson<InboxEnvelope>("inbox").some((row) => row.kind === "reminder" && row.deliveryAnchor === anchor);
+  }
+
   readFreshnessCursor<T>(target: string, generation = "external"): T | null {
     const state = this.readJson<{ version?: unknown; cursors?: unknown }>("freshnessState", { version: 1, cursors: {} });
     if (state.version !== 1 || !state.cursors || typeof state.cursors !== "object" || Array.isArray(state.cursors)) return null;
@@ -560,8 +572,14 @@ export class AgentStateStore {
       && typeof input.deliveryTarget === "string" && isUserDeliveryTarget(input.deliveryTarget)
       && typeof messageId === "string" && /^rem_[A-Za-z0-9_-]+$/.test(messageId)) {
       const contexts = state.reminder_contexts ?? [];
-      if (!contexts.some((candidate) => candidate.reminder_id === input.reminderId)) {
-        contexts.push({ reminder_id: input.reminderId, delivery_target: input.deliveryTarget, message_id: messageId, seq: targetSeq });
+      if (!contexts.some((candidate) => candidate.message_id === messageId)) {
+        const deliveryAnchor = typeof input.deliveryAnchor === "string"
+          && (input.deliveryTarget.startsWith("document-comment:")
+            ? /^doc_comment_[A-Za-z0-9_-]+$/.test(input.deliveryAnchor)
+            : /^om_[A-Za-z0-9_-]+$/.test(input.deliveryAnchor))
+          ? input.deliveryAnchor : undefined;
+        contexts.push({ reminder_id: input.reminderId, delivery_target: input.deliveryTarget, message_id: messageId, seq: targetSeq,
+          ...(deliveryAnchor ? { delivery_anchor: deliveryAnchor } : {}) });
       }
       state.reminder_contexts = contexts;
       delete state.last_reminder;
@@ -1163,24 +1181,46 @@ export class AgentStateStore {
     return this.resolveCurrentReminders()[0] ?? null;
   }
 
-  /** Clear a reminder context after its first committed user-facing outbound. */
-  clearCurrentReminder(reminderId: string): void {
+  /** Clear one consumed reminder occurrence after its first committed user-facing outbound. */
+  clearCurrentReminder(reminderId: string, occurrenceId?: string): void {
     this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      const contexts = (state.reminder_contexts ?? []).filter((reminder) => reminder.reminder_id !== reminderId);
-      if (contexts.length === (state.reminder_contexts ?? []).length && !state.last_reminder) return;
+      const original = state.reminder_contexts ?? [];
+      const index = original.findIndex((reminder) => reminder.reminder_id === reminderId
+        && (!occurrenceId || reminder.message_id === occurrenceId));
+      if (index < 0) {
+        if (!state.last_reminder || state.last_reminder.reminder_id !== reminderId
+          || (occurrenceId && state.last_reminder.message_id !== occurrenceId)) return;
+        delete state.last_reminder;
+        this.writeJson("inboxState", state);
+        return;
+      }
+      const cleared = original[index];
+      const contexts = original.filter((_reminder, candidateIndex) => candidateIndex !== index);
       if (contexts.length) state.reminder_contexts = contexts;
       else delete state.reminder_contexts;
       delete state.last_reminder;
+      if (cleared.delivery_anchor && !contexts.some((reminder) => reminder.delivery_anchor === cleared.delivery_anchor)
+        && !this.hasPendingReminderDeliveryAnchor(cleared.delivery_anchor)) {
+        delete state.delivery_anchors?.[cleared.delivery_anchor];
+        if (state.delivery_anchors && Object.keys(state.delivery_anchors).length === 0) delete state.delivery_anchors;
+      }
       this.writeJson("inboxState", state);
     });
   }
 
-  /** Expire all consumed reminder contexts at the Runtime turn boundary. */
+  /** Expire all consumed reminder contexts and their temporary routing anchors at turn end. */
   clearCurrentReminders(): void {
     this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      if (!state.reminder_contexts && !state.last_reminder) return;
+      const contexts = state.reminder_contexts ?? [];
+      if (!contexts.length && !state.last_reminder) return;
+      for (const context of contexts) {
+        if (context.delivery_anchor && !this.hasPendingReminderDeliveryAnchor(context.delivery_anchor)) {
+          delete state.delivery_anchors?.[context.delivery_anchor];
+        }
+      }
+      if (state.delivery_anchors && Object.keys(state.delivery_anchors).length === 0) delete state.delivery_anchors;
       delete state.reminder_contexts;
       delete state.last_reminder;
       this.writeJson("inboxState", state);

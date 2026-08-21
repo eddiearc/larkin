@@ -139,7 +139,9 @@ export class HostReminderOrchestrator {
     catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
     if (!this.options.deliveryTarget) {
       this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
-      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", { outcome: "runtime_unavailable" });
+      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+        outcome: "runtime_unavailable", occurrenceId: envelope.message_id,
+      });
       return;
     }
     try {
@@ -151,7 +153,7 @@ export class HostReminderOrchestrator {
       // user-facing delivery to audit.
       if (auditableDelivery) {
         this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
-          outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget,
+          outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
         });
       }
       const recordReceipt = (receipt: unknown): void => {
@@ -163,22 +165,24 @@ export class HostReminderOrchestrator {
         // message, so accepted, duplicate, and an empty receipt remain pending.
         if (!status || status === "accepted" || status === "duplicate") {
           this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
-            outcome: status || "empty", deliveryTarget: envelope.deliveryTarget,
+            outcome: status || "empty", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
           });
         } else if (status === "deferred") {
           this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
-            outcome: "deferred", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget,
+            outcome: "deferred", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
           });
         } else {
           this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
-            outcome: "error", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget,
+            outcome: "error", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
           });
         }
       };
       const result = this.options.deliveryTarget.deliver(agent.agentId, envelope);
       if (result && typeof (result as Promise<unknown>).then === "function") {
         void Promise.resolve(result).then(recordReceipt, (error) => this.recordDeliveryOutcome(
-          agent, reminder.reminderId, "delivery_failed", { outcome: "rejected", reason: String(error?.message || error), deliveryTarget: envelope.deliveryTarget },
+          agent, reminder.reminderId, "delivery_failed", {
+            outcome: "rejected", reason: String(error?.message || error), deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+          },
         ));
       } else {
         recordReceipt(result);
@@ -187,6 +191,7 @@ export class HostReminderOrchestrator {
       if (typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0) {
         this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
           outcome: "rejected", reason: String((error as Error).message || error), deliveryTarget: envelope.deliveryTarget,
+          occurrenceId: envelope.message_id,
         });
       }
       this.log(`reminder delivery 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
@@ -198,9 +203,21 @@ export class HostReminderOrchestrator {
       this.store.mutate(this.options.stateStore(agent).paths.reminders, (store) => {
         const reminder = store.reminders.find((candidate) => candidate.reminderId === reminderId);
         if (!reminder) return;
+        const occurrenceId = typeof metadata.occurrenceId === "string" ? metadata.occurrenceId : null;
+        const occurrenceEvents = occurrenceId
+          ? reminder.events?.filter((event) => event.metadata?.occurrenceId === occurrenceId)
+          : undefined;
+        const hasOccurrenceMetadata = reminder.events?.some((event) => typeof event.metadata?.occurrenceId === "string");
+        const last = occurrenceId
+          ? (occurrenceEvents?.at(-1) ?? (hasOccurrenceMetadata && reminder.events?.at(-1)?.eventType !== "fired"
+            ? undefined : reminder.events?.at(-1)))
+          : reminder.events?.at(-1);
+        if (!last || !["fired", "delivery_pending", "delivery_failed"].includes(last.eventType)) return;
+        // A late Runtime receipt must not resurrect an occurrence finalized as failed.
+        if (eventType === "delivery_pending" && last.eventType === "delivery_failed") return;
         // A synchronous outbound can finish inside deliveryTarget.deliver().
         // Never let its later Runtime receipt callback downgrade that success.
-        if (eventType !== "delivery_succeeded" && reminder.events?.at(-1)?.eventType === "delivery_succeeded") return;
+        if (eventType !== "delivery_succeeded" && last.eventType === "delivery_succeeded") return;
         this.store.appendEvent(reminder, eventType, "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, this.now(), metadata);
       });
     } catch (error) {

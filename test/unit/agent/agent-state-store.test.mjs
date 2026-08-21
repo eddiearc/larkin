@@ -539,6 +539,27 @@ test("polling a batch retains every reminder context until each is cleared", asy
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("recurring reminder contexts are keyed by occurrence and clear one occurrence at a time", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-recurring-reminder-context-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_recurringContextA1");
+    store.bindInboxDeliveryAnchor("doc_comment_anchor", "document-comment:doc/comment");
+    for (const messageId of ["rem_recurring_1", "rem_recurring_2"]) {
+      store.appendNdjson("inbox", { kind: "reminder", message_id: messageId, target: "runtime:reminder",
+        reminderId: "reminder-recurring", deliveryTarget: "document-comment:doc/comment", deliveryAnchor: "doc_comment_anchor", content: messageId });
+    }
+    store.pollInbox({ target: "runtime:reminder", limit: 2 });
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.deliveryAnchor), ["rem_recurring_1", "rem_recurring_2"]);
+    store.clearCurrentReminder("reminder-recurring", "rem_recurring_1");
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.deliveryAnchor), ["rem_recurring_2"]);
+    assert.equal(store.resolveInboxMessageTarget("doc_comment_anchor"), "document-comment:doc/comment");
+    store.clearCurrentReminder("reminder-recurring", "rem_recurring_2");
+    assert.deepEqual(store.resolveCurrentReminders(), []);
+    assert.equal(store.resolveInboxMessageTarget("doc_comment_anchor"), null, "the final occurrence clears its temporary routing anchor");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-stable-inbox-id-"));
   try {

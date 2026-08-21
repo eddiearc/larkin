@@ -604,6 +604,41 @@ test("a recurring reminder provider duplicate is not recorded as success for the
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("a recurring document-comment duplicate fails the later firing without a provider call", () => {
+  const f = fixture();
+  try {
+    const reminderId = "reminder-recurring-comment-duplicate";
+    const target = "document-comment:docx:doc_comment_file:doc_comment_anchor:in-thread";
+    const anchor = `doc_comment_${"e".repeat(32)}`;
+    const argv = ["comment", "reply", "--message-id", anchor, "--text", "same comment"];
+    f.store.bindInboxDeliveryAnchor(anchor, target);
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_comment_occurrence_1", target: "runtime:reminder",
+      reminderId, deliveryTarget: target, deliveryAnchor: anchor, content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    f.store.writeJson("reminders", { reminders: [{ reminderId, status: "scheduled", repeat: "every:1h",
+      fireAt: "2026-07-16T03:00:00.000Z", events: [{ eventType: "delivery_pending", metadata: { occurrenceId: "rem_comment_occurrence_1" } }] }] });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: {} }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 0);
+
+    f.store.bindInboxDeliveryAnchor(anchor, target);
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_comment_occurrence_2", target: "runtime:reminder",
+      reminderId, deliveryTarget: target, deliveryAnchor: anchor, content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    const reminders = f.store.readJson("reminders", { reminders: [] });
+    reminders.reminders[0].events.push({ eventType: "delivery_pending", metadata: { occurrenceId: "rem_comment_occurrence_2" } });
+    f.store.writeJson("reminders", reminders);
+    const providerCallsBefore = f.calls.filter((call) => call.args[0] === "drive").length;
+    const duplicate = f.run(argv);
+    assert.equal(duplicate.code, 2, duplicate.stderr);
+    assert.equal(f.calls.filter((call) => call.args[0] === "drive").length, providerCallsBefore, "the sent ledger skips the provider");
+    const reminder = f.store.readJson("reminders", { reminders: [] }).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    assert.match(reminder.events.at(-1).metadata.reason, /earlier reminder firing/);
+    assert.deepEqual(f.store.resolveCurrentReminders().map((row) => row.deliveryAnchor), ["rem_comment_occurrence_2"]);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("canonical reply and document comment reply audit the consumed reminder", () => {
   for (const mode of ["reply", "comment"]) {
     const f = fixture();

@@ -357,8 +357,16 @@ function runCommentReply(
     },
   );
   if (claim === "sent") {
-    try { auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, succeeded: true }); }
+    const currentReminder = store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === targetKey).at(-1) ?? null;
+    try {
+      auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, deliveryAnchor: currentReminder?.deliveryAnchor,
+        succeeded: !currentReminder, ...(currentReminder ? { reason: "document comment ledger already sent this text to the anchor on an earlier reminder firing" } : {}) });
+    }
     catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
+    if (currentReminder) {
+      io.stderr("comment reply was already sent for an earlier reminder firing; no new delivery was committed\n");
+      return 2;
+    }
     io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target: targetKey })}\n`);
     return 0;
   }
@@ -1080,7 +1088,9 @@ export function runLarkCli(
       ? `chat:${policyFlagValue(effectiveArgv, "--chat-id")}`
       : store.resolveInboxMessageTarget(policyFlagValue(effectiveArgv, "--message-id") || "") || targetKey;
     const matchingReminderContexts = store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === deliveryTarget);
-    const currentReminder = matchingReminderContexts.length === 1 ? matchingReminderContexts[0] : null;
+    // When recurring firings overlap, attach this write to one occurrence rather
+    // than dropping audit state merely because reminder_id is shared.
+    const currentReminder = matchingReminderContexts.at(-1) ?? null;
     const memo = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id, currentReminder?.deliveryAnchor) : { duplicate: false };
     const duplicateOfEarlierReminder = memo.duplicate && Boolean(currentReminder)

@@ -496,6 +496,12 @@ test("consumed reminder context is available to the outbound audit hook without 
     assert.equal(store.resolveCurrentInboxSource(), null);
     store.clearCurrentReminder("reminder-full-id");
     assert.equal(store.resolveCurrentReminder(), null);
+
+    store.appendNdjson("inbox", { message_id: "om_turn_source", chat_id: "oc_turn_source", content: "source" });
+    store.pollInbox({ target: "chat:oc_turn_source", limit: 1 });
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_turn_source", deliveryAnchor: "om_turn_source" });
+    store.clearCurrentInboxSource();
+    assert.equal(store.resolveCurrentInboxSource(), null, "the source capability expires at the Runtime turn boundary");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

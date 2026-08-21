@@ -1109,6 +1109,16 @@ export class AgentStateStore {
     });
   }
 
+  /** Expire the in-turn source capability at the Runtime turn boundary. */
+  clearCurrentInboxSource(): void {
+    this.withInboxLock(this.file("inbox"), () => {
+      const state = this.inboxState();
+      if (!state.last_source) return;
+      delete state.last_source;
+      this.writeJson("inboxState", state);
+    });
+  }
+
   /** Return the consumed reminder context for the guarded outbound audit hook. */
   resolveCurrentReminder(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null {
     return this.withInboxLock(this.file("inbox"), () => {

@@ -160,6 +160,7 @@ export function createOutboundTransport(options: OutboundOptions) {
     const target = body.target || "";
     const targetKey = String(target);
     const report = (succeeded: boolean, details: Omit<OutboundDeliveryOutcome, "target" | "succeeded"> = {}): void => {
+      if (options.dryRun) return;
       try { options.onDeliveryOutcome?.({ target: targetKey, succeeded, ...details }); }
       catch (error) { options.log("delivery outcome hook 失败:", (error as Error).message); }
     };

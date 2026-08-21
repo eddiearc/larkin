@@ -91,6 +91,16 @@ test("delivery outcome hook runs only after the guarded outbound result", () => 
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("dry-run sends do not record delivery outcomes", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-outbound-dry-run-"));
+  try {
+    const outcomes = [];
+    const f = fixture(temp, { dryRun: true, onDeliveryOutcome: (outcome) => outcomes.push(outcome) });
+    assert.equal(f.service.handleSend({ target: "#room", content: "preview" }).ok, true);
+    assert.deepEqual(outcomes, []);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("plain, attachment-only, unknown-target, and failure behavior remains fail-closed", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-outbound-edges-"));
   try {

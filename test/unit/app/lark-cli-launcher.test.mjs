@@ -544,6 +544,63 @@ test("protected urgent-app does not submit after a freshness conflict", () => {
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("canonical send audit records failure and allows a later successful retry", () => {
+  const f = fixture();
+  try {
+    const reminderId = "reminder-cli-audit";
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_cli_audit", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_cli_audit", content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    f.store.writeJson("reminders", { reminders: [{ reminderId, status: "fired", fireAt: "2026-07-16T02:00:00.000Z",
+      events: [{ eventType: "delivery_pending" }] }] });
+    const argv = ["im", "+messages-send", "--chat-id", "oc_cli_audit", "--text", "reminder"];
+    f.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: "provider down", error: undefined });
+    assert.equal(f.run(argv).code, 7);
+    let reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_cli_audit_success" } }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 0);
+    reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded");
+    assert.equal(reminder.events.at(-1).metadata.messageId, "om_cli_audit_success");
+    assert.equal(f.store.resolveCurrentReminder(), null);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("canonical reply and document comment reply audit the consumed reminder", () => {
+  for (const mode of ["reply", "comment"]) {
+    const f = fixture();
+    try {
+      const reminderId = `reminder-cli-${mode}`;
+      const target = mode === "reply" ? "chat:oc_cli_reply_audit" : "document-comment:docx:doc_cli_audit:comment_cli_audit:in-thread";
+      const anchor = mode === "reply" ? "om_cli_reply_anchor" : `doc_comment_${"d".repeat(32)}`;
+      if (mode === "reply") {
+        f.store.appendNdjson("inbox", { message_id: anchor, chat_id: "oc_cli_reply_audit", content: "question" });
+        f.store.pollInbox({ target, limit: 1 });
+      } else {
+        f.store.appendNdjson("inbox", { message_id: anchor, target, kind: "document_comment", content: "question" });
+        f.store.pollInbox({ target, limit: 1 });
+      }
+      f.store.appendNdjson("inbox", { kind: "reminder", message_id: `rem_${mode}_audit`, target: "runtime:reminder",
+        reminderId, deliveryTarget: target, content: "reminder" });
+      f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+      f.store.writeJson("reminders", { reminders: [{ reminderId, status: "fired", fireAt: "2026-07-16T02:00:00.000Z",
+        events: [{ eventType: "delivery_pending" }] }] });
+      f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+        stdout: JSON.stringify({ ok: true, data: mode === "reply" ? { message_id: "om_cli_reply_success" } : {} }), stderr: "", error: undefined });
+      const argv = mode === "reply"
+        ? ["im", "+messages-reply", "--message-id", anchor, "--text", "reply"]
+        : ["comment", "reply", "--message-id", anchor, "--text", "comment"];
+      const result = f.run(argv);
+      assert.equal(result.code, 0, `${mode}: ${result.stderr}`);
+      const reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+      assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded", mode);
+      assert.equal(f.store.resolveCurrentReminder(), null, mode);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
 test("provider failure and ambiguous termination retain a stable idempotency key", () => {
   const f = fixture();
   try {

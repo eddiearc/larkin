@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
+import { auditReminderDelivery } from "../agent/reminder-delivery-audit.js";
 import { evaluateFreshness, type FreshnessTarget } from "../agent/freshness-gate.js";
 import {
   feishuImFreshnessAdapter, feishuImTarget, mergeFeishuImCursor, serializeFeishuImTarget,
@@ -323,6 +324,7 @@ function recordImWriteMemo(store: AgentStateStore, key: string, messageId: strin
 
 function runCommentReply(
   argv: readonly string[], privateEnv: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
+  agentId: string,
 ): number {
   const input = parseCommentReply(argv);
   const targetKey = store.resolveInboxMessageTarget(input.messageId);
@@ -349,6 +351,8 @@ function runCommentReply(
     },
   );
   if (claim === "sent") {
+    try { auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, succeeded: true }); }
+    catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
     io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target: targetKey })}\n`);
     return 0;
   }
@@ -386,6 +390,10 @@ function runCommentReply(
       };
     });
   }
+  try {
+    auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, succeeded: !result.error && result.status === 0,
+      ...(!result.error && result.status === 0 ? {} : { reason: (result.stderr || result.stdout || "comment provider failed").trim().split("\n")[0] }) });
+  } catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
   return emitNativeResult(result, io);
 }
 
@@ -1012,7 +1020,7 @@ export function runLarkCli(
         } catch { /* telemetry is failure-isolated */ }
       }
       return telemetry.externalPhase(agent.agentId, store.paths.root, "document.comment.reply", SpanKind.CLIENT,
-        () => runCommentReply(argv, privateEnv, io, nativeDependencies, store), "comment_cli") as number;
+        () => runCommentReply(argv, privateEnv, io, nativeDependencies, store, agent.agentId), "comment_cli") as number;
     }
     catch (error) {
       io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -1062,6 +1070,15 @@ export function runLarkCli(
       return emitNativeResult(write, io);
     }
     const writeMessage = writeResponseMessage(write);
+    const deliveryTarget = decision.operation === "send"
+      ? `chat:${policyFlagValue(effectiveArgv, "--chat-id")}`
+      : store.resolveInboxMessageTarget(policyFlagValue(effectiveArgv, "--message-id") || "") || targetKey;
+    try {
+      auditReminderDelivery({ stateStore: store, agentId: agent.agentId, target: deliveryTarget,
+        succeeded: !write.error && write.status === 0,
+        ...(!write.error && write.status === 0 ? {} : { reason: (write.stderr || write.stdout || "provider write failed").trim().split("\n")[0] }),
+        ...(writeMessage?.message_id ? { messageId: writeMessage.message_id } : {}) });
+    } catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
     const duplicate = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;
     if (duplicate) {

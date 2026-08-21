@@ -1176,6 +1176,36 @@ test("issue 122 injected former prompt-builder target omission retries while the
   assert.deepEqual(newResult.statuses, ["consumed"]);
 });
 
+test("implicit Inbox source expires when its Runtime turn ends and before a direct next turn", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-source-expiry-"));
+  const agentId = "cli_runtimeSourceExpiryA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  try {
+    await host.start([{ agentId, name: agentId, runtime: "codex", model: "g", workspaceDir: "/tmp", stateDir: store.paths.root }]);
+    store.appendNdjson("inbox", { message_id: "om_source_expiry", chat_id: "oc_source_expiry", content: "source" });
+    session.emit({ type: "turn-start", turnId: "source-turn" });
+    store.pollInbox({ target: "chat:oc_source_expiry", limit: 1 });
+    assert.ok(store.resolveCurrentInboxSource());
+    session.emit({ type: "turn-end", turnId: "source-turn" });
+    assert.equal(store.resolveCurrentInboxSource(), null);
+
+    store.appendNdjson("inbox", { message_id: "om_source_stale", chat_id: "oc_source_stale", content: "stale" });
+    store.pollInbox({ target: "chat:oc_source_stale", limit: 1 });
+    assert.ok(store.resolveCurrentInboxSource());
+    session.emit({ type: "turn-start", turnId: "direct-turn" });
+    assert.equal(store.resolveCurrentInboxSource(), null, "a direct task cannot inherit the prior turn's chat");
+    session.emit({ type: "turn-end", turnId: "direct-turn" });
+  } finally {
+    await host.shutdown("source expiry test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex compatibility recovery closes, updates once, recreates, and retries the owned delivery", async () => {
   const sessions = [];
   let recoveries = 0;

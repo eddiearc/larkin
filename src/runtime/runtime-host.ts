@@ -49,6 +49,8 @@ interface DeliveryStateStore {
   writeJson(key: "runtimeDeliveries", value: unknown): void;
   withInboxTransaction<T>(operation: () => T): T;
   resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
+  /** A polled source is valid only for the Runtime turn that consumed it. */
+  clearCurrentInboxSource?(): void;
   rearmContextOverflow?(onCommit?: (messageIds: readonly string[], rollback: () => void) => void, expected?: {
     messageId?: string; deliveryId?: string; inputId?: string;
   }): ContextOverflowRearmResult;
@@ -1129,6 +1131,9 @@ export function createRuntimeHost(options: {
       emit({ type: "session", agentId: agent.config.agentId, runtime: agent.adapter.id, sessionId: event.sessionId, launchId: agent.launchId,
         ...(event.model ? { model: event.model } : {}), ...(event.reasoningEffort ? { reasoningEffort: event.reasoningEffort } : {}) });
     } else if (event.type === "turn-start") {
+      // Clear a source left by a crashed/aborted prior turn before a new turn
+      // can execute a direct task without an Inbox poll.
+      agent.stateStore?.clearCurrentInboxSource?.();
       agent.busy = true;
       agent.turnInProgress = true;
       agent.turnHadFailure = false;
@@ -1147,6 +1152,10 @@ export function createRuntimeHost(options: {
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
       reconcileAcceptedAtTurnEnd(agent);
+      // last_source is an in-turn capability, never a cross-turn default
+      // recipient. A later direct Runtime task must fail closed instead of
+      // inheriting the previous turn's chat.
+      agent.stateStore?.clearCurrentInboxSource?.();
       if (agent.backgroundCompletionInFlight) {
         if (agent.turnHadFailure) failBackgroundCompletionWake(agent);
         else commitBackgroundCompletion(agent);

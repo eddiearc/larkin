@@ -15,7 +15,7 @@ import { projectInboxEvents } from "./inbox-projection.js";
 import { signatureDescription } from "../feishu/message-policy.js";
 import { createOutboundTransport, type ReplyContext, type StagedAttachment } from "../feishu/outbound-transport.js";
 import { createReminderRoutes } from "./reminder-routes.js";
-import * as ReminderStore from "./reminder-store.js";
+import { auditReminderDelivery } from "./reminder-delivery-audit.js";
 import { isImageMime, looksLikeMarkdown, resolveMappedChatId, safeConversationExcerpt } from "./transport-shell.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
@@ -130,24 +130,11 @@ export function createTransportBusinessContext(env: Env = process.env) {
     target: string; succeeded: boolean; messageId?: string; reason?: string;
   }): void => {
     const current = stateStore.resolveCurrentReminder();
-    const currentChatId = current?.deliveryTarget.match(/^chat:(oc_[A-Za-z0-9_-]+)$/)?.[1];
-    const outboundChatId = currentChatId ? resolveChatId(target) : null;
-    if (!current || (current.deliveryTarget !== target && outboundChatId !== currentChatId)) return;
     try {
-      ReminderStore.mutate(paths.reminders, (store) => {
-        const reminder = store.reminders.find((candidate) => candidate.reminderId === current.reminderId);
-        const last = reminder?.events?.at(-1);
-        if (!reminder || last?.eventType !== "delivery_pending") return;
-        ReminderStore.appendEvent(reminder, succeeded ? "delivery_succeeded" : "delivery_failed", "agent", agentId,
-          reminder.status === "scheduled" ? reminder.fireAt : null, Date.now(), {
-            deliveryTarget: target,
-            ...(messageId ? { messageId } : {}),
-            ...(reason ? { reason } : {}),
-          });
-      });
-      if (succeeded) stateStore.clearCurrentReminder(current.reminderId);
+      auditReminderDelivery({ stateStore, agentId, target, succeeded, ...(messageId ? { messageId } : {}),
+        ...(reason ? { reason } : {}), resolveChatId });
     } catch (error) {
-      log(`reminder outbound audit 写失败 id=#${current.reminderId.slice(0, 8)}: ${(error as Error).message}`);
+      log(`reminder outbound audit 写失败 id=#${current?.reminderId.slice(0, 8) || "unknown"}: ${(error as Error).message}`);
     }
   };
 

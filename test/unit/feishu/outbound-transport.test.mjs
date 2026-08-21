@@ -101,6 +101,22 @@ test("dry-run sends do not record delivery outcomes", () => {
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("all-missing attachments with empty content fail instead of claiming a committed delivery", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-outbound-missing-attachments-"));
+  try {
+    const outcomes = [];
+    const f = fixture(temp, { onDeliveryOutcome: (outcome) => outcomes.push(outcome) });
+    const result = f.service.handleSend({ target: "#room", content: "", attachmentIds: ["att_missing_1", "att_missing_2"] });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.match(result.error, /att_missing_1, att_missing_2/);
+    assert.deepEqual(f.calls, [], "no provider call happened, so nothing was committed");
+    assert.equal(f.conversations.length, 0, "no outbound projection may claim a send that never reached the provider");
+    assert.deepEqual(outcomes, [{ target: "#room", succeeded: false, reason: result.error }],
+      "a reminder-turn audit must record delivery_failed, not delivery_succeeded");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("plain, attachment-only, unknown-target, and failure behavior remains fail-closed", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-outbound-edges-"));
   try {

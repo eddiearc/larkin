@@ -129,17 +129,40 @@ export class HostReminderOrchestrator {
       // overwrite that migration result with the absent fields from the record.
       deliveryTarget: reminder.deliveryTarget ?? projected.deliveryTarget ?? null,
       deliveryAnchor: reminder.deliveryAnchor ?? projected.deliveryAnchor ?? null });
+    const auditableDelivery = typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0;
+    // Persist the pending audit marker before the Inbox row becomes pollable.
+    // An already-active Agent can poll and answer the wake immediately, and
+    // RuntimeHost.deliver may execute the whole turn before its promise settles
+    // (notably with Pi); without a durable pending marker that outbound write
+    // would be invisible to the audit. Internal/no-delivery reminders still
+    // wake the Runtime, but have no user-facing delivery to audit.
+    if (auditableDelivery && !this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+      outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+    })) {
+      this.log(`reminder delivery pending 审计写失败 id=#${reminder.reminderId.slice(0, 8)}（拒绝唤醒）`);
+      return;
+    }
     try {
       const stateStore = this.options.stateStore(agent);
       if (envelope.deliveryTarget && envelope.deliveryAnchor) {
         stateStore.bindInboxDeliveryAnchor(envelope.deliveryAnchor, envelope.deliveryTarget);
       }
       stateStore.appendNdjson("inbox", envelope);
+    } catch (error) {
+      this.log("reminder inbox 写失败", (error as Error).message);
+      // The wake row never became durable, so the pending marker must not stay
+      // open awaiting a Runtime turn that can never poll this occurrence.
+      if (auditableDelivery) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+          outcome: "inbox_write_failed", reason: String((error as Error).message || error),
+          deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+        });
+      }
+      return;
     }
-    catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
     if (!this.options.deliveryTarget) {
       this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
-      if (envelope.deliveryTarget) {
+      if (auditableDelivery) {
         this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
           outcome: "runtime_unavailable", occurrenceId: envelope.message_id,
         });
@@ -147,18 +170,6 @@ export class HostReminderOrchestrator {
       return;
     }
     try {
-      const auditableDelivery = typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0;
-      // RuntimeHost.deliver may execute the whole Agent turn before its promise
-      // settles (notably with Pi). Persist the pending audit marker first so an
-      // outbound Feishu write during that turn can observe it synchronously.
-      // Internal/no-delivery reminders still wake the Runtime, but have no
-      // user-facing delivery to audit.
-      if (auditableDelivery && !this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
-        outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
-      })) {
-        this.log(`reminder delivery pending 审计写失败 id=#${reminder.reminderId.slice(0, 8)}（拒绝唤醒）`);
-        return;
-      }
       const recordReceipt = (receipt: unknown): void => {
         if (!auditableDelivery) return;
         const status = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).status || "") : "";

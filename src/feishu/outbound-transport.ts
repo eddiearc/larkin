@@ -176,6 +176,7 @@ export function createOutboundTransport(options: OutboundOptions) {
     const replyContext = options.replyContextFor(String(target)) || options.replyContextFor(chatId);
     const attachmentIds = Array.isArray(body.attachmentIds) ? body.attachmentIds.filter(Boolean) : [];
     let messageId = "sent";
+    let committedProviderCalls = 0;
 
     if (content !== "" || attachmentIds.length === 0) {
       const replyInThread = Boolean(replyContext?.in_topic && replyContext.reply_to);
@@ -192,9 +193,11 @@ export function createOutboundTransport(options: OutboundOptions) {
         const parsed = JSON.parse(result.stdout) as { data?: { message_id?: string }; message_id?: string };
         messageId = parsed?.data?.message_id || parsed?.message_id || (options.dryRun ? "dryrun" : "sent");
       } catch { messageId = options.dryRun ? "dryrun" : "sent"; }
+      committedProviderCalls += 1;
       options.log(`${replyInThread ? "reply-in-thread" : "send"} → chat=${chatId} len=${content.length} id=${messageId}${options.dryRun ? " (dry-run)" : ""}`);
     }
 
+    const missingAttachmentIds: string[] = [];
     if (attachmentIds.length) {
       const index = loadAttachmentIndex();
       for (let position = 0; position < attachmentIds.length; position += 1) {
@@ -202,6 +205,7 @@ export function createOutboundTransport(options: OutboundOptions) {
         const attachment = index[attachmentId];
         if (!attachment) {
           options.log(`attachment 未找到 id=${attachmentId}（跳过）`);
+          missingAttachmentIds.push(attachmentId);
           continue;
         }
         const result = options.sendMedia(chatId, replyContext, attachment, `${idempotencyKey}:a${position}`);
@@ -215,8 +219,19 @@ export function createOutboundTransport(options: OutboundOptions) {
           const parsed = JSON.parse(result.stdout) as { data?: { message_id?: string } };
           messageId = parsed?.data?.message_id || messageId;
         } catch { /* retain prior message id */ }
+        committedProviderCalls += 1;
         options.log(`attach → chat=${chatId} name=${attachment.filename} id=${messageId}${options.dryRun ? " (dry-run)" : ""}`);
       }
+    }
+
+    // Empty content plus attachment IDs that are all absent from the index
+    // reaches this point without any provider call; claiming success here would
+    // record delivery_succeeded for a reminder turn in which the user received
+    // nothing.
+    if (committedProviderCalls === 0) {
+      const error = `没有可发送的内容：附件不存在（${missingAttachmentIds.join(", ")}），且消息正文为空。`;
+      report(false, { reason: error });
+      return { ok: false, status: 400, error };
     }
 
     options.appendConversation({

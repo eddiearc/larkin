@@ -456,7 +456,10 @@ export class HostEnvelopeProjector {
     ].filter((line): line is string => Boolean(line));
     const envelope = {
       kind: "reminder" as const,
-      message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}`,
+      // The random suffix keeps each firing's occurrence identity unique across
+      // Host restarts: the in-memory seq restarts at 1 and would otherwise let a
+      // recurring reminder reuse a prior occurrenceId in the delivery audit.
+      message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}_${this.randomHex(6)}`,
       reminderId: reminder.reminderId,
       seq,
       sender_name: "定时提醒" as const,

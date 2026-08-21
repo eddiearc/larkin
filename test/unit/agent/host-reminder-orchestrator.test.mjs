@@ -71,16 +71,18 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
     channel_type: "dm", channel_name: "system",
   });
   const order = [];
-  f.state.appendNdjson = (_key, value) => { order.push("persist"); f.inbox.push(value); };
+  f.state.appendNdjson = (_key, value) => {
+    order.push(`persist:${reminder.events.at(-1)?.eventType || "missing-pending"}`);
+    f.inbox.push(value);
+  };
   const target = { deliver(_agentId, envelope) {
-    order.push(reminder.events.at(-1)?.eventType || "missing-pending");
-    order.push("deliver");
+    order.push(`deliver:${reminder.events.at(-1)?.eventType || "missing-pending"}`);
     f.deliveries.push(envelope);
   } };
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector, deliveryTarget: target, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
   orchestrator.handleFire({ agentId: "cli_rem", reminderId: reminder.reminderId });
-  assert.deepEqual(order, ["persist", "delivery_pending", "deliver"],
-    "delivery_pending must be durable before RuntimeHost.deliver can execute the turn");
+  assert.deepEqual(order, ["persist:delivery_pending", "deliver:delivery_pending"],
+    "delivery_pending must be durable before the Inbox wake row is pollable and before RuntimeHost.deliver runs the turn");
   assert.equal(reminder.status, "fired");
   assert.equal(reminder.version, 2);
   assert.equal(f.inbox[0].target, "runtime:reminder");
@@ -130,6 +132,23 @@ test("pending audit persistence failure prevents Runtime delivery", () => {
   orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
   assert.equal(deliveryCalls, 0, "Runtime delivery must be fail-closed when pending audit persistence fails");
   assert.equal(reminder.events.at(-1).eventType, "fired", "the failed pending write must not claim an auditable delivery");
+  assert.deepEqual(f.inbox, [], "the durable wake row must not be published without its pending audit marker");
+});
+
+test("Inbox append failure after the pending audit finalizes the occurrence as failed", () => {
+  const reminder = { reminderId: "append-fail-audited", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "audited", status: "scheduled", deliveryTarget: "chat:oc_append", deliveryAnchor: "om_append" };
+  const f = fixture([reminder]);
+  f.state.appendNdjson = () => { throw new Error("disk full"); };
+  let deliveryCalls = 0;
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
+    envelopeProjector: f.projector, deliveryTarget: { deliver() { deliveryCalls += 1; } }, reminderStore: f.api,
+    now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(deliveryCalls, 0, "an unexposed wake row must never reach the Runtime");
+  assert.equal(reminder.events.at(-1).eventType, "delivery_failed",
+    "the pending marker must not stay open for a wake row that never became durable");
+  assert.equal(reminder.events.at(-1).metadata.outcome, "inbox_write_failed");
 });
 
 test("internal reminders without a Runtime delivery target do not create delivery failures", () => {

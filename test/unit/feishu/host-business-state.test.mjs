@@ -172,6 +172,16 @@ test("pre-upgrade reminder fields retain safe legacy delivery guidance", () => {
   assert.doesNotMatch(anchored.content, /internal\/no-delivery/);
 });
 
+test("thread reminder guidance keeps +messages-reply inside the source thread", () => {
+  const store = memoryStore();
+  const projector = new HostEnvelopeProjector(new HostStateProjection(() => store), () => {}, () => "thread123456", () => new Date("2026-07-16T02:00:00.000Z"));
+  const reminder = projector.createReminderEnvelope(agent.agentId, {
+    reminderId: "thread-reminder", title: "Thread reminder", fireAt: "2026-07-17T01:00:00.000Z",
+    deliveryTarget: "thread:oc_thread:omt_topic", deliveryAnchor: "om_thread_anchor",
+  }, 0, null);
+  assert.match(reminder.content, /im \+messages-reply --message-id om_thread_anchor --reply-in-thread \.\.\./);
+});
+
 test("reminder and restart guidance use the injected CLI and never reply to synthetic ids", () => {
   const store = memoryStore();
   const executable = '"/opt/bun" "/installed/agent-cli.mjs"';

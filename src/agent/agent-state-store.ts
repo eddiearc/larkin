@@ -518,7 +518,11 @@ export class AgentStateStore {
     const messageId = input.message_id;
     const validAnchor = typeof messageId === "string"
       && (/^om_[A-Za-z0-9_-]+$/.test(messageId) || (target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(messageId)));
-    if (!isUserDeliveryTarget(target) || !validAnchor) return;
+    if (!isUserDeliveryTarget(target)) {
+      delete state.last_source;
+      return;
+    }
+    if (!validAnchor) return;
     state.last_source = { target, message_id: messageId, seq: targetSeq,
       ...(typeof input.kind === "string" && input.kind ? { kind: input.kind } : {}) };
   }

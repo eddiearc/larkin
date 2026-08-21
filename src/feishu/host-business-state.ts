@@ -439,7 +439,7 @@ export class HostEnvelopeProjector {
           : "本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息",
       anchorId ? `锚定消息: ${anchorId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是可用的 delivery anchor，不能用于回复` : null,
       anchorMessageId
-        ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId} ...`)}`
+        ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId}${deliveryTarget?.startsWith("thread:") ? " --reply-in-thread" : ""} ...`)}`
         : commentAnchorId
           ? `回复原文档评论: ${this.agentCommand(`comment reply --message-id ${commentAnchorId} --text ...`)}`
           : deliveryTarget

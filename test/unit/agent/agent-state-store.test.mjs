@@ -208,6 +208,16 @@ test("implicit reminder source stays bound to the active poll when an unpolled I
     assert.equal(scheduled.ok, true);
     assert.equal(scheduled.data.reminder.deliveryTarget, "chat:oc_source_a");
     assert.equal(scheduled.data.reminder.deliveryAnchor, "om_source_a");
+
+    // A consumed runtime reminder is not a user source. It must invalidate A
+    // so a later targetless schedule cannot reuse that stale conversation.
+    store.appendNdjson("inbox", { message_id: "rem_source_runtime", kind: "reminder", target: "runtime:reminder", content: "runtime wake" });
+    assert.deepEqual(store.pollInbox({ target: "runtime:reminder", limit: 1 }).envelopes.map((row) => row.message_id), ["rem_source_runtime"]);
+    assert.equal(store.resolveCurrentInboxSource(), null);
+    const failedClosed = routes.handle({ path: "/reminders", pathNoQuery: "/reminders", method: "POST",
+      body: { title: "must fail closed", delaySeconds: 60 } });
+    assert.equal(failedClosed.ok, false);
+    assert.match(failedClosed.error, /必须显式指定 delivery target/);
     assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_source_b"]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

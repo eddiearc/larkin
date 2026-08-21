@@ -179,6 +179,18 @@ test("canonical Inbox append returns the exact persisted shape and deduplicates 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("an unscoped mixed-target poll clears the implicit source instead of choosing its last envelope", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-mixed-source-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateMixedSourceA1");
+    store.appendNdjson("inbox", { message_id: "om_mixed_a", chat_id: "oc_mixed_a", content: "A" });
+    store.appendNdjson("inbox", { message_id: "om_mixed_b", chat_id: "oc_mixed_b", content: "B" });
+    assert.deepEqual(store.pollInbox().envelopes.map((row) => row.message_id), ["om_mixed_a", "om_mixed_b"]);
+    assert.equal(store.resolveCurrentInboxSource(), null, "a mixed batch must not expose its last envelope as an implicit target");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("implicit reminder source stays bound to the active poll when an unpolled Inbox event races in", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-targeted-source-"));
   try {

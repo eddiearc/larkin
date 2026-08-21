@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { agentCliPromptCapabilities } from "../agent/agent-cli-capabilities.js";
+import { auditReminderDelivery } from "../agent/reminder-delivery-audit.js";
 import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import type { ContextOverflowRearmResult, InboxDeliverySourceResolution } from "../agent/agent-state-store.js";
 import { SpanKind } from "@opentelemetry/api";
@@ -49,6 +50,10 @@ interface DeliveryStateStore {
   writeJson(key: "runtimeDeliveries", value: unknown): void;
   withInboxTransaction<T>(operation: () => T): T;
   resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
+  paths?: { reminders: string };
+  resolveCurrentReminder?(): { reminderId: string; deliveryTarget: string; deliveryAnchor: string } | null;
+  resolveCurrentReminders?(): Array<{ reminderId: string; deliveryTarget: string; deliveryAnchor: string }>;
+  clearCurrentReminder?(reminderId: string): void;
   /** A polled source is valid only for the Runtime turn that consumed it. */
   clearCurrentInboxSource?(): void;
   /** Reminder delivery audit contexts are also scoped to one Runtime turn. */
@@ -1158,7 +1163,23 @@ export function createRuntimeHost(options: {
       // never cross-turn defaults. A later direct Runtime task must fail
       // closed instead of inheriting a previous turn's chat or reminder.
       agent.stateStore?.clearCurrentInboxSource?.();
-      agent.stateStore?.clearCurrentReminders?.();
+      const legacyReminder = agent.stateStore?.resolveCurrentReminders ? null : agent.stateStore?.resolveCurrentReminder?.() ?? null;
+      const reminderContexts = agent.stateStore?.resolveCurrentReminders?.() ?? (legacyReminder ? [legacyReminder] : []);
+      let reminderAuditComplete = true;
+      if (agent.stateStore?.paths?.reminders && agent.stateStore.clearCurrentReminder) {
+        for (const reminder of reminderContexts) {
+          try {
+            auditReminderDelivery({ stateStore: agent.stateStore as Parameters<typeof auditReminderDelivery>[0]["stateStore"], agentId: agent.config.agentId,
+              reminderId: reminder.reminderId, target: reminder.deliveryTarget, succeeded: false, finalize: true,
+              reason: "Runtime turn ended without a matching Feishu write" });
+          } catch {
+            // Retain the context if the failure could not be durably recorded;
+            // a later matching outbound or turn can reconcile it.
+            reminderAuditComplete = false;
+          }
+        }
+      }
+      if (reminderAuditComplete) agent.stateStore?.clearCurrentReminders?.();
       if (agent.backgroundCompletionInFlight) {
         if (agent.turnHadFailure) failBackgroundCompletionWake(agent);
         else commitBackgroundCompletion(agent);

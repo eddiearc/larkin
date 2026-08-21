@@ -1069,6 +1069,26 @@ export class AgentStateStore {
         }
         state.targets[target] = targetState;
       }
+      // An unscoped poll may consume several user conversations at once. The
+      // last envelope is not an implicit source in that case: doing so would
+      // let a targetless reminder inherit an unrelated later chat. Keep an
+      // implicit source only when every valid user-facing anchor in this batch
+      // names the same delivery target.
+      const userSources = envelopes.flatMap((envelope) => {
+        const target = targetKeyOfInboxEnvelope(envelope);
+        const messageId = envelope.message_id;
+        const targetSeq = Number(envelope.target_seq);
+        const validAnchor = typeof messageId === "string"
+          && (/^om_[A-Za-z0-9_-]+$/.test(messageId)
+            || (target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(messageId)));
+        return isUserDeliveryTarget(target) && validSequence(targetSeq) && validAnchor
+          ? [{ target, message_id: messageId, seq: targetSeq,
+            ...(typeof envelope.kind === "string" && envelope.kind ? { kind: envelope.kind } : {}) }]
+          : [];
+      });
+      const userTargets = new Set(userSources.map((source) => source.target));
+      if (userSources.length && userTargets.size === 1) state.last_source = userSources.at(-1);
+      else delete state.last_source;
       this.replaceInboxUnlocked(remaining);
       this.writeJson("inboxState", state);
       return { envelopes, consumedDeliveryIds, seenThroughSeq, pendingCount };

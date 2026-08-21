@@ -297,7 +297,7 @@ type CommentReplyLedger = {
   document_comment_replies?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
 };
 
-type ImWriteMemoEntry = { message_id: string; updated_at: string };
+type ImWriteMemoEntry = { message_id: string; updated_at: string; source_message_id?: string };
 type ImWriteMemoState = {
   version: 1;
   cursors?: Record<string, unknown>;
@@ -309,17 +309,23 @@ const IM_WRITE_MEMO_LIMIT = 512;
 // 只标注、不拦截：每次成功写把「实际生效的幂等 key → 服务端返回的 message_id」记进备忘。
 // 同 key 再次成功且服务端返回同一个 message_id，说明服务端走了幂等去重（没有产生新消息），
 // 返回 true 供输出标注 duplicate。拦截权始终在服务端，备忘不会吞掉任何发送。
-function recordImWriteMemo(store: AgentStateStore, key: string, messageId: string): boolean {
-  let duplicate = false;
-  store.mutateJson<ImWriteMemoState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
-    state.im_write_memo ??= {};
-    const prior = state.im_write_memo[key];
-    if (prior && prior.message_id === messageId) duplicate = true;
-    state.im_write_memo[key] = { message_id: messageId, updated_at: new Date().toISOString() };
-    const keys = Object.keys(state.im_write_memo);
-    for (const stale of keys.slice(0, Math.max(0, keys.length - IM_WRITE_MEMO_LIMIT))) delete state.im_write_memo[stale];
-  });
-  return duplicate;
+function recordImWriteMemo(store: AgentStateStore, key: string, messageId: string, sourceMessageId?: string): {
+  duplicate: boolean; priorSourceMessageId?: string;
+} {
+  return store.mutateJson<ImWriteMemoState, { duplicate: boolean; priorSourceMessageId?: string }>(
+    "freshnessState", { version: 1, cursors: {} }, (state) => {
+      state.im_write_memo ??= {};
+      const prior = state.im_write_memo[key];
+      if (prior && prior.message_id === messageId) {
+        return { duplicate: true, ...(prior.source_message_id ? { priorSourceMessageId: prior.source_message_id } : {}) };
+      }
+      state.im_write_memo[key] = { message_id: messageId, updated_at: new Date().toISOString(),
+        ...(sourceMessageId ? { source_message_id: sourceMessageId } : {}) };
+      const keys = Object.keys(state.im_write_memo);
+      for (const stale of keys.slice(0, Math.max(0, keys.length - IM_WRITE_MEMO_LIMIT))) delete state.im_write_memo[stale];
+      return { duplicate: false };
+    },
+  );
 }
 
 function runCommentReply(
@@ -1073,14 +1079,23 @@ export function runLarkCli(
     const deliveryTarget = decision.operation === "send"
       ? `chat:${policyFlagValue(effectiveArgv, "--chat-id")}`
       : store.resolveInboxMessageTarget(policyFlagValue(effectiveArgv, "--message-id") || "") || targetKey;
+    const matchingReminderContexts = store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === deliveryTarget);
+    const currentReminder = matchingReminderContexts.length === 1 ? matchingReminderContexts[0] : null;
+    const memo = !write.error && write.status === 0 && writeMessage
+      ? recordImWriteMemo(store, intentKey, writeMessage.message_id, currentReminder?.deliveryAnchor) : { duplicate: false };
+    const duplicateOfEarlierReminder = memo.duplicate && Boolean(currentReminder)
+      && memo.priorSourceMessageId !== currentReminder?.deliveryAnchor;
     try {
       auditReminderDelivery({ stateStore: store, agentId: agent.agentId, target: deliveryTarget,
-        succeeded: !write.error && write.status === 0,
-        ...(!write.error && write.status === 0 ? {} : { reason: (write.stderr || write.stdout || "provider write failed").trim().split("\n")[0] }),
+        succeeded: !write.error && write.status === 0 && !duplicateOfEarlierReminder,
+        ...(!write.error && write.status === 0 && !duplicateOfEarlierReminder ? {} : {
+          reason: duplicateOfEarlierReminder
+            ? "provider deduplicated this write to an earlier reminder firing"
+            : (write.stderr || write.stdout || "provider write failed").trim().split("\n")[0],
+        }),
         ...(writeMessage?.message_id ? { messageId: writeMessage.message_id } : {}) });
     } catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
-    const duplicate = !write.error && write.status === 0 && writeMessage
-      ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;
+    const duplicate = memo.duplicate;
     if (duplicate) {
       observeSuccessfulWrite(write, target, targetKey, store, generation);
       emitDuplicatedWrite(write, io, { target: targetKey });

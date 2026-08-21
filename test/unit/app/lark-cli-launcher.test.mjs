@@ -568,6 +568,42 @@ test("canonical send audit records failure and allows a later successful retry",
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("a recurring reminder provider duplicate is not recorded as success for the later firing", () => {
+  const f = fixture();
+  try {
+    const reminderId = "reminder-recurring-duplicate";
+    const argv = ["im", "+messages-send", "--chat-id", "oc_recurring_duplicate", "--text", "reminder"];
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_occurrence_1", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_recurring_duplicate", content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    f.store.writeJson("reminders", { reminders: [{ reminderId, status: "scheduled", repeat: "every:1h",
+      fireAt: "2026-07-16T03:00:00.000Z", events: [{ eventType: "delivery_pending" }] }] });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_recurring_first" } }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 0);
+    assert.equal(JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0].events.at(-1).eventType, "delivery_succeeded");
+
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_occurrence_2", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_recurring_duplicate", content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    const reminders = f.store.readJson("reminders", { reminders: [] });
+    reminders.reminders[0].events.push({ eventType: "delivery_pending" });
+    f.store.writeJson("reminders", reminders);
+    f.setHistory({ ok: true, identity: "bot", data: { messages: [
+      { message_id: "om_recurring_first", chat_id: "oc_recurring_duplicate", create_time: "1786553650354" },
+    ] } });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_recurring_first" } }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 3, "the new provider head must be reconciled before retrying the write");
+    const duplicate = f.run(argv);
+    assert.equal(duplicate.code, 0, duplicate.stderr);
+    const reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    assert.match(reminder.events.at(-1).metadata.reason, /earlier reminder firing/);
+    assert.ok(f.store.resolveCurrentReminder(), "the later occurrence remains auditable after provider deduplication");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("canonical reply and document comment reply audit the consumed reminder", () => {
   for (const mode of ["reply", "comment"]) {
     const f = fixture();

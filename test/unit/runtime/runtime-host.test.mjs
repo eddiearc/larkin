@@ -1197,8 +1197,12 @@ test("implicit Inbox source expires when its Runtime turn ends and before a dire
     store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_turn_expiry", target: "runtime:reminder",
       reminderId: "reminder-turn-expiry", deliveryTarget: "chat:oc_turn_expiry", content: "reminder" });
     store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    store.writeJson("reminders", { reminders: [{ reminderId: "reminder-turn-expiry", status: "fired",
+      fireAt: "2026-07-16T02:00:00.000Z", events: [{ eventType: "delivery_pending" }] }] });
     assert.ok(store.resolveCurrentReminder());
     session.emit({ type: "turn-end", turnId: "source-turn-reminder" });
+    const finalizedReminder = store.readJson("reminders", { reminders: [] }).reminders[0];
+    assert.equal(finalizedReminder.events.at(-1).eventType, "delivery_failed", "turn end must finalize an unfulfilled pending delivery");
     assert.equal(store.resolveCurrentReminder(), null, "reminder audit context must expire at turn end");
 
     store.appendNdjson("inbox", { message_id: "om_source_stale", chat_id: "oc_source_stale", content: "stale" });

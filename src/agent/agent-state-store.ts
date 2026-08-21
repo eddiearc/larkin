@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.js";
 import { acquireProcessLock, inspectProcess } from "../platform/process-state.js";
 import { isWindows } from "../platform/secure-metadata.js";
-import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
+import { isCanonicalInboxTarget, isUserDeliveryTarget, targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 import { buildStrictProviderErrorInput, classifyStrictProviderError } from "../runtime/provider-error-classifier.js";
 
 export type JsonStateKey = "agentState" | "status" | "map" | "replyctx" | "botIdentity" |
@@ -118,10 +118,18 @@ interface InboxSendIntent {
   draft_id?: string;
 }
 
+interface InboxSourceState {
+  target: string;
+  message_id: string;
+  seq: number;
+  kind?: string;
+}
+
 interface InboxStateFile {
   version: 2;
   targets: Record<string, InboxTargetState>;
   messages: Record<string, { target: string; seq: number; kind?: string }>;
+  last_source?: InboxSourceState;
   drafts: Record<string, InboxDraft>;
   intents: Record<string, InboxSendIntent>;
 }
@@ -158,6 +166,17 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       if (typeof row.target === "string" && row.target && validSequence(row.seq)) state.messages[messageId] = {
         target: row.target, seq: row.seq, ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}),
       };
+    }
+  }
+  const source = raw.last_source;
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const row = source as Partial<InboxSourceState>;
+    if (typeof row.target === "string" && isUserDeliveryTarget(row.target)
+      && typeof row.message_id === "string"
+      && (/^om_[A-Za-z0-9_-]+$/.test(row.message_id) || (row.target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(row.message_id)))
+      && validSequence(row.seq)) {
+      state.last_source = { target: row.target, message_id: row.message_id, seq: row.seq,
+        ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}) };
     }
   }
   if (raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) {
@@ -495,6 +514,15 @@ export class AgentStateStore {
     });
   }
 
+  private rememberInboxSource(state: InboxStateFile, input: InboxEnvelope, target: string, targetSeq: number): void {
+    const messageId = input.message_id;
+    const validAnchor = typeof messageId === "string"
+      && (/^om_[A-Za-z0-9_-]+$/.test(messageId) || (target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(messageId)));
+    if (!isUserDeliveryTarget(target) || !validAnchor) return;
+    state.last_source = { target, message_id: messageId, seq: targetSeq,
+      ...(typeof input.kind === "string" && input.kind ? { kind: input.kind } : {}) };
+  }
+
   private normalizeInboxEnvelope(value: unknown, state: InboxStateFile): InboxEnvelope {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Inbox envelope must be an object");
     const input = value as InboxEnvelope;
@@ -509,6 +537,7 @@ export class AgentStateStore {
       const messageIds = Object.keys(state.messages);
       for (const stale of messageIds.slice(0, Math.max(0, messageIds.length - 2_048))) delete state.messages[stale];
     }
+    this.rememberInboxSource(state, input, target, targetSeq);
     return { ...input, envelope_version: 2, target, target_seq: targetSeq };
   }
 
@@ -524,6 +553,7 @@ export class AgentStateStore {
       state.targets[target] = current;
       if (typeof row.message_id === "string" && row.message_id) state.messages[row.message_id] = { target, seq: targetSeq,
         ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}) };
+      this.rememberInboxSource(state, row, target, targetSeq);
       return { ...row, envelope_version: 2, target, target_seq: targetSeq };
     });
   }
@@ -999,6 +1029,14 @@ export class AgentStateStore {
         ...(known.kind ? { kind: known.kind } : {}) });
       const row = this.readNdjson<InboxEnvelope>("inbox").find((candidate) => candidate.message_id === messageId);
       return row ? targetKeyOfInboxEnvelope(row) : null;
+    });
+  }
+
+  /** Return the most recently observed user Inbox source with a safe reply/send anchor. */
+  resolveCurrentInboxSource(): { deliveryTarget: string; deliveryAnchor: string } | null {
+    return this.withInboxLock(this.file("inbox"), () => {
+      const source = this.inboxState().last_source;
+      return source ? { deliveryTarget: source.target, deliveryAnchor: source.message_id } : null;
     });
   }
 

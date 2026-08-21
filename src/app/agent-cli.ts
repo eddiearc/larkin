@@ -273,7 +273,7 @@ function reminderRequest(
   // guarantees instead of creating an ad-hoc directory.
   if (!fs.existsSync(stateStore.paths.reminders)) stateStore.writeJson("reminders", { reminders: [] });
   const [operation, ...rest] = groupArgv;
-  const options = parseOptions(rest, new Set(["--all", "--json"]));
+  const options = parseOptions(rest, new Set(["--all", "--json", "--no-delivery", "--internal"]));
   if (options.positionals.length) throw new Error(`reminder ${operation || ""} 不接受位置参数：${options.positionals.join(" ")}`);
   const id = options.values.get("--id");
   let method = "GET";
@@ -289,6 +289,9 @@ function reminderRequest(
       if (options.values.has("--tz")) body.tz = options.values.get("--tz");
       if (options.values.has("--message-id")) body.msgId = options.values.get("--message-id");
       if (options.values.has("--channel")) body.channel = options.values.get("--channel");
+      if (options.values.has("--delivery-target")) body.deliveryTarget = options.values.get("--delivery-target");
+      if (options.values.has("--target")) body.deliveryTarget = options.values.get("--target");
+      if (options.booleans.has("--no-delivery") || options.booleans.has("--internal")) body.noDelivery = true;
       break;
     case "list": {
       const search = new URLSearchParams();
@@ -332,6 +335,8 @@ function reminderRequest(
     log: () => undefined,
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.timeZone ? { timeZone: deps.timeZone } : {}),
+    currentInboxSource: () => stateStore.resolveCurrentInboxSource(),
+    resolveMessageTarget: (messageId) => stateStore.resolveInboxMessageTarget(messageId),
   });
   return routes.handle({ path: requestPath, pathNoQuery: requestPath.split("?")[0], method, body });
 }

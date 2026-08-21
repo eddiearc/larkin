@@ -9,7 +9,7 @@ export interface ReminderEvent {
   actorId: unknown;
   occurredAt: string;
   nextFireAt: unknown;
-  metadata: null;
+  metadata: Record<string, unknown> | null;
 }
 
 export interface ReminderRecord {
@@ -22,6 +22,9 @@ export interface ReminderRecord {
   status: string;
   msgRef?: unknown;
   msgPermalink?: unknown;
+  deliveryTarget?: string | null;
+  deliveryAnchor?: string | null;
+  deliveryMode?: "user" | "internal";
   repeat?: unknown;
   tz?: string | null;
   events?: ReminderEvent[];
@@ -217,6 +220,7 @@ export function parseRepeat(rule: unknown, tz?: string | null): RepeatResult {
 export function toSummary(reminder: ReminderRecord): {
   reminderId: string; ownerAgentId: string; title: string; fireAt: string; firedAt: string | null;
   createdAt: string; status: string; msgRef: unknown; msgPermalink: unknown;
+  deliveryTarget: string | null; deliveryAnchor: string | null; deliveryMode: "user" | "internal";
   recurrence: { kind: string; description: string } | null;
 } {
   let recurrence: { kind: string; description: string } | null = null;
@@ -236,6 +240,9 @@ export function toSummary(reminder: ReminderRecord): {
     status: reminder.status,
     msgRef: reminder.msgRef ?? null,
     msgPermalink: reminder.msgPermalink ?? null,
+    deliveryTarget: reminder.deliveryTarget ?? null,
+    deliveryAnchor: reminder.deliveryAnchor ?? null,
+    deliveryMode: reminder.deliveryMode === "internal" ? "internal" : "user",
     recurrence,
   };
 }
@@ -247,6 +254,7 @@ export function appendEvent(
   actorId: unknown,
   nextFireAt: unknown,
   ms?: number | null,
+  metadata?: Record<string, unknown> | null,
 ): void {
   if (!Array.isArray(reminder.events)) reminder.events = [];
   reminder.events.push({
@@ -257,6 +265,6 @@ export function appendEvent(
     actorId: actorId ?? null,
     occurredAt: nowIso(ms),
     nextFireAt: nextFireAt ?? null,
-    metadata: null,
+    metadata: metadata ?? null,
   });
 }

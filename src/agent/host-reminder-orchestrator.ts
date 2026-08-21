@@ -103,7 +103,7 @@ export class HostReminderOrchestrator {
 
   private deliver(agent: ReminderAgent, reminder: ReminderRecord, overdueMs: number): void {
     const recurrence = reminder.repeat ? this.store.parseRepeat(reminder.repeat, reminder.tz) : null;
-    const envelope = withCanonicalTarget(this.options.envelopeProjector.createReminderEnvelope(
+    const projected = this.options.envelopeProjector.createReminderEnvelope(
       agent.agentId,
       {
         reminderId: reminder.reminderId,
@@ -112,14 +112,47 @@ export class HostReminderOrchestrator {
         fireAt: reminder.fireAt,
         msgRef: reminder.msgRef,
         channel: reminder.channel ? String(reminder.channel) : null,
+        deliveryTarget: reminder.deliveryTarget ?? null,
+        deliveryAnchor: reminder.deliveryAnchor ?? null,
       },
       overdueMs,
       reminder.repeat && recurrence && !("error" in recurrence) ? (recurrence.description || null) : null,
-    ));
+    );
+    const envelope = withCanonicalTarget({ ...projected,
+      deliveryTarget: reminder.deliveryTarget ?? null, deliveryAnchor: reminder.deliveryAnchor ?? null });
     try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }
     catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
-    if (this.options.deliveryTarget) void this.options.deliveryTarget.deliver(agent.agentId, envelope);
-    else this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
+    if (!this.options.deliveryTarget) {
+      this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
+      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", { outcome: "runtime_unavailable" });
+      return;
+    }
+    try {
+      const result = this.options.deliveryTarget.deliver(agent.agentId, envelope);
+      if (result && typeof (result as Promise<unknown>).then === "function") {
+        void Promise.resolve(result).then(
+          () => this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_succeeded", { outcome: "accepted", deliveryTarget: envelope.deliveryTarget }),
+          (error) => this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", { outcome: "rejected", reason: String(error?.message || error) }),
+        );
+      } else {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_succeeded", { outcome: "accepted", deliveryTarget: envelope.deliveryTarget });
+      }
+    } catch (error) {
+      this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", { outcome: "rejected", reason: String((error as Error).message || error) });
+      this.log(`reminder delivery 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
+    }
+  }
+
+  private recordDeliveryOutcome(agent: ReminderAgent, reminderId: string, eventType: string, metadata: Record<string, unknown>): void {
+    try {
+      this.store.mutate(this.options.stateStore(agent).paths.reminders, (store) => {
+        const reminder = store.reminders.find((candidate) => candidate.reminderId === reminderId);
+        if (!reminder) return;
+        this.store.appendEvent(reminder, eventType, "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, this.now(), metadata);
+      });
+    } catch (error) {
+      this.log(`reminder delivery audit 写失败 id=#${reminderId.slice(0, 8)}: ${(error as Error).message}`);
+    }
   }
 
   handleFire(message: { agentId?: string; reminderId?: string }): void {
@@ -151,7 +184,9 @@ export class HostReminderOrchestrator {
           reminder.firedAt = this.store.nowIso(now);
         }
         reminder.version = Number(reminder.version) + 1;
-        this.store.appendEvent(reminder, "fired", "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, now);
+        this.store.appendEvent(reminder, "fired", "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, now, {
+          deliveryTarget: reminder.deliveryTarget ?? null, deliveryAnchor: reminder.deliveryAnchor ?? null,
+        });
         store.reminders = store.reminders.filter((candidate) =>
           candidate.status === "scheduled" || now - Date.parse(candidate.firedAt || candidate.createdAt || "") < 30 * 86_400_000);
         action = "deliver";

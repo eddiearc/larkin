@@ -1,5 +1,6 @@
 import * as ReminderStore from "./reminder-store.js";
 import type { ReminderRecord, ReminderStore as ReminderStoreShape, RepeatResult } from "./reminder-store.js";
+import { isCanonicalInboxTarget, isUserDeliveryTarget } from "./inbox-projection.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -17,6 +18,11 @@ export interface ReminderRouteResponse {
   error?: string;
 }
 
+export interface ReminderDeliverySource {
+  deliveryTarget: string;
+  deliveryAnchor: string;
+}
+
 interface ReminderRouteOptions {
   stateFile: string;
   agentId: string;
@@ -24,10 +30,32 @@ interface ReminderRouteOptions {
   log(...parts: unknown[]): void;
   now?(): number;
   timeZone?(): string;
+  currentInboxSource?(): ReminderDeliverySource | null;
+  resolveMessageTarget?(messageId: string): string | null;
 }
 
 function versionOf(reminder: ReminderRecord): number {
   return Number(reminder.version || 0);
+}
+
+const VALID_IM_ANCHOR = /^om_[A-Za-z0-9_-]+$/;
+const VALID_COMMENT_ANCHOR = /^doc_comment_[A-Za-z0-9_-]+$/;
+
+function userTarget(value: unknown, field: string): string {
+  const raw = String(value ?? "").trim();
+  // --channel historically accepted an oc_ chat id; retain that unambiguous form.
+  const target = /^oc_[A-Za-z0-9_-]+$/.test(raw) ? `chat:${raw}` : raw;
+  if (!isCanonicalInboxTarget(target) || !isUserDeliveryTarget(target)) {
+    throw new Error(`${field} 必须是可投递的 canonical target（chat:<id>、thread:<chat>:<thread> 或 document-comment:<locator>）`);
+  }
+  return target;
+}
+
+function validAnchor(value: unknown, field = "message-id", target?: string | null): string {
+  const anchor = String(value ?? "").trim();
+  const valid = VALID_IM_ANCHOR.test(anchor) || (target?.startsWith("document-comment:") === true && VALID_COMMENT_ANCHOR.test(anchor));
+  if (!valid) throw new Error(`${field} 必须是有效的 Feishu om_ message_id，或 document-comment source 的 doc_comment_ anchor`);
+  return anchor;
 }
 
 export function createReminderRoutes(options: ReminderRouteOptions) {
@@ -47,6 +75,41 @@ export function createReminderRoutes(options: ReminderRouteOptions) {
       if (!title) return { ok: false, status: 400, error: "title 不能为空" };
       const current = now();
       const tz = typeof body.tz === "string" && body.tz ? body.tz : timeZone();
+      const internal = body.internal === true || body.noDelivery === true;
+      let deliveryTarget: string | null = null;
+      let deliveryAnchor: string | null = null;
+      if (internal) {
+        if (body.deliveryTarget !== undefined || body.channel !== undefined || body.msgId !== undefined) {
+          return { ok: false, status: 400, error: "internal/no-delivery reminder 不应携带 user-facing delivery target" };
+        }
+      } else {
+        try {
+          const explicit = body.deliveryTarget !== undefined ? body.deliveryTarget : body.channel;
+          if (explicit !== undefined && explicit !== null && String(explicit).trim()) deliveryTarget = userTarget(explicit, "delivery target");
+          if (body.msgId !== undefined && body.msgId !== null && String(body.msgId).trim()) {
+            const anchorTarget = options.resolveMessageTarget?.(String(body.msgId).trim()) || null;
+            deliveryAnchor = validAnchor(body.msgId, "message-id", anchorTarget || deliveryTarget);
+            if (!deliveryTarget && !anchorTarget) {
+              return { ok: false, status: 400, error: `message-id ${deliveryAnchor} 没有当前 Inbox 的 canonical delivery target` };
+            }
+            if (anchorTarget) {
+              const normalizedAnchorTarget = userTarget(anchorTarget, "message-id target");
+              if (deliveryTarget && deliveryTarget !== normalizedAnchorTarget) {
+                return { ok: false, status: 400, error: "delivery target 与 message-id 所属 Inbox target 冲突" };
+              }
+              deliveryTarget = deliveryTarget || normalizedAnchorTarget;
+            }
+          }
+          if (!deliveryTarget) {
+            const source = options.currentInboxSource?.() || null;
+            if (!source) return { ok: false, status: 400, error: "user-facing reminder 必须显式指定 delivery target，或从当前 Inbox source 派生" };
+            deliveryTarget = userTarget(source.deliveryTarget, "current Inbox target");
+            deliveryAnchor = validAnchor(source.deliveryAnchor, "current Inbox anchor", deliveryTarget);
+          }
+        } catch (error) {
+          return { ok: false, status: 400, error: (error as Error).message };
+        }
+      }
       let recurrence: RepeatResult | null = null;
       if (body.repeat !== undefined) {
         recurrence = ReminderStore.parseRepeat(body.repeat, tz);
@@ -64,14 +127,17 @@ export function createReminderRoutes(options: ReminderRouteOptions) {
       const reminder: ReminderRecord = {
         reminderId: ReminderStore.newId(), ownerAgentId: options.agentId, title,
         fireAt: ReminderStore.nowIso(fireAtMs), firedAt: null, createdAt: ReminderStore.nowIso(current),
-        status: "scheduled", msgRef: body.msgId ?? null, msgPermalink: null,
+        status: "scheduled", msgRef: deliveryAnchor, msgPermalink: null,
+        deliveryTarget, deliveryAnchor, deliveryMode: internal ? "internal" : "user",
         repeat: body.repeat ?? null, tz: body.repeat !== undefined ? tz : null,
         channel: body.channel ?? null, payload: body.payload ?? null,
         version: 1, events: [],
       };
-      ReminderStore.appendEvent(reminder, "scheduled", "agent", options.agentId, reminder.fireAt, current);
+      ReminderStore.appendEvent(reminder, "scheduled", "agent", options.agentId, reminder.fireAt, current, {
+        deliveryTarget, deliveryAnchor, deliveryMode: internal ? "internal" : "user",
+      });
       ReminderStore.mutate(options.stateFile, (store) => store.reminders.push(reminder));
-      options.log(`reminder 已建 #${reminder.reminderId.slice(0, 8)} fireAt=${reminder.fireAt}${reminder.repeat ? ` repeat=${String(reminder.repeat)}` : ""}`);
+      options.log(`reminder 已建 #${reminder.reminderId.slice(0, 8)} fireAt=${reminder.fireAt}${reminder.repeat ? ` repeat=${String(reminder.repeat)}` : ""} deliveryTarget=${deliveryTarget || "none"}`);
       return { ok: true, status: 200, data: { reminder: ReminderStore.toSummary(reminder), ...(warning ? { warning } : {}) } };
     }
 

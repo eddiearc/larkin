@@ -424,7 +424,7 @@ test("reminder commands wire the existing schedule/list/snooze/update/cancel/log
   try {
     let current = Date.parse("2026-07-19T01:00:00.000Z");
     const deps = { now: () => current, timeZone: () => "Asia/Shanghai" };
-    const scheduled = f.run(["reminder", "schedule", "--title", "follow up", "--delay-seconds", "60", "--message-id", "om_1"], deps);
+    const scheduled = f.run(["reminder", "schedule", "--title", "follow up", "--delay-seconds", "60", "--message-id", "om_1", "--channel", "oc_1"], deps);
     assert.equal(scheduled.code, 0, scheduled.stderr);
     const id = JSON.parse(scheduled.stdout).reminder.reminderId;
     assert.equal(JSON.parse(f.run(["reminder", "list"], deps).stdout).reminders.length, 1);
@@ -433,6 +433,18 @@ test("reminder commands wire the existing schedule/list/snooze/update/cancel/log
     assert.equal(JSON.parse(f.run(["reminder", "update", "--id", id, "--title", "renamed"], deps).stdout).reminder.title, "renamed");
     assert.deepEqual(JSON.parse(f.run(["reminder", "log", "--id", id], deps).stdout).events.map((event) => event.eventType), ["scheduled", "snoozed", "updated"]);
     assert.equal(JSON.parse(f.run(["reminder", "cancel", "--id", id], deps).stdout).reminder.status, "canceled");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("Agent CLI derives a reminder target and anchor from the current canonical Inbox source", () => {
+  const f = fixture();
+  try {
+    f.store.appendNdjson("inbox", { message_id: "om_current_source", chat_id: "oc_current_source", thread_id: "omt_current_source", kind: "message", wake: true });
+    const result = f.run(["reminder", "schedule", "--title", "source-bound", "--delay-seconds", "60"]);
+    assert.equal(result.code, 0, result.stderr);
+    const reminder = JSON.parse(result.stdout).reminder;
+    assert.equal(reminder.deliveryTarget, "thread:oc_current_source:omt_current_source");
+    assert.equal(reminder.deliveryAnchor, "om_current_source");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

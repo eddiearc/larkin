@@ -32,7 +32,10 @@ function fixture(reminders) {
     mutate(_file, fn) { return fn({ reminders }); },
     parseRepeat: () => null,
     nowIso: (ms) => new Date(ms).toISOString(),
-    appendEvent() {},
+    appendEvent(reminder, eventType, _actorType, _actorId, _nextFireAt, _ms, metadata) {
+      if (!Array.isArray(reminder.events)) reminder.events = [];
+      reminder.events.push({ eventType, metadata: metadata ?? null });
+    },
   };
   const projector = {
     createReminderEnvelope(_agentId, reminder) { return { kind: "reminder", message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true, target: "runtime:reminder" }; },
@@ -60,7 +63,7 @@ test("reminder schedules deduplicate unless forced", () => {
 });
 
 test("due fire persists before delivery, updates record, then forces snapshot", () => {
-  const reminder = { reminderId: "123456789", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "due", status: "scheduled" };
+  const reminder = { reminderId: "123456789", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "due", status: "scheduled", deliveryTarget: "chat:oc_due", deliveryAnchor: "om_due" };
   const f = fixture([reminder]);
   f.projector.createReminderEnvelope = (_agentId, value) => ({
     kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1, wake: true, target: "runtime:reminder",
@@ -76,7 +79,27 @@ test("due fire persists before delivery, updates record, then forces snapshot", 
   assert.equal(reminder.version, 2);
   assert.equal(f.inbox[0].target, "runtime:reminder");
   assert.equal(f.deliveries[0].target, "runtime:reminder");
+  assert.equal(f.deliveries[0].deliveryTarget, "chat:oc_due");
+  assert.equal(f.deliveries[0].deliveryAnchor, "om_due");
+  assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded");
+  assert.deepEqual(reminder.events.at(-1).metadata, { outcome: "accepted", deliveryTarget: "chat:oc_due" });
   assert.strictEqual(f.inbox[0], f.deliveries[0], "the same target-complete envelope is persisted and delivered");
+  orchestrator.handleFire({ agentId: "cli_rem", reminderId: reminder.reminderId });
+  assert.equal(f.deliveries.length, 1, "duplicate fire attempts do not duplicate the user-visible delivery");
+});
+
+test("thread reminder fire carries the thread target and remains exactly-once", () => {
+  const reminder = { reminderId: "thread-reminder", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "thread due", status: "scheduled", deliveryTarget: "thread:oc_thread:omt_topic", deliveryAnchor: "om_thread" };
+  const f = fixture([reminder]);
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
+    envelopeProjector: f.projector, deliveryTarget: { deliver(_id, envelope) { f.deliveries.push(envelope); } }, reminderStore: f.api,
+    now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(f.deliveries.length, 1);
+  assert.equal(f.deliveries[0].deliveryTarget, "thread:oc_thread:omt_topic");
+  assert.equal(f.deliveries[0].deliveryAnchor, "om_thread");
 });
 
 // Native Windows exposed both slow process inspection and async ledger races. This test is not

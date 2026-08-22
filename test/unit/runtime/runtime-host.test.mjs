@@ -7,6 +7,7 @@ import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { createRuntimeHost as createProductionRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
 import {
   ledgerFilePath,
+  sweepAbsentPiSubagentRecordFiles,
   writeDispatchedSubagentLedger,
 } from "../../../dist/runtime/pi-subagent-ledger.mjs";
 import { RuntimePrerequisiteError } from "../../../dist/runtime/runtime-readiness.mjs";
@@ -2297,6 +2298,47 @@ test("RuntimeHost does not double-wake if a real terminal notification arrives a
     assert.equal(host.getDispatchedSubagent("cli_piOrphanLateA1", "task-late-1")?.status, "orphaned");
   } finally {
     await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost does not orphan a consumed completed result after the Pi record is cleaned up", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-consumed-sidecar-"));
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piConsumedA1", name: "consumed", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piConsumedA1", { message_id: "om_pi_consumed", chat_id: "oc_pi_consumed", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-consumed-1", outputFile: path.join(root, "task-consumed-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piConsumedA1", "task-consumed-1");
+    assert.equal(dispatched?.status, "dispatched");
+    assert.ok(dispatched?.recordFile);
+    const recordDir = path.dirname(dispatched.recordFile);
+    const firstRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => (
+      taskId === "task-consumed-1" ? { status: "completed", resultConsumed: true } : undefined
+    ));
+    assert.deepEqual(firstRemoved, []);
+    const secondRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, () => undefined);
+    assert.deepEqual(secondRemoved, [], "consumed terminal state must survive later record cleanup");
+    assert.ok(fs.existsSync(dispatched.recordFile));
+    session.emit({ type: "turn-end" });
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 1, "a consumed completed result must not enqueue an orphan wake");
+    const record = host.getDispatchedSubagent("cli_piConsumedA1", "task-consumed-1");
+    assert.equal(record?.status, "completed");
+    assert.equal(record?.wakeState, "acknowledged");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

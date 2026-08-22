@@ -28,6 +28,7 @@ import {
 import {
   type DispatchedSubagentLedger,
   type DispatchedSubagentRecord,
+  type PiSubagentRecordPresence,
   getDispatchedSubagent as lookupDispatchedSubagent,
   ledgerFilePath,
   noteDispatchedSubagent,
@@ -280,7 +281,7 @@ export function createRuntimeHost(options: {
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
   compactTimeoutMs?: number;
   telemetry?: TelemetryRuntime;
-  subagentRecordProbe?: (record: DispatchedSubagentRecord) => "present" | "absent";
+  subagentRecordProbe?: (record: DispatchedSubagentRecord) => PiSubagentRecordPresence;
   subagentReconcileIntervalMs?: number;
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
@@ -975,8 +976,9 @@ export function createRuntimeHost(options: {
       forceMissing: input.forceMissing === true,
       missingReason: input.missingReason,
     });
+    const previousLedger = agent.subagentLedger;
     agent.subagentLedger = result.ledger;
-    if (result.orphaned.length > 0) persistSubagentLedger(agent);
+    if (result.orphaned.length > 0 || result.ledger !== previousLedger) persistSubagentLedger(agent);
     for (const record of result.orphaned) {
       noteBackgroundCompletion(agent, record.wakeKey ?? record.taskId);
     }

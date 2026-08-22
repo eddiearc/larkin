@@ -13,6 +13,7 @@ import {
   noteDispatchedSubagentTerminal,
   noteDispatchedSubagentWakeAcknowledged,
   probePiSubagentRecord,
+  readConsumedPiSubagentTerminal,
   readDispatchedSubagentLedger,
   reconcileDispatchedSubagents,
   sweepAbsentPiSubagentRecordFiles,
@@ -217,6 +218,59 @@ test("pending terminal wakes stay queryable until acknowledged", () => {
   ledger = noteDispatchedSubagentWakeAcknowledged(ledger, { completionKey: "task-wake-1", now: now + 2 });
   assert.deepEqual(undeliveredTerminalWakeKeys(ledger), []);
   assert.equal(getDispatchedSubagent(ledger, "task-wake-1")?.wakeState, "acknowledged");
+});
+
+test("consumed completed result is bridged into the sidecar and is not orphaned", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-consumed-"));
+  try {
+    const consumedFile = writeDispatchedSubagentRecordFile(root, "task-consumed");
+    const missingFile = writeDispatchedSubagentRecordFile(root, "task-missing");
+    const recordDir = path.dirname(consumedFile);
+    const live = new Map([
+      ["task-consumed", { status: "completed", resultConsumed: true }],
+    ]);
+    let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), {
+      taskId: "task-consumed", recordFile: consumedFile, now: 10,
+    });
+    ledger = noteDispatchedSubagent(ledger, {
+      taskId: "task-missing", recordFile: missingFile, now: 10,
+    });
+
+    const firstRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId));
+    assert.deepEqual(firstRemoved, ["task-missing"]);
+    assert.ok(fs.existsSync(consumedFile));
+    assert.deepEqual(readConsumedPiSubagentTerminal(consumedFile), {
+      taskId: "task-consumed",
+      status: "completed",
+    });
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-consumed", status: "dispatched", dispatchedAt: 10, lastActivityAt: 10, recordFile: consumedFile,
+    }), "consumed");
+
+    live.delete("task-consumed");
+    const secondRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId));
+    assert.deepEqual(secondRemoved, [], "a consumed terminal sidecar must not be treated as absent after cleanup");
+    assert.ok(fs.existsSync(consumedFile));
+
+    const result = reconcileDispatchedSubagents(ledger, {
+      probe: probePiSubagentRecord,
+      now: 11,
+    });
+    assert.deepEqual(result.orphaned.map((task) => task.taskId), ["task-missing"]);
+    assert.equal(getDispatchedSubagent(result.ledger, "task-consumed")?.status, "completed");
+    assert.equal(getDispatchedSubagent(result.ledger, "task-consumed")?.wakeState, "acknowledged");
+    assert.equal(getDispatchedSubagent(result.ledger, "task-missing")?.status, "orphaned");
+    assert.deepEqual(undeliveredTerminalWakeKeys(result.ledger), ["task-missing"]);
+
+    const again = reconcileDispatchedSubagents(result.ledger, {
+      probe: probePiSubagentRecord,
+      now: 12,
+    });
+    assert.deepEqual(again.orphaned, [], "a genuine missing record orphans only once");
+    assert.equal(getDispatchedSubagent(again.ledger, "task-missing")?.status, "orphaned");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("sweep removes record sidecars only after the Pi record is gone", () => {

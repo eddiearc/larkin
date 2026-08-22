@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "bun:test";
 import {
   emptyDispatchedSubagentLedger,
+  effectivePiStateDir,
   extractBackgroundPiSubagentDispatch,
   getDispatchedSubagent,
   ledgerFilePath,
@@ -336,6 +337,53 @@ test("sweep persists an unconsumed terminal before eviction can delete the sidec
   }
 });
 
+test("repeated sweeps do not reset the terminal notification grace clock", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-grace-clock-"));
+  try {
+    const recordFile = writeDispatchedSubagentRecordFile(root, "task-grace-clock-1", "session-a");
+    const recordDir = path.dirname(recordFile);
+    const live = new Map([
+      ["task-grace-clock-1", { status: "completed" }],
+    ]);
+    let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), {
+      taskId: "task-grace-clock-1", recordFile, now: 10,
+    });
+
+    assert.deepEqual(sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId)), []);
+    const persistedAt = fs.statSync(recordFile).mtimeMs;
+    assert.ok(Number.isFinite(persistedAt));
+
+    assert.deepEqual(sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId)), []);
+    assert.deepEqual(sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId)), []);
+    assert.equal(
+      fs.statSync(recordFile).mtimeMs,
+      persistedAt,
+      "an unchanged terminal sidecar must keep the original grace-clock mtime",
+    );
+
+    const duringGrace = reconcileDispatchedSubagents(ledger, {
+      probe: probePiSubagentRecord,
+      now: persistedAt + PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS - 1,
+    });
+    assert.deepEqual(duringGrace.orphaned, []);
+    assert.deepEqual(duringGrace.terminals, []);
+    assert.equal(getDispatchedSubagent(duringGrace.ledger, "task-grace-clock-1")?.status, "dispatched");
+
+    const afterGrace = reconcileDispatchedSubagents(duringGrace.ledger, {
+      probe: probePiSubagentRecord,
+      now: persistedAt + PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS,
+    });
+    assert.deepEqual(afterGrace.orphaned, []);
+    assert.equal(afterGrace.terminals.length, 1);
+    assert.equal(afterGrace.terminals[0].taskId, "task-grace-clock-1");
+    assert.equal(afterGrace.terminals[0].status, "completed");
+    assert.equal(afterGrace.terminals[0].wakeState, "pending");
+    assert.deepEqual(undeliveredTerminalWakeKeys(afterGrace.ledger), ["task-grace-clock-1"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("force-missing immediately advances a persisted unconsumed terminal instead of orphaning it", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-force-terminal-"));
   try {
@@ -423,4 +471,9 @@ test("consumed Pi record mapper treats aborted as timed_out and stopped as cance
   assert.equal(ledgerStatusFromPiSubagentRecord({ status: "aborted", resultConsumed: true }), "timed_out");
   assert.equal(ledgerStatusFromPiSubagentRecord({ status: "stopped", resultConsumed: true }), "cancelled");
   assert.equal(ledgerStatusFromPiSubagentRecord({ status: "error", resultConsumed: true }), "failed");
+});
+
+test("effectivePiStateDir matches the Pi adapter implicit root", () => {
+  assert.equal(effectivePiStateDir({ workspaceDir: "/ws", stateDir: "/explicit" }), "/explicit");
+  assert.equal(effectivePiStateDir({ workspaceDir: "/ws" }), path.join("/ws", ".larkin"));
 });

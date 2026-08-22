@@ -8,10 +8,10 @@ diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-80c5d241789d23ea b/.b
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..d8780fa4ab5b88ca5f576ee550294e50c7e6c450 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b39fdfd60 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -69,6 +69,43 @@ function abortable(promise, signal) {
+@@ -69,6 +69,44 @@ function abortable(promise, signal) {
          });
      });
  }
@@ -52,18 +52,27 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d8780fa4ab5b88ca5f576ee550294e50
 +        return true;
 +    return (await waitWithDeadline(record.promise, remainingMs, signal)).timedOut;
 +}
++const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
  export function renderRunningAgentStatus(frame, statsText, activity, theme) {
      const container = new Container();
      container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-@@ -282,7 +319,6 @@ export default function (pi) {
+@@ -280,9 +318,14 @@ export default function (pi) {
+     // before they reach pi.sendMessage (fire-and-forget).
+     const pendingNudges = new Map();
      const NUDGE_HOLD_MS = 200;
++    // A parent agent run may span multiple model turns. Keep the wait budget at
++    // that level so a timeout cannot be reset by a later get_subagent_result call.
++    let resultWaitTimedOutInParentTurn = false;
++    pi.on("agent_start", () => {
++        resultWaitTimedOutInParentTurn = false;
++    });
      // A queued result wait must observe completion before its held notification
      // can fire, so successful waits can still suppress that redundant nudge.
 -    const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
      function scheduleNudge(key, send, delay = NUDGE_HOLD_MS) {
          cancelNudge(key);
          pendingNudges.set(key, setTimeout(() => {
-@@ -1293,6 +1329,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1293,6 +1336,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -73,11 +82,14 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d8780fa4ab5b88ca5f576ee550294e50
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1346,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1353,16 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
 +            // One deadline covers both phases so queue polling cannot reset the wait.
++            if (params.wait && resultWaitTimedOutInParentTurn) {
++                throw new Error("Refusing wait: true after an earlier wait timed out in this parent turn; yield and await the completion notification instead.");
++            }
 +            let timedOut = false;
 +            const waitTimeoutMs = normalizeResultWaitTimeout(params.timeout_ms);
              if (params.wait && (record.status === "running" || record.status === "queued")) {
@@ -87,10 +99,12 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d8780fa4ab5b88ca5f576ee550294e50
 -                if (record.promise)
 -                    await abortable(record.promise, signal);
 +                timedOut = await waitForSubagentResult(record, waitTimeoutMs, signal);
++                if (timedOut)
++                    resultWaitTimedOutInParentTurn = true;
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1365,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1377,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -107,10 +121,10 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d8780fa4ab5b88ca5f576ee550294e50
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..43ca60dbcb0597178346491ed514bd431cb94ff1 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95bbe4bb1f 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -91,6 +91,52 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+@@ -91,6 +91,54 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
    });
  }
  
@@ -160,11 +174,21 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..43ca60dbcb0597178346491ed514bd43
 +  return (await waitWithDeadline(record.promise, remainingMs, signal)).timedOut;
 +}
 +
++export const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
++
  export function renderRunningAgentStatus(
    frame: string,
    statsText: string,
-@@ -332,8 +378,6 @@ export default function (pi: ExtensionAPI) {
+@@ -330,10 +378,14 @@ export default function (pi: ExtensionAPI) {
+   // before they reach pi.sendMessage (fire-and-forget).
+   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
    const NUDGE_HOLD_MS = 200;
++  // A parent agent run may span multiple model turns. Keep the wait budget at
++  // that level so a timeout cannot be reset by a later get_subagent_result call.
++  let resultWaitTimedOutInParentTurn = false;
++  pi.on("agent_start", () => {
++    resultWaitTimedOutInParentTurn = false;
++  });
    // A queued result wait must observe completion before its held notification
    // can fire, so successful waits can still suppress that redundant nudge.
 -  const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
@@ -172,7 +196,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..43ca60dbcb0597178346491ed514bd43
    function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
      cancelNudge(key);
      pendingNudges.set(key, setTimeout(() => {
-@@ -1453,6 +1497,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1453,6 +1505,11 @@ Terse command-style prompts produce shallow, generic work.
            description: "If true, wait for the agent to complete before returning. Default: false.",
          }),
        ),
@@ -184,11 +208,14 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..43ca60dbcb0597178346491ed514bd43
        verbose: Type.Optional(
          Type.Boolean({
            description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-@@ -1470,14 +1519,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1470,14 +1527,15 @@ Terse command-style prompts produce shallow, generic work.
        // completion notification can still be delivered.
        // Queued agents have no promise yet (it's created when the queue starts
        // them), so poll until they leave the queue, then await like a running one.
 +      // One deadline covers both phases so queue polling cannot reset the wait.
++      if (params.wait && resultWaitTimedOutInParentTurn) {
++        throw new Error("Refusing wait: true after an earlier wait timed out in this parent turn; yield and await the completion notification instead.");
++      }
 +      let timedOut = false;
 +      const waitTimeoutMs = normalizeResultWaitTimeout(params.timeout_ms);
        if (params.wait && (record.status === "running" || record.status === "queued")) {
@@ -200,10 +227,11 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..43ca60dbcb0597178346491ed514bd43
 -        }
 -        if (record.promise) await abortable(record.promise, signal);
 +        timedOut = await waitForSubagentResult(record, waitTimeoutMs, signal);
++        if (timedOut) resultWaitTimedOutInParentTurn = true;
        }
  
        const displayName = getDisplayName(record.type);
-@@ -1492,11 +1538,13 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1492,11 +1550,13 @@ Terse command-style prompts produce shallow, generic work.
  
        let output =
          `Agent: ${record.id}\n` +

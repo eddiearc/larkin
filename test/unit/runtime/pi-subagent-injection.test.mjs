@@ -48,7 +48,7 @@ test("external injects when the probed pi version satisfies the gate", () => {
 
 test("external does not inject when the probed pi version is below 0.80", () => {
   const decision = resolvePiSubagentExtensionArg(
-    { distribution: "external", piCommand: "pi", env: {} },
+    { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: "/missing/larkin-pi-agent" } },
     () => ({ major: 0, minor: 79 }),
     () => "/tmp/fake/pi-subagents.bundle.js",
   );
@@ -57,7 +57,7 @@ test("external does not inject when the probed pi version is below 0.80", () => 
 
 test("external does not inject when the version cannot be probed", () => {
   const decision = resolvePiSubagentExtensionArg(
-    { distribution: "external", piCommand: "/missing/pi", env: {} },
+    { distribution: "external", piCommand: "/missing/pi", env: { PI_CODING_AGENT_DIR: "/missing/larkin-pi-agent" } },
     () => null,
     () => "/tmp/fake/pi-subagents.bundle.js",
   );
@@ -134,7 +134,7 @@ test("userPiAlreadyHasSubagentsExtension detects settings packages and package d
   }
 });
 
-test("resolvePiSubagentExtensionArg skips injection when user already installed the extension", async () => {
+test("resolvePiSubagentExtensionArg refuses an unbounded user-installed extension", async () => {
   const { resolvePiSubagentExtensionArg } =
     await import("../../../dist/runtime/pi-subagent-injection.mjs");
   const fsMod = await import("node:fs");
@@ -147,12 +147,37 @@ test("resolvePiSubagentExtensionArg skips injection when user already installed 
     fsMod.mkdirSync(agentDir, { recursive: true });
     fsMod.writeFileSync(pathMod.join(agentDir, "settings.json"),
       JSON.stringify({ packages: ["n" + "pm:@tintinweb/pi-subagents"] }));
-    const decision = resolvePiSubagentExtensionArg(
+    assert.throws(() => resolvePiSubagentExtensionArg(
       { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: agentDir } },
       () => ({ major: 0, minor: 84 }),
       () => fakeBundle,
+    ), /WARNING: refusing external Pi.*unbounded or unverifiable/);
+  } finally {
+    fsMod.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolvePiSubagentExtensionArg accepts a user extension with the bounded capability", async () => {
+  const { resolvePiSubagentExtensionArg } =
+    await import("../../../dist/runtime/pi-subagent-injection.mjs");
+  const fsMod = await import("node:fs");
+  const osMod = await import("node:os");
+  const pathMod = await import("node:path");
+  const root = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), "pi-subagents-bounded-"));
+  try {
+    const agentDir = pathMod.join(root, ".pi", "agent");
+    const packageDir = pathMod.join(agentDir, "n" + "pm", "node_modules", "@tintinweb", "pi-subagents");
+    fsMod.mkdirSync(pathMod.join(packageDir, "dist"), { recursive: true });
+    fsMod.writeFileSync(pathMod.join(agentDir, "settings.json"),
+      JSON.stringify({ packages: ["n" + "pm:@tintinweb/pi-subagents"] }));
+    fsMod.writeFileSync(pathMod.join(packageDir, "dist", "index.js"),
+      "larkin-pi-subagents-bounded-wait-v1");
+    const decision = resolvePiSubagentExtensionArg(
+      { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: agentDir } },
+      () => ({ major: 0, minor: 84 }),
+      () => "/tmp/fake/pi-subagents.bundle.js",
     );
-    assert.equal(decision, null, "must not inject when user already has pi-subagents");
+    assert.equal(decision, null, "must not inject a verified bounded duplicate");
   } finally {
     fsMod.rmSync(root, { recursive: true, force: true });
   }

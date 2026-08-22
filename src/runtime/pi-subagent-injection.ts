@@ -85,27 +85,52 @@ export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv
  * 已装时 Larkin 不再 -e 注入，避免同名工具（Agent/get_subagent_result/steer_subagent）
  * 重复注册导致 pi 扩展加载 FATAL（pi 对 duplicate tool registration 是硬失败）。
  */
-export function userPiAlreadyHasSubagentsExtension(env: NodeJS.ProcessEnv): boolean {
+const BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
+
+type UserPiSubagentsWaitCapability = "absent" | "bounded" | "unbounded";
+
+function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsWaitCapability {
   const agentDir = env.PI_CODING_AGENT_DIR || path.join(env.HOME || process.env.HOME || "", ".pi", "agent");
   try {
+    let configured = false;
     const settingsFile = path.join(agentDir, "settings.json");
     if (fs.existsSync(settingsFile)) {
       const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
       const packages: unknown = settings?.packages;
       if (Array.isArray(packages)) {
-        for (const entry of packages) {
-          if (typeof entry === "string" && /pi-subagents/i.test(entry)) return true;
-        }
+        configured = packages.some((entry) => typeof entry === "string" && /pi-subagents/i.test(entry));
       }
     }
     // settings.json 可能未登记但包目录已存在（残留/手动安装）。
     // Split token: repo contract forbids the literal package-manager word in sources.
-    const npmDir = path.join(agentDir, "n" + "pm", "node_modules", "@tintinweb");
-    if (fs.existsSync(npmDir) && fs.readdirSync(npmDir).some((name) => /pi-subagents/i.test(name))) return true;
+    const packageRoots = [
+      path.join(agentDir, "n" + "pm", "node_modules", "@tintinweb", "pi-subagents"),
+      path.join(agentDir, "node_modules", "@tintinweb", "pi-subagents"),
+    ];
+    const installedRoot = packageRoots.find((root) => fs.existsSync(root));
+    if (!configured && !installedRoot) return "absent";
+    if (!installedRoot) return "unbounded";
+    const capabilityFiles = [
+      path.join(installedRoot, "dist", "index.js"),
+      path.join(installedRoot, "src", "index.ts"),
+    ];
+    const hasCapability = capabilityFiles.some((file) => {
+      try { return fs.readFileSync(file, "utf8").includes(BOUNDED_WAIT_CAPABILITY); }
+      catch { return false; }
+    });
+    return hasCapability ? "bounded" : "unbounded";
   } catch {
-    /* unreadable config: assume not installed, injection stays safe */
+    // Unreadable user extension state is not safe to treat as bounded.
+    return "unbounded";
   }
-  return false;
+}
+
+export function userPiAlreadyHasSubagentsExtension(env: NodeJS.ProcessEnv): boolean {
+  return userPiSubagentsWaitCapability(env) !== "absent";
+}
+
+export function userPiSubagentsHasBoundedWaitCapability(env: NodeJS.ProcessEnv): boolean {
+  return userPiSubagentsWaitCapability(env) === "bounded";
 }
 
 export function resolvePiSubagentExtensionArg(
@@ -117,11 +142,22 @@ export function resolvePiSubagentExtensionArg(
   probeVersion: () => { major: number; minor: number } | null = () => probeExternalPiVersion(input.piCommand, input.env),
   resolveBundle: () => string | null = () => bundledPiSubagentExtensionPath(input.env.LARKIN_CONFIG_DIR),
 ): string | null {
+  // A user-installed extension wins only when it advertises the exact bounded
+  // wait capability. Check this before the bundle path so a missing Larkin
+  // asset cannot silently leave an unbounded user extension active.
+  if (userPiAlreadyHasSubagentsExtension(input.env)) {
+    if (!userPiSubagentsHasBoundedWaitCapability(input.env)) {
+      throw new Error(
+        "[larkin] WARNING: refusing external Pi because the user-installed " +
+        "pi-subagents extension is unbounded or unverifiable; remove it or install " +
+        "a version advertising larkin-pi-subagents-bounded-wait-v1.",
+      );
+    }
+    return null;
+  }
   // resolveBundle is injectable so unit tests stay environment-independent
   // (no dependency on build artifacts or the filesystem).
   const bundle = resolveBundle();
   if (!bundle) return null;
-  // 用户已自行安装同款扩展时跳过注入，避免工具名重复注册冲突。
-  if (userPiAlreadyHasSubagentsExtension(input.env)) return null;
   return piVersionSupportsSubagents(probeVersion()) ? bundle : null;
 }

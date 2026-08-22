@@ -836,11 +836,12 @@ export function createRuntimeHost(options: {
       const session = await ensureSession(agent);
       if (agent.session !== session || agent.stopped) return { status: "dropped" };
       const headKey = agent.backgroundCompletionQueue[0];
-      const orphaned = taskIdsFromCompletionKey(headKey ?? "")
+      const tasks = taskIdsFromCompletionKey(headKey ?? "")
         .map((taskId) => lookupDispatchedSubagent(agent.subagentLedger, taskId))
-        .filter((task): task is DispatchedSubagentRecord => task?.status === "orphaned");
-      const wakeReason = orphaned.length > 0
-        ? `background subagent completed; ${orphaned.map((task) => `task ${task.taskId} status=orphaned`).join("; ")}`
+        .filter((task): task is DispatchedSubagentRecord => Boolean(task));
+      const details = tasks.map((task) => `task ${task.taskId} status=${task.status}`).join("; ");
+      const wakeReason = details
+        ? `background subagent completed; ${details}`
         : "background subagent completed";
       const input = options.promptBuilder.buildRuntimeInput("wake", crypto.randomUUID(), { wakeReason });
       const result = await session.prompt(input);
@@ -909,7 +910,7 @@ export function createRuntimeHost(options: {
   };
 
   const persistSubagentLedger = (agent: ManagedAgent): void => {
-    writeDispatchedSubagentLedger(ledgerFilePath(agent.config.stateDir), agent.subagentLedger);
+    writeDispatchedSubagentLedger(ledgerFilePath(effectivePiStateDir(agent.config)), agent.subagentLedger);
   };
 
   const acknowledgeSubagentWake = (agent: ManagedAgent, completionKey: string): void => {
@@ -936,8 +937,8 @@ export function createRuntimeHost(options: {
     if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
   };
 
-  const loadSubagentLedger = (stateDir: string | undefined): DispatchedSubagentLedger => {
-    return readDispatchedSubagentLedger(ledgerFilePath(stateDir));
+  const loadSubagentLedger = (config: AgentRuntimeConfig): DispatchedSubagentLedger => {
+    return readDispatchedSubagentLedger(ledgerFilePath(effectivePiStateDir(config)));
   };
 
   const clearSubagentReconcileTimer = (agent: ManagedAgent): void => {
@@ -1375,7 +1376,11 @@ export function createRuntimeHost(options: {
         recordDispatchedSubagent(agent, event.taskId, typeof event.outputFile === "string" ? event.outputFile : undefined);
       } else if (event.phase === "completed" && typeof event.completionKey === "string") {
         recordTerminalSubagentNotification(agent, event.completionKey, event.completionStatuses);
-        noteBackgroundCompletion(agent, event.completionKey);
+        if (event.handledInTurn === true) {
+          acknowledgeSubagentWake(agent, event.completionKey);
+        } else {
+          noteBackgroundCompletion(agent, event.completionKey);
+        }
       }
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
@@ -1996,7 +2001,7 @@ export function createRuntimeHost(options: {
           backgroundCompletionQueue: [], backgroundCompletionKeys: new Set(),
           backgroundCompletionInFlight: null, backgroundCompletionWakeInputId: null,
           backgroundCompletionRejectStreak: 0, backgroundCompletionRetryTimer: null,
-          subagentLedger: loadSubagentLedger(config.stateDir), subagentReconcileTimer: null };
+          subagentLedger: loadSubagentLedger(config), subagentReconcileTimer: null };
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
         for (const record of agent.records.values()) {

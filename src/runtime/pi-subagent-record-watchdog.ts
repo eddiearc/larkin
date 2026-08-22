@@ -30,9 +30,13 @@ export default function piSubagentRecordWatchdog(pi: ExtensionAPI): void {
   const recordDir = dispatchedSubagentRecordDir(stateDir);
   const intervalMs = sweepIntervalMs();
   const tick = (): void => {
-    const manager = (globalThis as Record<symbol, PiSubagentsManagerRegistry | undefined>)[PI_SUBAGENTS_MANAGER];
-    if (typeof manager?.getRecord !== "function") return;
-    sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => manager.getRecord!(taskId), { owner });
+    try {
+      const manager = (globalThis as Record<symbol, PiSubagentsManagerRegistry | undefined>)[PI_SUBAGENTS_MANAGER];
+      if (typeof manager?.getRecord !== "function") return;
+      sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => manager.getRecord!(taskId), { owner });
+    } catch {
+      // Best-effort: a transient EACCES/EMFILE must not crash the Pi timer.
+    }
   };
   const timer = setInterval(tick, intervalMs);
   timer.unref?.();

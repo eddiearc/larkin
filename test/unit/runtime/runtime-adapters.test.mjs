@@ -400,6 +400,40 @@ test("Pi canonical late completion notifications bridge once and ignore assistan
   assert.equal(observations[0].completionKey, "task-bridge-1");
 });
 
+test("Pi in-turn completion notifications emit immediately as handled without a second settle bridge", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-in-turn-complete", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  await session.prompt({ inputId: "pi-in-turn-input", kind: "user", text: "work", attempt: 0 });
+  listener({ type: "turn_start" });
+  const canonical = buildCanonicalPiSubagentAssistantMessage({
+    taskId: "task-in-turn-1",
+    toolUseId: "tool-use-in-turn-1",
+    outputFile: "/tmp/task-in-turn-1.output",
+    summary: "Agent \"fixture\" completed",
+    result: "Fixture result.",
+  });
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  await new Promise((resolve) => setImmediate(resolve));
+  const beforeSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
+  assert.deepEqual(beforeSettle.map((event) => event.phase), ["completed"]);
+  assert.equal(beforeSettle[0].completionKey, "task-in-turn-1");
+  assert.equal(beforeSettle[0].handledInTurn, true);
+  assert.deepEqual(beforeSettle[0].completionStatuses, { "task-in-turn-1": "completed" });
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
+  assert.equal(afterSettle.length, 1, "in-turn completion must not emit a second wake bridge after settle");
+});
+
 test("Pi assistant text lookalikes do not trigger the late completion bridge", async () => {
   let listener;
   const sdk = {

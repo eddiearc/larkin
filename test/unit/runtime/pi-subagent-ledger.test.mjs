@@ -41,6 +41,23 @@ test("extractBackgroundPiSubagentDispatch reads Agent ID and output file from a 
   assert.deepEqual(parsed, { taskId: "task-ledger-1", outputFile: "/tmp/task-ledger-1.output" });
 });
 
+test("extractBackgroundPiSubagentDispatch keeps spaces in text-only output-file paths", () => {
+  const parsed = extractBackgroundPiSubagentDispatch({
+    toolName: "Agent",
+    args: { prompt: "do work", run_in_background: true },
+    result: {
+      content: [{
+        type: "text",
+        text: "Agent started in background.\nAgent ID: task-space-1\nOutput file: /tmp/my workspace/task space.output\n",
+      }],
+    },
+  });
+  assert.deepEqual(parsed, {
+    taskId: "task-space-1",
+    outputFile: "/tmp/my workspace/task space.output",
+  });
+});
+
 test("extractBackgroundPiSubagentDispatch ignores foreground Agent calls", () => {
   assert.equal(extractBackgroundPiSubagentDispatch({
     toolName: "Agent",

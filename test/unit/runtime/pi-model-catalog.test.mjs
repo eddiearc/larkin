@@ -111,7 +111,8 @@ test("production graph pins official Pi and exposes it only through the shared R
   assert.match(binaryEntry, /main:\s*piMain/);
   assert.match(binaryEntry, /pi-ai\/bun-oauth/);
   assert.match(binaryEntry, /registerBunOAuthFlows\(\)/);
-  assert.match(inlineExtensions, /@tintinweb\/pi-subagents\/dist\/index\.js/);
+  assert.match(inlineExtensions, /bundledPiSubagentExtensionPath/);
+  assert.doesNotMatch(inlineExtensions, /@tintinweb\/pi-subagents\/dist\/index\.js/);
   assert.match(adapter, /--mode["'],\s*["']rpc/);
   assert.doesNotMatch(adapter, /available\s*\[\s*0\s*\]/);
 });

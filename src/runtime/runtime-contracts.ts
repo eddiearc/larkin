@@ -44,6 +44,7 @@ export type NormalizedRuntimeEvent =
         | "background_dispatched";
       reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; inputId?: string; sessionId?: string; completionKey?: string;
       completionStatuses?: Record<string, "completed" | "failed" | "cancelled" | "timed_out">;
+      handledInTurn?: boolean;
       taskId?: string; outputFile?: string }
   | { type: "turn-start"; turnId?: string }
   | { type: "activity"; activity: "thinking" | "text" | "tool" | "internal"; text?: string; name?: string }

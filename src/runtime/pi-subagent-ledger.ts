@@ -511,7 +511,7 @@ export function extractBackgroundPiSubagentDispatch(event: {
   if (!taskId) return null;
   const outputFile = firstNonEmpty(
     stringValue(details?.outputFile),
-    matchCapture(resultText, /Output file:\s*(\S+)/i),
+    matchCapture(resultText, /Output file:\s*(.+)/i),
   );
   return outputFile ? { taskId, outputFile } : { taskId };
 }

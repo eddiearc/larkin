@@ -670,19 +670,26 @@ class PiSession extends EventSession {
         this.emitObservation("completed");
       }
       const completionNotification = extractCanonicalPiSubagentNotification(event.messages);
-      if (completionNotification
-        && this.activeEpoch === null
-        && !this.observedBackgroundCompletionKeys.has(completionNotification.key)) {
-        // agent_end can still have an active Pi session. Prompting before
-        // unowned agent_settled is rejected as "Agent is already processing".
-        this.pendingUnownedCompletionKeys.add(completionNotification.key);
-        this.pendingUnownedCompletionStatuses.set(
-          completionNotification.key,
-          Object.fromEntries(completionNotification.notifications.map((notification) => [
-            notification.taskId,
-            ledgerStatusFromPiNotificationStatus(notification.status),
-          ])),
-        );
+      if (completionNotification && !this.observedBackgroundCompletionKeys.has(completionNotification.key)) {
+        const completionStatuses = Object.fromEntries(completionNotification.notifications.map((notification) => [
+          notification.taskId,
+          ledgerStatusFromPiNotificationStatus(notification.status),
+        ]));
+        if (this.activeEpoch === null) {
+          // agent_end can still have an active Pi session. Prompting before
+          // unowned agent_settled is rejected as "Agent is already processing".
+          this.pendingUnownedCompletionKeys.add(completionNotification.key);
+          this.pendingUnownedCompletionStatuses.set(completionNotification.key, completionStatuses);
+        } else {
+          // Already visible in the owned turn. Persist as acknowledged; do not
+          // schedule another wake after the parent turn settles.
+          this.observedBackgroundCompletionKeys.add(completionNotification.key);
+          this.emitObservation("completed", {
+            completionKey: completionNotification.key,
+            completionStatuses,
+            handledInTurn: true,
+          });
+        }
       }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
@@ -780,6 +787,7 @@ class PiSession extends EventSession {
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
     reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; completionKey?: string;
     completionStatuses?: Record<string, "completed" | "failed" | "cancelled" | "timed_out">;
+    handledInTurn?: boolean;
     taskId?: string; outputFile?: string;
   } = {}): void {
     const inputId = this.oldestOwnedInput();

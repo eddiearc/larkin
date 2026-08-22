@@ -675,9 +675,15 @@ class PiSession extends EventSession {
           notification.taskId,
           ledgerStatusFromPiNotificationStatus(notification.status),
         ]));
-        if (this.activeEpoch === null) {
-          // agent_end can still have an active Pi session. Prompting before
-          // unowned agent_settled is rejected as "Agent is already processing".
+        const owningTurnFailed = event.willRetry === true
+          || this.finalAssistantStopReason === "error"
+          || this.finalAssistantStopReason === "aborted";
+        if (this.activeEpoch === null || owningTurnFailed) {
+          // Unowned agent_end still has an active Pi session, so prompting
+          // before settle is rejected as "Agent is already processing".
+          // A failed or retrying owned turn also did not process the
+          // notification; do not emit handledInTurn so RuntimeHost can still
+          // wake after input-error, retry, or restart.
           this.pendingUnownedCompletionKeys.add(completionNotification.key);
           this.pendingUnownedCompletionStatuses.set(completionNotification.key, completionStatuses);
         } else {

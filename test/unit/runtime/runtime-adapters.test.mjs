@@ -425,6 +425,98 @@ test("Pi in-turn completion notifications emit immediately as handled without a 
   assert.equal(afterSettle.length, 1, "in-turn completion must not emit a second wake bridge after settle");
 });
 
+test("Pi failed owning turn does not mark in-turn completions handled so retry can still wake", async () => {
+  for (const stopReason of ["error", "aborted"]) {
+    let listener;
+    const sdk = {
+      sessionId: `pi-failed-owning-${stopReason}`,
+      prompt() {}, steer() {}, abort() {},
+      subscribe(next) { listener = next; return () => {}; },
+    };
+    const session = await createNativeRuntimeAdapter("pi", {
+      createPiSession: async () => sdk,
+      env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+    }).createSession(create());
+    const events = [];
+    session.subscribe((event) => events.push(event));
+    await session.prompt({ inputId: `pi-failed-owning-${stopReason}`, kind: "user", text: "work", attempt: 0 });
+    listener({ type: "turn_start" });
+    const canonical = buildCanonicalPiSubagentAssistantMessage({
+      taskId: `task-failed-owning-${stopReason}`,
+      toolUseId: `tool-use-failed-owning-${stopReason}`,
+      outputFile: `/tmp/task-failed-owning-${stopReason}.output`,
+      summary: "Agent \"fixture\" completed",
+      result: "Fixture result.",
+    });
+    listener({
+      type: "agent_end",
+      willRetry: false,
+      messages: [
+        canonical,
+        {
+          role: "assistant",
+          stopReason,
+          ...(stopReason === "error" ? { errorMessage: "provider failed" } : {}),
+        },
+      ],
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const beforeSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
+    assert.deepEqual(beforeSettle, [], `${stopReason} owning turn must not emit handledInTurn before input-error`);
+    listener({ type: "agent_settled" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const afterSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
+    assert.equal(afterSettle.length, 1, `${stopReason} owning turn must still bridge the completion after settle`);
+    assert.equal(afterSettle[0].phase, "completed");
+    assert.equal(afterSettle[0].completionKey, `task-failed-owning-${stopReason}`);
+    assert.equal(afterSettle[0].handledInTurn, undefined);
+    const errorIndex = events.findIndex((event) => event.type === "input-error");
+    assert.ok(errorIndex >= 0, `${stopReason} owning turn must emit input-error`);
+    assert.ok(errorIndex < events.indexOf(afterSettle[0]), "completion bridge must not precede input-error on a failed owning turn");
+  }
+});
+
+test("Pi retrying owning turn can still handle the completion after a later successful agent_end", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-retry-owning-complete",
+    prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  await session.prompt({ inputId: "pi-retry-owning-input", kind: "user", text: "work", attempt: 0 });
+  listener({ type: "turn_start" });
+  const canonical = buildCanonicalPiSubagentAssistantMessage({
+    taskId: "task-retry-owning-1",
+    toolUseId: "tool-use-retry-owning-1",
+    outputFile: "/tmp/task-retry-owning-1.output",
+    summary: "Agent \"fixture\" completed",
+    result: "Fixture result.",
+  });
+  listener({
+    type: "agent_end",
+    willRetry: true,
+    messages: [canonical, { role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter((event) => event.type === "runtime-observation" && event.completionKey), [],
+    "retrying owning turn must not ack the completion before a successful agent_end");
+  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
+  await new Promise((resolve) => setImmediate(resolve));
+  const handled = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
+  assert.equal(handled.length, 1);
+  assert.equal(handled[0].handledInTurn, true);
+  listener({ type: "agent_settled" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
+  assert.equal(afterSettle.length, 1, "successful retry must not emit a second wake bridge after settle");
+});
+
 test("Pi assistant text lookalikes do not trigger the late completion bridge", async () => {
   let listener;
   const sdk = {

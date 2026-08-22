@@ -635,6 +635,7 @@ test("RuntimeHost does not let an exhausted background wake block a later comple
     assert.equal(wakeAttempts, 7, "after the exhausted head is dropped the later completion must still wake");
     assert.equal(session.prompts.filter(isBackgroundCompletionWake).length, 7);
     assert.equal(session.prompts.at(-1).kind, "wake");
+    assert.equal(host.getDispatchedSubagent("cli_piWakeSkipA1", "task-skip-head")?.wakeState, "pending");
   } finally {
     await host.shutdown("done");
   }
@@ -2336,6 +2337,7 @@ test("RuntimeHost does not orphan a consumed completed result after the Pi recor
     const record = host.getDispatchedSubagent("cli_piConsumedA1", "task-consumed-1");
     assert.equal(record?.status, "completed");
     assert.equal(record?.wakeState, "acknowledged");
+    assert.equal(fs.existsSync(dispatched.recordFile), false, "acknowledged consumed sidecar must be retired");
   } finally {
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });
@@ -2479,6 +2481,223 @@ test("RuntimeHost reconciles persisted dispatched tasks after a failed startup l
     assert.match(session.prompts[0].text, /task task-recreate-1 status=orphaned/);
   } finally {
     await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost owner-tags sidecars so a foreign session sweep cannot delete them", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-sidecar-owner-"));
+  const session = new FakeSession();
+  let createdEnv;
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession(input) { createdEnv = input.env; return session; },
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piOwnerSweepA1", name: "owner", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piOwnerSweepA1", { message_id: "om_pi_owner_sweep", chat_id: "oc_pi_owner_sweep", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-owner-1", outputFile: path.join(root, "task-owner-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piOwnerSweepA1", "task-owner-1");
+    assert.ok(dispatched?.recordFile);
+    const sidecar = JSON.parse(fs.readFileSync(dispatched.recordFile, "utf8"));
+    assert.equal(sidecar.owner, createdEnv.LARKIN_PI_SESSION_OWNER);
+    assert.ok(sidecar.owner);
+    const foreignRemoved = sweepAbsentPiSubagentRecordFiles(
+      path.dirname(dispatched.recordFile),
+      () => undefined,
+      { owner: "other-session" },
+    );
+    assert.deepEqual(foreignRemoved, []);
+    assert.ok(fs.existsSync(dispatched.recordFile), "another Pi session must not delete this session's sidecar");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost force-missing reconciles dispatched tasks on resetSession", async () => {
+  const sessions = [];
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession() {
+      const session = new FakeSession();
+      session.sessionId = `reset-orphan-${sessions.length + 1}`;
+      sessions.push(session);
+      return session;
+    },
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentRecordProbe: () => "present",
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piResetOrphanA1", name: "reset-orphan", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    sessions[0].emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-reset-1", outputFile: "/tmp/task-reset-1.output",
+    });
+    assert.equal(host.getDispatchedSubagent("cli_piResetOrphanA1", "task-reset-1")?.status, "dispatched");
+    await host.resetSession("cli_piResetOrphanA1");
+    assert.equal(host.getDispatchedSubagent("cli_piResetOrphanA1", "task-reset-1")?.status, "orphaned");
+    await waitForPromptCount(sessions[1], 1);
+    assert.equal(sessions[1].prompts[0].kind, "wake");
+    assert.match(sessions[1].prompts[0].text, /task task-reset-1 status=orphaned/);
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost force-missing reconciles dispatched tasks on recoverContextOverflow", async () => {
+  const sessions = [];
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession() {
+      const session = new FakeSession();
+      session.sessionId = `overflow-orphan-${sessions.length + 1}`;
+      sessions.push(session);
+      return session;
+    },
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentRecordProbe: () => "present",
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piOverflowOrphanA1", name: "overflow-orphan", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    const receipt = await host.deliver("cli_piOverflowOrphanA1", {
+      message_id: "om_pi_overflow_orphan", chat_id: "oc_pi_overflow_orphan", content: "start",
+    });
+    sessions[0].emit({ type: "turn-start" });
+    sessions[0].emit({ type: "turn-end" });
+    sessions[0].emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-overflow-1", outputFile: "/tmp/task-overflow-1.output",
+    });
+    assert.equal(host.getDispatchedSubagent("cli_piOverflowOrphanA1", "task-overflow-1")?.status, "dispatched");
+    const idleDeadline = Date.now() + 1_000;
+    while (host.isBusy?.("cli_piOverflowOrphanA1") && Date.now() < idleDeadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await host.recoverContextOverflow("cli_piOverflowOrphanA1", receipt.deliveryId, "pi session gone");
+    assert.equal(host.getDispatchedSubagent("cli_piOverflowOrphanA1", "task-overflow-1")?.status, "orphaned");
+    await waitForPromptCount(sessions[1], 1);
+    assert.equal(sessions[1].prompts[0].kind, "wake");
+    assert.match(sessions[1].prompts[0].text, /task task-overflow-1 status=orphaned/);
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost keeps auth-dropped terminal wakes pending so a restart can requeue them", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-auth-drop-"));
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piAuthDropA1", name: "auth-drop", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piAuthDropA1", { message_id: "om_pi_auth_drop", chat_id: "oc_pi_auth_drop", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed",
+      completionKey: "task-auth-drop-1",
+    });
+    await waitForPromptCount(session, 2);
+    const wake = session.prompts[1];
+    session.emit({ type: "turn-start" });
+    session.emit({
+      type: "input-error", inputId: wake.inputId, retryable: false, willRetry: false,
+      errorCategory: "auth", message: "provider authentication failed",
+    });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(host.getDispatchedSubagent("cli_piAuthDropA1", "task-auth-drop-1")?.wakeState, "pending");
+  } finally {
+    await host.shutdown("done");
+  }
+  const restarted = new FakeSession();
+  const host2 = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return restarted; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host2.start([{ agentId: "cli_piAuthDropA1", name: "auth-drop", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await waitForPromptCount(restarted, 1);
+    assert.equal(restarted.prompts[0].kind, "wake");
+    assert.equal(host2.getDispatchedSubagent("cli_piAuthDropA1", "task-auth-drop-1")?.wakeState, "pending");
+  } finally {
+    await host2.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost keeps exhausted terminal wakes pending so a restart can requeue them", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-exhausted-drop-"));
+  let wakeAttempts = 0;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (isBackgroundCompletionWake(input)) {
+      wakeAttempts += 1;
+      return { status: "rejected", inputId: input.inputId, retryable: true, reason: "still failing" };
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 15, maxDelayMs: 20, maxAttempts: 1 },
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piExhaustedDropA1", name: "exhausted-drop", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piExhaustedDropA1", { message_id: "om_pi_exhausted_drop", chat_id: "oc_pi_exhausted_drop", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed",
+      completionKey: "task-exhausted-drop-1",
+    });
+    const deadline = Date.now() + 400;
+    while (wakeAttempts < 6 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(wakeAttempts, 6);
+    assert.equal(host.getDispatchedSubagent("cli_piExhaustedDropA1", "task-exhausted-drop-1")?.wakeState, "pending");
+  } finally {
+    await host.shutdown("done");
+  }
+  const restarted = new FakeSession();
+  const host2 = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return restarted; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host2.start([{ agentId: "cli_piExhaustedDropA1", name: "exhausted-drop", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await waitForPromptCount(restarted, 1);
+    assert.equal(restarted.prompts[0].kind, "wake");
+    assert.equal(host2.getDispatchedSubagent("cli_piExhaustedDropA1", "task-exhausted-drop-1")?.wakeState, "pending");
+  } finally {
+    await host2.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

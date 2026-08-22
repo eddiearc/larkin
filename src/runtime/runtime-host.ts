@@ -39,6 +39,8 @@ import {
   reconcileDispatchedSubagents,
   taskIdsFromCompletionKey,
   undeliveredTerminalWakeKeys,
+  PI_SUBAGENT_SESSION_OWNER_ENV,
+  retireConsumedPiSubagentRecord,
   writeDispatchedSubagentLedger,
   writeDispatchedSubagentRecordFile,
 } from "./pi-subagent-ledger.js";
@@ -120,6 +122,7 @@ interface ManagedAgent {
   backgroundCompletionRetryTimer: NodeJS.Timeout | null;
   subagentLedger: DispatchedSubagentLedger;
   subagentReconcileTimer: NodeJS.Timeout | null;
+  piSessionOwner?: string;
 }
 
 export interface RuntimeHost {
@@ -307,7 +310,10 @@ export function createRuntimeHost(options: {
   const runtimeEnv = (config: AgentRuntimeConfig, generation?: string): NodeJS.ProcessEnv => {
     const base: NodeJS.ProcessEnv = {
       LARKIN_AGENT_ID: config.agentId,
-    ...(generation ? { LARKIN_RUNTIME_OBSERVATION_GENERATION: generation } : {}),
+    ...(generation ? {
+      LARKIN_RUNTIME_OBSERVATION_GENERATION: generation,
+      [PI_SUBAGENT_SESSION_OWNER_ENV]: generation,
+    } : {}),
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
     ...(config.piDistribution ? { LARKIN_PI_DISTRIBUTION: config.piDistribution } : {}),
@@ -749,7 +755,7 @@ export function createRuntimeHost(options: {
     }
     agent.backgroundCompletionRejectStreak = 0;
     clearBackgroundCompletionRetryTimer(agent);
-    acknowledgeSubagentWake(agent, completionKey);
+    // Leave the durable wake pending so a later restart can requeue it.
   };
 
   const scheduleBackgroundCompletionRetry = (agent: ManagedAgent): void => {
@@ -910,12 +916,23 @@ export function createRuntimeHost(options: {
     if (next === agent.subagentLedger) return;
     agent.subagentLedger = next;
     persistSubagentLedger(agent);
+    for (const taskId of taskIdsFromCompletionKey(completionKey)) {
+      retireConsumedPiSubagentRecord(lookupDispatchedSubagent(agent.subagentLedger, taskId)?.recordFile);
+    }
   };
 
   const enqueueUndeliveredTerminalWakes = (agent: ManagedAgent): void => {
     for (const key of undeliveredTerminalWakeKeys(agent.subagentLedger)) {
+      agent.backgroundCompletionKeys.delete(key);
+      for (const taskId of taskIdsFromCompletionKey(key)) agent.backgroundCompletionKeys.delete(taskId);
       noteBackgroundCompletion(agent, key);
     }
+  };
+
+  const reconcileAfterSessionSwap = (agent: ManagedAgent): void => {
+    reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
+    enqueueUndeliveredTerminalWakes(agent);
+    if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
   };
 
   const loadSubagentLedger = (stateDir: string | undefined): DispatchedSubagentLedger => {
@@ -946,7 +963,7 @@ export function createRuntimeHost(options: {
   };
 
   const recordDispatchedSubagent = (agent: ManagedAgent, taskId: string, outputFile?: string): void => {
-    const recordFile = writeDispatchedSubagentRecordFile(agent.config.stateDir, taskId);
+    const recordFile = writeDispatchedSubagentRecordFile(agent.config.stateDir, taskId, agent.piSessionOwner);
     agent.subagentLedger = noteDispatchedSubagent(agent.subagentLedger, { taskId, outputFile, recordFile });
     persistSubagentLedger(agent);
     armSubagentReconcileTimer(agent);
@@ -1452,15 +1469,17 @@ export function createRuntimeHost(options: {
     });
     const generation = ++agent.generation;
     let completedSession: RuntimeSession | null = null;
+    const sessionEnv = runtimeEnv(agent.config, `${agent.launchId}:${generation}`);
     agent.starting = agent.adapter.createSession({
       agentId: agent.config.agentId, model: agent.config.model, reasoningEffort: agent.config.effort || null,
       workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir,
       resumeSessionId: agent.config.sessionId || null, standingPrompt,
-      env: runtimeEnv(agent.config, `${agent.launchId}:${generation}`),
+      env: sessionEnv,
     }).then((session) => {
       completedSession = session;
       if (agent.stopped || generation !== agent.generation) { void session.close("stale creation"); throw new Error("stale runtime session creation"); }
       agent.session = session;
+      agent.piSessionOwner = sessionEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
       session.subscribe((event) => observe(agent, session, event));
       if (agent.session !== session) return session;
       if (session.sessionId) {
@@ -1580,7 +1599,9 @@ export function createRuntimeHost(options: {
         ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
     }
     emit({ type: "agent-status", agentId, status: "active", readiness });
+    agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
     await oldSession.close("Pi context fallback committed").catch((error) => log("previous Pi session close after fallback failed", String(error)));
+    reconcileAfterSessionSwap(agent);
     const proactive = proactivelyCompactPiAtIdle(agent, fresh);
     void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
       if (outcome !== "failed") return retryPending(agent);
@@ -1669,12 +1690,10 @@ export function createRuntimeHost(options: {
           if (!candidate.authFailureActive) {
             emit({ type: "agent-status", agentId: config.agentId, status: "active", readiness: candidate.readiness ?? readiness });
           }
+          candidate.piSessionOwner = stageEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
           // Commit clears any inherited backoff timer; reschedule so a queued
           // completion still drains on the new session.
-          reconcileSubagentLedger(candidate, { forceMissing: true, missingReason: "pi session gone" });
-          if (candidate.backgroundCompletionQueue.length > 0) {
-            scheduleBackgroundCompletionDrain(candidate);
-          }
+          reconcileAfterSessionSwap(candidate);
           await previous.session?.close("runtime candidate committed")
             .catch((error) => log("previous runtime close after candidate commit failed", String(error)));
         },
@@ -1756,8 +1775,10 @@ export function createRuntimeHost(options: {
           ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
       }
       emit({ type: "agent-status", agentId, status: "active", readiness });
+      agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
       await oldSession.close("fresh session reset committed")
         .catch((error) => log("previous runtime close after fresh reset failed", String(error)));
+      reconcileAfterSessionSwap(agent);
       return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
         runtimeReady: true, pendingCount: 0, sessionId: fresh.sessionId };
     },
@@ -1887,8 +1908,10 @@ export function createRuntimeHost(options: {
         }
         emit({ type: "agent-status", agentId, status: "active", readiness });
         durableRollback = null;
+        agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
         await oldSession.close("context-window recovery committed")
           .catch((error) => log("previous runtime close after context-window recovery failed", String(error)));
+        reconcileAfterSessionSwap(agent);
         const proactive = proactivelyCompactPiAtIdle(agent, fresh);
         void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
           if (outcome !== "failed") return retryPending(agent);

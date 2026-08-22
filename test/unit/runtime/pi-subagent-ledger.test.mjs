@@ -8,6 +8,7 @@ import {
   extractBackgroundPiSubagentDispatch,
   getDispatchedSubagent,
   ledgerFilePath,
+  ledgerStatusFromPiSubagentRecord,
   dispatchedSubagentRecordFile,
   noteDispatchedSubagent,
   noteDispatchedSubagentTerminal,
@@ -259,6 +260,7 @@ test("consumed completed result is bridged into the sidecar and is not orphaned"
     assert.deepEqual(result.orphaned.map((task) => task.taskId), ["task-missing"]);
     assert.equal(getDispatchedSubagent(result.ledger, "task-consumed")?.status, "completed");
     assert.equal(getDispatchedSubagent(result.ledger, "task-consumed")?.wakeState, "acknowledged");
+    assert.equal(fs.existsSync(consumedFile), false, "acknowledged consumed sidecar must be retired");
     assert.equal(getDispatchedSubagent(result.ledger, "task-missing")?.status, "orphaned");
     assert.deepEqual(undeliveredTerminalWakeKeys(result.ledger), ["task-missing"]);
 
@@ -290,4 +292,49 @@ test("sweep removes record sidecars only after the Pi record is gone", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("sweep leaves another session's owner-tagged sidecar in place", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-owner-"));
+  try {
+    const mine = writeDispatchedSubagentRecordFile(root, "task-mine", "session-a");
+    const theirs = writeDispatchedSubagentRecordFile(root, "task-theirs", "session-b");
+    const untagged = writeDispatchedSubagentRecordFile(root, "task-untagged");
+    const removed = sweepAbsentPiSubagentRecordFiles(
+      path.dirname(mine),
+      () => undefined,
+      { owner: "session-a" },
+    );
+    assert.deepEqual(removed, ["task-mine"]);
+    assert.equal(fs.existsSync(mine), false);
+    assert.ok(fs.existsSync(theirs), "a staged session must not delete another session's sidecar");
+    assert.ok(fs.existsSync(untagged), "untagged sidecars are not owned by the sweeping session");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ledger cap evicts acknowledged terminals before active or pending-wake records", () => {
+  let ledger = emptyDispatchedSubagentLedger();
+  for (let index = 0; index < 2048; index += 1) {
+    const taskId = `task-ack-${index}`;
+    ledger = noteDispatchedSubagentTerminal(ledger, { taskId, status: "completed", now: index + 1 });
+    ledger = noteDispatchedSubagentWakeAcknowledged(ledger, { completionKey: taskId, now: index + 1 });
+  }
+  ledger = noteDispatchedSubagent(ledger, { taskId: "task-keep-dispatched", now: 3000 });
+  ledger = noteDispatchedSubagentTerminal(ledger, {
+    taskId: "task-keep-pending", status: "failed", wakeKey: "task-keep-pending", now: 3001,
+  });
+  assert.equal(getDispatchedSubagent(ledger, "task-keep-dispatched")?.status, "dispatched");
+  assert.equal(getDispatchedSubagent(ledger, "task-keep-pending")?.wakeState, "pending");
+  assert.equal(getDispatchedSubagent(ledger, "task-ack-0"), null);
+  assert.equal(getDispatchedSubagent(ledger, "task-ack-1"), null);
+  assert.ok(getDispatchedSubagent(ledger, "task-ack-2"));
+  assert.equal(ledger.tasks.length, 2048);
+});
+
+test("consumed Pi record mapper treats aborted as timed_out and stopped as cancelled", () => {
+  assert.equal(ledgerStatusFromPiSubagentRecord({ status: "aborted", resultConsumed: true }), "timed_out");
+  assert.equal(ledgerStatusFromPiSubagentRecord({ status: "stopped", resultConsumed: true }), "cancelled");
+  assert.equal(ledgerStatusFromPiSubagentRecord({ status: "error", resultConsumed: true }), "failed");
 });

@@ -451,7 +451,7 @@ test("Pi failed and aborted late notifications still bridge a completion key", a
   assert.deepEqual(observations.map((event) => event.phase), ["completed", "completed"]);
   assert.deepEqual(observations.map((event) => event.completionKey), ["task-aborted-bridge", "task-error-bridge"]);
   assert.deepEqual(observations.map((event) => event.completionStatuses), [
-    { "task-aborted-bridge": "cancelled" },
+    { "task-aborted-bridge": "timed_out" },
     { "task-error-bridge": "failed" },
   ]);
 });

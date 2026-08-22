@@ -5,10 +5,16 @@ import { bundledPiSubagentExtensionPath } from "./pi-subagent-injection.js";
 
 /**
  * Load the prebuilt, patched subagent bundle shipped in dist/ rather than the
- * package-manager copy. npm does not apply Bun's patchedDependencies, so a
- * direct package import would reintroduce the unbounded upstream wait.
+ * package-manager copy. Standalone binaries additionally load the patched
+ * package through Bun's compiled module graph, while normal package installs
+ * continue to use the prebuilt patched bundle.
  */
 async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
+  if (process.env.LARKIN_STANDALONE === "1") {
+    const loaded = await import("@tintinweb/pi-subagents/dist/index.js") as unknown as { default?: InlineExtension };
+    if (!loaded.default) throw new Error("Larkin bounded pi-subagents package is invalid; refusing to start builtin Pi");
+    return loaded.default;
+  }
   const bundle = bundledPiSubagentExtensionPath(process.env.LARKIN_CONFIG_DIR);
   if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start builtin Pi");
   const loaded = await import(pathToFileURL(bundle).href) as { default?: InlineExtension };

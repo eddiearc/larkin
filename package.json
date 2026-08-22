@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "private": false,
   "larkinPackageRole": "npm-published",
   "files": [
@@ -114,5 +114,8 @@
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
+  },
+  "patchedDependencies": {
+    "@tintinweb/pi-subagents@0.14.3": "patches/@tintinweb%2Fpi-subagents@0.14.3.patch"
   }
 }

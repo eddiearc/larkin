@@ -16,7 +16,7 @@ import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } fr
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v22";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v23";
 
 /**
  * Agent 间协作唤醒引导（issue #75）：纯文本 @ 不会产生飞书 mention 事件，
@@ -126,6 +126,7 @@ export class ContextPromptBuilder {
         "2. The tool returns an agent id immediately. Report it to the user and end the turn.",
         "3. Do NOT poll or sleep; a completion notification arrives automatically.",
         "4. On the notification, check the Inbox, then publish exactly one final summary.",
+        "If you explicitly use get_subagent_result with wait: true, make at most one bounded wait call per turn. If it returns timedOut: true, do not loop or call wait again in the same turn; yield and let the completion notification wake you.",
         "Forbidden pattern (never acceptable): `nohup sh -c '...' > /tmp/x.out 2>&1 &`, `sleep N; cat ...`, disown, or any shell background substitute. These bypass subagent isolation.",
         "Keep corrections, approvals, short commands, and Feishu writes in the foreground; do not delegate them.",
         "Parallel independent tasks: when the user clearly asks for two or more independent tasks with no dependencies between them, delegate EACH task to its own background subagent in a single message with multiple Agent tool calls (one per task, all with run_in_background: true), report every job id, and end the turn. Do not run them one-by-one in the foreground and do not merge them into one subagent.",

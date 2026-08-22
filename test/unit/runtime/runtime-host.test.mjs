@@ -2611,6 +2611,101 @@ test("RuntimeHost acknowledges an in-turn completion and does not wake again aft
   }
 });
 
+test("RuntimeHost does not ack a completion from a failed owning turn so retry and restart can still wake", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-failed-owning-"));
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piFailedOwningA1", name: "failed-owning", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piFailedOwningA1", { message_id: "om_pi_failed_owning", chat_id: "oc_pi_failed_owning", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-failed-owning-1", outputFile: path.join(root, "task-failed-owning-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piFailedOwningA1", "task-failed-owning-1");
+    assert.ok(dispatched?.recordFile);
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed",
+      completionKey: "task-failed-owning-1",
+      completionStatuses: { "task-failed-owning-1": "completed" },
+    });
+    session.emit({
+      type: "input-error", inputId: session.prompts[0].inputId, retryable: true, willRetry: false,
+      message: "Pi assistant turn aborted",
+    });
+    session.emit({ type: "turn-end" });
+    await waitForPromptCount(session, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.match(session.prompts[1].text, /task task-failed-owning-1 status=completed/);
+    assert.equal(host.getDispatchedSubagent("cli_piFailedOwningA1", "task-failed-owning-1")?.wakeState, "pending");
+    assert.ok(fs.existsSync(dispatched.recordFile), "failed owning turn must not delete the sidecar before a successful wake");
+  } finally {
+    await host.shutdown("done");
+  }
+  const restarted = new FakeSession();
+  const host2 = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return restarted; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host2.start([{ agentId: "cli_piFailedOwningA1", name: "failed-owning", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await waitForPromptCount(restarted, 1);
+    assert.equal(restarted.prompts[0].kind, "wake");
+    assert.match(restarted.prompts[0].text, /task task-failed-owning-1 status=completed/);
+    assert.equal(host2.getDispatchedSubagent("cli_piFailedOwningA1", "task-failed-owning-1")?.wakeState, "pending");
+    const record = host2.getDispatchedSubagent("cli_piFailedOwningA1", "task-failed-owning-1");
+    assert.ok(record?.recordFile && fs.existsSync(record.recordFile), "restart must still see the unacked sidecar");
+  } finally {
+    await host2.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost drops queued fallbacks after in-turn handling so drain does not start a redundant wake", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-in-turn-drop-fallback-"));
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piInTurnDropA1", name: "in-turn-drop", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piInTurnDropA1", { message_id: "om_pi_in_turn_drop", chat_id: "oc_pi_in_turn_drop", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-in-turn-drop-1", outputFile: path.join(root, "task-in-turn-drop-1.output"),
+    });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed",
+      completionKey: "task-in-turn-drop-1",
+      completionStatuses: { "task-in-turn-drop-1": "completed" },
+    });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed",
+      completionKey: "task-in-turn-drop-1",
+      completionStatuses: { "task-in-turn-drop-1": "completed" },
+      handledInTurn: true,
+    });
+    session.emit({ type: "turn-end" });
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 1, "in-turn handling must drop the queued fallback before drain");
+    assert.equal(host.getDispatchedSubagent("cli_piInTurnDropA1", "task-in-turn-drop-1")?.wakeState, "acknowledged");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeHost closes the failed session before force-missing reconcile on replaceSession", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-replace-close-first-"));
   const sessions = [];

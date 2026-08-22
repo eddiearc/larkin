@@ -913,6 +913,15 @@ export function createRuntimeHost(options: {
     writeDispatchedSubagentLedger(ledgerFilePath(effectivePiStateDir(agent.config)), agent.subagentLedger);
   };
 
+  const dropQueuedBackgroundCompletionFallback = (agent: ManagedAgent, completionKey: string): void => {
+    const keys = new Set([completionKey, ...taskIdsFromCompletionKey(completionKey)]);
+    for (let index = agent.backgroundCompletionQueue.length - 1; index >= 0; index -= 1) {
+      const queued = agent.backgroundCompletionQueue[index];
+      if (queued && keys.has(queued)) agent.backgroundCompletionQueue.splice(index, 1);
+    }
+    for (const key of keys) agent.backgroundCompletionKeys.add(key);
+  };
+
   const acknowledgeSubagentWake = (agent: ManagedAgent, completionKey: string): void => {
     const next = noteDispatchedSubagentWakeAcknowledged(agent.subagentLedger, { completionKey });
     if (next === agent.subagentLedger) return;
@@ -1378,6 +1387,7 @@ export function createRuntimeHost(options: {
         recordTerminalSubagentNotification(agent, event.completionKey, event.completionStatuses);
         if (event.handledInTurn === true) {
           acknowledgeSubagentWake(agent, event.completionKey);
+          dropQueuedBackgroundCompletionFallback(agent, event.completionKey);
         } else {
           noteBackgroundCompletion(agent, event.completionKey);
         }

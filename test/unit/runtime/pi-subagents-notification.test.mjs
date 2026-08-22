@@ -5,6 +5,7 @@ import {
   buildCanonicalPiSubagentNotificationContent,
   extractCanonicalPiSubagentCompletionKeyFromMessages,
   extractCanonicalPiSubagentNotification,
+  ledgerStatusFromPiNotificationStatus,
 } from "../../../dist/runtime/pi-subagents-notification.mjs";
 
 function mixedContent(blocks) {
@@ -156,4 +157,13 @@ test("queued or running notifications do not produce a completion key", () => {
     }),
   ]);
   assert.equal(key, null);
+});
+
+test("canonical notification statuses map onto ledger terminal states", () => {
+  assert.equal(ledgerStatusFromPiNotificationStatus("Done"), "completed");
+  assert.equal(ledgerStatusFromPiNotificationStatus("Error: provider failed"), "failed");
+  assert.equal(ledgerStatusFromPiNotificationStatus("Aborted (max turns exceeded)"), "timed_out");
+  assert.equal(ledgerStatusFromPiNotificationStatus("aborted"), "timed_out");
+  assert.equal(ledgerStatusFromPiNotificationStatus("Stopped"), "cancelled");
+  assert.equal(ledgerStatusFromPiNotificationStatus("Wrapped up (turn limit)"), "timed_out");
 });

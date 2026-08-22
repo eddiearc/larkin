@@ -22,7 +22,12 @@ import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
-import { extractCanonicalPiSubagentCompletionKeyFromMessages } from "./pi-subagents-notification.js";
+import {
+  extractCanonicalPiSubagentNotification,
+  ledgerStatusFromPiNotificationStatus,
+} from "./pi-subagents-notification.js";
+import { resolvePiSubagentRecordWatchdogExtensionArg } from "./pi-subagent-record-watchdog-injection.js";
+import { effectivePiStateDir, extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
   classifyRuntimePrerequisite,
@@ -525,6 +530,7 @@ class PiSession extends EventSession {
   private readonly observedCompletedEpochs = new Set<number>();
   private readonly observedBackgroundCompletionKeys = new Set<string>();
   private readonly pendingUnownedCompletionKeys = new Set<string>();
+  private readonly pendingUnownedCompletionStatuses = new Map<string, Record<string, "completed" | "failed" | "cancelled" | "timed_out">>();
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
@@ -618,6 +624,7 @@ class PiSession extends EventSession {
       this.observedCompletedEpochs.clear();
       this.observedBackgroundCompletionKeys.clear();
       this.pendingUnownedCompletionKeys.clear();
+      this.pendingUnownedCompletionStatuses.clear();
       this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
@@ -662,13 +669,33 @@ class PiSession extends EventSession {
         this.observedCompletedEpochs.add(this.activeEpoch);
         this.emitObservation("completed");
       }
-      const completionNotificationKey = extractCanonicalPiSubagentCompletionKeyFromMessages(event.messages);
-      if (completionNotificationKey
-        && this.activeEpoch === null
-        && !this.observedBackgroundCompletionKeys.has(completionNotificationKey)) {
-        // agent_end can still have an active Pi session. Prompting before
-        // unowned agent_settled is rejected as "Agent is already processing".
-        this.pendingUnownedCompletionKeys.add(completionNotificationKey);
+      const completionNotification = extractCanonicalPiSubagentNotification(event.messages);
+      if (completionNotification && !this.observedBackgroundCompletionKeys.has(completionNotification.key)) {
+        const completionStatuses = Object.fromEntries(completionNotification.notifications.map((notification) => [
+          notification.taskId,
+          ledgerStatusFromPiNotificationStatus(notification.status),
+        ]));
+        const owningTurnFailed = event.willRetry === true
+          || this.finalAssistantStopReason === "error"
+          || this.finalAssistantStopReason === "aborted";
+        if (this.activeEpoch === null || owningTurnFailed) {
+          // Unowned agent_end still has an active Pi session, so prompting
+          // before settle is rejected as "Agent is already processing".
+          // A failed or retrying owned turn also did not process the
+          // notification; do not emit handledInTurn so RuntimeHost can still
+          // wake after input-error, retry, or restart.
+          this.pendingUnownedCompletionKeys.add(completionNotification.key);
+          this.pendingUnownedCompletionStatuses.set(completionNotification.key, completionStatuses);
+        } else {
+          // Already visible in the owned turn. Persist as acknowledged; do not
+          // schedule another wake after the parent turn settles.
+          this.observedBackgroundCompletionKeys.add(completionNotification.key);
+          this.emitObservation("completed", {
+            completionKey: completionNotification.key,
+            completionStatuses,
+            handledInTurn: true,
+          });
+        }
       }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
@@ -731,6 +758,13 @@ class PiSession extends EventSession {
         this.toolCallOpen = false;
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_result" });
       }
+      const dispatched = extractBackgroundPiSubagentDispatch(event);
+      if (dispatched) {
+        this.emitObservation("background_dispatched", {
+          taskId: dispatched.taskId,
+          ...(dispatched.outputFile ? { outputFile: dispatched.outputFile } : {}),
+        });
+      }
     }
     else if (event?.type === "message_update" && event.assistantMessageEvent?.delta) {
       if (!this.firstOutputObserved) {
@@ -746,13 +780,21 @@ class PiSession extends EventSession {
     for (const completionKey of this.pendingUnownedCompletionKeys) {
       if (this.observedBackgroundCompletionKeys.has(completionKey)) continue;
       this.observedBackgroundCompletionKeys.add(completionKey);
-      this.emitObservation("completed", { completionKey });
+      const completionStatuses = this.pendingUnownedCompletionStatuses.get(completionKey);
+      this.emitObservation("completed", {
+        completionKey,
+        ...(completionStatuses ? { completionStatuses } : {}),
+      });
     }
     this.pendingUnownedCompletionKeys.clear();
+    this.pendingUnownedCompletionStatuses.clear();
   }
 
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
     reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; completionKey?: string;
+    completionStatuses?: Record<string, "completed" | "failed" | "cancelled" | "timed_out">;
+    handledInTurn?: boolean;
+    taskId?: string; outputFile?: string;
   } = {}): void {
     const inputId = this.oldestOwnedInput();
     const observation = { type: "runtime-observation" as const, runtime: "pi" as const,
@@ -997,12 +1039,17 @@ export function resolvePiProcessExtensionArgs(input: {
 }, resolvers: {
   subagents?: typeof resolvePiSubagentExtensionArg;
   bashTimeout?: typeof resolvePiBashTimeoutExtensionArg;
+  recordWatchdog?: typeof resolvePiSubagentRecordWatchdogExtensionArg;
 } = {}): string[] {
   // Builtin factories are passed directly to Pi main on every platform. The platform
   // field makes that invariant explicit and testable without changing process.platform.
   if (input.distribution === "builtin") return [];
   const resolverInput = { distribution: "external" as const, piCommand: input.piCommand, env: input.env };
   const args: string[] = [];
+  // Watchdog must load before the subagent extension so session_shutdown still
+  // sees AgentManager.getRecord and can bridge consumed or terminal state.
+  const recordWatchdog = (resolvers.recordWatchdog ?? resolvePiSubagentRecordWatchdogExtensionArg)(resolverInput);
+  if (recordWatchdog) args.push("-e", recordWatchdog);
   const subagents = (resolvers.subagents ?? resolvePiSubagentExtensionArg)(resolverInput);
   if (subagents) args.push("-e", subagents);
   const bashTimeout = (resolvers.bashTimeout ?? resolvePiBashTimeoutExtensionArg)(resolverInput);
@@ -1013,7 +1060,7 @@ export function resolvePiProcessExtensionArgs(input: {
 async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: NativeRuntimeAdapterDependencies,
   spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike,
   productionSpawn = true): Promise<PiSessionProcessLike> {
-  const stateRoot = input.stateDir ?? path.join(input.workspaceDir, ".larkin");
+  const stateRoot = effectivePiStateDir(input);
   const mergedEnv: NodeJS.ProcessEnv = { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" };
   assertNoProjectPiCompactionOverride(input.workspaceDir);
   const ownedPiDirectory = mergedEnv.LARKIN_CONFIG_DIR

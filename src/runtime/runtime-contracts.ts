@@ -40,8 +40,12 @@ export type NormalizedRuntimeEvent =
   | { type: "session-init"; sessionId: string; model?: string; reasoningEffort?: string }
   | { type: "runtime-observation"; runtime: "pi"; distribution: "builtin" | "external";
       phase: "rpc_submit" | "rpc_accepted" | "compaction_start" | "compaction_end" | "retry_progress"
-        | "rpc_timeout" | "rpc_error" | "turn_start" | "first_output" | "tool_call" | "tool_result" | "agent_end" | "completed" | "settled";
-      reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; inputId?: string; sessionId?: string; completionKey?: string }
+        | "rpc_timeout" | "rpc_error" | "turn_start" | "first_output" | "tool_call" | "tool_result" | "agent_end" | "completed" | "settled"
+        | "background_dispatched";
+      reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; inputId?: string; sessionId?: string; completionKey?: string;
+      completionStatuses?: Record<string, "completed" | "failed" | "cancelled" | "timed_out">;
+      handledInTurn?: boolean;
+      taskId?: string; outputFile?: string }
   | { type: "turn-start"; turnId?: string }
   | { type: "activity"; activity: "thinking" | "text" | "tool" | "internal"; text?: string; name?: string }
   | { type: "turn-end"; sessionId?: string; turnId?: string }

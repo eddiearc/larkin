@@ -110,11 +110,18 @@ function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsW
     const installedRoot = packageRoots.find((root) => fs.existsSync(root));
     if (!configured && !installedRoot) return "absent";
     if (!installedRoot) return "unbounded";
-    const capabilityFiles = [
-      path.join(installedRoot, "dist", "index.js"),
-      path.join(installedRoot, "src", "index.ts"),
-    ];
-    const hasCapability = capabilityFiles.some((file) => {
+    const packageManifest = JSON.parse(fs.readFileSync(path.join(installedRoot, "package.json"), "utf8")) as {
+      pi?: { extensions?: unknown };
+    };
+    const extensions = packageManifest.pi?.extensions;
+    if (!Array.isArray(extensions) || extensions.length === 0
+      || !extensions.every((entry): entry is string => typeof entry === "string" && entry.length > 0)) {
+      return "unbounded";
+    }
+    // Pi executes the entries declared by the package manifest. Do not trust a
+    // marker in a build artifact when the manifest points Pi at another file.
+    const capabilityFiles = extensions.map((entry) => path.resolve(installedRoot, entry));
+    const hasCapability = capabilityFiles.every((file) => {
       try { return fs.readFileSync(file, "utf8").includes(BOUNDED_WAIT_CAPABILITY); }
       catch { return false; }
     });

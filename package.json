@@ -5,6 +5,7 @@
   "larkinPackageRole": "npm-published",
   "files": [
     "dist/",
+    "patches/",
     "assets/",
     "scripts/npm/",
     "README.md",

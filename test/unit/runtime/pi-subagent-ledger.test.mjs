@@ -275,6 +275,59 @@ test("consumed completed result is bridged into the sidecar and is not orphaned"
   }
 });
 
+test("sweep persists an unconsumed terminal before eviction can delete the sidecar", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-evict-"));
+  try {
+    const recordFile = writeDispatchedSubagentRecordFile(root, "task-evict-1", "session-a");
+    const recordDir = path.dirname(recordFile);
+    const live = new Map([
+      ["task-evict-1", { status: "completed" }],
+    ]);
+    let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), {
+      taskId: "task-evict-1", recordFile, now: 10,
+    });
+
+    const firstRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId));
+    assert.deepEqual(firstRemoved, []);
+    assert.ok(fs.existsSync(recordFile));
+    const persisted = JSON.parse(fs.readFileSync(recordFile, "utf8"));
+    assert.equal(persisted.taskId, "task-evict-1");
+    assert.equal(persisted.status, "completed");
+    assert.equal(persisted.owner, "session-a");
+    assert.equal(persisted.resultConsumed, undefined);
+    assert.equal(readConsumedPiSubagentTerminal(recordFile), null);
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-evict-1", status: "dispatched", dispatchedAt: 10, lastActivityAt: 10, recordFile,
+    }), "present");
+
+    live.delete("task-evict-1");
+    const secondRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId));
+    assert.deepEqual(secondRemoved, [], "an evicted unconsumed terminal must keep its persisted sidecar");
+    assert.ok(fs.existsSync(recordFile));
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-evict-1", status: "dispatched", dispatchedAt: 10, lastActivityAt: 10, recordFile,
+    }), "present");
+
+    const result = reconcileDispatchedSubagents(ledger, {
+      probe: probePiSubagentRecord,
+      now: 11,
+    });
+    assert.deepEqual(result.orphaned, []);
+    assert.equal(getDispatchedSubagent(result.ledger, "task-evict-1")?.status, "dispatched");
+
+    ledger = noteDispatchedSubagentTerminal(result.ledger, {
+      taskId: "task-evict-1",
+      status: "completed",
+      wakeKey: "task-evict-1",
+      now: 12,
+    });
+    assert.equal(getDispatchedSubagent(ledger, "task-evict-1")?.status, "completed");
+    assert.equal(getDispatchedSubagent(ledger, "task-evict-1")?.wakeState, "pending");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("sweep removes record sidecars only after the Pi record is gone", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-sweep-"));
   try {

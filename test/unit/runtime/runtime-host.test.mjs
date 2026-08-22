@@ -8,6 +8,7 @@ import { createRuntimeHost as createProductionRuntimeHost } from "../../../dist/
 import {
   ledgerFilePath,
   sweepAbsentPiSubagentRecordFiles,
+  writeConsumedPiSubagentTerminal,
   writeDispatchedSubagentLedger,
 } from "../../../dist/runtime/pi-subagent-ledger.mjs";
 import { RuntimePrerequisiteError } from "../../../dist/runtime/runtime-readiness.mjs";
@@ -2338,6 +2339,103 @@ test("RuntimeHost does not orphan a consumed completed result after the Pi recor
     assert.equal(record?.status, "completed");
     assert.equal(record?.wakeState, "acknowledged");
     assert.equal(fs.existsSync(dispatched.recordFile), false, "acknowledged consumed sidecar must be retired");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost retires an acknowledged canonical sidecar without a consumed marker", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-canonical-sidecar-"));
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piCanonicalA1", name: "canonical", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piCanonicalA1", { message_id: "om_pi_canonical", chat_id: "oc_pi_canonical", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-canonical-1", outputFile: path.join(root, "task-canonical-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piCanonicalA1", "task-canonical-1");
+    assert.ok(dispatched?.recordFile);
+    assert.ok(fs.existsSync(dispatched.recordFile));
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed",
+      completionKey: "task-canonical-1",
+    });
+    await waitForPromptCount(session, 2);
+    assert.ok(fs.existsSync(dispatched.recordFile), "canonical sidecar stays until the wake is acknowledged");
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(host.getDispatchedSubagent("cli_piCanonicalA1", "task-canonical-1")?.status, "completed");
+    assert.equal(host.getDispatchedSubagent("cli_piCanonicalA1", "task-canonical-1")?.wakeState, "acknowledged");
+    assert.equal(fs.existsSync(dispatched.recordFile), false, "acknowledged canonical sidecar must be retired");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost closes the old Pi session before force-missing reconcile on stage commit", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-stage-close-first-"));
+  const sessions = [];
+  let host;
+  class CloseBridgesSession extends FakeSession {
+    async close(reason) {
+      this.closes.push(reason);
+      const dispatched = host.getDispatchedSubagent("cli_piStageCloseA1", "task-stage-close-1");
+      if (!dispatched?.recordFile || !fs.existsSync(dispatched.recordFile)) return;
+      writeConsumedPiSubagentTerminal(dispatched.recordFile, {
+        taskId: "task-stage-close-1",
+        status: "completed",
+      });
+    }
+  }
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession() {
+      const session = new CloseBridgesSession();
+      session.sessionId = `stage-close-${sessions.length + 1}`;
+      sessions.push(session);
+      return session;
+    },
+  };
+  host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  const base = {
+    agentId: "cli_piStageCloseA1", name: "stage-close", runtime: "pi", model: "old",
+    workspaceDir: "/tmp", stateDir: root,
+  };
+  try {
+    await host.start([base]);
+    await host.deliver(base.agentId, { message_id: "om_pi_stage_close", chat_id: "oc_pi_stage_close", content: "start" });
+    sessions[0].emit({ type: "turn-start" });
+    sessions[0].emit({ type: "turn-end" });
+    sessions[0].emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-stage-close-1", outputFile: path.join(root, "task-stage-close-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent(base.agentId, "task-stage-close-1");
+    assert.equal(dispatched?.status, "dispatched");
+    assert.ok(dispatched?.recordFile);
+    assert.equal(JSON.parse(fs.readFileSync(dispatched.recordFile, "utf8")).resultConsumed, undefined);
+    const staged = await host.stage({ ...base, model: "next" });
+    await staged.commit();
+    assert.deepEqual(sessions[0].closes, ["runtime candidate committed"]);
+    const record = host.getDispatchedSubagent(base.agentId, "task-stage-close-1");
+    assert.equal(record?.status, "completed");
+    assert.equal(record?.wakeState, "acknowledged");
+    assert.equal(fs.existsSync(dispatched.recordFile), false, "consumed sidecar retired after close-first reconcile");
   } finally {
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });

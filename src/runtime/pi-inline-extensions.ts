@@ -30,10 +30,13 @@ const bundledSubagentsExtension: InlineExtension = async (pi) => {
   else await extension.factory(pi);
 };
 
+// Watchdog must register session_shutdown before the bundled subagent extension
+// so the final sweep can still read AgentManager.getRecord and bridge consumed
+// terminals before manager teardown.
 export const BUILTIN_PI_EXTENSION_FACTORIES: readonly InlineExtension[] = Object.freeze([
+  piSubagentRecordWatchdog,
   bundledSubagentsExtension,
   bashTimeoutExtension,
-  piSubagentRecordWatchdog,
 ]);
 
 type PiMain = (args: string[], options?: MainOptions) => Promise<void>;

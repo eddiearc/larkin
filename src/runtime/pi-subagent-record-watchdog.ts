@@ -14,12 +14,14 @@ interface PiSubagentsManagerRegistry {
 
 /**
  * Pi-process watchdog: delete Larkin record sidecars once AgentManager no longer
- * has the in-memory task. A get_subagent_result consume suppresses the canonical
- * completion notification and later removes the successful record; bridge that
- * consumed terminal state into the sidecar before treating a missing getRecord
- * as a genuine orphan. Leftover transcripts are intentionally ignored. Sidecars
- * are owner-tagged so a staged Pi sharing LARKIN_STATE_DIR cannot sweep another
- * session's records.
+ * has the in-memory task. Persist any terminal AgentRecord — including an
+ * unconsumed completion Pi may evict after ten minutes — before treating a
+ * missing getRecord as a genuine orphan. A get_subagent_result consume also
+ * suppresses the canonical notification; bridge that consumed marker before
+ * cleanup can delete the sidecar. Leftover transcripts are intentionally
+ * ignored. Sidecars are owner-tagged so a staged Pi sharing LARKIN_STATE_DIR
+ * cannot sweep another session's records. This extension registers
+ * session_shutdown first so the final sweep still sees getRecord.
  */
 export default function piSubagentRecordWatchdog(pi: ExtensionAPI): void {
   const stateDir = process.env.LARKIN_STATE_DIR;

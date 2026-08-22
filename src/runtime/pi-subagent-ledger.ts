@@ -280,12 +280,16 @@ export function noteConsumedDispatchedSubagent(
   return noteDispatchedSubagentWakeAcknowledged(next, { completionKey: input.taskId, now });
 }
 
-export function isConsumedTerminalPiSubagentRecord(record: unknown): boolean {
+export function isTerminalPiSubagentRecord(record: unknown): boolean {
   if (!record || typeof record !== "object") return false;
-  const value = record as { status?: unknown; resultConsumed?: unknown };
-  if (value.resultConsumed !== true) return false;
-  return typeof value.status === "string" && value.status.length > 0
-    && value.status !== "running" && value.status !== "queued";
+  const status = (record as { status?: unknown }).status;
+  return typeof status === "string" && status.length > 0
+    && status !== "running" && status !== "queued";
+}
+
+export function isConsumedTerminalPiSubagentRecord(record: unknown): boolean {
+  if (!isTerminalPiSubagentRecord(record)) return false;
+  return (record as { resultConsumed?: unknown }).resultConsumed === true;
 }
 
 export function ledgerStatusFromPiSubagentRecord(record: unknown): ConsumedPiSubagentTerminalStatus {
@@ -299,52 +303,44 @@ export function ledgerStatusFromPiSubagentRecord(record: unknown): ConsumedPiSub
   return "completed";
 }
 
+export function readPersistedPiSubagentTerminal(file: string | undefined): ConsumedPiSubagentTerminal | null {
+  return readPiSubagentTerminalFile(file, false);
+}
+
 export function readConsumedPiSubagentTerminal(file: string | undefined): ConsumedPiSubagentTerminal | null {
-  if (!file) return null;
-  try {
-    const stat = fs.lstatSync(file);
-    if (stat.isSymbolicLink() || !stat.isFile()) return null;
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ConsumedPiSubagentTerminal> & {
-      resultConsumed?: unknown;
-      consumed?: unknown;
-    };
-    if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.resultConsumed !== true && parsed.consumed !== true) return null;
-    if (typeof parsed.taskId !== "string" || parsed.taskId.length === 0) return null;
-    if (parsed.status !== "completed" && parsed.status !== "failed"
-      && parsed.status !== "cancelled" && parsed.status !== "timed_out") {
-      return null;
-    }
-    return { taskId: parsed.taskId, status: parsed.status };
-  } catch {
-    return null;
-  }
+  return readPiSubagentTerminalFile(file, true);
+}
+
+export function writePersistedPiSubagentTerminal(
+  file: string,
+  input: ConsumedPiSubagentTerminal,
+  options?: { resultConsumed?: boolean },
+): void {
+  writePiSubagentTerminalFile(file, input, options?.resultConsumed === true);
 }
 
 export function writeConsumedPiSubagentTerminal(
   file: string,
   input: ConsumedPiSubagentTerminal,
 ): void {
-  const existing = (() => { try { return fs.lstatSync(file); } catch { return null; } })();
-  if (existing?.isSymbolicLink()) throw new Error("subagent record file must not be a symlink");
-  const owner = readPiSubagentRecordOwner(file);
-  fs.writeFileSync(file, `${JSON.stringify({
-    taskId: input.taskId,
-    resultConsumed: true,
-    status: input.status,
-    ...(owner ? { owner } : {}),
-  })}\n`, { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  writePersistedPiSubagentTerminal(file, input, { resultConsumed: true });
 }
 
-export function retireConsumedPiSubagentRecord(file: string | undefined): boolean {
-  if (!file || !readConsumedPiSubagentTerminal(file)) return false;
+export function retirePiSubagentRecord(file: string | undefined): boolean {
+  if (!file) return false;
   try {
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) return false;
     fs.unlinkSync(file);
     return true;
   } catch {
     return false;
   }
+}
+
+export function retireConsumedPiSubagentRecord(file: string | undefined): boolean {
+  if (!file || !readConsumedPiSubagentTerminal(file)) return false;
+  return retirePiSubagentRecord(file);
 }
 
 /** Probe the Pi task record sidecar. A leftover transcript is never presence. */
@@ -418,19 +414,19 @@ export function sweepAbsentPiSubagentRecordFiles(
     const owner = typeof options?.owner === "string" && options.owner.trim() ? options.owner.trim() : undefined;
     if (owner && readPiSubagentRecordOwner(file) !== owner) continue;
     const record = getRecord(name);
-    if (isConsumedTerminalPiSubagentRecord(record)) {
+    if (isTerminalPiSubagentRecord(record)) {
       try {
-        writeConsumedPiSubagentTerminal(file, {
+        writePersistedPiSubagentTerminal(file, {
           taskId: name,
           status: ledgerStatusFromPiSubagentRecord(record),
-        });
+        }, { resultConsumed: isConsumedTerminalPiSubagentRecord(record) });
       } catch {
-        // Keep the sidecar; the next sweep retries the consumed bridge.
+        // Keep the sidecar; the next sweep retries the terminal bridge.
       }
       continue;
     }
     if (record != null) continue;
-    if (readConsumedPiSubagentTerminal(file)) continue;
+    if (readPersistedPiSubagentTerminal(file)) continue;
     try {
       fs.unlinkSync(file);
       removed.push(name);
@@ -494,6 +490,48 @@ export function extractBackgroundPiSubagentDispatch(event: {
     matchCapture(resultText, /Output file:\s*(\S+)/i),
   );
   return outputFile ? { taskId, outputFile } : { taskId };
+}
+
+function readPiSubagentTerminalFile(
+  file: string | undefined,
+  requireConsumed: boolean,
+): ConsumedPiSubagentTerminal | null {
+  if (!file) return null;
+  try {
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ConsumedPiSubagentTerminal> & {
+      resultConsumed?: unknown;
+      consumed?: unknown;
+    };
+    if (!parsed || typeof parsed !== "object") return null;
+    if (requireConsumed && parsed.resultConsumed !== true && parsed.consumed !== true) return null;
+    if (typeof parsed.taskId !== "string" || parsed.taskId.length === 0) return null;
+    if (parsed.status !== "completed" && parsed.status !== "failed"
+      && parsed.status !== "cancelled" && parsed.status !== "timed_out") {
+      return null;
+    }
+    return { taskId: parsed.taskId, status: parsed.status };
+  } catch {
+    return null;
+  }
+}
+
+function writePiSubagentTerminalFile(
+  file: string,
+  input: ConsumedPiSubagentTerminal,
+  resultConsumed: boolean,
+): void {
+  const existing = (() => { try { return fs.lstatSync(file); } catch { return null; } })();
+  if (existing?.isSymbolicLink()) throw new Error("subagent record file must not be a symlink");
+  const owner = readPiSubagentRecordOwner(file);
+  fs.writeFileSync(file, `${JSON.stringify({
+    taskId: input.taskId,
+    ...(resultConsumed ? { resultConsumed: true } : {}),
+    status: input.status,
+    ...(owner ? { owner } : {}),
+  })}\n`, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
 }
 
 function refreshActivityFromOutput(task: DispatchedSubagentRecord, now: number): DispatchedSubagentRecord {

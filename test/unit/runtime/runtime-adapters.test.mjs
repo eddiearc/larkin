@@ -579,6 +579,40 @@ test("Pi repeated canonical late completion notifications only bridge once", asy
   assert.equal(observations[0].completionKey, "task-bridge-repeat");
 });
 
+test("Pi background Agent tool results emit a dispatched-task observation", async () => {
+  let listener;
+  const sdk = {
+    sessionId: "pi-dispatch-observe", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  listener({
+    type: "tool_execution_start",
+    toolName: "Agent",
+    args: { prompt: "do work", run_in_background: true, description: "work" },
+  });
+  listener({
+    type: "tool_execution_end",
+    toolName: "Agent",
+    args: { prompt: "do work", run_in_background: true, description: "work" },
+    result: {
+      content: [{ type: "text", text: "Agent started in background.\nAgent ID: task-dispatch-1\nOutput file: /tmp/task-dispatch-1.output\n" }],
+      details: { agentId: "task-dispatch-1", outputFile: "/tmp/task-dispatch-1.output", status: "background" },
+    },
+    isError: false,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const dispatched = events.filter((event) => event.type === "runtime-observation" && event.phase === "background_dispatched");
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].taskId, "task-dispatch-1");
+  assert.equal(dispatched[0].outputFile, "/tmp/task-dispatch-1.output");
+});
+
 test("Codex resume failure falls back to a fresh thread with the same standing prompt", async () => {
   const child = new FakeProcess();
   await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "stale-thread" }));

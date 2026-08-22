@@ -24,6 +24,7 @@ import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import { extractCanonicalPiSubagentCompletionKeyFromMessages } from "./pi-subagents-notification.js";
+import { extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
   classifyRuntimePrerequisite,
@@ -732,6 +733,13 @@ class PiSession extends EventSession {
         this.toolCallOpen = false;
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_result" });
       }
+      const dispatched = extractBackgroundPiSubagentDispatch(event);
+      if (dispatched) {
+        this.emitObservation("background_dispatched", {
+          taskId: dispatched.taskId,
+          ...(dispatched.outputFile ? { outputFile: dispatched.outputFile } : {}),
+        });
+      }
     }
     else if (event?.type === "message_update" && event.assistantMessageEvent?.delta) {
       if (!this.firstOutputObserved) {
@@ -754,6 +762,7 @@ class PiSession extends EventSession {
 
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
     reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; completionKey?: string;
+    taskId?: string; outputFile?: string;
   } = {}): void {
     const inputId = this.oldestOwnedInput();
     const observation = { type: "runtime-observation" as const, runtime: "pi" as const,

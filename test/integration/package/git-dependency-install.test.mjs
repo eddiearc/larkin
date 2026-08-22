@@ -22,7 +22,7 @@ test.skipIf(!enabled)("Bun source dependency keeps one Runtime-bound larkin bin 
     const consumer = path.join(temp, "consumer");
     fs.mkdirSync(sourceRepo);
     fs.mkdirSync(consumer);
-    for (const relative of ["src", "assets", "scripts", "README.md", "package.json", "bun.lock"]) {
+    for (const relative of ["src", "assets", "scripts", "patches", "README.md", "package.json", "bun.lock"]) {
       fs.cpSync(path.join(ROOT, relative), path.join(sourceRepo, relative), { recursive: true });
     }
     checked("git", ["init", "--quiet", sourceRepo], {}, "git init source fixture");

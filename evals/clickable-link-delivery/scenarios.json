@@ -1,7 +1,7 @@
 {
   "dataset": "clickable-link-delivery",
   "version": 1,
-  "standing_prompt_version": "larkin-standing-v22",
+  "standing_prompt_version": "larkin-standing-v23",
   "runtime": { "adapter": "codex", "selection": "runtime-default" },
   "threshold": 1,
   "grader": {

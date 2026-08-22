@@ -16,7 +16,7 @@ test("fixed runtime Agent interface eval registers dataset, rubric, grader, thre
   assert.equal(DATASET.version, 1);
   assert.equal(DATASET.runtime.adapter, "codex");
   assert.equal(DATASET.model.selection, "gpt-5.6-sol");
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v22");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v23");
   assert.equal(DATASET.grader.version, 1);
   assert.equal(DATASET.grader.threshold, 1);
   assert.ok(DATASET.grader.rubric.length >= 5);

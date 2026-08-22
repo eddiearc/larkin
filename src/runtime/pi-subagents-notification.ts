@@ -56,9 +56,10 @@ export type LedgerStatusFromPiNotification = "completed" | "failed" | "cancelled
 export function ledgerStatusFromPiNotificationStatus(status: string): LedgerStatusFromPiNotification {
   const normalized = status.trim().toLowerCase();
   if (normalized.startsWith("error") || normalized === "error") return "failed";
-  if (normalized.startsWith("aborted") || normalized.startsWith("stopped")) return "cancelled";
+  if (normalized.startsWith("stopped")) return "cancelled";
   if (
-    normalized.includes("turn limit")
+    normalized.startsWith("aborted")
+    || normalized.includes("turn limit")
     || normalized.includes("turn-limit")
     || normalized.includes("turn_limit")
     || normalized.includes("steered")

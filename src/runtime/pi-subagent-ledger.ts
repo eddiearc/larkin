@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 export const PI_SUBAGENT_LEDGER_FILENAME = "pi-subagent-ledger.json";
 export const PI_SUBAGENT_RECORD_DIRNAME = "pi-subagent-records";
 export const PI_SUBAGENT_LEDGER_VERSION = 1 as const;
+export const PI_SUBAGENT_SESSION_OWNER_ENV = "LARKIN_PI_SESSION_OWNER";
 
 export type DispatchedSubagentStatus =
   | "dispatched"
@@ -215,6 +216,7 @@ export function reconcileDispatchedSubagents(
         outputFile: current.outputFile,
         now,
       });
+      retireConsumedPiSubagentRecord(current.recordFile);
       continue;
     }
     if (presence !== "absent") continue;
@@ -291,7 +293,8 @@ export function ledgerStatusFromPiSubagentRecord(record: unknown): ConsumedPiSub
     ? String((record as { status?: unknown }).status || "").trim().toLowerCase()
     : "";
   if (status === "error") return "failed";
-  if (status === "aborted" || status === "stopped") return "cancelled";
+  if (status === "aborted") return "timed_out";
+  if (status === "stopped") return "cancelled";
   if (status === "steered") return "timed_out";
   return "completed";
 }
@@ -324,12 +327,24 @@ export function writeConsumedPiSubagentTerminal(
 ): void {
   const existing = (() => { try { return fs.lstatSync(file); } catch { return null; } })();
   if (existing?.isSymbolicLink()) throw new Error("subagent record file must not be a symlink");
+  const owner = readPiSubagentRecordOwner(file);
   fs.writeFileSync(file, `${JSON.stringify({
     taskId: input.taskId,
     resultConsumed: true,
     status: input.status,
+    ...(owner ? { owner } : {}),
   })}\n`, { mode: 0o600 });
   fs.chmodSync(file, 0o600);
+}
+
+export function retireConsumedPiSubagentRecord(file: string | undefined): boolean {
+  if (!file || !readConsumedPiSubagentTerminal(file)) return false;
+  try {
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Probe the Pi task record sidecar. A leftover transcript is never presence. */
@@ -358,14 +373,22 @@ export function dispatchedSubagentRecordFile(stateDir: string, taskId: string): 
   return path.join(dispatchedSubagentRecordDir(stateDir), taskId);
 }
 
-export function writeDispatchedSubagentRecordFile(stateDir: string | undefined, taskId: string): string | undefined {
+export function writeDispatchedSubagentRecordFile(
+  stateDir: string | undefined,
+  taskId: string,
+  owner?: string,
+): string | undefined {
   if (!stateDir || !taskId) return undefined;
   const dir = dispatchedSubagentRecordDir(stateDir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = dispatchedSubagentRecordFile(stateDir, taskId);
   const existing = (() => { try { return fs.lstatSync(file); } catch { return null; } })();
   if (existing?.isSymbolicLink()) throw new Error("subagent record file must not be a symlink");
-  fs.writeFileSync(file, `${JSON.stringify({ taskId })}\n`, { mode: 0o600 });
+  const normalizedOwner = typeof owner === "string" && owner.trim() ? owner.trim() : undefined;
+  fs.writeFileSync(file, `${JSON.stringify({
+    taskId,
+    ...(normalizedOwner ? { owner: normalizedOwner } : {}),
+  })}\n`, { mode: 0o600 });
   fs.chmodSync(file, 0o600);
   return file;
 }
@@ -373,6 +396,7 @@ export function writeDispatchedSubagentRecordFile(stateDir: string | undefined, 
 export function sweepAbsentPiSubagentRecordFiles(
   recordDir: string,
   getRecord: (taskId: string) => unknown,
+  options?: { owner?: string },
 ): string[] {
   let names: string[];
   try {
@@ -391,6 +415,8 @@ export function sweepAbsentPiSubagentRecordFiles(
     } catch {
       continue;
     }
+    const owner = typeof options?.owner === "string" && options.owner.trim() ? options.owner.trim() : undefined;
+    if (owner && readPiSubagentRecordOwner(file) !== owner) continue;
     const record = getRecord(name);
     if (isConsumedTerminalPiSubagentRecord(record)) {
       try {
@@ -485,7 +511,31 @@ function refreshActivityFromOutput(task: DispatchedSubagentRecord, now: number):
 
 function normalizeLedger(value: Partial<DispatchedSubagentLedger> | null | undefined): DispatchedSubagentLedger {
   const tasks = Array.isArray(value?.tasks) ? value.tasks.filter(isPersistedTask) : [];
-  return { version: PI_SUBAGENT_LEDGER_VERSION, tasks: tasks.slice(-MAX_LEDGER_TASKS) };
+  return { version: PI_SUBAGENT_LEDGER_VERSION, tasks: capLedgerTasks(tasks) };
+}
+
+function isAcknowledgedTerminalTask(task: DispatchedSubagentRecord): boolean {
+  return isTerminalDispatchedSubagentStatus(task.status) && task.wakeState === "acknowledged";
+}
+
+function capLedgerTasks(tasks: DispatchedSubagentRecord[]): DispatchedSubagentRecord[] {
+  if (tasks.length <= MAX_LEDGER_TASKS) return tasks;
+  const overflow = tasks.length - MAX_LEDGER_TASKS;
+  const evict = new Set<number>();
+  for (let index = 0; index < tasks.length && evict.size < overflow; index += 1) {
+    if (isAcknowledgedTerminalTask(tasks[index]!)) evict.add(index);
+  }
+  if (evict.size === 0) return tasks;
+  return tasks.filter((_, index) => !evict.has(index));
+}
+
+function readPiSubagentRecordOwner(file: string): string | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { owner?: unknown };
+    return typeof parsed?.owner === "string" && parsed.owner.trim() ? parsed.owner.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isPersistedTask(value: unknown): value is DispatchedSubagentRecord {

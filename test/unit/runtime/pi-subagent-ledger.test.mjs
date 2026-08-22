@@ -22,6 +22,7 @@ import {
   undeliveredTerminalWakeKeys,
   writeDispatchedSubagentLedger,
   writeDispatchedSubagentRecordFile,
+  PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS,
 } from "../../../dist/runtime/pi-subagent-ledger.mjs";
 
 test("extractBackgroundPiSubagentDispatch reads Agent ID and output file from a background spawn", () => {
@@ -298,7 +299,7 @@ test("sweep persists an unconsumed terminal before eviction can delete the sidec
     assert.equal(readConsumedPiSubagentTerminal(recordFile), null);
     assert.equal(probePiSubagentRecord({
       taskId: "task-evict-1", status: "dispatched", dispatchedAt: 10, lastActivityAt: 10, recordFile,
-    }), "present");
+    }), "terminal");
 
     live.delete("task-evict-1");
     const secondRemoved = sweepAbsentPiSubagentRecordFiles(recordDir, (taskId) => live.get(taskId));
@@ -306,23 +307,55 @@ test("sweep persists an unconsumed terminal before eviction can delete the sidec
     assert.ok(fs.existsSync(recordFile));
     assert.equal(probePiSubagentRecord({
       taskId: "task-evict-1", status: "dispatched", dispatchedAt: 10, lastActivityAt: 10, recordFile,
-    }), "present");
+    }), "terminal");
 
-    const result = reconcileDispatchedSubagents(ledger, {
+    const duringGrace = reconcileDispatchedSubagents(ledger, {
       probe: probePiSubagentRecord,
       now: 11,
     });
-    assert.deepEqual(result.orphaned, []);
-    assert.equal(getDispatchedSubagent(result.ledger, "task-evict-1")?.status, "dispatched");
+    assert.deepEqual(duringGrace.orphaned, []);
+    assert.deepEqual(duringGrace.terminals, []);
+    assert.equal(getDispatchedSubagent(duringGrace.ledger, "task-evict-1")?.status, "dispatched");
 
-    ledger = noteDispatchedSubagentTerminal(result.ledger, {
-      taskId: "task-evict-1",
-      status: "completed",
-      wakeKey: "task-evict-1",
-      now: 12,
+    const persistedAt = 1_700_000_400_000;
+    fs.utimesSync(recordFile, new Date(persistedAt), new Date(persistedAt));
+    const afterGrace = reconcileDispatchedSubagents(duringGrace.ledger, {
+      probe: probePiSubagentRecord,
+      now: persistedAt + PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS,
     });
-    assert.equal(getDispatchedSubagent(ledger, "task-evict-1")?.status, "completed");
-    assert.equal(getDispatchedSubagent(ledger, "task-evict-1")?.wakeState, "pending");
+    assert.deepEqual(afterGrace.orphaned, []);
+    assert.equal(afterGrace.terminals.length, 1);
+    assert.equal(afterGrace.terminals[0].taskId, "task-evict-1");
+    assert.equal(afterGrace.terminals[0].status, "completed");
+    assert.equal(afterGrace.terminals[0].wakeState, "pending");
+    assert.equal(getDispatchedSubagent(afterGrace.ledger, "task-evict-1")?.status, "completed");
+    assert.deepEqual(undeliveredTerminalWakeKeys(afterGrace.ledger), ["task-evict-1"]);
+    assert.ok(fs.existsSync(recordFile), "unconsumed terminal sidecar stays until the wake is acknowledged");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("force-missing immediately advances a persisted unconsumed terminal instead of orphaning it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-force-terminal-"));
+  try {
+    const recordFile = writeDispatchedSubagentRecordFile(root, "task-force-1", "session-a");
+    sweepAbsentPiSubagentRecordFiles(path.dirname(recordFile), () => ({ status: "error" }));
+    let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), {
+      taskId: "task-force-1", recordFile, now: 10,
+    });
+    const result = reconcileDispatchedSubagents(ledger, {
+      probe: probePiSubagentRecord,
+      forceMissing: true,
+      now: 11,
+      missingReason: "pi session gone",
+    });
+    assert.deepEqual(result.orphaned, []);
+    assert.equal(result.terminals.length, 1);
+    assert.equal(result.terminals[0].status, "failed");
+    assert.equal(result.terminals[0].wakeState, "pending");
+    assert.equal(getDispatchedSubagent(result.ledger, "task-force-1")?.status, "failed");
+    assert.deepEqual(undeliveredTerminalWakeKeys(result.ledger), ["task-force-1"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

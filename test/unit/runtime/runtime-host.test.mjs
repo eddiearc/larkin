@@ -7,6 +7,7 @@ import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { createRuntimeHost as createProductionRuntimeHost } from "../../../dist/runtime/runtime-host.mjs";
 import {
   ledgerFilePath,
+  PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS,
   sweepAbsentPiSubagentRecordFiles,
   writeConsumedPiSubagentTerminal,
   writeDispatchedSubagentLedger,
@@ -2436,6 +2437,153 @@ test("RuntimeHost closes the old Pi session before force-missing reconcile on st
     assert.equal(record?.status, "completed");
     assert.equal(record?.wakeState, "acknowledged");
     assert.equal(fs.existsSync(dispatched.recordFile), false, "consumed sidecar retired after close-first reconcile");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost wakes a persisted unconsumed terminal after the notification grace", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-terminal-grace-"));
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piTerminalGraceA1", name: "terminal-grace", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piTerminalGraceA1", { message_id: "om_pi_terminal_grace", chat_id: "oc_pi_terminal_grace", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-terminal-grace-1", outputFile: path.join(root, "task-terminal-grace-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piTerminalGraceA1", "task-terminal-grace-1");
+    assert.ok(dispatched?.recordFile);
+    sweepAbsentPiSubagentRecordFiles(path.dirname(dispatched.recordFile), () => ({ status: "completed" }));
+    const persistedAt = Date.now() - PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS;
+    fs.utimesSync(dispatched.recordFile, new Date(persistedAt), new Date(persistedAt));
+    session.emit({ type: "turn-end" });
+    await waitForPromptCount(session, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.match(session.prompts[1].text, /reason=background subagent completed/i);
+    assert.doesNotMatch(session.prompts[1].text, /status=orphaned/);
+    const record = host.getDispatchedSubagent("cli_piTerminalGraceA1", "task-terminal-grace-1");
+    assert.equal(record?.status, "completed");
+    assert.equal(record?.wakeState, "pending");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost closes the failed session before force-missing reconcile on replaceSession", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-replace-close-first-"));
+  const sessions = [];
+  let host;
+  class CloseBridgesSession extends FakeSession {
+    async close(reason) {
+      this.closes.push(reason);
+      const dispatched = host.getDispatchedSubagent("cli_piReplaceCloseA1", "task-replace-close-1");
+      if (!dispatched?.recordFile || !fs.existsSync(dispatched.recordFile)) return;
+      writeConsumedPiSubagentTerminal(dispatched.recordFile, {
+        taskId: "task-replace-close-1",
+        status: "completed",
+      });
+    }
+  }
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession() {
+      const session = new CloseBridgesSession();
+      session.sessionId = `replace-close-${sessions.length + 1}`;
+      sessions.push(session);
+      return session;
+    },
+  };
+  host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 5, maxDelayMs: 10, maxAttempts: 2 },
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piReplaceCloseA1", name: "replace-close", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piReplaceCloseA1", { message_id: "om_pi_replace_close", chat_id: "oc_pi_replace_close", content: "start" });
+    sessions[0].emit({ type: "turn-start" });
+    sessions[0].emit({ type: "turn-end" });
+    sessions[0].emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-replace-close-1", outputFile: path.join(root, "task-replace-close-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piReplaceCloseA1", "task-replace-close-1");
+    assert.equal(dispatched?.status, "dispatched");
+    sessions[0].emit({ type: "closed", code: 1, signal: null });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(sessions[0].closes.some((reason) => String(reason).startsWith("replace after")));
+    const record = host.getDispatchedSubagent("cli_piReplaceCloseA1", "task-replace-close-1");
+    assert.equal(record?.status, "completed");
+    assert.equal(record?.wakeState, "acknowledged");
+    assert.equal(fs.existsSync(dispatched.recordFile), false, "consumed sidecar retired after close-first replace");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost closes the failed session before force-missing reconcile on recoverConfiguration", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-recover-close-first-"));
+  const sessions = [];
+  let host;
+  class CloseBridgesSession extends FakeSession {
+    async close(reason) {
+      this.closes.push(reason);
+      const dispatched = host.getDispatchedSubagent("cli_piRecoverCloseA1", "task-recover-close-1");
+      if (!dispatched?.recordFile || !fs.existsSync(dispatched.recordFile)) return;
+      writeConsumedPiSubagentTerminal(dispatched.recordFile, {
+        taskId: "task-recover-close-1",
+        status: "completed",
+      });
+    }
+  }
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession() {
+      const session = new CloseBridgesSession();
+      session.sessionId = `recover-close-${sessions.length + 1}`;
+      sessions.push(session);
+      return session;
+    },
+    async recoverConfigurationError() {
+      return { recovered: false, reason: "configuration recovery not needed for close-order coverage" };
+    },
+  };
+  host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piRecoverCloseA1", name: "recover-close", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.deliver("cli_piRecoverCloseA1", { message_id: "om_pi_recover_close", chat_id: "oc_pi_recover_close", content: "start" });
+    sessions[0].emit({ type: "turn-start" });
+    sessions[0].emit({ type: "turn-end" });
+    sessions[0].emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-recover-close-1", outputFile: path.join(root, "task-recover-close-1.output"),
+    });
+    const dispatched = host.getDispatchedSubagent("cli_piRecoverCloseA1", "task-recover-close-1");
+    assert.equal(dispatched?.status, "dispatched");
+    sessions[0].emit({ type: "configuration-error", message: "selected model requires a newer version of Codex" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(sessions[0].closes, ["runtime configuration error"]);
+    const record = host.getDispatchedSubagent("cli_piRecoverCloseA1", "task-recover-close-1");
+    assert.equal(record?.status, "completed");
+    assert.equal(record?.wakeState, "acknowledged");
+    assert.equal(fs.existsSync(dispatched.recordFile), false, "consumed sidecar retired after close-first recover");
   } finally {
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });

@@ -995,8 +995,10 @@ export function createRuntimeHost(options: {
     });
     const previousLedger = agent.subagentLedger;
     agent.subagentLedger = result.ledger;
-    if (result.orphaned.length > 0 || result.ledger !== previousLedger) persistSubagentLedger(agent);
-    for (const record of result.orphaned) {
+    if (result.orphaned.length > 0 || result.terminals.length > 0 || result.ledger !== previousLedger) {
+      persistSubagentLedger(agent);
+    }
+    for (const record of [...result.orphaned, ...result.terminals]) {
       noteBackgroundCompletion(agent, record.wakeKey ?? record.taskId);
     }
     if (!hasActiveDispatchedSubagent(agent)) clearSubagentReconcileTimer(agent);
@@ -1057,15 +1059,21 @@ export function createRuntimeHost(options: {
     if (agent.session !== session || agent.stopped) return;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
     rearmBackgroundCompletion(agent);
-    reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
     agent.recreateReason = reason;
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
-    void session.close(`replace after ${reason}`).catch((error) => log("runtime close after replacement failed", String(error)));
     for (const record of agent.records.values()) if (isActiveDelivery(record.status)) record.status = "pending";
     emitConsumed(agent, persist(agent));
     emit({ type: "agent-status", agentId: agent.config.agentId, status: "error", error: reason });
-    scheduleRecreate(agent, reason);
+    // Close first so the shutdown sweep can bridge consumed or terminal state
+    // before force-missing reconcile treats a plain sidecar as orphaned.
+    void session.close(`replace after ${reason}`)
+      .catch((error) => log("runtime close after replacement failed", String(error)))
+      .finally(() => {
+        if (agent.stopped) return;
+        reconcileAfterSessionSwap(agent);
+        scheduleRecreate(agent, reason);
+      });
   };
 
   const recoverConfiguration = (agent: ManagedAgent, session: RuntimeSession, message: string): void => {
@@ -1073,7 +1081,6 @@ export function createRuntimeHost(options: {
     agent.disabledReason = `runtime configuration recovery in progress: ${message}`;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
     rearmBackgroundCompletion(agent);
-    reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
     for (const record of agent.records.values()) {
@@ -1086,6 +1093,7 @@ export function createRuntimeHost(options: {
     const recovery = (async () => {
       try {
         await session.close("runtime configuration error");
+        if (!agent.stopped) reconcileAfterSessionSwap(agent);
         const result = agent.adapter.recoverConfigurationError
           ? await agent.adapter.recoverConfigurationError(message)
           : { recovered: false, reason: "runtime adapter does not support automatic configuration recovery" };

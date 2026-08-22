@@ -6,6 +6,7 @@ export const PI_SUBAGENT_LEDGER_FILENAME = "pi-subagent-ledger.json";
 export const PI_SUBAGENT_RECORD_DIRNAME = "pi-subagent-records";
 export const PI_SUBAGENT_LEDGER_VERSION = 1 as const;
 export const PI_SUBAGENT_SESSION_OWNER_ENV = "LARKIN_PI_SESSION_OWNER";
+export const PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS = 30_000;
 
 export type DispatchedSubagentStatus =
   | "dispatched"
@@ -35,7 +36,7 @@ export interface DispatchedSubagentLedger {
   tasks: DispatchedSubagentRecord[];
 }
 
-export type PiSubagentRecordPresence = "present" | "absent" | "consumed";
+export type PiSubagentRecordPresence = "present" | "absent" | "consumed" | "terminal";
 
 export type ConsumedPiSubagentTerminalStatus = Exclude<DispatchedSubagentStatus, "dispatched" | "orphaned">;
 
@@ -54,6 +55,7 @@ export interface ReconcileDispatchedSubagentsInput {
 export interface ReconcileDispatchedSubagentsResult {
   ledger: DispatchedSubagentLedger;
   orphaned: DispatchedSubagentRecord[];
+  terminals: DispatchedSubagentRecord[];
 }
 
 const TERMINAL_STATUSES = new Set<DispatchedSubagentStatus>([
@@ -192,6 +194,7 @@ export function reconcileDispatchedSubagents(
 ): ReconcileDispatchedSubagentsResult {
   const now = input.now ?? Date.now();
   const orphaned: DispatchedSubagentRecord[] = [];
+  const terminals: DispatchedSubagentRecord[] = [];
   let next = ledger;
   for (const task of ledger.tasks) {
     if (isTerminalDispatchedSubagentStatus(task.status)) continue;
@@ -207,7 +210,7 @@ export function reconcileDispatchedSubagents(
     const probed = getDispatchedSubagent(next, current.taskId) ?? refreshed;
     const probedPresence = input.probe?.(probed);
     const presence = input.forceMissing
-      ? (probedPresence === "consumed" ? "consumed" : "absent")
+      ? (probedPresence === "consumed" || probedPresence === "terminal" ? probedPresence : "absent")
       : (probedPresence ?? "present");
     if (presence === "consumed") {
       next = noteConsumedDispatchedSubagent(next, {
@@ -217,6 +220,19 @@ export function reconcileDispatchedSubagents(
         now,
       });
       retireConsumedPiSubagentRecord(current.recordFile);
+      continue;
+    }
+    if (presence === "terminal") {
+      if (!input.forceMissing && !hasTerminalNotificationGraceElapsed(current.recordFile, now)) continue;
+      next = noteDispatchedSubagentTerminal(next, {
+        taskId: current.taskId,
+        status: readPersistedPiSubagentTerminal(current.recordFile)?.status ?? "completed",
+        outputFile: current.outputFile,
+        wakeKey: current.taskId,
+        now,
+      });
+      const advanced = getDispatchedSubagent(next, current.taskId);
+      if (advanced) terminals.push(advanced);
       continue;
     }
     if (presence !== "absent") continue;
@@ -229,7 +245,7 @@ export function reconcileDispatchedSubagents(
     next = marked.ledger;
     if (marked.record) orphaned.push(marked.record);
   }
-  return { ledger: next, orphaned };
+  return { ledger: next, orphaned, terminals };
 }
 
 export function noteDispatchedSubagentWakeAcknowledged(
@@ -350,6 +366,7 @@ export function probePiSubagentRecord(record: DispatchedSubagentRecord): PiSubag
     const stat = fs.lstatSync(record.recordFile);
     if (stat.isSymbolicLink() || !stat.isFile()) return "absent";
     if (readConsumedPiSubagentTerminal(record.recordFile)) return "consumed";
+    if (readPersistedPiSubagentTerminal(record.recordFile)) return "terminal";
     return "present";
   } catch {
     return "absent";
@@ -532,6 +549,16 @@ function writePiSubagentTerminalFile(
     ...(owner ? { owner } : {}),
   })}\n`, { mode: 0o600 });
   fs.chmodSync(file, 0o600);
+}
+
+function hasTerminalNotificationGraceElapsed(file: string | undefined, now: number): boolean {
+  if (!file) return true;
+  try {
+    const mtimeMs = fs.statSync(file).mtimeMs;
+    return Number.isFinite(mtimeMs) && now - mtimeMs >= PI_SUBAGENT_TERMINAL_NOTIFICATION_GRACE_MS;
+  } catch {
+    return true;
+  }
 }
 
 function refreshActivityFromOutput(task: DispatchedSubagentRecord, now: number): DispatchedSubagentRecord {

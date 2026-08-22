@@ -765,10 +765,10 @@ test.each(["win32", "linux"])("external Pi retains all -e extension args on simu
     recordWatchdog: () => "/fixture/pi-subagent-record-watchdog.bundle.js",
   });
   assert.deepEqual(args, [
+    "-e", "/fixture/pi-subagent-record-watchdog.bundle.js",
     "-e", "/fixture/pi-subagents.bundle.js",
     "-e", "/fixture/pi-bash-timeout.bundle.js",
-    "-e", "/fixture/pi-subagent-record-watchdog.bundle.js",
-  ]);
+  ], "watchdog must precede the subagent extension so shutdown can still read getRecord");
 });
 
 test.each(["external", "builtin"])("%s Pi launches one shared append standing-prompt path without replacement", async (distribution) => {

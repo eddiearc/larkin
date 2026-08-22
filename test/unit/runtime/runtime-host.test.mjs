@@ -2175,3 +2175,123 @@ test("issue 138: reopening a terminal wake failure can be promoted again", async
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+const waitForPromptCount = async (session, count, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (session.prompts.length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(session.prompts.length, count);
+};
+
+test("RuntimeHost wakes once when a dispatched Pi record disappears and keeps the task queryable as orphaned", async () => {
+  const session = new FakeSession();
+  let present = true;
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentRecordProbe: () => present ? "present" : "absent",
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piOrphanA1", name: "orphan", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piOrphanA1", { message_id: "om_pi_orphan", chat_id: "oc_pi_orphan", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-orphan-1", outputFile: "/tmp/task-orphan-1.output",
+    });
+    assert.equal(host.getDispatchedSubagent("cli_piOrphanA1", "task-orphan-1")?.status, "dispatched");
+    present = false;
+    session.emit({ type: "turn-end" });
+    await waitForPromptCount(session, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.match(session.prompts[1].text, /reason=background subagent completed/i);
+    assert.match(session.prompts[1].text, /task task-orphan-1 status=orphaned/);
+    const record = host.getDispatchedSubagent("cli_piOrphanA1", "task-orphan-1");
+    assert.equal(record?.status, "orphaned");
+    assert.equal(record?.outputFile, "/tmp/task-orphan-1.output");
+    assert.equal(record?.reason, "pi record missing");
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    present = false;
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2, "repeat reconciliation must not send another orphan wake");
+    assert.equal(host.getDispatchedSubagent("cli_piOrphanA1", "task-orphan-1")?.status, "orphaned");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost does not mark a normally completed background task orphaned", async () => {
+  const session = new FakeSession();
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentRecordProbe: () => "absent",
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piOrphanHappyA1", name: "happy", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piOrphanHappyA1", { message_id: "om_pi_orphan_happy", chat_id: "oc_pi_orphan_happy", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    assert.equal(session.prompts.length, 1);
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-happy-1", outputFile: "/tmp/task-happy-1.output",
+    });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-happy-1" });
+    await waitForPromptCount(session, 2);
+    assert.equal(session.prompts[1].kind, "wake");
+    assert.match(session.prompts[1].text, /reason=background subagent completed/i);
+    assert.doesNotMatch(session.prompts[1].text, /status=orphaned/);
+    assert.equal(host.getDispatchedSubagent("cli_piOrphanHappyA1", "task-happy-1")?.status, "completed");
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "turn-end" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2, "happy-path completion must stay a single wake and not be reclassified as orphaned");
+    assert.equal(host.getDispatchedSubagent("cli_piOrphanHappyA1", "task-happy-1")?.status, "completed");
+  } finally {
+    await host.shutdown("done");
+  }
+});
+
+test("RuntimeHost does not double-wake if a real terminal notification arrives after orphaning", async () => {
+  const session = new FakeSession();
+  let present = true;
+  const adapter = { id: "pi", capabilities: {}, async createSession() { return session; } };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentRecordProbe: () => present ? "present" : "absent",
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piOrphanLateA1", name: "late", runtime: "pi", model: "model", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_piOrphanLateA1", { message_id: "om_pi_orphan_late", chat_id: "oc_pi_orphan_late", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-late-1", outputFile: "/tmp/task-late-1.output",
+    });
+    present = false;
+    session.emit({ type: "turn-end" });
+    await waitForPromptCount(session, 2);
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({ type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "completed", completionKey: "task-late-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.prompts.length, 2, "a later canonical notification must reuse the orphan wake key");
+    assert.equal(host.getDispatchedSubagent("cli_piOrphanLateA1", "task-late-1")?.status, "orphaned");
+  } finally {
+    await host.shutdown("done");
+  }
+});

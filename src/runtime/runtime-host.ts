@@ -40,7 +40,7 @@ import {
   taskIdsFromCompletionKey,
   undeliveredTerminalWakeKeys,
   PI_SUBAGENT_SESSION_OWNER_ENV,
-  retireConsumedPiSubagentRecord,
+  retirePiSubagentRecord,
   writeDispatchedSubagentLedger,
   writeDispatchedSubagentRecordFile,
 } from "./pi-subagent-ledger.js";
@@ -917,7 +917,7 @@ export function createRuntimeHost(options: {
     agent.subagentLedger = next;
     persistSubagentLedger(agent);
     for (const taskId of taskIdsFromCompletionKey(completionKey)) {
-      retireConsumedPiSubagentRecord(lookupDispatchedSubagent(agent.subagentLedger, taskId)?.recordFile);
+      retirePiSubagentRecord(lookupDispatchedSubagent(agent.subagentLedger, taskId)?.recordFile);
     }
   };
 
@@ -1691,11 +1691,13 @@ export function createRuntimeHost(options: {
             emit({ type: "agent-status", agentId: config.agentId, status: "active", readiness: candidate.readiness ?? readiness });
           }
           candidate.piSessionOwner = stageEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
-          // Commit clears any inherited backoff timer; reschedule so a queued
-          // completion still drains on the new session.
-          reconcileAfterSessionSwap(candidate);
+          // Close first so the old session's shutdown sweep can bridge consumed
+          // terminals before force-missing reconcile. Commit also clears any
+          // inherited backoff timer; reschedule so a queued completion still
+          // drains on the new session.
           await previous.session?.close("runtime candidate committed")
             .catch((error) => log("previous runtime close after candidate commit failed", String(error)));
+          reconcileAfterSessionSwap(candidate);
         },
         rollback,
       };

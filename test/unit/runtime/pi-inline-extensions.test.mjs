@@ -18,12 +18,32 @@ test("builtin Pi RPC receives exactly the three static inline extension factorie
   assert.ok(BUILTIN_PI_EXTENSION_FACTORIES.every((factory) => typeof factory === "function"));
 });
 
+test("record watchdog registers session_shutdown before bundled subagents", async () => {
+  const priorStateDir = process.env.LARKIN_STATE_DIR;
+  const priorOwner = process.env.LARKIN_PI_SESSION_OWNER;
+  process.env.LARKIN_STATE_DIR = "/tmp/larkin-watchdog-order";
+  process.env.LARKIN_PI_SESSION_OWNER = "session-order";
+  try {
+    const events = [];
+    const first = BUILTIN_PI_EXTENSION_FACTORIES[0];
+    const factory = typeof first === "function" ? first : first.factory;
+    await factory({ on(event) { events.push(event); } });
+    assert.deepEqual(events, ["session_shutdown"],
+      "shutdown sweep must register before AgentManager teardown");
+  } finally {
+    if (priorStateDir === undefined) delete process.env.LARKIN_STATE_DIR;
+    else process.env.LARKIN_STATE_DIR = priorStateDir;
+    if (priorOwner === undefined) delete process.env.LARKIN_PI_SESSION_OWNER;
+    else process.env.LARKIN_PI_SESSION_OWNER = priorOwner;
+  }
+});
+
 test("inline bash extension preserves the 60s foreground hard guard", async () => {
   const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
   try {
     let bashTool;
-    const extension = BUILTIN_PI_EXTENSION_FACTORIES[1];
+    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
     await factory({ registerTool(tool) { bashTool = tool; } });
     assert.equal(bashTool.name, "bash");

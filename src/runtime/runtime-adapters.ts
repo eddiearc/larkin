@@ -1032,12 +1032,14 @@ export function resolvePiProcessExtensionArgs(input: {
   if (input.distribution === "builtin") return [];
   const resolverInput = { distribution: "external" as const, piCommand: input.piCommand, env: input.env };
   const args: string[] = [];
+  // Watchdog must load before the subagent extension so session_shutdown still
+  // sees AgentManager.getRecord and can bridge consumed or terminal state.
+  const recordWatchdog = (resolvers.recordWatchdog ?? resolvePiSubagentRecordWatchdogExtensionArg)(resolverInput);
+  if (recordWatchdog) args.push("-e", recordWatchdog);
   const subagents = (resolvers.subagents ?? resolvePiSubagentExtensionArg)(resolverInput);
   if (subagents) args.push("-e", subagents);
   const bashTimeout = (resolvers.bashTimeout ?? resolvePiBashTimeoutExtensionArg)(resolverInput);
   if (bashTimeout) args.push("-e", bashTimeout);
-  const recordWatchdog = (resolvers.recordWatchdog ?? resolvePiSubagentRecordWatchdogExtensionArg)(resolverInput);
-  if (recordWatchdog) args.push("-e", recordWatchdog);
   return args;
 }
 

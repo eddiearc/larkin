@@ -32,11 +32,14 @@ import {
   ledgerFilePath,
   noteDispatchedSubagent,
   noteDispatchedSubagentTerminal,
-  probePiSubagentOutputRecord,
+  noteDispatchedSubagentWakeAcknowledged,
+  probePiSubagentRecord,
   readDispatchedSubagentLedger,
   reconcileDispatchedSubagents,
   taskIdsFromCompletionKey,
+  undeliveredTerminalWakeKeys,
   writeDispatchedSubagentLedger,
+  writeDispatchedSubagentRecordFile,
 } from "./pi-subagent-ledger.js";
 
 export interface AgentRuntimeConfig {
@@ -307,6 +310,7 @@ export function createRuntimeHost(options: {
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
     ...(config.piDistribution ? { LARKIN_PI_DISTRIBUTION: config.piDistribution } : {}),
+    ...(config.stateDir ? { LARKIN_STATE_DIR: config.stateDir } : {}),
     ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
     ...(process.env.SHELL ? { SHELL: process.env.SHELL } : {}),
     ...(process.env.ZDOTDIR ? { ZDOTDIR: process.env.ZDOTDIR } : {}),
@@ -744,6 +748,7 @@ export function createRuntimeHost(options: {
     }
     agent.backgroundCompletionRejectStreak = 0;
     clearBackgroundCompletionRetryTimer(agent);
+    acknowledgeSubagentWake(agent, completionKey);
   };
 
   const scheduleBackgroundCompletionRetry = (agent: ManagedAgent): void => {
@@ -811,6 +816,7 @@ export function createRuntimeHost(options: {
     agent.backgroundCompletionWakeInputId = null;
     agent.backgroundCompletionRejectStreak = 0;
     clearBackgroundCompletionRetryTimer(agent);
+    acknowledgeSubagentWake(agent, completionKey);
   };
 
   const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<
@@ -898,6 +904,19 @@ export function createRuntimeHost(options: {
     writeDispatchedSubagentLedger(ledgerFilePath(agent.config.stateDir), agent.subagentLedger);
   };
 
+  const acknowledgeSubagentWake = (agent: ManagedAgent, completionKey: string): void => {
+    const next = noteDispatchedSubagentWakeAcknowledged(agent.subagentLedger, { completionKey });
+    if (next === agent.subagentLedger) return;
+    agent.subagentLedger = next;
+    persistSubagentLedger(agent);
+  };
+
+  const enqueueUndeliveredTerminalWakes = (agent: ManagedAgent): void => {
+    for (const key of undeliveredTerminalWakeKeys(agent.subagentLedger)) {
+      noteBackgroundCompletion(agent, key);
+    }
+  };
+
   const loadSubagentLedger = (stateDir: string | undefined): DispatchedSubagentLedger => {
     return readDispatchedSubagentLedger(ledgerFilePath(stateDir));
   };
@@ -926,15 +945,21 @@ export function createRuntimeHost(options: {
   };
 
   const recordDispatchedSubagent = (agent: ManagedAgent, taskId: string, outputFile?: string): void => {
-    agent.subagentLedger = noteDispatchedSubagent(agent.subagentLedger, { taskId, outputFile });
+    const recordFile = writeDispatchedSubagentRecordFile(agent.config.stateDir, taskId);
+    agent.subagentLedger = noteDispatchedSubagent(agent.subagentLedger, { taskId, outputFile, recordFile });
     persistSubagentLedger(agent);
     armSubagentReconcileTimer(agent);
   };
 
-  const recordTerminalSubagentNotification = (agent: ManagedAgent, completionKey: string): void => {
+  const recordTerminalSubagentNotification = (agent: ManagedAgent, completionKey: string, statuses?: Record<string, DispatchedSubagentRecord["status"]>): void => {
     let next = agent.subagentLedger;
     for (const taskId of taskIdsFromCompletionKey(completionKey)) {
-      next = noteDispatchedSubagentTerminal(next, { taskId, status: "completed", wakeKey: completionKey });
+      const status = statuses?.[taskId];
+      next = noteDispatchedSubagentTerminal(next, {
+        taskId,
+        status: status && status !== "dispatched" && status !== "orphaned" ? status : "completed",
+        wakeKey: completionKey,
+      });
     }
     agent.subagentLedger = next;
     persistSubagentLedger(agent);
@@ -946,7 +971,7 @@ export function createRuntimeHost(options: {
   } = {}): void => {
     if (agent.stopped) return;
     const result = reconcileDispatchedSubagents(agent.subagentLedger, {
-      probe: options.subagentRecordProbe ?? probePiSubagentOutputRecord,
+      probe: options.subagentRecordProbe ?? probePiSubagentRecord,
       forceMissing: input.forceMissing === true,
       missingReason: input.missingReason,
     });
@@ -990,6 +1015,8 @@ export function createRuntimeHost(options: {
         const session = agent.session;
         const proactive = session ? proactivelyCompactPiAtIdle(agent, session) : null;
         if (proactive && await proactive === "failed") return;
+        reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
+        enqueueUndeliveredTerminalWakes(agent);
         await retryPending(agent);
         if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
       }).catch((error) => {
@@ -1319,7 +1346,7 @@ export function createRuntimeHost(options: {
       if (event.phase === "background_dispatched" && typeof event.taskId === "string" && event.taskId) {
         recordDispatchedSubagent(agent, event.taskId, typeof event.outputFile === "string" ? event.outputFile : undefined);
       } else if (event.phase === "completed" && typeof event.completionKey === "string") {
-        recordTerminalSubagentNotification(agent, event.completionKey);
+        recordTerminalSubagentNotification(agent, event.completionKey, event.completionStatuses);
         noteBackgroundCompletion(agent, event.completionKey);
       }
     } else if (event.type === "activity") {
@@ -1963,6 +1990,7 @@ export function createRuntimeHost(options: {
         try {
           await ensureSession(agent);
           reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "runtime restarted" });
+          enqueueUndeliveredTerminalWakes(agent);
           await recoverStalePiCompaction(agent);
           const startupSession = agent.session;
           const proactive = startupSession ? proactivelyCompactPiAtIdle(agent, startupSession) : null;
@@ -1973,6 +2001,8 @@ export function createRuntimeHost(options: {
           const reason = error instanceof Error ? error.message : String(error);
           const transient = error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable";
           agent.disabledReason = transient ? null : reason;
+          reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "runtime restarted" });
+          enqueueUndeliveredTerminalWakes(agent);
           if (transient) { recoveringCount += 1; scheduleRecreate(agent, reason); }
           startupFailures.push(`${config.agentId}: ${reason}`);
           emit({ type: "agent-status", agentId: config.agentId, status: "error", error: reason,

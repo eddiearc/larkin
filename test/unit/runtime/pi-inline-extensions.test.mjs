@@ -5,13 +5,13 @@ import {
   invokeBuiltinPiRpc,
 } from "../../../dist/runtime/pi-inline-extensions.mjs";
 
-test("builtin Pi RPC receives exactly the two static inline extension factories", async () => {
+test("builtin Pi RPC receives exactly the three static inline extension factories", async () => {
   let invocation;
   await invokeBuiltinPiRpc(async (args, options) => { invocation = { args, options }; }, ["--no-session"]);
 
   assert.deepEqual(invocation.args, ["--mode", "rpc", "--no-session"]);
   assert.equal(Object.isFrozen(BUILTIN_PI_EXTENSION_FACTORIES), true);
-  assert.equal(BUILTIN_PI_EXTENSION_FACTORIES.length, 2);
+  assert.equal(BUILTIN_PI_EXTENSION_FACTORIES.length, 3);
   assert.deepEqual(invocation.options.extensionFactories, [...BUILTIN_PI_EXTENSION_FACTORIES]);
   assert.notEqual(invocation.options.extensionFactories, BUILTIN_PI_EXTENSION_FACTORIES,
     "Pi receives a mutable copy while the exported factory list remains immutable");

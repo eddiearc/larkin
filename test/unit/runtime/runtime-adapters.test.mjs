@@ -450,6 +450,10 @@ test("Pi failed and aborted late notifications still bridge a completion key", a
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), ["completed", "completed"]);
   assert.deepEqual(observations.map((event) => event.completionKey), ["task-aborted-bridge", "task-error-bridge"]);
+  assert.deepEqual(observations.map((event) => event.completionStatuses), [
+    { "task-aborted-bridge": "cancelled" },
+    { "task-error-bridge": "failed" },
+  ]);
 });
 
 test("Pi mixed-status late notification groups keep terminal successes", async () => {
@@ -501,6 +505,10 @@ test("Pi mixed-status late notification groups keep terminal successes", async (
   const observations = events.filter((event) => event.type === "runtime-observation");
   assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
   assert.equal(observations[0].completionKey, "task-mixed-ok|task-mixed-error");
+  assert.deepEqual(observations[0].completionStatuses, {
+    "task-mixed-ok": "completed",
+    "task-mixed-error": "failed",
+  });
 });
 
 test("Pi batched agent_end messages bridge every canonical notification", async () => {
@@ -733,21 +741,24 @@ test.each(["win32", "linux"])("builtin Pi resolves no -e extension args on simul
   }, {
     subagents: () => { resolverCalls += 1; return "/must/not/resolve-subagents.js"; },
     bashTimeout: () => { resolverCalls += 1; return "/must/not/resolve-bash-timeout.js"; },
+    recordWatchdog: () => { resolverCalls += 1; return "/must/not/resolve-record-watchdog.js"; },
   });
   assert.deepEqual(args, []);
   assert.equal(resolverCalls, 0, "builtin must not resolve file-based extensions");
 });
 
-test.each(["win32", "linux"])("external Pi retains both -e extension args on simulated %s", (platform) => {
+test.each(["win32", "linux"])("external Pi retains all -e extension args on simulated %s", (platform) => {
   const args = resolvePiProcessExtensionArgs({
     distribution: "external", piCommand: "external-pi", env: {}, platform,
   }, {
     subagents: () => "/fixture/pi-subagents.bundle.js",
     bashTimeout: () => "/fixture/pi-bash-timeout.bundle.js",
+    recordWatchdog: () => "/fixture/pi-subagent-record-watchdog.bundle.js",
   });
   assert.deepEqual(args, [
     "-e", "/fixture/pi-subagents.bundle.js",
     "-e", "/fixture/pi-bash-timeout.bundle.js",
+    "-e", "/fixture/pi-subagent-record-watchdog.bundle.js",
   ]);
 });
 

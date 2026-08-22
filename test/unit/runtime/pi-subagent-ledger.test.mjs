@@ -8,13 +8,18 @@ import {
   extractBackgroundPiSubagentDispatch,
   getDispatchedSubagent,
   ledgerFilePath,
+  dispatchedSubagentRecordFile,
   noteDispatchedSubagent,
   noteDispatchedSubagentTerminal,
-  probePiSubagentOutputRecord,
+  noteDispatchedSubagentWakeAcknowledged,
+  probePiSubagentRecord,
   readDispatchedSubagentLedger,
   reconcileDispatchedSubagents,
+  sweepAbsentPiSubagentRecordFiles,
   taskIdsFromCompletionKey,
+  undeliveredTerminalWakeKeys,
   writeDispatchedSubagentLedger,
+  writeDispatchedSubagentRecordFile,
 } from "../../../dist/runtime/pi-subagent-ledger.mjs";
 
 test("extractBackgroundPiSubagentDispatch reads Agent ID and output file from a background spawn", () => {
@@ -131,21 +136,103 @@ test("ledger file persists orphaned state after the Pi record is gone", () => {
   }
 });
 
-test("default output-file probe reports absent only when the known file is gone", () => {
+test("default probe uses the Pi record sidecar and ignores a leftover transcript", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-probe-"));
   try {
     const outputFile = path.join(root, "task-probe-1.output");
-    fs.writeFileSync(outputFile, "alive\n");
-    assert.equal(probePiSubagentOutputRecord({
-      taskId: "task-probe-1", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1, outputFile,
+    const recordFile = writeDispatchedSubagentRecordFile(root, "task-probe-1");
+    fs.writeFileSync(outputFile, "leftover transcript\n");
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-probe-1", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1, outputFile, recordFile,
     }), "present");
-    fs.rmSync(outputFile);
-    assert.equal(probePiSubagentOutputRecord({
-      taskId: "task-probe-1", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1, outputFile,
+    fs.rmSync(recordFile);
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-probe-1", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1, outputFile, recordFile,
+    }), "absent", "a leftover transcript must not count as a present Pi record");
+    assert.ok(fs.existsSync(outputFile));
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-probe-2", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1, outputFile,
+    }), "absent", "tasks without a record sidecar are not unconditionally present");
+    assert.equal(probePiSubagentRecord({
+      taskId: "task-probe-3", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1,
     }), "absent");
-    assert.equal(probePiSubagentOutputRecord({
-      taskId: "task-probe-2", status: "dispatched", dispatchedAt: 1, lastActivityAt: 1,
-    }), "present");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reconcile orphans when the Pi record sidecar is gone even if the transcript remains", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-leftover-"));
+  try {
+    const outputFile = path.join(root, "task-leftover-1.output");
+    fs.writeFileSync(outputFile, "still here\n");
+    const recordFile = writeDispatchedSubagentRecordFile(root, "task-leftover-1");
+    let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), {
+      taskId: "task-leftover-1", outputFile, recordFile, now: 10,
+    });
+    fs.rmSync(recordFile);
+    const result = reconcileDispatchedSubagents(ledger, {
+      probe: probePiSubagentRecord,
+      now: 11,
+      missingReason: "pi record missing",
+    });
+    assert.equal(result.orphaned.length, 1);
+    assert.equal(result.orphaned[0].taskId, "task-leftover-1");
+    assert.equal(result.orphaned[0].status, "orphaned");
+    assert.equal(result.orphaned[0].wakeState, "pending");
+    assert.equal(result.orphaned[0].outputFile, outputFile);
+    assert.ok(fs.existsSync(outputFile));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reconcile persists transcript mtime into lastActivityAt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-mtime-"));
+  try {
+    const outputFile = path.join(root, "task-mtime-1.output");
+    fs.writeFileSync(outputFile, "alive\n");
+    const now = 1_000;
+    let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), {
+      taskId: "task-mtime-1", outputFile, now,
+    });
+    const later = new Date(5_000);
+    fs.utimesSync(outputFile, later, later);
+    const result = reconcileDispatchedSubagents(ledger, {
+      probe: () => "present",
+      now: 10_000,
+    });
+    assert.deepEqual(result.orphaned, []);
+    assert.equal(getDispatchedSubagent(result.ledger, "task-mtime-1")?.lastActivityAt, 5_000);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pending terminal wakes stay queryable until acknowledged", () => {
+  const now = 1_700_000_300_000;
+  let ledger = noteDispatchedSubagent(emptyDispatchedSubagentLedger(), { taskId: "task-wake-1", now });
+  ledger = reconcileDispatchedSubagents(ledger, { forceMissing: true, now: now + 1 }).ledger;
+  assert.deepEqual(undeliveredTerminalWakeKeys(ledger), ["task-wake-1"]);
+  ledger = noteDispatchedSubagentWakeAcknowledged(ledger, { completionKey: "task-wake-1", now: now + 2 });
+  assert.deepEqual(undeliveredTerminalWakeKeys(ledger), []);
+  assert.equal(getDispatchedSubagent(ledger, "task-wake-1")?.wakeState, "acknowledged");
+});
+
+test("sweep removes record sidecars only after the Pi record is gone", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-subagent-sweep-"));
+  try {
+    const alive = writeDispatchedSubagentRecordFile(root, "task-alive");
+    const gone = writeDispatchedSubagentRecordFile(root, "task-gone");
+    const present = new Set(["task-alive"]);
+    const removed = sweepAbsentPiSubagentRecordFiles(
+      path.dirname(alive),
+      (taskId) => present.has(taskId) ? { id: taskId } : undefined,
+    );
+    assert.deepEqual(removed, ["task-gone"]);
+    assert.ok(fs.existsSync(alive));
+    assert.equal(fs.existsSync(gone), false);
+    assert.equal(dispatchedSubagentRecordFile(root, "task-alive"), alive);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

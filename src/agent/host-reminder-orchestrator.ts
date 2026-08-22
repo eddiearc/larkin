@@ -10,9 +10,17 @@ interface ReminderAgent extends HostAgent { stateDir?: string | null }
 interface ReminderDeliveryTarget {
   deliver(agentId: string, envelope: ReminderEnvelope | object): Promise<unknown> | unknown;
 }
+interface DeliveryReceipt {
+  status?: unknown;
+  reason?: unknown;
+}
 interface StateStore {
   paths: AgentStatePaths;
   appendNdjson(key: "inbox", value: unknown): void;
+  /** Pin a reminder's user-facing source before the Runtime wake can be consumed. */
+  bindInboxDeliveryAnchor(messageId: string, target: string): void;
+  /** Remove a pin created for an Inbox wake that failed to append. */
+  unbindInboxDeliveryAnchor?(messageId: string, target?: string): void;
 }
 function withCanonicalTarget<T extends object>(envelope: T): T & { target: string } {
   const input = envelope as InboxEnvelope;
@@ -103,7 +111,7 @@ export class HostReminderOrchestrator {
 
   private deliver(agent: ReminderAgent, reminder: ReminderRecord, overdueMs: number): void {
     const recurrence = reminder.repeat ? this.store.parseRepeat(reminder.repeat, reminder.tz) : null;
-    const envelope = withCanonicalTarget(this.options.envelopeProjector.createReminderEnvelope(
+    const projected = this.options.envelopeProjector.createReminderEnvelope(
       agent.agentId,
       {
         reminderId: reminder.reminderId,
@@ -112,14 +120,134 @@ export class HostReminderOrchestrator {
         fireAt: reminder.fireAt,
         msgRef: reminder.msgRef,
         channel: reminder.channel ? String(reminder.channel) : null,
+        deliveryTarget: reminder.deliveryTarget ?? null,
+        deliveryAnchor: reminder.deliveryAnchor ?? null,
       },
       overdueMs,
       reminder.repeat && recurrence && !("error" in recurrence) ? (recurrence.description || null) : null,
-    ));
-    try { this.options.stateStore(agent).appendNdjson("inbox", envelope); }
-    catch (error) { this.log("reminder inbox 写失败", (error as Error).message); return; }
-    if (this.options.deliveryTarget) void this.options.deliveryTarget.deliver(agent.agentId, envelope);
-    else this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
+    );
+    const envelope = withCanonicalTarget({ ...projected,
+      // The projector also derives safe routing for pre-0.4.14 records; do not
+      // overwrite that migration result with the absent fields from the record.
+      deliveryTarget: reminder.deliveryTarget ?? projected.deliveryTarget ?? null,
+      deliveryAnchor: reminder.deliveryAnchor ?? projected.deliveryAnchor ?? null });
+    const auditableDelivery = typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0;
+    // Persist the pending audit marker before the Inbox row becomes pollable.
+    // An already-active Agent can poll and answer the wake immediately, and
+    // RuntimeHost.deliver may execute the whole turn before its promise settles
+    // (notably with Pi); without a durable pending marker that outbound write
+    // would be invisible to the audit. Internal/no-delivery reminders still
+    // wake the Runtime, but have no user-facing delivery to audit.
+    if (auditableDelivery && !this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+      outcome: "awaiting_runtime", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+    })) {
+      this.log(`reminder delivery pending 审计写失败 id=#${reminder.reminderId.slice(0, 8)}（拒绝唤醒）`);
+      return;
+    }
+    let stateStore: StateStore | undefined;
+    let deliveryAnchorBound = false;
+    try {
+      stateStore = this.options.stateStore(agent);
+      if (envelope.deliveryTarget && envelope.deliveryAnchor) {
+        stateStore.bindInboxDeliveryAnchor(envelope.deliveryAnchor, envelope.deliveryTarget);
+        deliveryAnchorBound = true;
+      }
+      stateStore.appendNdjson("inbox", envelope);
+    } catch (error) {
+      if (deliveryAnchorBound && stateStore?.unbindInboxDeliveryAnchor && envelope.deliveryTarget && envelope.deliveryAnchor) {
+        try { stateStore.unbindInboxDeliveryAnchor(envelope.deliveryAnchor, envelope.deliveryTarget); }
+        catch (rollbackError) { this.log("reminder Inbox anchor 回滚失败", (rollbackError as Error).message); }
+      }
+      this.log("reminder inbox 写失败", (error as Error).message);
+      // The wake row never became durable, so the pending marker must not stay
+      // open awaiting a Runtime turn that can never poll this occurrence.
+      if (auditableDelivery) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+          outcome: "inbox_write_failed", reason: String((error as Error).message || error),
+          deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+        });
+      }
+      return;
+    }
+    if (!this.options.deliveryTarget) {
+      this.log(`reminder 触发但 Runtime Host 未就绪 id=#${reminder.reminderId.slice(0, 8)}（仅入 inbox）`);
+      if (auditableDelivery) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+          outcome: "runtime_unavailable", occurrenceId: envelope.message_id,
+        });
+      }
+      return;
+    }
+    try {
+      const recordReceipt = (receipt: unknown): void => {
+        if (!auditableDelivery) return;
+        const status = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).status || "") : "";
+        const reason = receipt && typeof receipt === "object" ? String((receipt as DeliveryReceipt).reason || "") : "";
+        // RuntimeHost.deliver only acknowledges Inbox persistence/wake submission.
+        // It does not prove that the Agent later committed an outbound Feishu
+        // message, so accepted, duplicate, and an empty receipt remain pending.
+        if (!status || status === "accepted" || status === "duplicate") {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+            outcome: status || "empty", deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+          });
+        } else if (status === "deferred") {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_pending", {
+            outcome: "deferred", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+          });
+        } else {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+            outcome: "error", ...(reason ? { reason } : {}), deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+          });
+        }
+      };
+      const result = this.options.deliveryTarget.deliver(agent.agentId, envelope);
+      if (result && typeof (result as Promise<unknown>).then === "function") {
+        void Promise.resolve(result).then(recordReceipt, (error) => this.recordDeliveryOutcome(
+          agent, reminder.reminderId, "delivery_failed", {
+            outcome: "rejected", reason: String(error?.message || error), deliveryTarget: envelope.deliveryTarget, occurrenceId: envelope.message_id,
+          },
+        ));
+      } else {
+        recordReceipt(result);
+      }
+    } catch (error) {
+      if (typeof envelope.deliveryTarget === "string" && envelope.deliveryTarget.length > 0) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "delivery_failed", {
+          outcome: "rejected", reason: String((error as Error).message || error), deliveryTarget: envelope.deliveryTarget,
+          occurrenceId: envelope.message_id,
+        });
+      }
+      this.log(`reminder delivery 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
+    }
+  }
+
+  private recordDeliveryOutcome(agent: ReminderAgent, reminderId: string, eventType: string, metadata: Record<string, unknown>): boolean {
+    try {
+      return this.store.mutate(this.options.stateStore(agent).paths.reminders, (store) => {
+        const reminder = store.reminders.find((candidate) => candidate.reminderId === reminderId);
+        if (!reminder) return false;
+        const occurrenceId = typeof metadata.occurrenceId === "string" ? metadata.occurrenceId : null;
+        const occurrenceEvents = occurrenceId
+          ? reminder.events?.filter((event) => event.metadata?.occurrenceId === occurrenceId)
+          : undefined;
+        const hasOccurrenceMetadata = reminder.events?.some((event) => typeof event.metadata?.occurrenceId === "string");
+        const last = occurrenceId
+          ? (occurrenceEvents?.at(-1) ?? (hasOccurrenceMetadata && reminder.events?.at(-1)?.eventType !== "fired"
+            ? undefined : reminder.events?.at(-1)))
+          : reminder.events?.at(-1);
+        if (!last || !["fired", "delivery_pending", "delivery_failed"].includes(last.eventType)) return false;
+        // A late Runtime receipt must not resurrect an occurrence finalized as failed.
+        if (eventType === "delivery_pending" && last.eventType === "delivery_failed") return false;
+        // A synchronous outbound can finish inside deliveryTarget.deliver().
+        // Never let its later Runtime receipt callback downgrade that success.
+        if (eventType !== "delivery_succeeded" && last.eventType === "delivery_succeeded") return false;
+        this.store.appendEvent(reminder, eventType, "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, this.now(), metadata);
+        return true;
+      });
+    } catch (error) {
+      this.log(`reminder delivery audit 写失败 id=#${reminderId.slice(0, 8)}: ${(error as Error).message}`);
+      return false;
+    }
   }
 
   handleFire(message: { agentId?: string; reminderId?: string }): void {
@@ -151,7 +279,9 @@ export class HostReminderOrchestrator {
           reminder.firedAt = this.store.nowIso(now);
         }
         reminder.version = Number(reminder.version) + 1;
-        this.store.appendEvent(reminder, "fired", "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, now);
+        this.store.appendEvent(reminder, "fired", "system", null, reminder.status === "scheduled" ? reminder.fireAt : null, now, {
+          deliveryTarget: reminder.deliveryTarget ?? null, deliveryAnchor: reminder.deliveryAnchor ?? null,
+        });
         store.reminders = store.reminders.filter((candidate) =>
           candidate.status === "scheduled" || now - Date.parse(candidate.firedAt || candidate.createdAt || "") < 30 * 86_400_000);
         action = "deliver";

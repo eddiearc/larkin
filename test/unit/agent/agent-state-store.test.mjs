@@ -12,6 +12,7 @@ process.env.LARKIN_BUN_TEST_RUNNER = "1";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const moduleUrl = pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href;
 const processStateUrl = pathToFileURL(path.join(ROOT, "dist/platform/process-state.mjs")).href;
+const reminderRoutesUrl = pathToFileURL(path.join(ROOT, "dist/agent/reminder-routes.mjs")).href;
 
 test("Agent state layout owns every canonical persistence path", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-layout-"));
@@ -175,6 +176,72 @@ test("canonical Inbox append returns the exact persisted shape and deduplicates 
     store.pollInbox({ target: candidate.target, limit: 1 });
     assert.deepEqual(store.appendCanonicalInboxOnce(candidate), { status: "duplicate_consumed", envelope: null });
     assert.deepEqual(store.readNdjson("inbox"), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an unscoped mixed-target poll clears the implicit source instead of choosing its last envelope", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-mixed-source-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateMixedSourceA1");
+    store.appendNdjson("inbox", { message_id: "om_mixed_a", chat_id: "oc_mixed_a", content: "A" });
+    store.appendNdjson("inbox", { message_id: "om_mixed_b", chat_id: "oc_mixed_b", content: "B" });
+    assert.deepEqual(store.pollInbox().envelopes.map((row) => row.message_id), ["om_mixed_a", "om_mixed_b"]);
+    assert.equal(store.resolveCurrentInboxSource(), null, "a mixed batch must not expose its last envelope as an implicit target");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("implicit reminder source stays bound to the active poll when an unpolled Inbox event races in", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-targeted-source-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateTargetedSourceA1");
+    store.appendNdjson("inbox", { message_id: "om_source_a", target: "chat:oc_source_a", content: "A" });
+    const polled = store.pollInbox({ target: "chat:oc_source_a", limit: 1 });
+    assert.deepEqual(polled.envelopes.map((row) => row.message_id), ["om_source_a"]);
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_source_a", deliveryAnchor: "om_source_a" });
+
+    // B is durably appended but has not been consumed by this Agent yet. It
+    // must not replace A as the implicit target for a targetless schedule.
+    store.appendNdjson("inbox", { message_id: "om_source_b", target: "chat:oc_source_b", content: "B" });
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_source_a", deliveryAnchor: "om_source_a" });
+    const { createReminderRoutes } = await import(reminderRoutesUrl);
+    const routes = createReminderRoutes({
+      stateFile: store.paths.reminders,
+      agentId: "cli_stateTargetedSourceA1",
+      query: (requestPath, name) => new URL(requestPath, "http://local").searchParams.get(name),
+      log: () => undefined,
+      now: () => Date.parse("2026-07-16T00:00:00.000Z"),
+      currentInboxSource: () => store.resolveCurrentInboxSource(),
+      resolveMessageTarget: (messageId) => store.resolveInboxMessageTarget(messageId),
+    });
+    const scheduled = routes.handle({ path: "/reminders", pathNoQuery: "/reminders", method: "POST",
+      body: { title: "bound to A", delaySeconds: 60 } });
+    assert.equal(scheduled.ok, true);
+    assert.equal(scheduled.data.reminder.deliveryTarget, "chat:oc_source_a");
+    assert.equal(scheduled.data.reminder.deliveryAnchor, "om_source_a");
+
+    // An interaction wake is user-targeted by chat locator but its synthetic
+    // interaction_* id is not a reply anchor. Polling it must invalidate A so
+    // a later targetless schedule fails closed instead of reusing A.
+    store.appendNdjson("inbox", { message_id: "interaction_run_source", kind: "interaction", chat_id: "oc_interaction", content: "interaction wake" });
+    assert.deepEqual(store.pollInbox({ target: "chat:oc_interaction", limit: 1 }).envelopes.map((row) => row.message_id), ["interaction_run_source"]);
+    assert.equal(store.resolveCurrentInboxSource(), null);
+    const failedClosedInteraction = routes.handle({ path: "/reminders", pathNoQuery: "/reminders", method: "POST",
+      body: { title: "must fail closed after interaction", delaySeconds: 60 } });
+    assert.equal(failedClosedInteraction.ok, false);
+    assert.match(failedClosedInteraction.error, /必须显式指定 delivery target/);
+
+    // A consumed runtime reminder is not a user source. It must keep the
+    // invalidation fail-closed for a later targetless schedule too.
+    store.appendNdjson("inbox", { message_id: "rem_source_runtime", kind: "reminder", target: "runtime:reminder", content: "runtime wake" });
+    assert.deepEqual(store.pollInbox({ target: "runtime:reminder", limit: 1 }).envelopes.map((row) => row.message_id), ["rem_source_runtime"]);
+    assert.equal(store.resolveCurrentInboxSource(), null);
+    const failedClosed = routes.handle({ path: "/reminders", pathNoQuery: "/reminders", method: "POST",
+      body: { title: "must fail closed", delaySeconds: 60 } });
+    assert.equal(failedClosed.ok, false);
+    assert.match(failedClosed.error, /必须显式指定 delivery target/);
+    assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_source_b"]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -425,6 +492,72 @@ test("context-overflow rearm refuses missing, mismatched, or duplicate stable id
       assert.deepEqual(store.readJson("runtimeDeliveries", {}), before);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   }
+});
+
+test("consumed reminder context is available to the outbound audit hook without becoming a user source", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-reminder-context-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_reminderContextA1");
+    store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_1234567890_1", reminderId: "reminder-full-id",
+      target: "runtime:reminder", deliveryTarget: "chat:oc_reminder", content: "reminder" });
+    store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    assert.deepEqual(store.resolveCurrentReminder(), {
+      reminderId: "reminder-full-id", deliveryTarget: "chat:oc_reminder", deliveryAnchor: "rem_1234567890_1",
+    });
+    assert.equal(store.resolveCurrentInboxSource(), null);
+    store.clearCurrentReminder("reminder-full-id");
+    assert.equal(store.resolveCurrentReminder(), null);
+
+    store.appendNdjson("inbox", { message_id: "om_turn_source", chat_id: "oc_turn_source", content: "source" });
+    store.pollInbox({ target: "chat:oc_turn_source", limit: 1 });
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: "chat:oc_turn_source", deliveryAnchor: "om_turn_source" });
+    store.clearCurrentInboxSource();
+    assert.equal(store.resolveCurrentInboxSource(), null, "the source capability expires at the Runtime turn boundary");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("polling a batch retains every reminder context until each is cleared", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-reminder-batch-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_reminderBatchA1");
+    for (const [reminderId, messageId, target] of [
+      ["reminder-batch-1", "rem_batch_1", "chat:oc_batch"],
+      ["reminder-batch-2", "rem_batch_2", "chat:oc_batch"],
+    ]) {
+      store.appendNdjson("inbox", { kind: "reminder", message_id: messageId, target: "runtime:reminder",
+        reminderId, deliveryTarget: target, content: reminderId });
+    }
+    store.appendNdjson("inbox", { message_id: "om_batch_other", chat_id: "oc_other", content: "other" });
+    store.pollInbox({ limit: 100 });
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.reminderId), ["reminder-batch-1", "reminder-batch-2"]);
+    store.clearCurrentReminder("reminder-batch-1");
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.reminderId), ["reminder-batch-2"]);
+    store.clearCurrentReminders();
+    assert.deepEqual(store.resolveCurrentReminders(), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("recurring reminder contexts are keyed by occurrence and clear one occurrence at a time", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-recurring-reminder-context-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_recurringContextA1");
+    store.bindInboxDeliveryAnchor("doc_comment_anchor", "document-comment:doc/comment");
+    for (const messageId of ["rem_recurring_1", "rem_recurring_2"]) {
+      store.appendNdjson("inbox", { kind: "reminder", message_id: messageId, target: "runtime:reminder",
+        reminderId: "reminder-recurring", deliveryTarget: "document-comment:doc/comment", deliveryAnchor: "doc_comment_anchor", content: messageId });
+    }
+    store.pollInbox({ target: "runtime:reminder", limit: 2 });
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.deliveryAnchor), ["rem_recurring_1", "rem_recurring_2"]);
+    store.clearCurrentReminder("reminder-recurring", "rem_recurring_1");
+    assert.deepEqual(store.resolveCurrentReminders().map((row) => row.deliveryAnchor), ["rem_recurring_2"]);
+    assert.equal(store.resolveInboxMessageTarget("doc_comment_anchor"), "document-comment:doc/comment");
+    store.clearCurrentReminder("reminder-recurring", "rem_recurring_2");
+    assert.deepEqual(store.resolveCurrentReminders(), []);
+    assert.equal(store.resolveInboxMessageTarget("doc_comment_anchor"), null, "the final occurrence clears its temporary routing anchor");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("appendInboxOnce remembers a stable provider id after the Inbox row is consumed", async () => {

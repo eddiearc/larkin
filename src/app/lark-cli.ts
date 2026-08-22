@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
+import { auditReminderDelivery } from "../agent/reminder-delivery-audit.js";
 import { evaluateFreshness, type FreshnessTarget } from "../agent/freshness-gate.js";
 import {
   feishuImFreshnessAdapter, feishuImTarget, mergeFeishuImCursor, serializeFeishuImTarget,
@@ -296,7 +297,7 @@ type CommentReplyLedger = {
   document_comment_replies?: Record<string, { digest: string; status: "sending" | "sent" | "failed"; updated_at: string }>;
 };
 
-type ImWriteMemoEntry = { message_id: string; updated_at: string };
+type ImWriteMemoEntry = { message_id: string; updated_at: string; source_message_id?: string };
 type ImWriteMemoState = {
   version: 1;
   cursors?: Record<string, unknown>;
@@ -308,21 +309,28 @@ const IM_WRITE_MEMO_LIMIT = 512;
 // 只标注、不拦截：每次成功写把「实际生效的幂等 key → 服务端返回的 message_id」记进备忘。
 // 同 key 再次成功且服务端返回同一个 message_id，说明服务端走了幂等去重（没有产生新消息），
 // 返回 true 供输出标注 duplicate。拦截权始终在服务端，备忘不会吞掉任何发送。
-function recordImWriteMemo(store: AgentStateStore, key: string, messageId: string): boolean {
-  let duplicate = false;
-  store.mutateJson<ImWriteMemoState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
-    state.im_write_memo ??= {};
-    const prior = state.im_write_memo[key];
-    if (prior && prior.message_id === messageId) duplicate = true;
-    state.im_write_memo[key] = { message_id: messageId, updated_at: new Date().toISOString() };
-    const keys = Object.keys(state.im_write_memo);
-    for (const stale of keys.slice(0, Math.max(0, keys.length - IM_WRITE_MEMO_LIMIT))) delete state.im_write_memo[stale];
-  });
-  return duplicate;
+function recordImWriteMemo(store: AgentStateStore, key: string, messageId: string, sourceMessageId?: string): {
+  duplicate: boolean; priorSourceMessageId?: string;
+} {
+  return store.mutateJson<ImWriteMemoState, { duplicate: boolean; priorSourceMessageId?: string }>(
+    "freshnessState", { version: 1, cursors: {} }, (state) => {
+      state.im_write_memo ??= {};
+      const prior = state.im_write_memo[key];
+      if (prior && prior.message_id === messageId) {
+        return { duplicate: true, ...(prior.source_message_id ? { priorSourceMessageId: prior.source_message_id } : {}) };
+      }
+      state.im_write_memo[key] = { message_id: messageId, updated_at: new Date().toISOString(),
+        ...(sourceMessageId ? { source_message_id: sourceMessageId } : {}) };
+      const keys = Object.keys(state.im_write_memo);
+      for (const stale of keys.slice(0, Math.max(0, keys.length - IM_WRITE_MEMO_LIMIT))) delete state.im_write_memo[stale];
+      return { duplicate: false };
+    },
+  );
 }
 
 function runCommentReply(
   argv: readonly string[], privateEnv: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, store: AgentStateStore,
+  agentId: string,
 ): number {
   const input = parseCommentReply(argv);
   const targetKey = store.resolveInboxMessageTarget(input.messageId);
@@ -349,6 +357,16 @@ function runCommentReply(
     },
   );
   if (claim === "sent") {
+    const currentReminder = store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === targetKey).at(-1) ?? null;
+    try {
+      auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, deliveryAnchor: currentReminder?.deliveryAnchor,
+        succeeded: !currentReminder, ...(currentReminder ? { reason: "document comment ledger already sent this text to the anchor on an earlier reminder firing" } : {}) });
+    }
+    catch (error) { io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`); }
+    if (currentReminder) {
+      io.stderr("comment reply was already sent for an earlier reminder firing; no new delivery was committed\n");
+      return 2;
+    }
     io.stdout(`${JSON.stringify({ ok: true, identity: "bot", committed: true, duplicate: true, target: targetKey })}\n`);
     return 0;
   }
@@ -385,6 +403,20 @@ function runCommentReply(
         updated_at: new Date().toISOString(),
       };
     });
+  }
+  const committedWrite = !result.error && result.status === 0;
+  const currentReminder = committedWrite
+    ? store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === targetKey).at(-1) ?? null
+    : null;
+  try {
+    auditReminderDelivery({ stateStore: store, agentId, target: targetKey!, succeeded: committedWrite,
+      ...(committedWrite ? {} : { reason: (result.stderr || result.stdout || "comment provider failed").trim().split("\n")[0] }) });
+  } catch (error) {
+    if (committedWrite && currentReminder) {
+      try { store.markCurrentReminderDeliveryCommitted(currentReminder.reminderId, currentReminder.deliveryAnchor); }
+      catch (markerError) { io.stderr(`lark-cli: reminder committed marker failed: ${markerError instanceof Error ? markerError.message : String(markerError)}\n`); }
+    }
+    io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`);
   }
   return emitNativeResult(result, io);
 }
@@ -1012,7 +1044,7 @@ export function runLarkCli(
         } catch { /* telemetry is failure-isolated */ }
       }
       return telemetry.externalPhase(agent.agentId, store.paths.root, "document.comment.reply", SpanKind.CLIENT,
-        () => runCommentReply(argv, privateEnv, io, nativeDependencies, store), "comment_cli") as number;
+        () => runCommentReply(argv, privateEnv, io, nativeDependencies, store, agent.agentId), "comment_cli") as number;
     }
     catch (error) {
       io.stderr(`lark-cli: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -1062,8 +1094,38 @@ export function runLarkCli(
       return emitNativeResult(write, io);
     }
     const writeMessage = writeResponseMessage(write);
-    const duplicate = !write.error && write.status === 0 && writeMessage
-      ? recordImWriteMemo(store, intentKey, writeMessage.message_id) : false;
+    const deliveryTarget = decision.operation === "send"
+      ? `chat:${policyFlagValue(effectiveArgv, "--chat-id")}`
+      : store.resolveInboxMessageTarget(policyFlagValue(effectiveArgv, "--message-id") || "") || targetKey;
+    const matchingReminderContexts = store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === deliveryTarget);
+    // When recurring firings overlap, attach this write to one occurrence rather
+    // than dropping audit state merely because reminder_id is shared. Reuse this
+    // exact anchor for both the memo and audit so they cannot select different
+    // occurrences.
+    const currentReminder = matchingReminderContexts.at(-1) ?? null;
+    const deliveryAnchor = currentReminder?.deliveryAnchor;
+    const memo = !write.error && write.status === 0 && writeMessage
+      ? recordImWriteMemo(store, intentKey, writeMessage.message_id, deliveryAnchor) : { duplicate: false };
+    const duplicateOfEarlierReminder = memo.duplicate && Boolean(currentReminder)
+      && memo.priorSourceMessageId !== currentReminder?.deliveryAnchor;
+    const committedWrite = !write.error && write.status === 0 && !duplicateOfEarlierReminder;
+    try {
+      auditReminderDelivery({ stateStore: store, agentId: agent.agentId, target: deliveryTarget, deliveryAnchor,
+        succeeded: committedWrite,
+        ...(!committedWrite ? {
+          reason: duplicateOfEarlierReminder
+            ? "provider deduplicated this write to an earlier reminder firing"
+            : (write.stderr || write.stdout || "provider write failed").trim().split("\n")[0],
+        } : {}),
+        ...(writeMessage?.message_id ? { messageId: writeMessage.message_id } : {}) });
+    } catch (error) {
+      if (committedWrite && currentReminder) {
+        try { store.markCurrentReminderDeliveryCommitted(currentReminder.reminderId, currentReminder.deliveryAnchor, writeMessage?.message_id); }
+        catch (markerError) { io.stderr(`lark-cli: reminder committed marker failed: ${markerError instanceof Error ? markerError.message : String(markerError)}\n`); }
+      }
+      io.stderr(`lark-cli: reminder delivery audit failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    const duplicate = memo.duplicate;
     if (duplicate) {
       observeSuccessfulWrite(write, target, targetKey, store, generation);
       emitDuplicatedWrite(write, io, { target: targetKey });

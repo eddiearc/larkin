@@ -15,6 +15,7 @@ import { projectInboxEvents } from "./inbox-projection.js";
 import { signatureDescription } from "../feishu/message-policy.js";
 import { createOutboundTransport, type ReplyContext, type StagedAttachment } from "../feishu/outbound-transport.js";
 import { createReminderRoutes } from "./reminder-routes.js";
+import { auditReminderDelivery } from "./reminder-delivery-audit.js";
 import { isImageMime, looksLikeMarkdown, resolveMappedChatId, safeConversationExcerpt } from "./transport-shell.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
@@ -124,6 +125,22 @@ export function createTransportBusinessContext(env: Env = process.env) {
     catch { return {}; }
   };
   const resolveChatId = (target: unknown): string => resolveMappedChatId(loadMap(), target);
+
+  const recordReminderDelivery = ({ target, succeeded, messageId, reason }: {
+    target: string; succeeded: boolean; messageId?: string; reason?: string;
+  }): void => {
+    const current = stateStore.resolveCurrentReminder();
+    try {
+      auditReminderDelivery({ stateStore, agentId, target, succeeded, ...(messageId ? { messageId } : {}),
+        ...(reason ? { reason } : {}), resolveChatId });
+    } catch (error) {
+      if (succeeded && current && stateStore.markCurrentReminderDeliveryCommitted) {
+        try { stateStore.markCurrentReminderDeliveryCommitted(current.reminderId, current.deliveryAnchor, messageId); }
+        catch (markerError) { log(`reminder committed marker 写失败 id=#${current.reminderId.slice(0, 8)}: ${(markerError as Error).message}`); }
+      }
+      log(`reminder outbound audit 写失败 id=#${current?.reminderId.slice(0, 8) || "unknown"}: ${(error as Error).message}`);
+    }
+  };
 
   const larkArgs = (...rest: string[]): string[] => rest;
   const larkCli = (args: string[], cwd?: string): CommandResult => {
@@ -257,7 +274,8 @@ export function createTransportBusinessContext(env: Env = process.env) {
   const outbound = createOutboundTransport({
     attachmentDir, attachmentIndexFile, resolveChatId, replyContextFor,
     sendText: larkSend, replyText: larkReply, sendMedia: larkSendMedia,
-    appendConversation, botDisplayName: () => botIdentity()?.name, agentName, dryRun, log,
+    appendConversation, onDeliveryOutcome: recordReminderDelivery,
+    botDisplayName: () => botIdentity()?.name, agentName, dryRun, log,
   });
 
   const liveGrantLink = (): string | null => {
@@ -396,7 +414,11 @@ export function createTransportBusinessContext(env: Env = process.env) {
     },
     mappedChannels: loadMap, larkJsonOut, feishuError, botDisplayName, feishuAppInfo, log,
   });
-  const reminderRoutes = createReminderRoutes({ stateFile: paths.reminders, agentId, query, log });
+  const reminderRoutes = createReminderRoutes({
+    stateFile: paths.reminders, agentId, query, log,
+    currentInboxSource: () => stateStore.resolveCurrentInboxSource(),
+    resolveMessageTarget: (messageId) => stateStore.resolveInboxMessageTarget(messageId),
+  });
 
   try {
     fs.appendFileSync(transportLogFile, `${new Date().toISOString()} INIT profile=${selectedAgent.feishuProfile} larkCfgDir=${selectedAgent.larkConfigDir} inbox=${paths.inbox}\n`);

@@ -96,7 +96,7 @@ test("lark-cli launcher passes --mention argv through without injecting --conten
 });
 
 test("mention guidance ships under the current standing prompt version", () => {
-  assert.equal(LARKIN_STANDING_PROMPT_VERSION, "larkin-standing-v21");
+  assert.equal(LARKIN_STANDING_PROMPT_VERSION, "larkin-standing-v22");
   const prompt = buildPrompt("codex");
   assert.match(prompt, /## Collaboration and delivery/);
 });

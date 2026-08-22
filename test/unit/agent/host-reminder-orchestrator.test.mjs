@@ -25,20 +25,28 @@ async function waitFor(condition, label, timeoutMs = 10_000) {
 }
 
 function fixture(reminders) {
-  const deliveries = [], inbox = [];
-  const state = { paths: { reminders: "/state/reminders.json", inbox: "/state/inbox.ndjson" }, appendNdjson(_key, value) { inbox.push(value); } };
+  const deliveries = [], inbox = [], deliveryAnchors = new Map();
+  const state = { paths: { reminders: "/state/reminders.json", inbox: "/state/inbox.ndjson" },
+    bindInboxDeliveryAnchor(messageId, target) { deliveryAnchors.set(messageId, target); },
+    unbindInboxDeliveryAnchor(messageId, target) {
+      if (deliveryAnchors.get(messageId) === target) deliveryAnchors.delete(messageId);
+    },
+    appendNdjson(_key, value) { inbox.push(value); } };
   const api = {
     load: () => ({ reminders }),
     mutate(_file, fn) { return fn({ reminders }); },
     parseRepeat: () => null,
     nowIso: (ms) => new Date(ms).toISOString(),
-    appendEvent() {},
+    appendEvent(reminder, eventType, _actorType, _actorId, _nextFireAt, _ms, metadata) {
+      if (!Array.isArray(reminder.events)) reminder.events = [];
+      reminder.events.push({ eventType, metadata: metadata ?? null });
+    },
   };
   const projector = {
     createReminderEnvelope(_agentId, reminder) { return { kind: "reminder", message_id: `rem_${reminder.reminderId}`, seq: 1, wake: true, target: "runtime:reminder" }; },
     createRedeliveryEnvelope(_agentId, count) { return { kind: "redelivery", message_id: `redeliver_${count}`, seq: 2, target: "runtime:redelivery" }; },
   };
-  return { deliveries, inbox, state, api, projector };
+  return { deliveries, inbox, deliveryAnchors, state, api, projector };
 }
 
 test("reminder schedules deduplicate unless forced", () => {
@@ -60,23 +68,205 @@ test("reminder schedules deduplicate unless forced", () => {
 });
 
 test("due fire persists before delivery, updates record, then forces snapshot", () => {
-  const reminder = { reminderId: "123456789", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "due", status: "scheduled" };
+  const reminder = { reminderId: "123456789", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "due", status: "scheduled", deliveryTarget: "chat:oc_due", deliveryAnchor: "om_due" };
   const f = fixture([reminder]);
   f.projector.createReminderEnvelope = (_agentId, value) => ({
     kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1, wake: true, target: "runtime:reminder",
     channel_type: "dm", channel_name: "system",
   });
   const order = [];
-  f.state.appendNdjson = (_key, value) => { order.push("persist"); f.inbox.push(value); };
-  const target = { deliver(_agentId, envelope) { order.push("deliver"); f.deliveries.push(envelope); } };
+  f.state.appendNdjson = (_key, value) => {
+    order.push(`persist:${reminder.events.at(-1)?.eventType || "missing-pending"}`);
+    f.inbox.push(value);
+  };
+  const target = { deliver(_agentId, envelope) {
+    order.push(`deliver:${reminder.events.at(-1)?.eventType || "missing-pending"}`);
+    f.deliveries.push(envelope);
+  } };
   const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector, deliveryTarget: target, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
   orchestrator.handleFire({ agentId: "cli_rem", reminderId: reminder.reminderId });
-  assert.deepEqual(order, ["persist", "deliver"]);
+  assert.deepEqual(order, ["persist:delivery_pending", "deliver:delivery_pending"],
+    "delivery_pending must be durable before the Inbox wake row is pollable and before RuntimeHost.deliver runs the turn");
   assert.equal(reminder.status, "fired");
   assert.equal(reminder.version, 2);
   assert.equal(f.inbox[0].target, "runtime:reminder");
   assert.equal(f.deliveries[0].target, "runtime:reminder");
+  assert.equal(f.deliveries[0].deliveryTarget, "chat:oc_due");
+  assert.equal(f.deliveries[0].deliveryAnchor, "om_due");
+  assert.equal(reminder.events.at(-1).eventType, "delivery_pending");
+  assert.deepEqual(reminder.events.at(-1).metadata, { outcome: "empty", deliveryTarget: "chat:oc_due", occurrenceId: "rem_123456789" });
   assert.strictEqual(f.inbox[0], f.deliveries[0], "the same target-complete envelope is persisted and delivered");
+  orchestrator.handleFire({ agentId: "cli_rem", reminderId: reminder.reminderId });
+  assert.equal(f.deliveries.length, 1, "duplicate fire attempts do not duplicate the user-visible delivery");
+});
+
+test("recurring fires get distinct occurrence audit identities", () => {
+  const reminder = { reminderId: "recurring-occurrence", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "recurring", status: "scheduled", repeat: "every:1h", deliveryTarget: "chat:oc_recurring", deliveryAnchor: "om_recurring" };
+  const f = fixture([reminder]);
+  let sequence = 0;
+  f.projector.createReminderEnvelope = (_agentId, value) => ({
+    kind: "reminder", message_id: `rem_recurring_occurrence_${++sequence}`, seq: sequence, wake: true, target: "runtime:reminder",
+    deliveryTarget: value.deliveryTarget, deliveryAnchor: value.deliveryAnchor,
+  });
+  f.api.parseRepeat = () => ({ description: "every hour", next: () => Date.parse("2026-07-16T02:00:00Z") });
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    deliveryTarget: { deliver() { return { status: "accepted" }; } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.deepEqual([...new Set(reminder.events.filter((event) => event.eventType === "delivery_pending").map((event) => event.metadata.occurrenceId))], [
+    "rem_recurring_occurrence_1", "rem_recurring_occurrence_2",
+  ]);
+});
+
+test("pending audit persistence failure prevents Runtime delivery", () => {
+  const reminder = { reminderId: "pending-audit-fail", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-16T00:00:00Z", title: "audit", status: "scheduled", deliveryTarget: "chat:oc_pending_audit", deliveryAnchor: "om_pending_audit" };
+  const f = fixture([reminder]);
+  const originalMutate = f.api.mutate;
+  let mutations = 0;
+  f.api.mutate = (file, fn) => {
+    mutations += 1;
+    if (mutations === 2) throw new Error("reminders.json unavailable");
+    return originalMutate(file, fn);
+  };
+  let deliveryCalls = 0;
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    deliveryTarget: { deliver() { deliveryCalls += 1; } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(deliveryCalls, 0, "Runtime delivery must be fail-closed when pending audit persistence fails");
+  assert.equal(reminder.events.at(-1).eventType, "fired", "the failed pending write must not claim an auditable delivery");
+  assert.deepEqual(f.inbox, [], "the durable wake row must not be published without its pending audit marker");
+});
+
+test("Inbox append failure after the pending audit finalizes the occurrence as failed", () => {
+  const reminder = { reminderId: "append-fail-audited", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "audited", status: "scheduled", deliveryTarget: "chat:oc_append", deliveryAnchor: "om_append" };
+  const f = fixture([reminder]);
+  f.state.appendNdjson = () => { throw new Error("disk full"); };
+  let deliveryCalls = 0;
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
+    envelopeProjector: f.projector, deliveryTarget: { deliver() { deliveryCalls += 1; } }, reminderStore: f.api,
+    now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(deliveryCalls, 0, "an unexposed wake row must never reach the Runtime");
+  assert.equal(reminder.events.at(-1).eventType, "delivery_failed",
+    "the pending marker must not stay open for a wake row that never became durable");
+  assert.equal(reminder.events.at(-1).metadata.outcome, "inbox_write_failed");
+  assert.equal(f.deliveryAnchors.size, 0, "a failed Inbox append must roll back its temporary delivery anchor");
+});
+
+test("internal reminders without a Runtime delivery target do not create delivery failures", () => {
+  const reminder = { reminderId: "internal-unavailable", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-16T00:00:00Z", title: "internal", status: "scheduled", deliveryMode: "internal" };
+  const f = fixture([reminder]);
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(reminder.events?.some((event) => event.eventType === "delivery_failed"), false);
+});
+
+test("Runtime accepted, duplicate, and empty receipts remain pending until Feishu commit", async () => {
+  for (const receipt of [{ status: "accepted" }, { status: "duplicate" }, undefined]) {
+    const outcome = receipt?.status || "empty";
+    const reminder = { reminderId: `receipt-${outcome}`, version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-16T00:00:00Z", title: "receipt", status: "scheduled", deliveryTarget: "chat:oc_receipt", deliveryAnchor: "om_receipt" };
+    const f = fixture([reminder]);
+    const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+      deliveryTarget: { deliver() { return Promise.resolve(receipt); } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+    orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reminder.events.at(-1).eventType, "delivery_pending");
+    assert.deepEqual(reminder.events.at(-1).metadata, { outcome, deliveryTarget: "chat:oc_receipt", occurrenceId: `rem_receipt-${outcome}` });
+    assert.equal(reminder.events.some((event) => event.eventType === "delivery_succeeded"), false,
+      "Runtime acceptance is not a committed Feishu delivery");
+  }
+});
+
+test("internal reminders do not create a user-delivery audit record", async () => {
+  const reminder = { reminderId: "internal-reminder", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "internal", status: "scheduled" };
+  const f = fixture([reminder]);
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+    deliveryTarget: { deliver() { return Promise.resolve({ status: "accepted" }); } }, reminderStore: f.api,
+    now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reminder.events?.some((event) => event.eventType.startsWith("delivery_")), false);
+});
+
+test("Runtime deferred and error receipts are audited without false delivery success", async () => {
+  for (const receipt of [{ status: "deferred", reason: "backlog" }, { status: "error", reason: "invalid target" }]) {
+    const reminder = { reminderId: `receipt-${receipt.status}`, version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "receipt", status: "scheduled", deliveryTarget: "chat:oc_receipt", deliveryAnchor: "om_receipt" };
+    const f = fixture([reminder]);
+    const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state, envelopeProjector: f.projector,
+      deliveryTarget: { deliver() { return Promise.resolve(receipt); } }, reminderStore: f.api, now: () => Date.parse("2026-07-16T03:00:00Z") });
+    orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.notEqual(reminder.events.at(-1).eventType, "delivery_succeeded");
+    assert.equal(reminder.events.at(-1).eventType, receipt.status === "deferred" ? "delivery_pending" : "delivery_failed");
+    assert.equal(reminder.events.at(-1).metadata.outcome, receipt.status);
+  }
+});
+
+test("thread reminder fire carries the thread target and remains exactly-once", () => {
+  const reminder = { reminderId: "thread-reminder", version: 1, ownerAgentId: "cli_rem", fireAt: "2026-07-16T02:00:00Z",
+    createdAt: "2026-07-15T00:00:00Z", title: "thread due", status: "scheduled", deliveryTarget: "thread:oc_thread:omt_topic", deliveryAnchor: "om_thread" };
+  const f = fixture([reminder]);
+  const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => f.state,
+    envelopeProjector: f.projector, deliveryTarget: { deliver(_id, envelope) { f.deliveries.push(envelope); } }, reminderStore: f.api,
+    now: () => Date.parse("2026-07-16T03:00:00Z") });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+  assert.equal(f.deliveries.length, 1);
+  assert.equal(f.deliveries[0].deliveryTarget, "thread:oc_thread:omt_topic");
+  assert.equal(f.deliveries[0].deliveryAnchor, "om_thread");
+});
+
+test("fire pins evicted thread and document-comment anchors for protected outbound routing", {
+  timeout: 60_000,
+}, () => {
+  for (const route of [
+    { anchor: "om_evicted_thread", target: "thread:oc_evicted:omt_topic", kind: undefined },
+    { anchor: "doc_comment_evicted", target: "document-comment:doc_evicted/comment_evicted", kind: "document_comment" },
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-anchor-rebind-"));
+    try {
+      const store = deterministicStateStore(root, agent.agentId);
+      store.appendNdjson("inbox", { message_id: route.anchor, target: route.target, ...(route.kind ? { kind: route.kind } : {}), content: "source" });
+      store.pollInbox({ target: route.target, limit: 1 });
+      for (let index = 0; index < 2_048; index += 1) {
+        store.appendNdjson("inbox", { message_id: `om_later_${index}`, target: "chat:oc_later", content: "later" });
+      }
+      assert.equal(store.resolveInboxMessageTarget(route.anchor), null, "the source must be evicted before fire");
+
+      const reminder = { reminderId: `rebind-${route.anchor}`, version: 1, ownerAgentId: agent.agentId,
+        fireAt: "2026-07-16T02:00:00Z", createdAt: "2026-07-15T00:00:00Z", title: "rebind", status: "scheduled",
+        deliveryTarget: route.target, deliveryAnchor: route.anchor };
+      const reminders = [reminder];
+      const deliveries = [];
+      const reminderStore = {
+        load: () => ({ reminders }), mutate(_file, fn) { return fn({ reminders }); }, parseRepeat: () => null,
+        nowIso: (ms) => new Date(ms).toISOString(), appendEvent(record, eventType, _actorType, _actorId, _nextFireAt, _ms, metadata) {
+          (record.events ||= []).push({ eventType, metadata: metadata ?? null });
+        },
+      };
+      const projector = {
+        createReminderEnvelope(_agentId, value) { return { kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1,
+          wake: true, target: "runtime:reminder", deliveryTarget: value.deliveryTarget, deliveryAnchor: value.deliveryAnchor }; },
+        createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_unused", seq: 2, target: "runtime:redelivery" }; },
+      };
+      const orchestrator = new HostReminderOrchestrator({ agents: [agent], stateStore: () => store, envelopeProjector: projector,
+        deliveryTarget: { deliver(_id, envelope) { deliveries.push(envelope); } }, reminderStore,
+        now: () => Date.parse("2026-07-16T03:00:00Z") });
+      orchestrator.handleFire({ agentId: agent.agentId, reminderId: reminder.reminderId });
+
+      assert.equal(store.resolveInboxMessageTarget(route.anchor), route.target);
+      assert.deepEqual(store.readJson("inboxState", {}).delivery_anchors[route.anchor], { target: route.target });
+      assert.equal(deliveries.length, 1);
+      assert.equal(deliveries[0].deliveryTarget, route.target);
+      assert.equal(deliveries[0].deliveryAnchor, route.anchor);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 // Native Windows exposed both slow process inspection and async ledger races. This test is not

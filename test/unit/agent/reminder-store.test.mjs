@@ -126,7 +126,7 @@ test("summary and event shapes retain every key required by the Agent API", () =
   };
   const summary = store.toSummary(reminder);
   assert.deepEqual(Object.keys(summary).sort(), [
-    "createdAt", "fireAt", "firedAt", "msgPermalink", "msgRef", "ownerAgentId", "recurrence", "reminderId", "status", "title",
+    "createdAt", "deliveryAnchor", "deliveryMode", "deliveryTarget", "fireAt", "firedAt", "msgPermalink", "msgRef", "ownerAgentId", "recurrence", "reminderId", "status", "title",
   ]);
   assert.equal(summary.firedAt, null);
   assert.equal(summary.msgRef, null);

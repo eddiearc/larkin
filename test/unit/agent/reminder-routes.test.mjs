@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const { createReminderRoutes } = require(path.join(ROOT, "dist/agent/reminder-routes.cjs"));
 
-function fixture(temp) {
+function fixture(temp, extras = {}) {
   const logs = [];
   let current = Date.parse("2026-07-16T00:00:00.000Z");
   const routes = createReminderRoutes({
@@ -20,6 +20,7 @@ function fixture(temp) {
     log: (...parts) => logs.push(parts),
     now: () => current,
     timeZone: () => "Asia/Shanghai",
+    ...extras,
   });
   return {
     request(method, requestPath, body = {}) {
@@ -33,8 +34,8 @@ function fixture(temp) {
 test("reminder route service preserves schedule/list/snooze/update/cancel schemas and persistence", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-routes-"));
   try {
-    const f = fixture(temp);
-    const scheduled = f.request("POST", "/reminders", { title: "follow up", delaySeconds: 60, msgId: "om_1" });
+    const f = fixture(temp, { resolveMessageTarget: () => "chat:oc_1" });
+    const scheduled = f.request("POST", "/reminders", { title: "follow up", delaySeconds: 60, msgId: "om_1", channel: "oc_1" });
     assert.equal(scheduled.ok, true);
     assert.equal(scheduled.data.reminder.fireAt, "2026-07-16T00:01:00.000Z");
     assert.equal(scheduled.data.reminder.recurrence, null);
@@ -42,6 +43,11 @@ test("reminder route service preserves schedule/list/snooze/update/cancel schema
     const stored = JSON.parse(fs.readFileSync(path.join(temp, "reminders.json"), "utf8"));
     assert.equal(stored.reminders[0].tz, null);
     assert.equal(stored.reminders[0].version, 1);
+    assert.equal(stored.reminders[0].deliveryTarget, "chat:oc_1");
+    assert.equal(stored.reminders[0].deliveryAnchor, "om_1");
+    assert.deepEqual(stored.reminders[0].events[0].metadata, {
+      deliveryTarget: "chat:oc_1", deliveryAnchor: "om_1", deliveryMode: "user",
+    });
     assert.equal(stored.reminders[0].events[0].eventType, "scheduled");
 
     assert.equal(f.request("GET", "/reminders").data.reminders.length, 1);
@@ -58,6 +64,25 @@ test("reminder route service preserves schedule/list/snooze/update/cancel schema
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("schedule rejects a deliveryTarget that contradicts channel instead of preferring one", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-destination-conflict-"));
+  try {
+    const f = fixture(temp);
+    const conflicting = f.request("POST", "/reminders", {
+      title: "conflict", delaySeconds: 60, deliveryTarget: "chat:oc_route_a", channel: "oc_route_b",
+    });
+    assert.equal(conflicting.ok, false);
+    assert.equal(conflicting.status, 400);
+    assert.match(conflicting.error, /指向不同目的地/);
+    assert.equal(fs.existsSync(path.join(temp, "reminders.json")), false, "a rejected schedule must not persist");
+    const agreeing = f.request("POST", "/reminders", {
+      title: "agreeing aliases", delaySeconds: 60, deliveryTarget: "chat:oc_route_a", channel: "oc_route_a",
+    });
+    assert.equal(agreeing.ok, true, agreeing.error);
+    assert.equal(agreeing.data.reminder.deliveryTarget, "chat:oc_route_a");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("reminder route service preserves validation and recurrence behavior", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-validation-"));
   try {
@@ -65,11 +90,73 @@ test("reminder route service preserves validation and recurrence behavior", () =
     assert.equal(f.request("POST", "/reminders", {}).status, 400);
     assert.equal(f.request("POST", "/reminders", { title: "bad", fireAt: "not-a-date" }).status, 400);
     assert.equal(f.request("POST", "/reminders", { title: "bad", repeat: "every:10s" }).status, 400);
-    const recurring = f.request("POST", "/reminders", { title: "daily", repeat: "daily@09:00", tz: "Asia/Shanghai" });
+    const recurring = f.request("POST", "/reminders", { title: "daily", repeat: "daily@09:00", tz: "Asia/Shanghai", channel: "oc_1" });
     assert.equal(recurring.ok, true);
     assert.deepEqual(recurring.data.reminder.recurrence, { kind: "daily", description: "daily@09:00 (Asia/Shanghai)" });
     assert.equal(f.request("POST", "/reminders/missing/snooze", { delaySeconds: 0 }).status, 400);
     assert.equal(f.request("DELETE", "/reminders/missing").status, 404);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("user-facing schedules fail closed, while explicit internal opt-in is allowed", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-target-required-"));
+  try {
+    const f = fixture(temp);
+    assert.equal(f.request("POST", "/reminders", { title: "tell Eddie", delaySeconds: 60 }).status, 400);
+    const internal = f.request("POST", "/reminders", { title: "background cleanup", delaySeconds: 60, internal: true });
+    assert.equal(internal.ok, true);
+    assert.equal(internal.data.reminder.deliveryTarget, null);
+    assert.equal(internal.data.reminder.deliveryMode, "internal");
+    assert.equal(f.request("POST", "/reminders", { title: "bad", delaySeconds: 60, noDelivery: true, channel: "oc_1" }).status, 400);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("current Inbox source derives DM, thread, and document-comment targets with a valid anchor", () => {
+  for (const source of [
+    { deliveryTarget: "chat:oc_dm", deliveryAnchor: "om_dm" },
+    { deliveryTarget: "thread:oc_thread:omt_thread", deliveryAnchor: "om_thread" },
+    { deliveryTarget: "document-comment:doc:token:comment:in-thread", deliveryAnchor: "doc_comment_comment" },
+  ]) {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-source-"));
+    try {
+      const f = fixture(temp, { currentInboxSource: () => source });
+      const result = f.request("POST", "/reminders", { title: "source reminder", delaySeconds: 60 });
+      assert.equal(result.ok, true);
+      assert.equal(result.data.reminder.deliveryTarget, source.deliveryTarget);
+      assert.equal(result.data.reminder.deliveryAnchor, source.deliveryAnchor);
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  }
+});
+
+test("explicit routes require complete surface-specific anchors", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-explicit-route-"));
+  try {
+    const f = fixture(temp);
+    assert.equal(f.request("POST", "/reminders", { title: "bad chat", delaySeconds: 60, deliveryTarget: "chat:foo" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad thread", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad comment", delaySeconds: 60, deliveryTarget: "document-comment:doc:token:comment:in-thread" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad unresolved", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic", msgId: "om_unresolved" }).status, 400);
+    const chat = f.request("POST", "/reminders", { title: "chat", delaySeconds: 60, deliveryTarget: "chat:oc_chat" });
+    assert.equal(chat.ok, true);
+    const unresolvedChatAnchor = f.request("POST", "/reminders", {
+      title: "bad chat anchor", delaySeconds: 60, deliveryTarget: "chat:oc_chat", msgId: "om_unresolved_chat",
+    });
+    assert.equal(unresolvedChatAnchor.status, 400);
+    const thread = fixture(temp, { resolveMessageTarget: () => "thread:oc_chat:omt_topic" })
+      .request("POST", "/reminders", { title: "thread", delaySeconds: 60, deliveryTarget: "thread:oc_chat:omt_topic", msgId: "om_thread" });
+    assert.equal(thread.ok, true);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("message anchor derives its Inbox target and rejects invalid or conflicting routing", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-reminder-anchor-"));
+  try {
+    const f = fixture(temp, { resolveMessageTarget: (messageId) => messageId === "om_thread" ? "thread:oc_chat:omt_topic" : null });
+    const result = f.request("POST", "/reminders", { title: "thread reminder", delaySeconds: 60, msgId: "om_thread" });
+    assert.equal(result.ok, true);
+    assert.equal(result.data.reminder.deliveryTarget, "thread:oc_chat:omt_topic");
+    assert.equal(f.request("POST", "/reminders", { title: "bad", delaySeconds: 60, msgId: "rem_not_an_anchor" }).status, 400);
+    assert.equal(f.request("POST", "/reminders", { title: "bad", delaySeconds: 60, msgId: "om_thread", channel: "chat:oc_other" }).status, 400);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 

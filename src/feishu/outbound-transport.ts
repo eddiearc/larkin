@@ -33,6 +33,13 @@ interface MultipartForm {
 
 interface NodeError extends Error { code?: string }
 
+export interface OutboundDeliveryOutcome {
+  target: string;
+  succeeded: boolean;
+  messageId?: string;
+  reason?: string;
+}
+
 interface OutboundOptions {
   attachmentDir: string;
   attachmentIndexFile: string;
@@ -42,6 +49,7 @@ interface OutboundOptions {
   replyText(messageId: string, content: string, idempotencyKey: unknown, chatId: string): LarkResult;
   sendMedia(chatId: string, replyContext: ReplyContext | null, attachment: StagedAttachment, idempotencyKey: string): LarkResult;
   appendConversation(item: Record<string, unknown>): void;
+  onDeliveryOutcome?(outcome: OutboundDeliveryOutcome): void;
   botDisplayName(): string | null | undefined;
   agentName: string;
   dryRun: boolean;
@@ -150,16 +158,25 @@ export function createOutboundTransport(options: OutboundOptions) {
 
   const handleSend = (body: Record<string, unknown>) => {
     const target = body.target || "";
+    const targetKey = String(target);
+    const report = (succeeded: boolean, details: Omit<OutboundDeliveryOutcome, "target" | "succeeded"> = {}): void => {
+      if (options.dryRun) return;
+      try { options.onDeliveryOutcome?.({ target: targetKey, succeeded, ...details }); }
+      catch (error) { options.log("delivery outcome hook 失败:", (error as Error).message); }
+    };
     const content = String(body.content ?? "").replace(/\n+$/, "");
     const chatId = options.resolveChatId(target);
     if (!chatId) {
-      return { ok: false, status: 400, error: `该 target 没有已知 chat_id：${JSON.stringify(target)}。只能回复 canonical Inbox 给出的确切会话；不会兜底发往默认群。` };
+      const error = `该 target 没有已知 chat_id：${JSON.stringify(target)}。只能回复 canonical Inbox 给出的确切会话；不会兜底发往默认群。`;
+      report(false, { reason: error });
+      return { ok: false, status: 400, error };
     }
     const idempotencyKey = body.idempotencyKey
       || crypto.createHash("sha256").update(`${String(target)}\0${content}`).digest("hex").slice(0, 32);
     const replyContext = options.replyContextFor(String(target)) || options.replyContextFor(chatId);
     const attachmentIds = Array.isArray(body.attachmentIds) ? body.attachmentIds.filter(Boolean) : [];
     let messageId = "sent";
+    let committedProviderCalls = 0;
 
     if (content !== "" || attachmentIds.length === 0) {
       const replyInThread = Boolean(replyContext?.in_topic && replyContext.reply_to);
@@ -168,15 +185,19 @@ export function createOutboundTransport(options: OutboundOptions) {
         : options.sendText(chatId, content, idempotencyKey);
       if (result.code !== 0) {
         options.log("send 失败 FULL:", `${result.stdout || ""} || ${result.stderr || ""}`);
-        return { ok: false, status: 502, error: `lark-cli send failed: ${(result.stdout || result.stderr || "").trim().split("\n")[0]}` };
+        const error = `lark-cli send failed: ${(result.stdout || result.stderr || "").trim().split("\n")[0]}`;
+        report(false, { reason: error });
+        return { ok: false, status: 502, error };
       }
       try {
         const parsed = JSON.parse(result.stdout) as { data?: { message_id?: string }; message_id?: string };
         messageId = parsed?.data?.message_id || parsed?.message_id || (options.dryRun ? "dryrun" : "sent");
       } catch { messageId = options.dryRun ? "dryrun" : "sent"; }
+      committedProviderCalls += 1;
       options.log(`${replyInThread ? "reply-in-thread" : "send"} → chat=${chatId} len=${content.length} id=${messageId}${options.dryRun ? " (dry-run)" : ""}`);
     }
 
+    const missingAttachmentIds: string[] = [];
     if (attachmentIds.length) {
       const index = loadAttachmentIndex();
       for (let position = 0; position < attachmentIds.length; position += 1) {
@@ -184,19 +205,33 @@ export function createOutboundTransport(options: OutboundOptions) {
         const attachment = index[attachmentId];
         if (!attachment) {
           options.log(`attachment 未找到 id=${attachmentId}（跳过）`);
+          missingAttachmentIds.push(attachmentId);
           continue;
         }
         const result = options.sendMedia(chatId, replyContext, attachment, `${idempotencyKey}:a${position}`);
         if (result.code !== 0) {
           options.log("attachment 发送失败 FULL:", `${result.stdout || ""} || ${result.stderr || ""}`);
-          return { ok: false, status: 502, error: `lark-cli 发送附件失败: ${(result.stdout || result.stderr || "").trim().split("\n")[0]}` };
+          const error = `lark-cli 发送附件失败: ${(result.stdout || result.stderr || "").trim().split("\n")[0]}`;
+          report(false, { reason: error });
+          return { ok: false, status: 502, error };
         }
         try {
           const parsed = JSON.parse(result.stdout) as { data?: { message_id?: string } };
           messageId = parsed?.data?.message_id || messageId;
         } catch { /* retain prior message id */ }
+        committedProviderCalls += 1;
         options.log(`attach → chat=${chatId} name=${attachment.filename} id=${messageId}${options.dryRun ? " (dry-run)" : ""}`);
       }
+    }
+
+    // Empty content plus attachment IDs that are all absent from the index
+    // reaches this point without any provider call; claiming success here would
+    // record delivery_succeeded for a reminder turn in which the user received
+    // nothing.
+    if (committedProviderCalls === 0) {
+      const error = `没有可发送的内容：附件不存在（${missingAttachmentIds.join(", ")}），且消息正文为空。`;
+      report(false, { reason: error });
+      return { ok: false, status: 400, error };
     }
 
     options.appendConversation({
@@ -209,6 +244,9 @@ export function createOutboundTransport(options: OutboundOptions) {
       messageId,
       at: new Date().toISOString(),
     });
+    // This is deliberately after every guarded provider call succeeds and after
+    // the local outbound projection, not at Runtime acceptance.
+    report(true, { messageId });
     return { ok: true, status: 200, data: { ok: true, state: "sent", messageId, messageSeq: 1 } };
   };
 

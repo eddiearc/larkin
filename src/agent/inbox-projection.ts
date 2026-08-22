@@ -62,6 +62,11 @@ export function isCanonicalInboxTarget(target: string): boolean {
     || isDocumentCommentTarget(target);
 }
 
+/** Targets that can safely receive a user-facing reminder. Runtime wake targets are not delivery destinations. */
+export function isUserDeliveryTarget(target: string): boolean {
+  return isChatTarget(target) || isThreadTarget(target) || isDocumentCommentTarget(target);
+}
+
 function invalidTarget(target: string): Error {
   return new Error(`Invalid canonical Inbox target ${JSON.stringify(target)}; expected chat:<nonempty>, thread:<nonempty>, runtime:reminder, runtime:redelivery, or document-comment:<nonempty>`);
 }

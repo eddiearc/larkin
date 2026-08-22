@@ -83,6 +83,8 @@ export class HostInteractionOrchestrator {
       const reminderId = `int_${createHash("sha256").update(run.run_id).digest("hex").slice(0, 24)}`;
       const current = this.now();
       const fireAt = effect.args.fire_at ? Date.parse(effect.args.fire_at) : current + Number(effect.args.delay_seconds) * 1_000;
+      const deliveryTarget = typeof run.chat_id === "string" && run.chat_id ? `chat:${run.chat_id}` : null;
+      const deliveryAnchor = typeof run.message_id === "string" && /^om_[A-Za-z0-9_-]+$/.test(run.message_id) ? run.message_id : null;
       const reminder = ReminderStore.mutate(file, (store) => {
         const existing = store.reminders.find((candidate) => candidate.reminderId === reminderId);
         if (existing) return existing;
@@ -96,6 +98,9 @@ export class HostInteractionOrchestrator {
           status: "scheduled",
           msgRef: run.message_id,
           msgPermalink: null,
+          deliveryTarget,
+          deliveryAnchor,
+          deliveryMode: "user",
           repeat: null,
           tz: null,
           channel: run.chat_id,
@@ -103,7 +108,9 @@ export class HostInteractionOrchestrator {
           version: 1,
           events: [],
         };
-        ReminderStore.appendEvent(created, "scheduled", "interaction", run.run_id, created.fireAt, current);
+        ReminderStore.appendEvent(created, "scheduled", "interaction", run.run_id, created.fireAt, current, {
+          deliveryTarget, deliveryAnchor, deliveryMode: "user",
+        });
         store.reminders.push(created);
         return created;
       }, Math.max(1, Math.min(350, deadline - this.now() - 100)));

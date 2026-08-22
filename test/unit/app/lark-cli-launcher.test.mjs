@@ -544,6 +544,145 @@ test("protected urgent-app does not submit after a freshness conflict", () => {
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("canonical send audit records failure and allows a later successful retry", () => {
+  const f = fixture();
+  try {
+    const reminderId = "reminder-cli-audit";
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_cli_audit", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_cli_audit", content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    f.store.writeJson("reminders", { reminders: [{ reminderId, status: "fired", fireAt: "2026-07-16T02:00:00.000Z",
+      events: [{ eventType: "delivery_pending" }] }] });
+    const argv = ["im", "+messages-send", "--chat-id", "oc_cli_audit", "--text", "reminder"];
+    f.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: "provider down", error: undefined });
+    assert.equal(f.run(argv).code, 7);
+    let reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_cli_audit_success" } }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 0);
+    reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded");
+    assert.equal(reminder.events.at(-1).metadata.messageId, "om_cli_audit_success");
+    assert.equal(f.store.resolveCurrentReminder(), null);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a recurring reminder provider duplicate is not recorded as success for the later firing", () => {
+  const f = fixture();
+  try {
+    const reminderId = "reminder-recurring-duplicate";
+    const argv = ["im", "+messages-send", "--chat-id", "oc_recurring_duplicate", "--text", "reminder"];
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_occurrence_1", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_recurring_duplicate", content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    f.store.writeJson("reminders", { reminders: [{ reminderId, status: "scheduled", repeat: "every:1h",
+      fireAt: "2026-07-16T03:00:00.000Z", events: [{ eventType: "delivery_pending" }] }] });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_recurring_first" } }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 0);
+    assert.equal(JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0].events.at(-1).eventType, "delivery_succeeded");
+
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_occurrence_2", target: "runtime:reminder",
+      reminderId, deliveryTarget: "chat:oc_recurring_duplicate", content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    const reminders = f.store.readJson("reminders", { reminders: [] });
+    reminders.reminders[0].events = [
+      { eventType: "delivery_pending", metadata: { occurrenceId: "rem_occurrence_1" } },
+      { eventType: "delivery_pending", metadata: { occurrenceId: "rem_occurrence_2" } },
+    ];
+    f.store.writeJson("reminders", reminders);
+    const inboxState = f.store.readJson("inboxState", {});
+    inboxState.reminder_contexts = [
+      { reminder_id: reminderId, delivery_target: "chat:oc_recurring_duplicate", message_id: "rem_occurrence_1", seq: 1 },
+      { reminder_id: reminderId, delivery_target: "chat:oc_recurring_duplicate", message_id: "rem_occurrence_2", seq: 2 },
+    ];
+    f.store.writeJson("inboxState", inboxState);
+    f.setHistory({ ok: true, identity: "bot", data: { messages: [
+      { message_id: "om_recurring_first", chat_id: "oc_recurring_duplicate", create_time: "1786553650354" },
+    ] } });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_recurring_first" } }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 3, "the new provider head must be reconciled before retrying the write");
+    const duplicate = f.run(argv);
+    assert.equal(duplicate.code, 0, duplicate.stderr);
+    const reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    assert.equal(reminder.events.at(-1).metadata.occurrenceId, "rem_occurrence_2",
+      "the audit must finalize the same occurrence selected for the write memo");
+    assert.match(reminder.events.at(-1).metadata.reason, /earlier reminder firing/);
+    assert.ok(f.store.resolveCurrentReminder(), "the later occurrence remains auditable after provider deduplication");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a recurring document-comment duplicate fails the later firing without a provider call", () => {
+  const f = fixture();
+  try {
+    const reminderId = "reminder-recurring-comment-duplicate";
+    const target = "document-comment:docx:doc_comment_file:doc_comment_anchor:in-thread";
+    const anchor = `doc_comment_${"e".repeat(32)}`;
+    const argv = ["comment", "reply", "--message-id", anchor, "--text", "same comment"];
+    f.store.bindInboxDeliveryAnchor(anchor, target);
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_comment_occurrence_1", target: "runtime:reminder",
+      reminderId, deliveryTarget: target, deliveryAnchor: anchor, content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    f.store.writeJson("reminders", { reminders: [{ reminderId, status: "scheduled", repeat: "every:1h",
+      fireAt: "2026-07-16T03:00:00.000Z", events: [{ eventType: "delivery_pending", metadata: { occurrenceId: "rem_comment_occurrence_1" } }] }] });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: {} }), stderr: "", error: undefined });
+    assert.equal(f.run(argv).code, 0);
+
+    f.store.bindInboxDeliveryAnchor(anchor, target);
+    f.store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_comment_occurrence_2", target: "runtime:reminder",
+      reminderId, deliveryTarget: target, deliveryAnchor: anchor, content: "reminder" });
+    f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    const reminders = f.store.readJson("reminders", { reminders: [] });
+    reminders.reminders[0].events.push({ eventType: "delivery_pending", metadata: { occurrenceId: "rem_comment_occurrence_2" } });
+    f.store.writeJson("reminders", reminders);
+    const providerCallsBefore = f.calls.filter((call) => call.args[0] === "drive").length;
+    const duplicate = f.run(argv);
+    assert.equal(duplicate.code, 2, duplicate.stderr);
+    assert.equal(f.calls.filter((call) => call.args[0] === "drive").length, providerCallsBefore, "the sent ledger skips the provider");
+    const reminder = f.store.readJson("reminders", { reminders: [] }).reminders[0];
+    assert.equal(reminder.events.at(-1).eventType, "delivery_failed");
+    assert.match(reminder.events.at(-1).metadata.reason, /earlier reminder firing/);
+    assert.deepEqual(f.store.resolveCurrentReminders().map((row) => row.deliveryAnchor), ["rem_comment_occurrence_2"]);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("canonical reply and document comment reply audit the consumed reminder", () => {
+  for (const mode of ["reply", "comment"]) {
+    const f = fixture();
+    try {
+      const reminderId = `reminder-cli-${mode}`;
+      const target = mode === "reply" ? "chat:oc_cli_reply_audit" : "document-comment:docx:doc_cli_audit:comment_cli_audit:in-thread";
+      const anchor = mode === "reply" ? "om_cli_reply_anchor" : `doc_comment_${"d".repeat(32)}`;
+      if (mode === "reply") {
+        f.store.appendNdjson("inbox", { message_id: anchor, chat_id: "oc_cli_reply_audit", content: "question" });
+        f.store.pollInbox({ target, limit: 1 });
+      } else {
+        f.store.appendNdjson("inbox", { message_id: anchor, target, kind: "document_comment", content: "question" });
+        f.store.pollInbox({ target, limit: 1 });
+      }
+      f.store.appendNdjson("inbox", { kind: "reminder", message_id: `rem_${mode}_audit`, target: "runtime:reminder",
+        reminderId, deliveryTarget: target, content: "reminder" });
+      f.store.pollInbox({ target: "runtime:reminder", limit: 1 });
+      f.store.writeJson("reminders", { reminders: [{ reminderId, status: "fired", fireAt: "2026-07-16T02:00:00.000Z",
+        events: [{ eventType: "delivery_pending" }] }] });
+      f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+        stdout: JSON.stringify({ ok: true, data: mode === "reply" ? { message_id: "om_cli_reply_success" } : {} }), stderr: "", error: undefined });
+      const argv = mode === "reply"
+        ? ["im", "+messages-reply", "--message-id", anchor, "--text", "reply"]
+        : ["comment", "reply", "--message-id", anchor, "--text", "comment"];
+      const result = f.run(argv);
+      assert.equal(result.code, 0, `${mode}: ${result.stderr}`);
+      const reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
+      assert.equal(reminder.events.at(-1).eventType, "delivery_succeeded", mode);
+      assert.equal(f.store.resolveCurrentReminder(), null, mode);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
 test("provider failure and ambiguous termination retain a stable idempotency key", () => {
   const f = fixture();
   try {

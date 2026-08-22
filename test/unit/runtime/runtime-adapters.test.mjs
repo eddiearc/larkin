@@ -150,9 +150,11 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v21");
+  assert.equal(prompt.version, "larkin-standing-v22");
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
+  assert.match(prompt.content, /explicit delivery target/);
+  assert.match(prompt.content, /Never infer recipients from a reminder title/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
   assert.match(prompt.content, /larkin comment reply --message-id/);

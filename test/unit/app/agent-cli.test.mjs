@@ -424,7 +424,7 @@ test("reminder commands wire the existing schedule/list/snooze/update/cancel/log
   try {
     let current = Date.parse("2026-07-19T01:00:00.000Z");
     const deps = { now: () => current, timeZone: () => "Asia/Shanghai" };
-    const scheduled = f.run(["reminder", "schedule", "--title", "follow up", "--delay-seconds", "60", "--message-id", "om_1"], deps);
+    const scheduled = f.run(["reminder", "schedule", "--title", "follow up", "--delay-seconds", "60", "--channel", "oc_1"], deps);
     assert.equal(scheduled.code, 0, scheduled.stderr);
     const id = JSON.parse(scheduled.stdout).reminder.reminderId;
     assert.equal(JSON.parse(f.run(["reminder", "list"], deps).stdout).reminders.length, 1);
@@ -433,6 +433,53 @@ test("reminder commands wire the existing schedule/list/snooze/update/cancel/log
     assert.equal(JSON.parse(f.run(["reminder", "update", "--id", id, "--title", "renamed"], deps).stdout).reminder.title, "renamed");
     assert.deepEqual(JSON.parse(f.run(["reminder", "log", "--id", id], deps).stdout).events.map((event) => event.eventType), ["scheduled", "snoozed", "updated"]);
     assert.equal(JSON.parse(f.run(["reminder", "cancel", "--id", id], deps).stdout).reminder.status, "canceled");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("reminder schedule fails closed when destination aliases are combined", () => {
+  const f = fixture();
+  try {
+    const conflicts = [
+      ["--delivery-target", "chat:oc_dest_a", "--target", "chat:oc_dest_b"],
+      ["--delivery-target", "chat:oc_dest_a", "--channel", "oc_dest_b"],
+      ["--target", "chat:oc_dest_a", "--channel", "oc_dest_b"],
+      ["--delivery-target", "chat:oc_dest_a", "--target", "chat:oc_dest_a"],
+    ];
+    for (const flags of conflicts) {
+      const rejected = f.run(["reminder", "schedule", "--title", "conflict", "--delay-seconds", "60", ...flags]);
+      assert.notEqual(rejected.code, 0, `conflicting destination flags must fail closed: ${flags.join(" ")}`);
+      assert.match(rejected.stderr, /只能指定其中一个/);
+    }
+    assert.equal(JSON.parse(f.run(["reminder", "list"]).stdout).reminders.length, 0, "no reminder may persist from a rejected schedule");
+    const single = f.run(["reminder", "schedule", "--title", "single destination", "--delay-seconds", "60", "--target", "chat:oc_dest_a"]);
+    assert.equal(single.code, 0, single.stderr);
+    assert.equal(JSON.parse(single.stdout).reminder.deliveryTarget, "chat:oc_dest_a");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("reminder schedule rejects unknown flags before implicit Inbox source fallback", () => {
+  const f = fixture();
+  try {
+    f.store.appendNdjson("inbox", { message_id: "om_unknown_destination_source", chat_id: "oc_unknown_destination_source", content: "source" });
+    f.store.pollInbox({ target: "chat:oc_unknown_destination_source", limit: 1 });
+    const rejected = f.run(["reminder", "schedule", "--title", "must not route", "--delay-seconds", "60",
+      "--delivery-targte", "chat:oc_other"]);
+    assert.equal(rejected.code, 2);
+    assert.match(rejected.stderr, /不支持参数.*--delivery-targte/);
+    assert.equal(JSON.parse(f.run(["reminder", "list"]).stdout).reminders.length, 0);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("Agent CLI derives a reminder target and anchor from the current canonical Inbox source", () => {
+  const f = fixture();
+  try {
+    f.store.appendNdjson("inbox", { message_id: "om_current_source", chat_id: "oc_current_source", thread_id: "omt_current_source", kind: "message", wake: true });
+    f.store.pollInbox({ target: "thread:oc_current_source:omt_current_source", limit: 1 });
+    const result = f.run(["reminder", "schedule", "--title", "source-bound", "--delay-seconds", "60"]);
+    assert.equal(result.code, 0, result.stderr);
+    const reminder = JSON.parse(result.stdout).reminder;
+    assert.equal(reminder.deliveryTarget, "thread:oc_current_source:omt_current_source");
+    assert.equal(reminder.deliveryAnchor, "om_current_source");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

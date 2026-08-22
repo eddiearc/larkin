@@ -321,7 +321,11 @@ export interface InboundEnvelopeOptions {
 export interface ReminderEnvelope {
   kind: "reminder";
   message_id: string;
+  reminderId: string;
+  /** Runtime wake target; deliveryTarget is the original user-facing destination. */
   target: typeof RUNTIME_REMINDER_TARGET;
+  deliveryTarget: string | null;
+  deliveryAnchor: string | null;
   seq: number;
   sender_name: "定时提醒";
   sender_type: "system";
@@ -354,6 +358,8 @@ export interface ReminderForDelivery {
   fireAt: string;
   msgRef?: unknown;
   channel?: string | null;
+  deliveryTarget?: string | null;
+  deliveryAnchor?: string | null;
 }
 
 export class HostEnvelopeProjector {
@@ -411,31 +417,50 @@ export class HostEnvelopeProjector {
     repeatDescription: string | null,
   ): ReminderEnvelope {
     const seq = this.nextSequence(agentId);
-    const anchorMessageId = typeof reminder.msgRef === "string" && /^om_[A-Za-z0-9_-]+$/.test(reminder.msgRef)
-      ? reminder.msgRef
-      : null;
+    const legacyChannel = typeof reminder.channel === "string" ? reminder.channel.trim() : "";
+    const legacyChatTarget = /^oc_[A-Za-z0-9_-]+$/.test(legacyChannel) ? `chat:${legacyChannel}` : null;
+    const deliveryTarget = typeof reminder.deliveryTarget === "string" && reminder.deliveryTarget
+      ? reminder.deliveryTarget : legacyChatTarget;
+    const anchorMessageId = typeof reminder.deliveryAnchor === "string" && /^om_[A-Za-z0-9_-]+$/.test(reminder.deliveryAnchor)
+      ? reminder.deliveryAnchor
+      : typeof reminder.msgRef === "string" && /^om_[A-Za-z0-9_-]+$/.test(reminder.msgRef)
+        ? reminder.msgRef
+        : null;
+    const commentAnchorId = deliveryTarget?.startsWith("document-comment:") && typeof reminder.deliveryAnchor === "string"
+      && /^doc_comment_[A-Za-z0-9_-]+$/.test(reminder.deliveryAnchor) ? reminder.deliveryAnchor : null;
+    const anchorId = anchorMessageId || commentAnchorId;
+    const chatId = deliveryTarget?.match(/^chat:(oc_[A-Za-z0-9_-]+)$/)?.[1] || null;
     const lines = [
       `[定时提醒触发] ${reminder.title}`,
       `提醒ID: #${reminder.reminderId.slice(0, 8)}` + (reminder.repeat && repeatDescription
         ? `　重复: ${repeatDescription}（下次已自动排在 ${reminder.fireAt}）`
         : "　类型: 一次性"),
       overdueMs > 120_000 ? `注意: 原定时间已过 ${Math.round(overdueMs / 60_000)} 分钟（Runtime Host 离线期间错过，现补触发）` : null,
-      anchorMessageId ? `锚定消息: ${anchorMessageId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是飞书 om_ message_id，不能用于回复` : null,
+      deliveryTarget ? `原始 deliveryTarget: ${deliveryTarget}`
+        : anchorId ? "这是升级前存量 user-facing reminder，优先回复其安全锚点；不得向标题中的任何人或第三方发送消息"
+          : "本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息",
+      anchorId ? `锚定消息: ${anchorId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是可用的 delivery anchor，不能用于回复` : null,
       anchorMessageId
-        ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId} ...`)}`
-        : null,
-      reminder.channel && /^oc_[A-Za-z0-9_-]+$/.test(reminder.channel)
-        ? `发送到原群: ${this.larkCommand(`im +messages-send --chat-id ${reminder.channel} ...`)}`
-        : reminder.channel
-          ? `历史目标 ${reminder.channel} 不是 chat_id；${anchorMessageId ? "若不回复锚定消息，" : ""}先用 ${this.larkCommand("im +chat-search")} 查询并确认 oc_ chat_id，禁止按名称猜测发送目标`
-          : anchorMessageId
-            ? null
-            : `本条存量提醒缺少可用的飞书 message_id/chat_id，无法安全推断原会话；请先用 ${this.larkCommand("im +chat-search")} 确认目标，禁止猜测发送`,
+        ? [
+            `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId}${deliveryTarget?.startsWith("thread:") ? " --reply-in-thread" : ""} ...`)}`,
+            chatId ? `若 ${anchorMessageId} 无法由当前 Inbox 解析（例如 interaction_* 卡片锚点或已淘汰的历史消息），改用聊天兜底发送: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}；仅使用这个持久化 chat_id，不得猜测收件人` : null,
+          ].filter((line): line is string => Boolean(line)).join("\n")
+        : commentAnchorId
+          ? `回复原文档评论: ${this.agentCommand(`comment reply --message-id ${commentAnchorId} --text ...`)}`
+          : deliveryTarget
+          ? chatId
+            ? `发送到原始 target: ${deliveryTarget}: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}（不得从提醒标题推断收件人）`
+            : `发送到原始 target: ${deliveryTarget}（不得从提醒标题推断收件人）`
+          : null,
       `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
     ].filter((line): line is string => Boolean(line));
     const envelope = {
       kind: "reminder" as const,
-      message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}`,
+      // The random suffix keeps each firing's occurrence identity unique across
+      // Host restarts: the in-memory seq restarts at 1 and would otherwise let a
+      // recurring reminder reuse a prior occurrenceId in the delivery audit.
+      message_id: `rem_${reminder.reminderId.slice(0, 16)}_${seq}_${this.randomHex(6)}`,
+      reminderId: reminder.reminderId,
       seq,
       sender_name: "定时提醒" as const,
       sender_type: "system" as const,
@@ -445,6 +470,8 @@ export class HostEnvelopeProjector {
       timestamp: this.now().toISOString(),
       thread_id: null,
       wake: true as const,
+      deliveryTarget,
+      deliveryAnchor: anchorId,
     };
     return { ...envelope, target: RUNTIME_REMINDER_TARGET };
   }

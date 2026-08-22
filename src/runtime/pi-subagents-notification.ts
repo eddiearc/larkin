@@ -51,6 +51,21 @@ const TERMINAL_STATUS_TOKENS = new Set([
   "turn_limit",
 ]);
 
+export type LedgerStatusFromPiNotification = "completed" | "failed" | "cancelled" | "timed_out";
+
+export function ledgerStatusFromPiNotificationStatus(status: string): LedgerStatusFromPiNotification {
+  const normalized = status.trim().toLowerCase();
+  if (normalized.startsWith("error") || normalized === "error") return "failed";
+  if (normalized.startsWith("aborted") || normalized.startsWith("stopped")) return "cancelled";
+  if (
+    normalized.includes("turn limit")
+    || normalized.includes("turn-limit")
+    || normalized.includes("turn_limit")
+    || normalized.includes("steered")
+  ) return "timed_out";
+  return "completed";
+}
+
 export function isCanonicalTerminalPiSubagentStatus(status: string): boolean {
   const normalized = status.trim().toLowerCase();
   if (!normalized) return false;

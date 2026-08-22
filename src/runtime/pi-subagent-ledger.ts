@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 export const PI_SUBAGENT_LEDGER_FILENAME = "pi-subagent-ledger.json";
+export const PI_SUBAGENT_RECORD_DIRNAME = "pi-subagent-records";
 export const PI_SUBAGENT_LEDGER_VERSION = 1 as const;
 
 export type DispatchedSubagentStatus =
@@ -13,14 +14,18 @@ export type DispatchedSubagentStatus =
   | "timed_out"
   | "orphaned";
 
+export type DispatchedSubagentWakeState = "pending" | "acknowledged";
+
 export interface DispatchedSubagentRecord {
   taskId: string;
   status: DispatchedSubagentStatus;
   dispatchedAt: number;
   lastActivityAt: number;
   outputFile?: string;
+  recordFile?: string;
   reason?: string;
   wakeKey?: string;
+  wakeState?: DispatchedSubagentWakeState;
   notifiedAt?: number;
 }
 
@@ -74,7 +79,7 @@ export function getDispatchedSubagent(
 
 export function noteDispatchedSubagent(
   ledger: DispatchedSubagentLedger,
-  input: { taskId: string; outputFile?: string; now?: number },
+  input: { taskId: string; outputFile?: string; recordFile?: string; now?: number },
 ): DispatchedSubagentLedger {
   const now = input.now ?? Date.now();
   const existing = getDispatchedSubagent(ledger, input.taskId);
@@ -84,6 +89,7 @@ export function noteDispatchedSubagent(
       ...existing,
       lastActivityAt: now,
       ...(input.outputFile ? { outputFile: input.outputFile } : {}),
+      ...(input.recordFile ? { recordFile: input.recordFile } : {}),
     });
   }
   return appendTask(ledger, {
@@ -92,6 +98,7 @@ export function noteDispatchedSubagent(
     dispatchedAt: now,
     lastActivityAt: now,
     ...(input.outputFile ? { outputFile: input.outputFile } : {}),
+    ...(input.recordFile ? { recordFile: input.recordFile } : {}),
   });
 }
 
@@ -113,7 +120,6 @@ export function noteDispatchedSubagentTerminal(
     return replaceTask(ledger, {
       ...existing,
       lastActivityAt: now,
-      notifiedAt: existing.notifiedAt ?? now,
       ...(input.outputFile && !existing.outputFile ? { outputFile: input.outputFile } : {}),
     });
   }
@@ -122,9 +128,10 @@ export function noteDispatchedSubagentTerminal(
     status,
     dispatchedAt: existing?.dispatchedAt ?? now,
     lastActivityAt: now,
-    notifiedAt: now,
+    wakeState: existing?.wakeState ?? "pending",
     ...(existing?.outputFile || input.outputFile
       ? { outputFile: input.outputFile ?? existing?.outputFile } : {}),
+    ...(existing?.recordFile ? { recordFile: existing.recordFile } : {}),
     ...(input.reason ? { reason: input.reason } : existing?.reason ? { reason: existing.reason } : {}),
     ...(input.wakeKey ? { wakeKey: input.wakeKey } : existing?.wakeKey ? { wakeKey: existing.wakeKey } : {}),
   };
@@ -160,9 +167,10 @@ export function markDispatchedSubagentOrphaned(
     lastActivityAt: existing?.lastActivityAt ?? now,
     reason: input.reason,
     wakeKey: input.taskId,
-    notifiedAt: now,
+    wakeState: "pending",
     ...(input.outputFile || existing?.outputFile
       ? { outputFile: input.outputFile ?? existing?.outputFile } : {}),
+    ...(existing?.recordFile ? { recordFile: existing.recordFile } : {}),
   };
   return {
     ledger: existing ? replaceTask(ledger, record) : appendTask(ledger, record),
@@ -179,12 +187,22 @@ export function reconcileDispatchedSubagents(
   let next = ledger;
   for (const task of ledger.tasks) {
     if (isTerminalDispatchedSubagentStatus(task.status)) continue;
-    const presence = input.forceMissing ? "absent" : (input.probe?.(refreshActivityFromOutput(task, now)) ?? "present");
+    const current = getDispatchedSubagent(next, task.taskId) ?? task;
+    const refreshed = refreshActivityFromOutput(current, now);
+    if (refreshed.lastActivityAt !== current.lastActivityAt) {
+      next = noteDispatchedSubagentActivity(next, {
+        taskId: current.taskId,
+        outputFile: refreshed.outputFile,
+        now: refreshed.lastActivityAt,
+      });
+    }
+    const probed = getDispatchedSubagent(next, current.taskId) ?? refreshed;
+    const presence = input.forceMissing ? "absent" : (input.probe?.(probed) ?? "present");
     if (presence !== "absent") continue;
     const marked = markDispatchedSubagentOrphaned(next, {
-      taskId: task.taskId,
+      taskId: current.taskId,
       reason: input.missingReason ?? (input.forceMissing ? "pi session gone" : "pi record missing"),
-      outputFile: task.outputFile,
+      outputFile: current.outputFile,
       now,
     });
     next = marked.ledger;
@@ -193,14 +211,100 @@ export function reconcileDispatchedSubagents(
   return { ledger: next, orphaned };
 }
 
-export function probePiSubagentOutputRecord(record: DispatchedSubagentRecord): PiSubagentRecordPresence {
-  if (!record.outputFile) return "present";
+export function noteDispatchedSubagentWakeAcknowledged(
+  ledger: DispatchedSubagentLedger,
+  input: { completionKey: string; now?: number },
+): DispatchedSubagentLedger {
+  const now = input.now ?? Date.now();
+  let next = ledger;
+  for (const taskId of taskIdsFromCompletionKey(input.completionKey)) {
+    const existing = getDispatchedSubagent(next, taskId);
+    if (!existing || !isTerminalDispatchedSubagentStatus(existing.status)) continue;
+    if (existing.wakeState === "acknowledged") continue;
+    next = replaceTask(next, { ...existing, wakeState: "acknowledged", notifiedAt: now });
+  }
+  return next;
+}
+
+export function undeliveredTerminalWakeKeys(ledger: DispatchedSubagentLedger): string[] {
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const task of ledger.tasks) {
+    if (!needsTerminalWake(task)) continue;
+    const key = task.wakeKey ?? task.taskId;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  return keys;
+}
+
+/** Probe the Pi task record sidecar. A leftover transcript is never presence. */
+export function probePiSubagentRecord(record: DispatchedSubagentRecord): PiSubagentRecordPresence {
+  if (!record.recordFile) return "absent";
   try {
-    fs.accessSync(record.outputFile);
+    fs.accessSync(record.recordFile);
     return "present";
   } catch {
     return "absent";
   }
+}
+
+/** @deprecated Use probePiSubagentRecord. Transcript leftovers are not presence. */
+export function probePiSubagentOutputRecord(record: DispatchedSubagentRecord): PiSubagentRecordPresence {
+  return probePiSubagentRecord(record);
+}
+
+export function dispatchedSubagentRecordDir(stateDir: string): string {
+  return path.join(stateDir, PI_SUBAGENT_RECORD_DIRNAME);
+}
+
+export function dispatchedSubagentRecordFile(stateDir: string, taskId: string): string {
+  return path.join(dispatchedSubagentRecordDir(stateDir), taskId);
+}
+
+export function writeDispatchedSubagentRecordFile(stateDir: string | undefined, taskId: string): string | undefined {
+  if (!stateDir || !taskId) return undefined;
+  const dir = dispatchedSubagentRecordDir(stateDir);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = dispatchedSubagentRecordFile(stateDir, taskId);
+  const existing = (() => { try { return fs.lstatSync(file); } catch { return null; } })();
+  if (existing?.isSymbolicLink()) throw new Error("subagent record file must not be a symlink");
+  fs.writeFileSync(file, `${JSON.stringify({ taskId })}\n`, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  return file;
+}
+
+export function sweepAbsentPiSubagentRecordFiles(
+  recordDir: string,
+  getRecord: (taskId: string) => unknown,
+): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(recordDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name || name.startsWith(".")) continue;
+    const file = path.join(recordDir, name);
+    try {
+      const stat = fs.lstatSync(file);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+    } catch {
+      continue;
+    }
+    if (getRecord(name) != null) continue;
+    try {
+      fs.unlinkSync(file);
+      removed.push(name);
+    } catch {
+      // Best-effort: the next sweep retries.
+    }
+  }
+  return removed;
 }
 
 export function ledgerFilePath(stateDir: string | undefined): string | null {
@@ -283,7 +387,16 @@ function isPersistedTask(value: unknown): value is DispatchedSubagentRecord {
     && typeof record.status === "string"
     && ["dispatched", "completed", "failed", "cancelled", "timed_out", "orphaned"].includes(record.status)
     && Number.isFinite(record.dispatchedAt)
-    && Number.isFinite(record.lastActivityAt);
+    && Number.isFinite(record.lastActivityAt)
+    && (record.recordFile === undefined || (typeof record.recordFile === "string" && record.recordFile.length > 0))
+    && (record.wakeState === undefined || record.wakeState === "pending" || record.wakeState === "acknowledged");
+}
+
+function needsTerminalWake(task: DispatchedSubagentRecord): boolean {
+  if (!isTerminalDispatchedSubagentStatus(task.status)) return false;
+  if (task.wakeState === "acknowledged") return false;
+  if (task.wakeState === "pending") return true;
+  return task.notifiedAt == null;
 }
 
 function appendTask(ledger: DispatchedSubagentLedger, record: DispatchedSubagentRecord): DispatchedSubagentLedger {

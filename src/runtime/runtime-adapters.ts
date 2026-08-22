@@ -27,7 +27,7 @@ import {
   ledgerStatusFromPiNotificationStatus,
 } from "./pi-subagents-notification.js";
 import { resolvePiSubagentRecordWatchdogExtensionArg } from "./pi-subagent-record-watchdog-injection.js";
-import { extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
+import { effectivePiStateDir, extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
   classifyRuntimePrerequisite,
@@ -1046,7 +1046,7 @@ export function resolvePiProcessExtensionArgs(input: {
 async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: NativeRuntimeAdapterDependencies,
   spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike,
   productionSpawn = true): Promise<PiSessionProcessLike> {
-  const stateRoot = input.stateDir ?? path.join(input.workspaceDir, ".larkin");
+  const stateRoot = effectivePiStateDir(input);
   const mergedEnv: NodeJS.ProcessEnv = { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" };
   assertNoProjectPiCompactionOverride(input.workspaceDir);
   const ownedPiDirectory = mergedEnv.LARKIN_CONFIG_DIR

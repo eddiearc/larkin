@@ -2443,6 +2443,44 @@ test("RuntimeHost closes the old Pi session before force-missing reconcile on st
   }
 });
 
+test("RuntimeHost writes sidecars to the Pi adapter fallback state dir when stateDir is omitted", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-implicit-state-"));
+  const session = new FakeSession();
+  let createdEnv;
+  const adapter = {
+    id: "pi", capabilities: {},
+    async createSession(input) { createdEnv = input.env; return session; },
+  };
+  const host = createRuntimeHost({
+    adapterFor: () => adapter,
+    promptBuilder: new ContextPromptBuilder(),
+    subagentReconcileIntervalMs: 0,
+  });
+  try {
+    await host.start([{ agentId: "cli_piImplicitStateA1", name: "implicit-state", runtime: "pi", model: "model", workspaceDir: workspace }]);
+    await host.deliver("cli_piImplicitStateA1", { message_id: "om_pi_implicit_state", chat_id: "oc_pi_implicit_state", content: "start" });
+    session.emit({ type: "turn-start" });
+    session.emit({ type: "turn-end" });
+    session.emit({
+      type: "runtime-observation", runtime: "pi", distribution: "builtin", phase: "background_dispatched",
+      taskId: "task-implicit-1", outputFile: path.join(workspace, "task-implicit-1.output"),
+    });
+    const expectedStateDir = path.join(workspace, ".larkin");
+    const dispatched = host.getDispatchedSubagent("cli_piImplicitStateA1", "task-implicit-1");
+    assert.equal(dispatched?.status, "dispatched");
+    assert.equal(dispatched?.recordFile, path.join(expectedStateDir, "pi-subagent-records", "task-implicit-1"));
+    assert.ok(fs.existsSync(dispatched.recordFile), "omitted stateDir must still create a sidecar");
+    assert.equal(createdEnv.LARKIN_STATE_DIR, expectedStateDir);
+    session.emit({ type: "turn-end" });
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(host.getDispatchedSubagent("cli_piImplicitStateA1", "task-implicit-1")?.status, "dispatched");
+    assert.equal(session.prompts.length, 1, "a live implicit-state sidecar must not be false-orphaned");
+  } finally {
+    await host.shutdown("done");
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeHost wakes a persisted unconsumed terminal after the notification grace", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-terminal-grace-"));
   const session = new FakeSession();

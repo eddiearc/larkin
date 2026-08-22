@@ -378,6 +378,11 @@ export function probePiSubagentOutputRecord(record: DispatchedSubagentRecord): P
   return probePiSubagentRecord(record);
 }
 
+/** Same implicit root the Pi adapter uses when `stateDir` is omitted. */
+export function effectivePiStateDir(input: { workspaceDir: string; stateDir?: string }): string {
+  return input.stateDir ?? path.join(input.workspaceDir, ".larkin");
+}
+
 export function dispatchedSubagentRecordDir(stateDir: string): string {
   return path.join(stateDir, PI_SUBAGENT_RECORD_DIRNAME);
 }
@@ -433,6 +438,8 @@ export function sweepAbsentPiSubagentRecordFiles(
     const record = getRecord(name);
     if (isTerminalPiSubagentRecord(record)) {
       try {
+        // Unchanged terminal payloads must not be rewritten: mtime is the
+        // 30s lost-notification grace clock while Pi still holds the record.
         writePersistedPiSubagentTerminal(file, {
           taskId: name,
           status: ledgerStatusFromPiSubagentRecord(record),
@@ -542,12 +549,20 @@ function writePiSubagentTerminalFile(
   const existing = (() => { try { return fs.lstatSync(file); } catch { return null; } })();
   if (existing?.isSymbolicLink()) throw new Error("subagent record file must not be a symlink");
   const owner = readPiSubagentRecordOwner(file);
-  fs.writeFileSync(file, `${JSON.stringify({
+  const payload = `${JSON.stringify({
     taskId: input.taskId,
     ...(resultConsumed ? { resultConsumed: true } : {}),
     status: input.status,
     ...(owner ? { owner } : {}),
-  })}\n`, { mode: 0o600 });
+  })}\n`;
+  if (existing?.isFile()) {
+    try {
+      if (fs.readFileSync(file, "utf8") === payload) return;
+    } catch {
+      // Rewrite if the existing sidecar cannot be compared.
+    }
+  }
+  fs.writeFileSync(file, payload, { mode: 0o600 });
   fs.chmodSync(file, 0o600);
 }
 

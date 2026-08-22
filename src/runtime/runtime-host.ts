@@ -41,6 +41,7 @@ import {
   undeliveredTerminalWakeKeys,
   PI_SUBAGENT_SESSION_OWNER_ENV,
   retirePiSubagentRecord,
+  effectivePiStateDir,
   writeDispatchedSubagentLedger,
   writeDispatchedSubagentRecordFile,
 } from "./pi-subagent-ledger.js";
@@ -317,7 +318,7 @@ export function createRuntimeHost(options: {
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
     ...(config.piDistribution ? { LARKIN_PI_DISTRIBUTION: config.piDistribution } : {}),
-    ...(config.stateDir ? { LARKIN_STATE_DIR: config.stateDir } : {}),
+    LARKIN_STATE_DIR: effectivePiStateDir(config),
     ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
     ...(process.env.SHELL ? { SHELL: process.env.SHELL } : {}),
     ...(process.env.ZDOTDIR ? { ZDOTDIR: process.env.ZDOTDIR } : {}),
@@ -963,7 +964,7 @@ export function createRuntimeHost(options: {
   };
 
   const recordDispatchedSubagent = (agent: ManagedAgent, taskId: string, outputFile?: string): void => {
-    const recordFile = writeDispatchedSubagentRecordFile(agent.config.stateDir, taskId, agent.piSessionOwner);
+    const recordFile = writeDispatchedSubagentRecordFile(effectivePiStateDir(agent.config), taskId, agent.piSessionOwner);
     agent.subagentLedger = noteDispatchedSubagent(agent.subagentLedger, { taskId, outputFile, recordFile });
     persistSubagentLedger(agent);
     armSubagentReconcileTimer(agent);

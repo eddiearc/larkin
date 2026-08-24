@@ -8,15 +8,21 @@ import {
 } from "../../../dist/dashboard/dashboard-avatar.mjs";
 
 const AVATAR = "https://s1-imfile.feishucdn.com/static-resource/v1/avatar.png";
+const LARK_AVATAR = "https://s16-imfile-sg.feishucdn.com/static-resource/v1/avatar.png";
 
-test("dashboard avatar source accepts only the bounded Feishu CDN shape", () => {
+test("dashboard avatar source accepts bounded Feishu and Lark CDN hosts", () => {
   assert.equal(isAllowedDashboardAvatarUrl(AVATAR), true);
+  assert.equal(isAllowedDashboardAvatarUrl(LARK_AVATAR), true);
+  assert.equal(isAllowedDashboardAvatarUrl("https://s1-imfile-us.feishucdn.com/static-resource/v1/avatar.png"), true);
   for (const value of [
     "http://s1-imfile.feishucdn.com/static-resource/v1/avatar.png",
     "https://user:pass@s1-imfile.feishucdn.com/static-resource/v1/avatar.png",
     "https://s1-imfile.feishucdn.com:8443/static-resource/v1/avatar.png",
     "https://s1-imfile.feishucdn.com/other/avatar.png",
     "https://s1-imfile.feishucdn.com.evil.invalid/static-resource/v1/avatar.png",
+    "https://s16-imfile-sg.feishucdn.com.evil.invalid/static-resource/v1/avatar.png",
+    "https://s16-imfile-singapore.feishucdn.com/static-resource/v1/avatar.png",
+    "https://s1-imfile-.feishucdn.com/static-resource/v1/avatar.png",
     "https://127.0.0.1/static-resource/v1/avatar.png",
   ]) assert.equal(isAllowedDashboardAvatarUrl(value), false, value);
 });

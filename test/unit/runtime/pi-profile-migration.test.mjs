@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -197,5 +198,118 @@ test("refuses target content or mode tampering during rollback", () => {
       fs.chmodSync(path.join(second.targetDir, "models.json"), 0o644);
       assert.throws(() => migration.rollbackPiProfileMigration(secondPlan.state), /changed/);
     } finally { clean(second); }
+  } finally { clean(f); }
+});
+
+function lockPath(config, agent) {
+  return path.join(config, "providers", "pi", `${agent}.larkin-pi-import.lock`);
+}
+
+function writeLock(config, agent, body, mode = 0o600) {
+  const file = lockPath(config, agent);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, body, { mode });
+  fs.chmodSync(file, mode);
+  return file;
+}
+
+async function deadPid() {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const pid = child.pid;
+  assert.equal(typeof pid, "number");
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("exit", resolve));
+  return pid;
+}
+
+test("reclaims a stale lock whose recorded pid is dead", async () => {
+  const f = fixture();
+  try {
+    const file = writeLock(f.config, f.agent, `${await deadPid()}\n`);
+    migration.clearStalePiProfileMigrationLock(f.config, f.agent);
+    assert.equal(fs.existsSync(file), false);
+  } finally { clean(f); }
+});
+
+test("refuses to reclaim a lock owned by the current live pid", () => {
+  const f = fixture();
+  try {
+    const file = writeLock(f.config, f.agent, `${process.pid}\n`);
+    assert.throws(() => migration.clearStalePiProfileMigrationLock(f.config, f.agent), /Pi provider target is busy/);
+    assert.equal(fs.existsSync(file), true);
+  } finally { clean(f); }
+});
+
+test("treats EPERM as a possibly live lock and refuses reclaim", async () => {
+  const f = fixture();
+  try {
+    const file = writeLock(f.config, f.agent, `${await deadPid()}\n`);
+    const kill = () => {
+      const error = new Error("EPERM");
+      error.code = "EPERM";
+      throw error;
+    };
+    assert.throws(() => migration.clearStalePiProfileMigrationLock(f.config, f.agent, { kill }), /Pi provider target is busy/);
+    assert.equal(fs.existsSync(file), true);
+  } finally { clean(f); }
+});
+
+test("refuses malformed lock pid lines", () => {
+  const f = fixture();
+  try {
+    for (const body of ["", "not-a-pid\n", "0\n", "-3\n", "12\n34\n", "12 34\n"]) {
+      const file = writeLock(f.config, f.agent, body);
+      assert.throws(() => migration.clearStalePiProfileMigrationLock(f.config, f.agent), /Pi provider target is busy/, body);
+      assert.equal(fs.existsSync(file), true, body);
+    }
+  } finally { clean(f); }
+});
+
+test("refuses symlink or hardlinked lock metadata", async () => {
+  const f = fixture();
+  try {
+    const pid = await deadPid();
+    const file = lockPath(f.config, f.agent);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const target = path.join(f.config, "providers", "pi", "lock-target");
+    fs.writeFileSync(target, `${pid}\n`, { mode: 0o600 });
+    fs.symlinkSync(target, file);
+    assert.throws(() => migration.clearStalePiProfileMigrationLock(f.config, f.agent), /Pi provider target is busy/);
+    fs.unlinkSync(file);
+    writeLock(f.config, f.agent, `${pid}\n`, 0o644);
+    assert.throws(() => migration.clearStalePiProfileMigrationLock(f.config, f.agent), /Pi provider target is busy/);
+    fs.unlinkSync(file);
+    writeLock(f.config, f.agent, `${pid}\n`);
+    fs.linkSync(file, `${file}.hard`);
+    assert.throws(() => migration.clearStalePiProfileMigrationLock(f.config, f.agent), /Pi provider target is busy/);
+  } finally { clean(f); }
+});
+
+test("concurrent stale-lock reclaimers leave the lock path empty without stealing a live lock", async () => {
+  const f = fixture();
+  try {
+    const file = writeLock(f.config, f.agent, `${await deadPid()}\n`);
+    const script = path.join(f.root, "reclaim.mjs");
+    fs.writeFileSync(script, `import { pathToFileURL } from "node:url";
+const migration = await import(pathToFileURL(${JSON.stringify(path.join(ROOT, "dist/runtime/pi-profile-migration.mjs"))}).href);
+try {
+  migration.clearStalePiProfileMigrationLock(process.env.LOCK_CONFIG, process.env.LOCK_AGENT);
+  process.stdout.write("ok\\n");
+} catch (error) {
+  process.stdout.write(String(error && error.message || error) + "\\n");
+  process.exit(2);
+}
+`);
+    const env = { ...process.env, LOCK_CONFIG: f.config, LOCK_AGENT: f.agent };
+    const first = spawn(process.execPath, [script], { env, encoding: "utf8" });
+    const second = spawn(process.execPath, [script], { env, encoding: "utf8" });
+    const results = await Promise.all([first, second].map((child) => new Promise((resolve) => {
+      let stdout = ""; let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.once("exit", (status) => resolve({ status, stdout, stderr }));
+    })));
+    assert.equal(results.every((result) => result.status === 0 && result.stdout.includes("ok")), true, JSON.stringify(results));
+    assert.equal(fs.existsSync(file), false);
   } finally { clean(f); }
 });

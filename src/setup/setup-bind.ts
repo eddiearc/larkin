@@ -10,7 +10,17 @@ import { fileURLToPath } from "node:url";
 import { isWindows } from "../platform/secure-metadata.js";
 import { TargetRootLayout } from "../platform/root-layout.js";
 import { planSingleRootBinding, type StoredConfig } from "./setup-binding.js";
-import { configureBuiltinPiProviderModel, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
+import { configureBuiltinPiProviderModel, piAgentDirectory, type BuiltinPiProviderSetupSelection } from "../runtime/pi-provider-config.js";
+import {
+  applyPiProfileMigration,
+  clearStalePiProfileMigrationLock,
+  preparePiProfileMigration,
+  releasePiProfileMigrationLock,
+  rollbackPiProfileMigration,
+  type PiProfileMigrationPlan,
+} from "../runtime/pi-profile-migration.js";
+import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
+import { calculatePiCompactionSettings } from "../runtime/pi-compaction-recovery.js";
 import { terminalSetupQuestioner, type OfficialPiAuthSelection, type SetupAgentChoice } from "./setup-agent-choice.js";
 import {
   beginBuiltinPiCredentialTransaction,
@@ -257,6 +267,30 @@ function fabricateAttachment(root: string, serverId: string): void {
   fs.writeFileSync(file, JSON.stringify(attachment, null, 2), { mode: 0o600 });
 }
 
+function catalogModelsFromError(error: unknown): string[] {
+  if (!error || typeof error !== "object" || !("catalogModels" in error)) return [];
+  const models = (error as { catalogModels?: unknown }).catalogModels;
+  return Array.isArray(models) ? models.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+}
+
+function formatExternalPiSetupFailure(error: unknown, options: { agentExisted: boolean }): string {
+  const original = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").trim();
+  const alternatives = catalogModelsFromError(error);
+  const parts: string[] = [];
+  if (/external Pi (?:auth\.json|models\.json|settings\.json) is required|external Pi profile|external Pi auth\.json has an unsafe mode|external Pi models\.json has an unsafe mode|external Pi settings\.json has an unsafe mode/.test(original)) {
+    parts.push("external-pi requires the official file-backed Pi profile containing auth.json (0600), models.json, and settings.json, normally after `pi` login and default-model selection. Environment-variable-only credentials are unsupported.");
+  }
+  if (original) parts.push(original);
+  parts.push("Fix the official `pi` login and default model, then rerun `larkin setup --runtime external-pi`.");
+  if (options.agentExisted) {
+    parts.push("This Agent already exists; after a successful setup you can switch models with `larkin model <provider>/<model>`.");
+  }
+  if (alternatives.length) {
+    parts.push(`Alternative models that report a context window: ${alternatives.join(", ")}.`);
+  }
+  return parts.join(" ");
+}
+
 function safeProviderFailure(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   if (/\b(?:401|403)\b|unauth|invalid.*(?:key|token)|credential/i.test(message)) {
@@ -329,48 +363,84 @@ export async function main(): Promise<void> {
   validateRuntime(runtime);
   const defaultModel = larkinConfig.defaultModelFor(runtime);
   const selectedModel = selection?.runtime === "pi" && selection.distribution === "builtin" ? selection.model : undefined;
-  const targetModelId = selectedModel || (prior?.runtime === runtime ? prior.model : defaultModel);
-  let runtimeModels = larkinConfig.loadRuntimeModels()[runtime];
-  if (runtime === "pi") {
-    const preservedEffort = prior?.runtime === "pi" && typeof prior.effort === "string" && prior.effort.trim()
-      ? [prior.effort]
-      : [];
-    runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: preservedEffort }];
-  }
-  const targetModel = runtimeModels.find((model) => model.id === targetModelId);
-  if (!targetModel) die(`目标模型 ${runtime}/${targetModelId} 不在 runtime 模型目录中；未修改 Agent 配置`);
-  const stored = planSingleRootBinding({
-    config: larkinConfig.toStored(config),
-    profile,
-    requestedAgent,
-    runtime: selection?.runtime || options.runtime,
-    ...(runtime === "pi" && piDistribution ? { piDistribution } : {}),
-    ...(selectedModel ? { model: selectedModel } : {}),
-    defaultModel,
-    supportedReasoningEfforts: targetModel!.supportedReasoningEfforts || [],
-    now: new Date().toISOString(),
-  });
-  const bound = stored.agents[profile.appId];
-
-  fs.mkdirSync(CFG_DIR, { recursive: true });
+  let targetModelId = selectedModel || (prior?.runtime === runtime ? prior.model : defaultModel);
+  let resolvedExternalModel: string | undefined;
+  let pendingMigration: PiProfileMigrationPlan | null = null;
+  let setupConfigCommitted = false;
   let providerTransaction: ReturnType<typeof beginBuiltinPiCredentialTransaction> | null = null;
   let providerPublished = false;
-  const authAlreadyCompleted = selection?.runtime === "pi" && selection.distribution === "builtin"
-    && (selection as SetupAgentChoice & { authCompleted?: true }).authCompleted === true;
-  const readinessAlreadyCompleted = authAlreadyCompleted
-    && (selection as SetupAgentChoice & { readinessCompleted?: true }).readinessCompleted === true;
   const authAbort = new AbortController();
-  const cancelProviderTransaction = (signal: NodeJS.Signals): void => {
+  const cancelOnSignal = (signal: NodeJS.Signals): void => {
     authAbort.abort();
+    if (!setupConfigCommitted && pendingMigration) {
+      try { rollbackPiProfileMigration(pendingMigration.state); } catch { /* best effort */ }
+    }
     if (!providerPublished) providerTransaction?.rollback();
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
-  const onSigint = (): void => cancelProviderTransaction("SIGINT");
-  const onSigterm = (): void => cancelProviderTransaction("SIGTERM");
+  const onSigint = (): void => cancelOnSignal("SIGINT");
+  const onSigterm = (): void => cancelOnSignal("SIGTERM");
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
+  let runtimeModels = larkinConfig.loadRuntimeModels()[runtime];
   let authQuestioner: ReturnType<typeof terminalSetupQuestioner> | null = null;
   try {
+    if (runtime === "pi" && piDistribution === "external" && targetModelId === "default") {
+      fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
+      try {
+        clearStalePiProfileMigrationLock(CFG_DIR, profile.appId);
+        const plan = preparePiProfileMigration(process.env, CFG_DIR, profile.appId, "external");
+        pendingMigration = plan;
+        applyPiProfileMigration(plan);
+        const catalog = await discoverPiModelCatalog({
+          cwd: CFG_DIR,
+          agentDir: piAgentDirectory(CFG_DIR, profile.appId),
+          env: process.env,
+        });
+        const effective = catalog.effectiveModel;
+        const entry = effective ? catalog.models.find((model) => model.id === effective) : undefined;
+        if (!effective || !entry) {
+          throw new Error("Pi official default resolution returned an unavailable model");
+        }
+        if (!entry.contextWindow) {
+          const alternatives = catalog.models
+            .filter((model) => Number.isFinite(model.contextWindow) && Number(model.contextWindow) > 0)
+            .map((model) => model.id);
+          throw Object.assign(new Error("Pi effective model is missing a context window"), { catalogModels: alternatives });
+        }
+        calculatePiCompactionSettings(entry.contextWindow);
+        targetModelId = effective;
+        resolvedExternalModel = effective;
+        runtimeModels = [{ id: effective, supportedReasoningEfforts: entry.supportedReasoningEfforts }];
+      } catch (error) {
+        throw new Error(formatExternalPiSetupFailure(error, { agentExisted: Boolean(prior) }));
+      }
+    } else if (runtime === "pi") {
+      const preservedEffort = prior?.runtime === "pi" && typeof prior.effort === "string" && prior.effort.trim()
+        ? [prior.effort]
+        : [];
+      runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: preservedEffort }];
+    }
+    const targetModel = runtimeModels.find((model) => model.id === targetModelId);
+    if (!targetModel) throw new Error(`目标模型 ${runtime}/${targetModelId} 不在 runtime 模型目录中；未修改 Agent 配置`);
+    const stored = planSingleRootBinding({
+      config: larkinConfig.toStored(config),
+      profile,
+      requestedAgent,
+      runtime: selection?.runtime || options.runtime,
+      ...(runtime === "pi" && piDistribution ? { piDistribution } : {}),
+      ...(selectedModel || resolvedExternalModel ? { model: selectedModel || resolvedExternalModel } : {}),
+      defaultModel,
+      supportedReasoningEfforts: targetModel!.supportedReasoningEfforts || [],
+      now: new Date().toISOString(),
+    });
+    const bound = stored.agents[profile.appId];
+
+    fs.mkdirSync(CFG_DIR, { recursive: true });
+    const authAlreadyCompleted = selection?.runtime === "pi" && selection.distribution === "builtin"
+      && (selection as SetupAgentChoice & { authCompleted?: true }).authCompleted === true;
+    const readinessAlreadyCompleted = authAlreadyCompleted
+      && (selection as SetupAgentChoice & { readinessCompleted?: true }).readinessCompleted === true;
     providerTransaction = selection?.runtime === "pi" && selection.distribution === "builtin"
       && !authAlreadyCompleted ? beginBuiltinPiCredentialTransaction(CFG_DIR, profile.appId)
       : null;
@@ -405,9 +475,28 @@ export async function main(): Promise<void> {
       }
     }
     larkinConfig.commitSetupConfig(process.env, loaded.revision, stored);
+    setupConfigCommitted = true;
     providerTransaction?.commit();
     providerPublished = true;
+    if (pendingMigration) {
+      try { releasePiProfileMigrationLock(pendingMigration.state); }
+      catch { /* post-commit lock release is best-effort; do not roll back credentials */ }
+      pendingMigration = null;
+    }
+    fabricateAttachment(layout.root, stored.serverId);
+    say(`\n✓ 已写配置: ${CFG_FILE}`);
+    say(`  agent=${profile.appId}  runtime=${bound.runtime}  model=${bound.model}`);
+    say(`  单服务 serverId=${stored.serverId}  larkinHome=${layout.root}`);
+    say("\n启动这个 Agent：");
+    say("  larkin start                     # 单服务启动全部已配置 Agent");
+    say(`  larkin start --agent ${profile.appId}  # 仅调试这个 Agent`);
+    say("创建独立飞书（Lark）机器人 + Agent：");
+    say("  larkin setup");
   } catch (error) {
+    if (!setupConfigCommitted && pendingMigration) {
+      try { rollbackPiProfileMigration(pendingMigration.state); } catch { /* best effort */ }
+      pendingMigration = null;
+    }
     providerTransaction?.rollback();
     throw error;
   } finally {
@@ -415,16 +504,6 @@ export async function main(): Promise<void> {
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
   }
-  fabricateAttachment(layout.root, stored.serverId);
-
-  say(`\n✓ 已写配置: ${CFG_FILE}`);
-  say(`  agent=${profile.appId}  runtime=${bound.runtime}  model=${bound.model}`);
-  say(`  单服务 serverId=${stored.serverId}  larkinHome=${layout.root}`);
-  say("\n启动这个 Agent：");
-  say("  larkin start                     # 单服务启动全部已配置 Agent");
-  say(`  larkin start --agent ${profile.appId}  # 仅调试这个 Agent`);
-  say("创建独立飞书（Lark）机器人 + Agent：");
-  say("  larkin setup");
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {

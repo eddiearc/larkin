@@ -179,8 +179,9 @@ export async function main(): Promise<void> {
   const configuredAgent = configured.agents[selectedAgentId];
   if (!configuredAgent) die(`setup 完成但 Agent ${selectedAgentId} 配置不可读`);
   if (!(["codex", "claude", "pi"] as const).includes(configuredAgent.runtime as "codex" | "claude" | "pi")) die(`Runtime ${configuredAgent.runtime} 不受支持`);
-  // 非交互（Agent 驱动）时跳过 RPC probe：无 TTY 环境无法进行 pi RPC，探测留到 daemon 启动；
-  // 其余真实阻塞（缺 runtime 可执行文件 / 缺 key / 缺 lark-cli）一律 fast-fail 并给出 agent 可读的修复提示。
+  // 非交互（Agent 驱动）时仍跳过 probeNativeRuntimeReadiness：该探测保持 interactive-only。
+  // external-pi 绑定已在 setup-bind 内做非交互 Pi RPC catalog discovery（RPC over pipes 不需要 TTY）；
+  // daemon attach 探测仍是权威校验。其余真实阻塞（缺 runtime 可执行文件 / 缺 key / 缺 lark-cli）一律 fast-fail。
   if (!OPT.nonInteractive) {
     const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
       agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,

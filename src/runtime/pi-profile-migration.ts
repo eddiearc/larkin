@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import processInspect from "../platform/process-inspect.cjs";
 import { resolveRuntimeExecutable } from "./runtime-readiness.js";
 import { mergeOwnedPiSettings, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
@@ -61,6 +62,91 @@ function acquireTargetLock(state: PiProfileMigrationState): void {
 export function releasePiProfileMigrationLock(state: PiProfileMigrationState): void {
   try { fs.unlinkSync(targetLockFile(state)); fsyncDirectory(path.dirname(targetLockFile(state))); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+}
+const TARGET_BUSY = "Pi provider target is busy";
+export interface ClearStalePiProfileMigrationLockOptions {
+  kill?: typeof process.kill;
+}
+function migrationLockPath(configDir: string, agentId: string): string {
+  if (!AGENT_ID.test(agentId)) throw new Error("Pi Agent ID 格式无效");
+  return path.join(path.resolve(configDir), "providers", "pi", `${agentId}${TARGET_LOCK_SUFFIX}`);
+}
+function lockPidFromBytes(bytes: Buffer): number | null {
+  const text = bytes.toString("utf8");
+  if (text.endsWith("\n") ? text.slice(0, -1).includes("\n") : text.includes("\n")) return null;
+  const line = text.endsWith("\n") ? text.slice(0, -1) : text;
+  if (!/^[1-9][0-9]*$/.test(line)) return null;
+  const pid = Number(line);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+function inspectOwnedLock(file: string): { pid: number; dev: number; ino: number } | null {
+  let fd: number | undefined;
+  try {
+    const initial = fs.lstatSync(file);
+    if (initial.isSymbolicLink() || !initial.isFile() || initial.nlink !== 1 || (initial.mode & 0o777) !== 0o600) {
+      throw new Error(TARGET_BUSY);
+    }
+    assertOwner(initial, "Pi provider lock");
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+    fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(fd);
+    if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600) throw new Error(TARGET_BUSY);
+    assertOwner(before, "Pi provider lock");
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < before.size) {
+      const read = fs.readSync(fd, bytes, offset, before.size - offset, null);
+      if (read === 0) throw new Error(TARGET_BUSY);
+      offset += read;
+    }
+    const after = fs.fstatSync(fd);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.nlink !== before.nlink
+        || after.uid !== before.uid || (after.mode & 0o777) !== 0o600) throw new Error(TARGET_BUSY);
+    const pid = lockPidFromBytes(bytes.subarray(0, after.size));
+    if (pid === null) throw new Error(TARGET_BUSY);
+    return { pid, dev: after.dev, ino: after.ino };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(TARGET_BUSY);
+    if (error instanceof Error && error.message === TARGET_BUSY) throw error;
+    if (error instanceof Error && /unsafe/.test(error.message)) throw new Error(TARGET_BUSY);
+    throw new Error(TARGET_BUSY);
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+/** Reclaim a credential-adjacent import lock only when it is a proven-dead owned regular file. */
+export function clearStalePiProfileMigrationLock(
+  configDir: string,
+  agentId: string,
+  options: ClearStalePiProfileMigrationLockOptions = {},
+): void {
+  const file = migrationLockPath(configDir, agentId);
+  assertNoSymlinkAncestors(path.dirname(file));
+  const inspected = inspectOwnedLock(file);
+  if (!inspected) return;
+  const kill = options.kill ?? process.kill;
+  if (processInspect.pidAlive(inspected.pid, kill)) throw new Error(TARGET_BUSY);
+  const quarantine = `${file}.stale-${process.pid}-${crypto.randomUUID()}`;
+  try { fs.renameSync(file, quarantine); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(TARGET_BUSY);
+  }
+  fsyncDirectory(path.dirname(file));
+  try {
+    const quarantined = fs.lstatSync(quarantine);
+    if (quarantined.isSymbolicLink() || !quarantined.isFile() || quarantined.nlink !== 1
+        || (quarantined.mode & 0o777) !== 0o600 || quarantined.dev !== inspected.dev || quarantined.ino !== inspected.ino) {
+      throw new Error(TARGET_BUSY);
+    }
+    assertOwner(quarantined, "Pi provider lock");
+    const bytes = fs.readFileSync(quarantine);
+    if (lockPidFromBytes(bytes) !== inspected.pid || processInspect.pidAlive(inspected.pid, kill)) {
+      throw new Error(TARGET_BUSY);
+    }
+  } finally {
+    try { fs.unlinkSync(quarantine); } catch { /* quarantine is not the live lock path */ }
+    fsyncDirectory(path.dirname(file));
+  }
 }
 function isKnownSystemSymlink(value: string): boolean {
   return value === "/tmp" || value === "/private/tmp" || value === "/var" || value === "/private/var"
@@ -193,7 +279,7 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
   const sourceDirectoryState = assertDirectory(sourceDir, "external Pi profile") as fs.Stats;
   const sourceExecutable = sourceVersion(env, sourceDir);
   const sourceFiles = Object.fromEntries(FILES.map((name) => {
-    const file = readRegular(path.join(sourceDir, name), `external Pi ${name}`);
+    const file = readRegular(path.join(sourceDir, name), `external Pi ${name}`, false);
     if (!file) throw new Error(`external Pi ${name} is required`);
     if (name === "auth.json" && file.mode !== 0o600) throw new Error("external Pi auth.json has an unsafe mode");
     if (name !== "auth.json" && !SOURCE_MODES.has(file.mode)) throw new Error(`external Pi ${name} has an unsafe mode`);

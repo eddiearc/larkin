@@ -21,7 +21,9 @@ export function isAllowedDashboardAvatarUrl(value: unknown): value is string {
       && url.username === ""
       && url.password === ""
       && (url.port === "" || url.port === "443")
-      && /^s\d+-imfile\.feishucdn\.com$/i.test(url.hostname)
+      // Feishu: s1-imfile.feishucdn.com
+      // Lark regional: s16-imfile-sg.feishucdn.com
+      && /^s\d+-imfile(?:-[a-z]{2,3})?\.feishucdn\.com$/i.test(url.hostname)
       && url.pathname.startsWith("/static-resource/v1/");
   } catch {
     return false;

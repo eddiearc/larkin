@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import processInspect from "../platform/process-inspect.cjs";
-import { applyPiPackageDirForChild } from "./builtin-pi-assets.js";
+import { applyPiPackageDirForChild, resolveExternalPiPackageDir } from "./builtin-pi-assets.js";
 import { resolveRuntimeExecutable } from "./runtime-readiness.js";
 import { mergeOwnedPiSettings, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
@@ -41,7 +41,7 @@ export interface PiProfileMigrationState {
 export interface PiProfileMigrationPlan {
   state: PiProfileMigrationState;
   sourceBytes: Record<FileName, Buffer>;
-  sourceEnvironment: { PATH?: string; LARKIN_PI_COMMAND?: string };
+  sourceEnvironment: { PATH?: string; LARKIN_PI_COMMAND?: string; PI_PACKAGE_DIR?: string };
 }
 
 const TARGET_LOCK_SUFFIX = ".larkin-pi-import.lock";
@@ -310,7 +310,11 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
       priorFiles: target.files, afterFiles },
     sourceBytes: { "auth.json": sourceFiles["auth.json"].bytes, "models.json": sourceFiles["models.json"].bytes,
       "settings.json": imported["settings.json"] },
-    sourceEnvironment: { PATH: env.PATH, LARKIN_PI_COMMAND: env.LARKIN_PI_COMMAND },
+    sourceEnvironment: {
+      PATH: env.PATH,
+      LARKIN_PI_COMMAND: env.LARKIN_PI_COMMAND,
+      ...(resolveExternalPiPackageDir(env.PI_PACKAGE_DIR) ? { PI_PACKAGE_DIR: resolveExternalPiPackageDir(env.PI_PACKAGE_DIR) } : {}),
+    },
   };
 }
 
@@ -437,8 +441,13 @@ function restoreFile(file: string, prior: FileState): void {
 
 export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
   const sameEnvironment = process.env.PATH === plan.sourceEnvironment.PATH
-    && process.env.LARKIN_PI_COMMAND === plan.sourceEnvironment.LARKIN_PI_COMMAND;
-  assertSourceUnchanged(plan.state, sameEnvironment ? process.env : plan.sourceEnvironment);
+    && process.env.LARKIN_PI_COMMAND === plan.sourceEnvironment.LARKIN_PI_COMMAND
+    && (resolveExternalPiPackageDir(process.env.PI_PACKAGE_DIR) ?? undefined) === plan.sourceEnvironment.PI_PACKAGE_DIR;
+  const replayEnv = {
+    ...(sameEnvironment ? process.env : { ...process.env, ...plan.sourceEnvironment }),
+    ...(plan.sourceEnvironment.PI_PACKAGE_DIR ? { PI_PACKAGE_DIR: plan.sourceEnvironment.PI_PACKAGE_DIR } : {}),
+  };
+  assertSourceUnchanged(plan.state, replayEnv);
   const parent = path.dirname(plan.state.targetDir); assertNoSymlinkAncestors(parent); fs.mkdirSync(parent, { recursive: true, mode: 0o700 }); fs.chmodSync(parent, 0o700);
   acquireTargetLock(plan.state);
   assertTargetUnchanged(plan.state);

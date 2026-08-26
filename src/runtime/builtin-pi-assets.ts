@@ -61,7 +61,11 @@ export function piChildDistributionFromOverrides(
 
 function existingPiThemeFile(directory: string): string | undefined {
   const theme = path.join(directory, "dist", "modes", "interactive", "theme", "dark.json");
-  return fs.existsSync(theme) ? theme : undefined;
+  try {
+    return fs.statSync(theme).isFile() ? theme : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveExternalPiPackageDir(directory: string | undefined): string | undefined {

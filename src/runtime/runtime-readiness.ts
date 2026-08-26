@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
+import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
 import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
@@ -106,11 +106,11 @@ function executableVersion(executable: string, env: NodeJS.ProcessEnv, commandAr
 
 /** Resolve and handshake through each runtime's structured native control protocol. */
 export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeReadinessOptions): Promise<RuntimeReadiness> {
-  const env = { ...process.env, ...options.env };
+  let env = { ...process.env, ...options.env };
   const piDistribution = options.runtime === "pi" ? piChildDistributionFromOverrides(options.env) : "external";
-  if (piDistribution !== "builtin") {
+  if (options.runtime === "pi" && piDistribution !== "builtin") {
     if (env.LARKIN_PI_DISTRIBUTION === "builtin") delete env.LARKIN_PI_DISTRIBUTION;
-    delete env.PI_PACKAGE_DIR;
+    env = applyPiPackageDirForChild(env, { distribution: "external" });
   }
   if (options.runtime === "pi" && piDistribution === "builtin") {
     try {

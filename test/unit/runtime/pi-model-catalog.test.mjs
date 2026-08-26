@@ -153,6 +153,9 @@ test("external env keeps a Nix-like package root and strips symlink/minimal/miss
     assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: minimal }, "external").PI_PACKAGE_DIR, undefined);
     assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: aliasToMinimal }, "external").PI_PACKAGE_DIR, undefined);
     assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: path.join(root, "missing") }, "external").PI_PACKAGE_DIR, undefined);
+    const dirAsTheme = path.join(root, "dir-theme");
+    fs.mkdirSync(path.join(dirAsTheme, "dist", "modes", "interactive", "theme", "dark.json"), { recursive: true });
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: dirAsTheme }, "external").PI_PACKAGE_DIR, undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

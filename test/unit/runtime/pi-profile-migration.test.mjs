@@ -42,6 +42,17 @@ function fixture({ target = false } = {}) {
 
 function clean(f) { fs.rmSync(f.root, { recursive: true, force: true }); }
 
+test("profile migration plan persists a canonical external package root", () => {
+  const f = fixture();
+  const pkg = path.join(f.root, "nix", "store", "hash-pi");
+  fs.mkdirSync(path.join(pkg, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(pkg, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+  try {
+    const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: pkg }, f.config, f.agent, "external");
+    assert.equal(plan.sourceEnvironment.PI_PACKAGE_DIR, fs.realpathSync(pkg));
+  } finally { clean(f); }
+});
+
  test("imports only auth/models/settings, preserves provider bytes, owns modes, and rolls back an absent target", () => {
   const f = fixture();
   try {

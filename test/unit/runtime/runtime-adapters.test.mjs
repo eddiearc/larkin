@@ -809,6 +809,10 @@ test("inherited builtin PI_PACKAGE_DIR does not drop production extension versio
     const versions = rows.filter((row) => row.kind === "argv" && row.args.includes("--version"));
     assert.ok(versions.length >= 1, JSON.stringify(rows));
     assert.equal(versions.every((row) => row.packageDir == null), true, JSON.stringify(versions));
+    const sessionLaunch = rows.find((row) => row.kind === "argv" && row.args.includes("--session-dir"));
+    assert.ok(sessionLaunch, JSON.stringify(rows));
+    const extensionArgs = sessionLaunch.args.filter((arg) => arg === "-e");
+    assert.equal(extensionArgs.length, 2, JSON.stringify(sessionLaunch.args));
     assert.equal(session.effectiveModel, "test-provider/test-model");
   } finally {
     await session?.close("inherited extension probe test complete").catch(() => {});

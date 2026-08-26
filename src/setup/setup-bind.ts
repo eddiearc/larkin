@@ -395,7 +395,7 @@ export async function main(): Promise<void> {
         const catalog = await discoverPiModelCatalog({
           cwd: CFG_DIR,
           agentDir: piAgentDirectory(CFG_DIR, profile.appId),
-          env: process.env,
+          env: { ...process.env, LARKIN_PI_DISTRIBUTION: "external" },
         });
         const effective = catalog.effectiveModel;
         const entry = effective ? catalog.models.find((model) => model.id === effective) : undefined;

@@ -43,3 +43,73 @@ export function prepareBuiltinPiPackageAssets(): void {
   writeEmbeddedFile(path.join(themeDir, "light.json"), assets.lightTheme);
   process.env.PI_PACKAGE_DIR = packageDir;
 }
+
+export function piChildDistribution(env: NodeJS.ProcessEnv | undefined): "builtin" | "external" {
+  return env?.LARKIN_PI_DISTRIBUTION === "builtin" ? "builtin" : "external";
+}
+
+/** Host process env may be builtin Pi; only explicit child overrides select bundled assets. */
+export function piChildDistributionFromOverrides(
+  ...overrides: Array<NodeJS.ProcessEnv | undefined>
+): "builtin" | "external" {
+  for (let index = overrides.length - 1; index >= 0; index -= 1) {
+    const value = overrides[index]?.LARKIN_PI_DISTRIBUTION;
+    if (value === "builtin" || value === "external") return value;
+  }
+  return "external";
+}
+
+function existingPiThemeFile(directory: string): string | undefined {
+  const theme = path.join(directory, "dist", "modes", "interactive", "theme", "dark.json");
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(theme, fs.constants.O_RDONLY);
+    return fs.fstatSync(fd).isFile() ? theme : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* already closed or unreadable */ }
+    }
+  }
+}
+
+export function resolveExternalPiPackageDir(directory: string | undefined): string | undefined {
+  if (!directory?.trim()) return undefined;
+  try {
+    const resolved = fs.realpathSync(directory);
+    return existingPiThemeFile(resolved) ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isLarkinBuiltinPiPackageDir(directory: string | undefined): boolean {
+  if (!directory) return false;
+  try {
+    const resolved = fs.realpathSync(directory);
+    if (path.basename(resolved).toLowerCase() !== ".larkin-official-pi-package") return false;
+    return !existingPiThemeFile(resolved);
+  } catch {
+    return path.basename(directory).toLowerCase() === ".larkin-official-pi-package";
+  }
+}
+
+export function catalogPiChildDistribution(commandArgs?: readonly string[]): "builtin" | "external" {
+  return commandArgs?.includes("pi-rpc") ? "builtin" : "external";
+}
+
+/** External/npm Pi resolves PI_PACKAGE_DIR as a Node package root and looks for dist/themes. */
+export function applyPiPackageDirForChild(
+  env: NodeJS.ProcessEnv,
+  distribution: "builtin" | "external" | { distribution?: "builtin" | "external"; explicitPackageDir?: string } = piChildDistribution(env),
+): NodeJS.ProcessEnv {
+  const options = typeof distribution === "string" ? { distribution } : distribution;
+  const resolved = options.distribution ?? piChildDistribution(env);
+  const next = { ...env };
+  if (resolved === "builtin") return next;
+  const kept = resolveExternalPiPackageDir(options.explicitPackageDir) ?? resolveExternalPiPackageDir(next.PI_PACKAGE_DIR);
+  if (kept) next.PI_PACKAGE_DIR = kept;
+  else delete next.PI_PACKAGE_DIR;
+  return next;
+}

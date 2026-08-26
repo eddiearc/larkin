@@ -15,6 +15,7 @@ import type {
   StandingPrompt,
   UpstreamProviderError,
 } from "./runtime-contracts.js";
+import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { internalCommandSpec } from "../app/internal-command.js";
@@ -1033,22 +1034,27 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ...(session.sessionFile ? ["--session", session.sessionFile] : []),
     ...(requestedModel ? ["--model", requestedModel] : []),
     ...(requestedEffort ? ["--thinking", requestedEffort] : [])];
-  const builtin = mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin";
+  const builtin = piChildDistributionFromOverrides(dependencies.env, input.env) === "builtin";
+  if (!builtin && mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin") delete mergedEnv.LARKIN_PI_DISTRIBUTION;
   const builtinSpec = builtin ? internalCommandSpec("pi-rpc", [], mergedEnv) : null;
   const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
   const commandPrefix = builtinSpec?.args ?? dependencies.piCommandArgs ?? [];
   const commandArgs = [...commandPrefix, ...args];
-  const reportedVersion = productionSpawn && !builtin
-    ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
-      cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000,
-    }).stdout || ""))
-    : BUNDLED_PI_VERSION;
   mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
   if (builtin) mergedEnv.PI_TELEMETRY = "0";
+  const childEnv = applyPiPackageDirForChild(mergedEnv, {
+    distribution: builtin ? "builtin" : "external",
+    explicitPackageDir: input.env?.PI_PACKAGE_DIR ?? dependencies.env?.PI_PACKAGE_DIR,
+  });
+  const reportedVersion = productionSpawn && !builtin
+    ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
+      cwd: input.workspaceDir, env: childEnv, encoding: "utf8", timeout: 5_000,
+    }).stdout || ""))
+    : BUNDLED_PI_VERSION;
   const extensionArgs = (dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,
-    env: mergedEnv,
+    env: childEnv,
     platform: process.platform,
   });
   commandArgs.push(...extensionArgs);
@@ -1060,7 +1066,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     // is loaded by the probe.
     probedModel = await discoverEffectivePiContextWindow(
       input, command, commandPrefix, requestedModel,
-      mergedEnv, spawn, dependencies.piRpcClientOptions,
+      childEnv, spawn, dependencies.piRpcClientOptions,
     );
     writeOwnedPiSettings(ownedPiDirectory, calculatePiCompactionSettings(probedModel.contextWindow));
   }
@@ -1068,7 +1074,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const artifactSpawnBoundary = Date.now();
   const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
-    env: mergedEnv,
+    env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
   traceProcessBoundary(mergedEnv, "pi-rpc:child-spawned", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childPid: (child as unknown as { pid?: number }).pid ?? null });
@@ -1220,8 +1226,7 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
         if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
       }
       if (id === "pi") {
-        const distribution = ({ ...globalThis.process.env, ...dependencies.env, ...input.env }).LARKIN_PI_DISTRIBUTION === "builtin"
-          ? "builtin" : "external";
+        const distribution = piChildDistributionFromOverrides(dependencies.env, input.env);
         return new PiSession(await (dependencies.createPiSession
         ? dependencies.createPiSession(input)
         : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn, productionSpawn)), distribution);

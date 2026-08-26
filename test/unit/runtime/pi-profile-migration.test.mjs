@@ -112,6 +112,43 @@ test("profile apply does not inherit a later ambient package root when the plan 
   }
 });
 
+test("prepare/apply/rollback probes ignore a later ambient package root", () => {
+  const f = fixture();
+  const planned = path.join(f.root, "planned-root");
+  const later = path.join(f.root, "later-valid");
+  for (const root of [planned, later]) {
+    fs.mkdirSync(path.join(root, "dist", "modes", "interactive", "theme"), { recursive: true });
+    fs.writeFileSync(path.join(root, "dist", "modes", "interactive", "theme", "dark.json"), `${JSON.stringify({ root: path.basename(root) })}\n`);
+  }
+  const previous = process.env.PI_PACKAGE_DIR;
+  const lock = path.join(f.config, "providers", "pi", `${f.agent}.larkin-pi-import.lock`);
+  const readProbes = () => fs.readFileSync(f.probeLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+  try {
+    fs.writeFileSync(f.probeLog, "");
+    const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: planned }, f.config, f.agent, "external");
+    const prepareProbes = readProbes();
+    assert.equal(prepareProbes.length, 1, JSON.stringify(prepareProbes));
+    assert.equal(fs.realpathSync(prepareProbes[0].packageDir), fs.realpathSync(planned));
+    process.env.PI_PACKAGE_DIR = later;
+    fs.writeFileSync(f.probeLog, "");
+    migration.applyPiProfileMigration(plan);
+    const applyProbes = readProbes();
+    assert.equal(applyProbes.length, 1, JSON.stringify(applyProbes));
+    assert.equal(fs.realpathSync(applyProbes[0].packageDir), fs.realpathSync(planned));
+    assert.equal(applyProbes[0].packageDir.includes("later-valid"), false);
+    fs.writeFileSync(f.probeLog, "");
+    migration.rollbackPiProfileMigration(plan.state);
+    const rollbackProbes = readProbes();
+    assert.equal(rollbackProbes.every((row) => !String(row.packageDir || "").includes("later-valid")), true, JSON.stringify(rollbackProbes));
+    assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), false);
+    assert.equal(fs.existsSync(lock), false);
+  } finally {
+    if (previous === undefined) delete process.env.PI_PACKAGE_DIR;
+    else process.env.PI_PACKAGE_DIR = previous;
+    clean(f);
+  }
+});
+
 test("profile apply rejects symlink retarget and theme content mutation", () => {
   const f = fixture();
   const pkg = path.join(f.root, "planned-root");

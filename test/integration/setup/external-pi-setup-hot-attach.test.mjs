@@ -247,6 +247,47 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
   }
 });
 
+test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after catalog failure", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-host-builtin-fail-"));
+  try {
+    const configFile = path.join(root, "config.json");
+    const before = `${JSON.stringify({
+      version: 4,
+      serverId: "server-existing",
+      mentionPolicy: "require",
+      activeAgent: APP,
+      agents: {
+        [APP]: { runtime: "pi", model: "default", piDistribution: "external" },
+      },
+    }, null, 2)}\n`;
+    fs.writeFileSync(configFile, before, { mode: 0o600 });
+    const botFile = writeCredential(root);
+    const botBefore = fs.readFileSync(botFile);
+    const profile = writeExternalPiProfile(path.join(root, "home"));
+    const fake = writeFakePi(root, { missingWindow: true });
+    const packageDir = path.join(root, ".larkin-official-pi-package");
+    fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
+    fs.writeFileSync(path.join(packageDir, "package.json"), "{\"name\":\"fixture-builtin-pi\"}\n");
+    fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
+    const result = runBind(root, {
+      LARKIN_PI_COMMAND: fake.command,
+      LARKIN_PI_DISTRIBUTION: "builtin",
+      PI_PACKAGE_DIR: packageDir,
+    });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fs.readFileSync(configFile, "utf8"), before);
+    assert.deepEqual(fs.readFileSync(botFile), botBefore);
+    assert.deepEqual(fs.readFileSync(path.join(profile.dir, "auth.json")), profile.auth);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi", `${APP}.larkin-pi-import.lock`)), false);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP, "auth.json")), false);
+    const launches = readLaunches(fake.marker);
+    assert.equal(launches.every((row) => row.packageDir == null), true, JSON.stringify(launches));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("external-pi setup from a builtin host with minimal PI_PACKAGE_DIR still resolves models", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-host-builtin-"));
   try {

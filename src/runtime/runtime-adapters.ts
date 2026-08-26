@@ -1054,7 +1054,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const extensionArgs = (dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,
-    env: mergedEnv,
+    env: childEnv,
     platform: process.platform,
   });
   commandArgs.push(...extensionArgs);

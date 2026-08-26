@@ -69,8 +69,15 @@ const log = process.env.LARKIN_PI_TEST_LOG;
 const probe = args.includes("--no-session");
 let stateRequests = 0;
 const record = (value) => fs.appendFileSync(log + "." + process.pid, JSON.stringify(value) + "\\n");
-record({ kind: "argv", probe, args });
-if (args.includes("--version")) { process.stdout.write("0.84.2\\n"); process.exit(0); }
+record({ kind: "argv", probe, args, packageDir: process.env.PI_PACKAGE_DIR || null });
+if (args.includes("--version")) {
+  if (process.env.PI_PACKAGE_DIR) {
+    const theme = process.env.PI_PACKAGE_DIR + "/dist/modes/interactive/theme/dark.json";
+    if (!fs.existsSync(theme)) process.exit(1);
+  }
+  process.stdout.write("0.84.2\\n");
+  process.exit(0);
+}
 const respond = (request, data) => process.stdout.write(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data }) + "\\n");
 const state = () => {
   stateRequests += 1;
@@ -776,6 +783,35 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     await session.close("test complete");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("inherited builtin PI_PACKAGE_DIR does not drop production extension version probes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-inherited-ext-"));
+  const packageDir = path.join(root, ".larkin-official-pi-package");
+  fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs,
+      env: { PI_PACKAGE_DIR: packageDir, LARKIN_PI_TEST_LOG: log },
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    session = await adapter.createSession(input);
+    const rows = readProductionPiLog(log);
+    const versions = rows.filter((row) => row.kind === "argv" && row.args.includes("--version"));
+    assert.ok(versions.length >= 1, JSON.stringify(rows));
+    assert.equal(versions.every((row) => row.packageDir == null), true, JSON.stringify(versions));
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+  } finally {
+    await session?.close("inherited extension probe test complete").catch(() => {});
   }
 });
 

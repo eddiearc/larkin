@@ -135,6 +135,29 @@ test("setup-style catalog env with host builtin + minimal PI_PACKAGE_DIR still s
   }
 });
 
+test("external env keeps a Nix-like package root and strips symlink/minimal/missing roots", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-roots-"));
+  const nixDir = path.join(root, "nix", "store", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-pi-coding-agent-0.84.2");
+  fs.mkdirSync(path.join(nixDir, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(nixDir, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+  const minimal = path.join(root, ".larkin-official-pi-package");
+  fs.mkdirSync(path.join(minimal, "theme"), { recursive: true });
+  fs.writeFileSync(path.join(minimal, "theme", "dark.json"), "{}\n");
+  const aliasToMinimal = path.join(root, "alias-minimal");
+  const aliasToNix = path.join(root, "alias-nix");
+  fs.symlinkSync(minimal, aliasToMinimal);
+  fs.symlinkSync(nixDir, aliasToNix);
+  try {
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: nixDir }, "external").PI_PACKAGE_DIR, fs.realpathSync(nixDir));
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: aliasToNix }, "external").PI_PACKAGE_DIR, fs.realpathSync(nixDir));
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: minimal }, "external").PI_PACKAGE_DIR, undefined);
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: aliasToMinimal }, "external").PI_PACKAGE_DIR, undefined);
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: path.join(root, "missing") }, "external").PI_PACKAGE_DIR, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("explicit external PI_PACKAGE_DIR is kept only when it is a real Node package root", () => {
   const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-real-pkg-"));
   const realDir = path.join(realRoot, "pi-pkg");
@@ -147,7 +170,7 @@ test("explicit external PI_PACKAGE_DIR is kept only when it is a real Node packa
       distribution: "external",
       explicitPackageDir: realDir,
     });
-    assert.equal(kept.PI_PACKAGE_DIR, realDir);
+    assert.equal(kept.PI_PACKAGE_DIR, fs.realpathSync(realDir));
     const stripped = applyPiPackageDirForChild({ PI_PACKAGE_DIR: builtinDir }, {
       distribution: "external",
       explicitPackageDir: builtinDir,
@@ -190,6 +213,43 @@ rl.on("line", (line) => {
     });
     assert.equal(catalog.effectiveModel, "plain/chat");
     assert.equal(catalog.models[0].id, "plain/chat");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("catalog cache distinguishes sanitized package roots", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-cache-"));
+  const makePkg = (name) => {
+    const dir = path.join(root, name);
+    fs.mkdirSync(path.join(dir, "dist", "modes", "interactive", "theme"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+    return dir;
+  };
+  const first = makePkg("one");
+  const second = makePkg("two");
+  const script = path.join(root, "pi.mjs");
+  fs.writeFileSync(script, `
+import path from "node:path";
+import readline from "node:readline";
+const id = path.basename(process.env.PI_PACKAGE_DIR || "missing");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  const model = { provider: "plain", id, name: id, reasoning: false, contextWindow: 32000 };
+  const data = request.type === "get_available_models" ? { models: [model] } : { model, thinkingLevel: "off" };
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+});
+`);
+  try {
+    const a = await discoverPiModelCatalog({
+      cwd: root, command: process.execPath, commandArgs: [script], packageDir: first,
+    });
+    const b = await discoverPiModelCatalog({
+      cwd: root, command: process.execPath, commandArgs: [script], packageDir: second,
+    });
+    assert.equal(a.effectiveModel, "plain/one");
+    assert.equal(b.effectiveModel, "plain/two");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

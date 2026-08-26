@@ -59,13 +59,29 @@ export function piChildDistributionFromOverrides(
   return "external";
 }
 
+function existingPiThemeFile(directory: string): string | undefined {
+  const theme = path.join(directory, "dist", "modes", "interactive", "theme", "dark.json");
+  return fs.existsSync(theme) ? theme : undefined;
+}
+
+export function resolveExternalPiPackageDir(directory: string | undefined): string | undefined {
+  if (!directory?.trim()) return undefined;
+  try {
+    const resolved = fs.realpathSync(directory);
+    return existingPiThemeFile(resolved) ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function isLarkinBuiltinPiPackageDir(directory: string | undefined): boolean {
   if (!directory) return false;
-  if (path.basename(directory) !== ".larkin-official-pi-package") return false;
   try {
-    return !fs.existsSync(path.join(directory, "dist", "modes", "interactive", "theme", "dark.json"));
+    const resolved = fs.realpathSync(directory);
+    if (path.basename(resolved).toLowerCase() !== ".larkin-official-pi-package") return false;
+    return !existingPiThemeFile(resolved);
   } catch {
-    return true;
+    return path.basename(directory).toLowerCase() === ".larkin-official-pi-package";
   }
 }
 
@@ -82,11 +98,8 @@ export function applyPiPackageDirForChild(
   const resolved = options.distribution ?? piChildDistribution(env);
   const next = { ...env };
   if (resolved === "builtin") return next;
-  const explicit = options.explicitPackageDir?.trim();
-  if (explicit && !isLarkinBuiltinPiPackageDir(explicit)) {
-    next.PI_PACKAGE_DIR = explicit;
-    return next;
-  }
-  delete next.PI_PACKAGE_DIR;
+  const kept = resolveExternalPiPackageDir(options.explicitPackageDir) ?? resolveExternalPiPackageDir(next.PI_PACKAGE_DIR);
+  if (kept) next.PI_PACKAGE_DIR = kept;
+  else delete next.PI_PACKAGE_DIR;
   return next;
 }

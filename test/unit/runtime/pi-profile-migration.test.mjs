@@ -139,8 +139,10 @@ test("prepare/apply/rollback probes ignore a later ambient package root", () => 
     fs.writeFileSync(f.probeLog, "");
     migration.rollbackPiProfileMigration(plan.state);
     const rollbackProbes = readProbes();
+    assert.ok(rollbackProbes.length > 0, JSON.stringify(rollbackProbes));
     assert.equal(rollbackProbes.every((row) => !String(row.packageDir || "").includes("later-valid")), true, JSON.stringify(rollbackProbes));
-    assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), false);
+    assert.equal(fs.realpathSync(rollbackProbes[0].packageDir), fs.realpathSync(planned));
+    assert.equal(fs.existsSync(f.targetDir), false);
     assert.equal(fs.existsSync(lock), false);
   } finally {
     if (previous === undefined) delete process.env.PI_PACKAGE_DIR;

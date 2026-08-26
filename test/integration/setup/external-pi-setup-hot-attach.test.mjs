@@ -274,7 +274,10 @@ test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after 
       LARKIN_PI_DISTRIBUTION: "builtin",
       PI_PACKAGE_DIR: packageDir,
     });
-    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /Pi effective model is missing a context window/);
+    assert.match(output, /larkin setup --runtime external-pi/);
     assert.equal(fs.readFileSync(configFile, "utf8"), before);
     assert.deepEqual(fs.readFileSync(botFile), botBefore);
     assert.deepEqual(fs.readFileSync(path.join(profile.dir, "auth.json")), profile.auth);
@@ -282,6 +285,11 @@ test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after 
     assert.equal(fs.existsSync(path.join(root, "providers", "pi", `${APP}.larkin-pi-import.lock`)), false);
     assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP, "auth.json")), false);
     const launches = readLaunches(fake.marker);
+    assert.ok(launches.length > 0, JSON.stringify(launches));
+    assert.equal(launches.some((row) => row.args.includes("--version")), true, JSON.stringify(launches));
+    const catalogProbe = launches.find((row) => row.args.includes("--mode") && row.args.includes("rpc") && row.args.includes("--no-session"));
+    assert.ok(catalogProbe, JSON.stringify(launches));
+    assert.equal(catalogProbe.agentDir, path.join(root, "providers", "pi", APP));
     assert.equal(launches.every((row) => row.packageDir == null), true, JSON.stringify(launches));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

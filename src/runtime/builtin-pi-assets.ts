@@ -59,12 +59,34 @@ export function piChildDistributionFromOverrides(
   return "external";
 }
 
+export function isLarkinBuiltinPiPackageDir(directory: string | undefined): boolean {
+  if (!directory) return false;
+  if (path.basename(directory) !== ".larkin-official-pi-package") return false;
+  try {
+    return !fs.existsSync(path.join(directory, "dist", "modes", "interactive", "theme", "dark.json"));
+  } catch {
+    return true;
+  }
+}
+
+export function catalogPiChildDistribution(commandArgs?: readonly string[]): "builtin" | "external" {
+  return commandArgs?.includes("pi-rpc") ? "builtin" : "external";
+}
+
 /** External/npm Pi resolves PI_PACKAGE_DIR as a Node package root and looks for dist/themes. */
 export function applyPiPackageDirForChild(
   env: NodeJS.ProcessEnv,
-  distribution: "builtin" | "external" = piChildDistribution(env),
+  distribution: "builtin" | "external" | { distribution?: "builtin" | "external"; explicitPackageDir?: string } = piChildDistribution(env),
 ): NodeJS.ProcessEnv {
+  const options = typeof distribution === "string" ? { distribution } : distribution;
+  const resolved = options.distribution ?? piChildDistribution(env);
   const next = { ...env };
-  if (distribution !== "builtin") delete next.PI_PACKAGE_DIR;
+  if (resolved === "builtin") return next;
+  const explicit = options.explicitPackageDir?.trim();
+  if (explicit && !isLarkinBuiltinPiPackageDir(explicit)) {
+    next.PI_PACKAGE_DIR = explicit;
+    return next;
+  }
+  delete next.PI_PACKAGE_DIR;
   return next;
 }

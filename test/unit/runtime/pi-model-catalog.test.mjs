@@ -108,6 +108,56 @@ test("builtin Pi child env keeps PI_PACKAGE_DIR", () => {
   assert.equal(env.PI_PACKAGE_DIR, packageDir);
 });
 
+test("setup-style catalog env with host builtin + minimal PI_PACKAGE_DIR still strips the builtin dir", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-setup-"));
+  const packageDir = path.join(root, ".larkin-official-pi-package");
+  fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "package.json"), "{\"name\":\"fixture-builtin-pi\"}\n");
+  fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
+  try {
+    let childEnv;
+    const catalog = await discoverPiModelCatalog({
+      cwd: root,
+      env: {
+        LARKIN_PI_DISTRIBUTION: "builtin",
+        PI_PACKAGE_DIR: packageDir,
+        PI_CODING_AGENT_DIR: path.join(root, "agent"),
+      },
+      spawn: (_command, _args, options) => {
+        childEnv = options.env;
+        return new FakePi(models, models[0]);
+      },
+    });
+    assert.equal(childEnv.PI_PACKAGE_DIR, undefined);
+    assert.equal(catalog.effectiveModel, "plain/chat");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit external PI_PACKAGE_DIR is kept only when it is a real Node package root", () => {
+  const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-real-pkg-"));
+  const realDir = path.join(realRoot, "pi-pkg");
+  fs.mkdirSync(path.join(realDir, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(realDir, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+  const builtinDir = path.join(realRoot, ".larkin-official-pi-package");
+  fs.mkdirSync(path.join(builtinDir, "theme"), { recursive: true });
+  try {
+    const kept = applyPiPackageDirForChild({ PI_PACKAGE_DIR: builtinDir }, {
+      distribution: "external",
+      explicitPackageDir: realDir,
+    });
+    assert.equal(kept.PI_PACKAGE_DIR, realDir);
+    const stripped = applyPiPackageDirForChild({ PI_PACKAGE_DIR: builtinDir }, {
+      distribution: "external",
+      explicitPackageDir: builtinDir,
+    });
+    assert.equal(stripped.PI_PACKAGE_DIR, undefined);
+  } finally {
+    fs.rmSync(realRoot, { recursive: true, force: true });
+  }
+});
+
 test("external catalog discovery succeeds after builtin assets materialize without reading dist themes", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-"));
   const packageDir = path.join(root, ".larkin-official-pi-package");

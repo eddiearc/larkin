@@ -70,7 +70,15 @@ const marker = ${JSON.stringify(marker)};
 const args = process.argv.slice(2);
 fs.appendFileSync(marker, JSON.stringify({
   args, cwd: process.cwd(), agentDir: process.env.PI_CODING_AGENT_DIR || null,
+  packageDir: process.env.PI_PACKAGE_DIR || null,
 }) + "\\n");
+if (process.env.PI_PACKAGE_DIR) {
+  const theme = process.env.PI_PACKAGE_DIR + "/dist/modes/interactive/theme/dark.json";
+  if (!fs.existsSync(theme)) {
+    process.stderr.write("ENOENT: no such file or directory, open " + theme + "\\n");
+    process.exit(1);
+  }
+}
 if (args.includes("--version")) { process.stdout.write("0.84.2\\n"); process.exit(0); }
 const missingWindow = ${missingWindow ? "true" : "false"};
 const effective = { provider: "fixture", id: "pi-fixture", reasoning: false, ...(missingWindow ? {} : { contextWindow: 32000 }) };
@@ -234,6 +242,41 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
     } finally {
       await session.close("external-pi hot-attach test complete").catch(() => {});
     }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("external-pi setup from a builtin host with minimal PI_PACKAGE_DIR still resolves models", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-host-builtin-"));
+  try {
+    const configFile = path.join(root, "config.json");
+    fs.writeFileSync(configFile, `${JSON.stringify({
+      version: 4,
+      serverId: "server-existing",
+      mentionPolicy: "require",
+      activeAgent: APP,
+      agents: {
+        [APP]: { runtime: "pi", model: "default", piDistribution: "external" },
+      },
+    }, null, 2)}\n`, { mode: 0o600 });
+    writeCredential(root);
+    writeExternalPiProfile(path.join(root, "home"));
+    const fake = writeFakePi(root);
+    const packageDir = path.join(root, ".larkin-official-pi-package");
+    fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
+    fs.writeFileSync(path.join(packageDir, "package.json"), "{\"name\":\"fixture-builtin-pi\"}\n");
+    fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
+    const result = runBind(root, {
+      LARKIN_PI_COMMAND: fake.command,
+      LARKIN_PI_DISTRIBUTION: "builtin",
+      PI_PACKAGE_DIR: packageDir,
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    assert.equal(stored.agents[APP].model, "fixture/pi-fixture");
+    const launches = readLaunches(fake.marker);
+    assert.equal(launches.every((row) => row.packageDir == null), true, JSON.stringify(launches));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

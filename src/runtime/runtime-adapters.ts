@@ -1040,14 +1040,17 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
   const commandPrefix = builtinSpec?.args ?? dependencies.piCommandArgs ?? [];
   const commandArgs = [...commandPrefix, ...args];
-  const reportedVersion = productionSpawn && !builtin
-    ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
-      cwd: input.workspaceDir, env: mergedEnv, encoding: "utf8", timeout: 5_000,
-    }).stdout || ""))
-    : BUNDLED_PI_VERSION;
   mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
   if (builtin) mergedEnv.PI_TELEMETRY = "0";
-  const childEnv = applyPiPackageDirForChild(mergedEnv, builtin ? "builtin" : "external");
+  const childEnv = applyPiPackageDirForChild(mergedEnv, {
+    distribution: builtin ? "builtin" : "external",
+    explicitPackageDir: input.env?.PI_PACKAGE_DIR ?? dependencies.env?.PI_PACKAGE_DIR,
+  });
+  const reportedVersion = productionSpawn && !builtin
+    ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
+      cwd: input.workspaceDir, env: childEnv, encoding: "utf8", timeout: 5_000,
+    }).stdout || ""))
+    : BUNDLED_PI_VERSION;
   const extensionArgs = (dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
     distribution: builtin ? "builtin" : "external",
     piCommand: command,

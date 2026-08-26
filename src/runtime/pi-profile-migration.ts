@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import processInspect from "../platform/process-inspect.cjs";
+import { applyPiPackageDirForChild } from "./builtin-pi-assets.js";
 import { resolveRuntimeExecutable } from "./runtime-readiness.js";
 import { mergeOwnedPiSettings, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
@@ -239,7 +240,13 @@ function sourceVersion(env: NodeJS.ProcessEnv, cwd: string): ExecutableState {
   const executable = resolveRuntimeExecutable(command, env);
   if (!executable) throw new Error("外部 Pi 0.84.2 profile import requires an installed Pi executable");
   const executableState = readExecutable(executable, "external Pi executable");
-  const result = spawnSync(executableState.path, ["--version"], { cwd, env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
+  const result = spawnSync(executableState.path, ["--version"], {
+    cwd,
+    env: applyPiPackageDirForChild(env, { distribution: "external" }),
+    encoding: "utf8",
+    timeout: 5_000,
+    maxBuffer: 64 * 1024,
+  });
   if (result.status !== 0) throw new Error("external Pi version probe failed");
   try { parsePiExecutableVersion(String(result.stdout || result.stderr || "").trim()); }
   catch { throw new Error(`external Pi must be exactly ${BUNDLED_PI_VERSION}`); }
@@ -352,7 +359,13 @@ function assertSourceUnchanged(state: PiProfileMigrationState, resolutionEnviron
       || executable.bytes !== state.sourceExecutable.bytes || executable.mode !== state.sourceExecutable.mode) {
     throw new Error("external Pi executable changed; refusing migration");
   }
-  const result = spawnSync(executable.path, ["--version"], { cwd: state.sourceDir, env: probeEnvironment, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
+  const result = spawnSync(executable.path, ["--version"], {
+    cwd: state.sourceDir,
+    env: applyPiPackageDirForChild(probeEnvironment, { distribution: "external" }),
+    encoding: "utf8",
+    timeout: 5_000,
+    maxBuffer: 64 * 1024,
+  });
   if (result.status !== 0) throw new Error("external Pi version probe failed");
   try { parsePiExecutableVersion(String(result.stdout || result.stderr || "").trim()); }
   catch { throw new Error(`external Pi must be exactly ${BUNDLED_PI_VERSION}`); }

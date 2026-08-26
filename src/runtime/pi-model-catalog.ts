@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as path from "node:path";
-import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
+import { applyPiPackageDirForChild, catalogPiChildDistribution } from "./builtin-pi-assets.js";
 import { PiRpcClient, type PiRpcProcess } from "./pi-rpc-client.js";
 import { classifyRuntimePrerequisite, RuntimePrerequisiteError } from "./runtime-readiness.js";
 
@@ -39,6 +39,8 @@ export interface DiscoverPiCatalogOptions {
   command?: string;
   commandArgs?: readonly string[];
   env?: NodeJS.ProcessEnv;
+  /** Child-explicit Node package root. Host process.env.PI_PACKAGE_DIR is not this. */
+  packageDir?: string;
   spawn?: (command: string, args: readonly string[], options: Record<string, unknown>) => PiRpcProcess;
   timeoutMs?: number;
 }
@@ -99,7 +101,10 @@ async function discoverPiModelCatalogUncached(options: DiscoverPiCatalogOptions)
   };
   const child = spawn(command, [...(options.commandArgs ?? []), "--mode", "rpc", "--no-session"], {
     cwd: options.cwd,
-    env: applyPiPackageDirForChild(mergedEnv, piChildDistributionFromOverrides(options.env)),
+    env: applyPiPackageDirForChild(mergedEnv, {
+      distribution: catalogPiChildDistribution(options.commandArgs),
+      explicitPackageDir: options.packageDir,
+    }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const client = new PiRpcClient(child, { requestTimeoutMs: options.timeoutMs ?? 10_000 });

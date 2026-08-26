@@ -223,7 +223,10 @@ test("thread reminder fire carries the thread target and remains exactly-once", 
 });
 
 test("fire pins evicted thread and document-comment anchors for protected outbound routing", {
-  timeout: 60_000,
+  // Windows 11 gate measured 130461ms for 2 × 2048 fsyncing inbox appends that
+  // evict the source from the 2048-entry message index. This is durable-store
+  // I/O, not a leaked handle; keep the real eviction path and wait for it.
+  timeout: 180_000,
 }, () => {
   for (const route of [
     { anchor: "om_evicted_thread", target: "thread:oc_evicted:omt_topic", kind: undefined },

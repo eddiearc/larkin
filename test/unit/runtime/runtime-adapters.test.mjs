@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+const ADAPTERS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { resolveAgentCliExecutable } from "../../../dist/agent/agent-cli-capabilities.mjs";
 import {
@@ -816,11 +818,15 @@ test("inherited builtin PI_PACKAGE_DIR does not drop production extension versio
       if (sessionLaunch.args[index] === "-e") extensionPaths.push(sessionLaunch.args[index + 1]);
     }
     assert.equal(extensionPaths.length, 2, JSON.stringify(sessionLaunch.args));
-    assert.deepEqual(extensionPaths.map((entry) => path.basename(entry)).sort(), ["pi-bash-timeout.bundle.js", "pi-subagents.bundle.js"]);
-    assert.ok(extensionPaths.every((entry) => fs.statSync(entry).isFile()), JSON.stringify(extensionPaths));
+    const expected = [
+      path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-bash-timeout.bundle.js"),
+      path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-subagents.bundle.js"),
+    ].map((entry) => fs.realpathSync(entry)).sort();
+    assert.deepEqual(extensionPaths.map((entry) => fs.realpathSync(entry)).sort(), expected);
     assert.equal(session.effectiveModel, "test-provider/test-model");
   } finally {
     await session?.close("inherited extension probe test complete").catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

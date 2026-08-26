@@ -36,6 +36,11 @@ export interface PiProfileMigrationState {
   targetEntries: string[];
   priorFiles: Record<FileName, FileState>;
   afterFiles: Record<FileName, FileState>;
+  sourcePath?: string;
+  sourcePackageDir?: string;
+  sourcePackageDev?: number;
+  sourcePackageIno?: number;
+  sourcePackageThemeSha256?: string;
 }
 
 export interface PiProfileMigrationPlan {
@@ -46,6 +51,45 @@ export interface PiProfileMigrationPlan {
 
 const TARGET_LOCK_SUFFIX = ".larkin-pi-import.lock";
 function hash(bytes: Buffer): string { return crypto.createHash("sha256").update(bytes).digest("hex"); }
+function isPiOrLarkinEnvKey(key: string): boolean {
+  return key === "PATH" || key.startsWith("PI_") || key.startsWith("LARKIN_");
+}
+function isolatePlannedReplayEnv(source: { PATH?: string; LARKIN_PI_COMMAND?: string; PI_PACKAGE_DIR?: string }): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (isPiOrLarkinEnvKey(key)) continue;
+    next[key] = value;
+  }
+  if (source.PATH) next.PATH = source.PATH;
+  if (source.LARKIN_PI_COMMAND) next.LARKIN_PI_COMMAND = source.LARKIN_PI_COMMAND;
+  if (source.PI_PACKAGE_DIR) next.PI_PACKAGE_DIR = source.PI_PACKAGE_DIR;
+  return next;
+}
+function capturePackageRootProof(directory: string): { dir: string; dev: number; ino: number; themeSha256: string } {
+  const resolved = fs.realpathSync(directory);
+  const rootStat = fs.statSync(resolved);
+  const theme = path.join(resolved, "dist", "modes", "interactive", "theme", "dark.json");
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(theme, fs.constants.O_RDONLY);
+    const themeStat = fs.fstatSync(fd);
+    if (!themeStat.isFile()) throw new Error("external Pi package root changed; refusing migration");
+    const bytes = fs.readFileSync(fd);
+    return { dir: resolved, dev: rootStat.dev, ino: rootStat.ino, themeSha256: hash(bytes) };
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+}
+function assertPackageRootProof(state: PiProfileMigrationState): void {
+  if (!state.sourcePackageDir) return;
+  let current: ReturnType<typeof capturePackageRootProof>;
+  try { current = capturePackageRootProof(state.sourcePackageDir); }
+  catch { throw new Error("external Pi package root changed; refusing migration"); }
+  if (current.dir !== state.sourcePackageDir || current.dev !== state.sourcePackageDev
+      || current.ino !== state.sourcePackageIno || current.themeSha256 !== state.sourcePackageThemeSha256) {
+    throw new Error("external Pi package root changed; refusing migration");
+  }
+}
 function targetLockFile(state: PiProfileMigrationState): string { return path.join(path.dirname(state.targetDir), `${state.agentId}${TARGET_LOCK_SUFFIX}`); }
 function acquireTargetLock(state: PiProfileMigrationState): void {
   const file = targetLockFile(state);
@@ -309,13 +353,23 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
       sourceFiles: Object.fromEntries(FILES.map((name) => [name, safeState(sourceFiles[name], false)])) as Record<FileName, FileState>,
       targetDir, targetDirExisted: Boolean(target.stat), targetDirMode: target.stat ? target.stat.mode & 0o777 : 0o700,
       ...(target.stat ? { targetDirDevice: target.stat.dev, targetDirInode: target.stat.ino } : {}), targetEntries: target.entries,
-      priorFiles: target.files, afterFiles },
+      priorFiles: target.files, afterFiles,
+      ...(sanitized.PATH ? { sourcePath: sanitized.PATH } : {}),
+      ...(sanitized.PI_PACKAGE_DIR ? (() => {
+        const proof = capturePackageRootProof(sanitized.PI_PACKAGE_DIR);
+        return {
+          sourcePackageDir: proof.dir,
+          sourcePackageDev: proof.dev,
+          sourcePackageIno: proof.ino,
+          sourcePackageThemeSha256: proof.themeSha256,
+        };
+      })() : {}) },
     sourceBytes: { "auth.json": sourceFiles["auth.json"].bytes, "models.json": sourceFiles["models.json"].bytes,
       "settings.json": imported["settings.json"] },
     sourceEnvironment: {
       PATH: sanitized.PATH,
       LARKIN_PI_COMMAND: String(sanitized.LARKIN_PI_COMMAND || "pi"),
-      ...(sanitized.PI_PACKAGE_DIR ? { PI_PACKAGE_DIR: sanitized.PI_PACKAGE_DIR } : {}),
+      ...(sanitized.PI_PACKAGE_DIR ? { PI_PACKAGE_DIR: capturePackageRootProof(sanitized.PI_PACKAGE_DIR).dir } : {}),
     },
   };
 }
@@ -370,6 +424,7 @@ function assertSourceUnchanged(state: PiProfileMigrationState, resolutionEnviron
   const directory = assertDirectory(state.sourceDir, "external Pi profile");
   if ((directory!.mode & 0o777) !== state.sourceDirMode) throw new Error("external Pi profile changed; refusing migration");
   verifySourceProfile(state.sourceDir);
+  assertPackageRootProof(state);
   const probeEnvironment = replayExternalPiPackageEnv(resolutionEnvironment);
   const resolved = verifyResolution ? resolveRuntimeExecutable(state.sourceCommand, probeEnvironment) : state.sourceExecutable.path;
   if (!resolved) throw new Error("external Pi executable changed; refusing migration");
@@ -455,11 +510,7 @@ function restoreFile(file: string, prior: FileState): void {
 }
 
 export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
-  const replayEnv: NodeJS.ProcessEnv = { ...process.env, PATH: plan.sourceEnvironment.PATH ?? process.env.PATH };
-  if (plan.sourceEnvironment.LARKIN_PI_COMMAND) replayEnv.LARKIN_PI_COMMAND = plan.sourceEnvironment.LARKIN_PI_COMMAND;
-  else delete replayEnv.LARKIN_PI_COMMAND;
-  if (plan.sourceEnvironment.PI_PACKAGE_DIR) replayEnv.PI_PACKAGE_DIR = plan.sourceEnvironment.PI_PACKAGE_DIR;
-  else delete replayEnv.PI_PACKAGE_DIR;
+  const replayEnv = isolatePlannedReplayEnv(plan.sourceEnvironment);
   assertSourceUnchanged(plan.state, replayEnv);
   const parent = path.dirname(plan.state.targetDir); assertNoSymlinkAncestors(parent); fs.mkdirSync(parent, { recursive: true, mode: 0o700 }); fs.chmodSync(parent, 0o700);
   acquireTargetLock(plan.state);
@@ -487,7 +538,12 @@ function fsyncDirectory(directory: string): void {
 }
 
 export function rollbackPiProfileMigration(state: PiProfileMigrationState): void {
-  validatePiProfileMigrationState(state); assertSourceUnchanged(state, process.env, false);
+  validatePiProfileMigrationState(state);
+  assertSourceUnchanged(state, isolatePlannedReplayEnv({
+    PATH: state.sourcePath,
+    LARKIN_PI_COMMAND: state.sourceCommand,
+    ...(state.sourcePackageDir ? { PI_PACKAGE_DIR: state.sourcePackageDir } : {}),
+  }), false);
   const target = assertDirectory(state.targetDir, "Pi provider target", false);
   if (!target) {
     if (state.targetDirExisted) throw new Error("Pi provider target disappeared during rollback");

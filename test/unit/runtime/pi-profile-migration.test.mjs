@@ -20,11 +20,24 @@ function fixture({ target = false } = {}) {
   fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
   fs.mkdirSync(config, { recursive: true, mode: 0o700 });
   const version = path.join(bin, "pi");
-  const probeLog = path.join(root, "pi-version.ndjson");
+  const probeLog = path.join(bin, "probe.ndjson");
   fs.writeFileSync(probeLog, "");
   fs.writeFileSync(version, `#!${process.execPath}
 const fs = require("node:fs");
-try { if (process.env.LARKIN_PI_PROBE_LOG) fs.appendFileSync(process.env.LARKIN_PI_PROBE_LOG, JSON.stringify({ packageDir: process.env.PI_PACKAGE_DIR || null }) + "\\n"); } catch {}
+const path = require("node:path");
+try {
+  fs.appendFileSync(path.join(path.dirname(process.argv[1]), "probe.ndjson"), JSON.stringify({
+    packageDir: process.env.PI_PACKAGE_DIR || null,
+    cwd: process.cwd(),
+    path: process.env.PATH || null,
+    command: process.env.LARKIN_PI_COMMAND || null,
+    codingAgentDir: process.env.PI_CODING_AGENT_DIR || null,
+    offline: process.env.PI_OFFLINE || null,
+    skipVersion: process.env.PI_SKIP_VERSION_CHECK || null,
+    distribution: process.env.LARKIN_PI_DISTRIBUTION || null,
+    configDir: process.env.LARKIN_CONFIG_DIR || null,
+  }) + "\\n");
+} catch {}
 console.log("0.84.2");
 `, { mode: 0o700 });
   fs.chmodSync(version, 0o700);
@@ -42,7 +55,7 @@ console.log("0.84.2");
     fs.writeFileSync(path.join(targetDir, "settings.json"), JSON.stringify({ keep: true, compaction: { enabled: false } }), { mode: 0o600 });
     fs.writeFileSync(path.join(targetDir, "unrelated.txt"), "must-survive", { mode: 0o600 });
   }
-  const env = { HOME: root, PATH: `${bin}:/usr/bin:/bin`, PI_CODING_AGENT_DIR: source, LARKIN_PI_PROBE_LOG: probeLog };
+  const env = { HOME: root, PATH: `${bin}:/usr/bin:/bin`, PI_CODING_AGENT_DIR: source };
   return { root, source, config, targetDir, agent, env, auth, models, probeLog };
 }
 
@@ -56,8 +69,14 @@ test("profile apply does not inherit a later ambient package root when the plan 
   const later = path.join(f.root, "later-root");
   fs.mkdirSync(path.join(later, "dist", "modes", "interactive", "theme"), { recursive: true });
   fs.writeFileSync(path.join(later, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
-  const previous = process.env.PI_PACKAGE_DIR;
-  const previousProbeLog = process.env.LARKIN_PI_PROBE_LOG;
+  const previous = {
+    PI_PACKAGE_DIR: process.env.PI_PACKAGE_DIR,
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+    PI_OFFLINE: process.env.PI_OFFLINE,
+    PI_SKIP_VERSION_CHECK: process.env.PI_SKIP_VERSION_CHECK,
+    LARKIN_PI_DISTRIBUTION: process.env.LARKIN_PI_DISTRIBUTION,
+    LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
+  };
   try {
     fs.writeFileSync(f.probeLog, "");
     const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: minimal }, f.config, f.agent, "external");
@@ -65,21 +84,60 @@ test("profile apply does not inherit a later ambient package root when the plan 
     const prepareProbes = fs.readFileSync(f.probeLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
     assert.ok(prepareProbes.length >= 1);
     assert.equal(prepareProbes.every((row) => row.packageDir == null), true, JSON.stringify(prepareProbes));
-    process.env.PI_PACKAGE_DIR = later;
-    process.env.LARKIN_PI_PROBE_LOG = f.probeLog;
+    process.env.PI_CODING_AGENT_DIR = "/tmp/polluted-agent";
+    process.env.PI_OFFLINE = "1";
+    process.env.PI_SKIP_VERSION_CHECK = "1";
+    process.env.LARKIN_PI_DISTRIBUTION = "builtin";
+    process.env.LARKIN_CONFIG_DIR = "/tmp/polluted-config";
     fs.writeFileSync(f.probeLog, "");
     migration.applyPiProfileMigration(plan);
     const applyProbes = fs.readFileSync(f.probeLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
-    assert.ok(applyProbes.length >= 1);
-    assert.equal(applyProbes.every((row) => row.packageDir == null), true, JSON.stringify(applyProbes));
+    assert.equal(applyProbes.length, 1, JSON.stringify(applyProbes));
+    assert.equal(applyProbes[0].packageDir, null);
+    assert.equal(applyProbes[0].codingAgentDir, null);
+    assert.equal(applyProbes[0].offline, null);
+    assert.equal(applyProbes[0].skipVersion, null);
+    assert.equal(applyProbes[0].distribution, null);
+    assert.equal(applyProbes[0].configDir, null);
+    assert.equal(applyProbes[0].command, "pi");
+    assert.equal(fs.realpathSync(applyProbes[0].cwd), fs.realpathSync(plan.state.sourceDir));
+    assert.equal(applyProbes[0].path, plan.sourceEnvironment.PATH);
     assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), true);
   } finally {
-    if (previous === undefined) delete process.env.PI_PACKAGE_DIR;
-    else process.env.PI_PACKAGE_DIR = previous;
-    if (previousProbeLog === undefined) delete process.env.LARKIN_PI_PROBE_LOG;
-    else process.env.LARKIN_PI_PROBE_LOG = previousProbeLog;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     clean(f);
   }
+});
+
+test("profile apply rejects symlink retarget and theme content mutation", () => {
+  const f = fixture();
+  const pkg = path.join(f.root, "planned-root");
+  const alt = path.join(f.root, "alternate-root");
+  fs.mkdirSync(path.join(pkg, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(pkg, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+  fs.mkdirSync(path.join(alt, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(alt, "dist", "modes", "interactive", "theme", "dark.json"), "{\"alt\":true}\n");
+  try {
+    const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: pkg }, f.config, f.agent, "external");
+    fs.rmSync(pkg, { recursive: true, force: true });
+    fs.symlinkSync(alt, pkg);
+    assert.throws(() => migration.applyPiProfileMigration(plan), /package root changed/);
+    assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), false);
+  } finally { clean(f); }
+  const g = fixture();
+  const live = path.join(g.root, "live-root");
+  fs.mkdirSync(path.join(live, "dist", "modes", "interactive", "theme"), { recursive: true });
+  const theme = path.join(live, "dist", "modes", "interactive", "theme", "dark.json");
+  fs.writeFileSync(theme, "{}\n");
+  try {
+    const plan = migration.preparePiProfileMigration({ ...g.env, PI_PACKAGE_DIR: live }, g.config, g.agent, "external");
+    fs.writeFileSync(theme, "{\"mutated\":true}\n");
+    assert.throws(() => migration.applyPiProfileMigration(plan), /package root changed/);
+    assert.equal(fs.existsSync(path.join(g.targetDir, "auth.json")), false);
+  } finally { clean(g); }
 });
 
 test("profile apply fails closed when the planned package root becomes stale", () => {

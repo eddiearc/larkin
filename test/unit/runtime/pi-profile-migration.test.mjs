@@ -42,6 +42,28 @@ function fixture({ target = false } = {}) {
 
 function clean(f) { fs.rmSync(f.root, { recursive: true, force: true }); }
 
+test("profile apply does not inherit a later ambient package root when the plan had none", () => {
+  const f = fixture();
+  const minimal = path.join(f.root, ".larkin-official-pi-package");
+  fs.mkdirSync(path.join(minimal, "theme"), { recursive: true });
+  fs.writeFileSync(path.join(minimal, "theme", "dark.json"), "{}\n");
+  const later = path.join(f.root, "later-root");
+  fs.mkdirSync(path.join(later, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(later, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+  const previous = process.env.PI_PACKAGE_DIR;
+  try {
+    const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: minimal }, f.config, f.agent, "external");
+    assert.equal(plan.sourceEnvironment.PI_PACKAGE_DIR, undefined);
+    process.env.PI_PACKAGE_DIR = later;
+    migration.applyPiProfileMigration(plan);
+    assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), true);
+  } finally {
+    if (previous === undefined) delete process.env.PI_PACKAGE_DIR;
+    else process.env.PI_PACKAGE_DIR = previous;
+    clean(f);
+  }
+});
+
 test("profile migration plan persists a canonical external package root", () => {
   const f = fixture();
   const pkg = path.join(f.root, "nix", "store", "hash-pi");

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import processInspect from "../platform/process-inspect.cjs";
-import { applyPiPackageDirForChild, resolveExternalPiPackageDir } from "./builtin-pi-assets.js";
+import { applyPiPackageDirForChild } from "./builtin-pi-assets.js";
 import { resolveRuntimeExecutable } from "./runtime-readiness.js";
 import { mergeOwnedPiSettings, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
 import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
@@ -281,10 +281,11 @@ function targetPrior(directory: string): { stat: fs.Stats | null; entries: strin
 }
 
 export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: string, agentId: string, distribution: "builtin" | "external" = "builtin"): PiProfileMigrationPlan {
-  const sourceDir = sourceDirectory(env);
+  const sanitized = applyPiPackageDirForChild({ ...env }, { distribution: "external" });
+  const sourceDir = sourceDirectory(sanitized);
   verifySourceProfile(sourceDir);
   const sourceDirectoryState = assertDirectory(sourceDir, "external Pi profile") as fs.Stats;
-  const sourceExecutable = sourceVersion(env, sourceDir);
+  const sourceExecutable = sourceVersion(sanitized, sourceDir);
   const sourceFiles = Object.fromEntries(FILES.map((name) => {
     const file = readRegular(path.join(sourceDir, name), `external Pi ${name}`, false);
     if (!file) throw new Error(`external Pi ${name} is required`);
@@ -303,7 +304,7 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
   const afterFiles = Object.fromEntries(FILES.map((name) => [name, safeState({ bytes: imported[name], mode: 0o600 }, false)])) as Record<FileName, FileState>;
   return {
     state: { version: 1, agentId, sourceDir, sourceDirMode: sourceDirectoryState.mode & 0o777,
-      sourceCommand: String(env.LARKIN_PI_COMMAND || "pi"), sourceExecutable,
+      sourceCommand: String(sanitized.LARKIN_PI_COMMAND || "pi"), sourceExecutable,
       sourceFiles: Object.fromEntries(FILES.map((name) => [name, safeState(sourceFiles[name], false)])) as Record<FileName, FileState>,
       targetDir, targetDirExisted: Boolean(target.stat), targetDirMode: target.stat ? target.stat.mode & 0o777 : 0o700,
       ...(target.stat ? { targetDirDevice: target.stat.dev, targetDirInode: target.stat.ino } : {}), targetEntries: target.entries,
@@ -311,9 +312,9 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
     sourceBytes: { "auth.json": sourceFiles["auth.json"].bytes, "models.json": sourceFiles["models.json"].bytes,
       "settings.json": imported["settings.json"] },
     sourceEnvironment: {
-      PATH: env.PATH,
-      LARKIN_PI_COMMAND: env.LARKIN_PI_COMMAND,
-      ...(resolveExternalPiPackageDir(env.PI_PACKAGE_DIR) ? { PI_PACKAGE_DIR: resolveExternalPiPackageDir(env.PI_PACKAGE_DIR) } : {}),
+      PATH: sanitized.PATH,
+      LARKIN_PI_COMMAND: sanitized.LARKIN_PI_COMMAND,
+      ...(sanitized.PI_PACKAGE_DIR ? { PI_PACKAGE_DIR: sanitized.PI_PACKAGE_DIR } : {}),
     },
   };
 }
@@ -440,13 +441,9 @@ function restoreFile(file: string, prior: FileState): void {
 }
 
 export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
-  const sameEnvironment = process.env.PATH === plan.sourceEnvironment.PATH
-    && process.env.LARKIN_PI_COMMAND === plan.sourceEnvironment.LARKIN_PI_COMMAND
-    && (resolveExternalPiPackageDir(process.env.PI_PACKAGE_DIR) ?? undefined) === plan.sourceEnvironment.PI_PACKAGE_DIR;
-  const replayEnv = {
-    ...(sameEnvironment ? process.env : { ...process.env, ...plan.sourceEnvironment }),
-    ...(plan.sourceEnvironment.PI_PACKAGE_DIR ? { PI_PACKAGE_DIR: plan.sourceEnvironment.PI_PACKAGE_DIR } : {}),
-  };
+  const replayEnv = { ...process.env, ...plan.sourceEnvironment };
+  if (plan.sourceEnvironment.PI_PACKAGE_DIR) replayEnv.PI_PACKAGE_DIR = plan.sourceEnvironment.PI_PACKAGE_DIR;
+  else delete replayEnv.PI_PACKAGE_DIR;
   assertSourceUnchanged(plan.state, replayEnv);
   const parent = path.dirname(plan.state.targetDir); assertNoSymlinkAncestors(parent); fs.mkdirSync(parent, { recursive: true, mode: 0o700 }); fs.chmodSync(parent, 0o700);
   acquireTargetLock(plan.state);

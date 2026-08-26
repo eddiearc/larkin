@@ -156,6 +156,25 @@ test("external env keeps a Nix-like package root and strips symlink/minimal/miss
     const dirAsTheme = path.join(root, "dir-theme");
     fs.mkdirSync(path.join(dirAsTheme, "dist", "modes", "interactive", "theme", "dark.json"), { recursive: true });
     assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: dirAsTheme }, "external").PI_PACKAGE_DIR, undefined);
+    const linkedThemeRoot = path.join(root, "linked-theme");
+    const themeFile = path.join(root, "real-dark.json");
+    fs.writeFileSync(themeFile, "{}\n");
+    fs.mkdirSync(path.join(linkedThemeRoot, "dist", "modes", "interactive", "theme"), { recursive: true });
+    fs.symlinkSync(themeFile, path.join(linkedThemeRoot, "dist", "modes", "interactive", "theme", "dark.json"));
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: linkedThemeRoot }, "external").PI_PACKAGE_DIR, fs.realpathSync(linkedThemeRoot));
+    const brokenThemeRoot = path.join(root, "broken-theme");
+    fs.mkdirSync(path.join(brokenThemeRoot, "dist", "modes", "interactive", "theme"), { recursive: true });
+    fs.symlinkSync(path.join(root, "missing-dark.json"), path.join(brokenThemeRoot, "dist", "modes", "interactive", "theme", "dark.json"));
+    assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: brokenThemeRoot }, "external").PI_PACKAGE_DIR, undefined);
+    if (process.platform !== "win32") {
+      const unread = path.join(root, "unread-root");
+      fs.mkdirSync(path.join(unread, "dist", "modes", "interactive", "theme"), { recursive: true });
+      const unreadTheme = path.join(unread, "dist", "modes", "interactive", "theme", "dark.json");
+      fs.writeFileSync(unreadTheme, "{}\n", { mode: 0o000 });
+      fs.chmodSync(unreadTheme, 0o000);
+      assert.equal(applyPiPackageDirForChild({ PI_PACKAGE_DIR: unread }, "external").PI_PACKAGE_DIR, undefined);
+      fs.chmodSync(unreadTheme, 0o644);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

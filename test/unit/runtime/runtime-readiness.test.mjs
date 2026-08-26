@@ -95,7 +95,9 @@ test("external Pi readiness keeps a real package root and strips minimal or brok
     const rows = fs.readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
     const realRows = rows.filter((row) => row.packageDir && row.packageDir.includes("nix-store-pi"));
     const dirtyRows = rows.filter((row) => row.packageDir && (String(row.packageDir).includes(".larkin-official-pi-package") || String(row.packageDir).includes("broken-link")));
-    assert.ok(realRows.length >= 1, JSON.stringify(rows));
+    assert.ok(realRows.some((row) => row.args.includes("--version")), JSON.stringify(rows));
+    assert.ok(realRows.some((row) => row.args.includes("--mode") && row.args.includes("rpc")), JSON.stringify(rows));
+    assert.ok(realRows.length >= 2, JSON.stringify(rows));
     assert.equal(dirtyRows.length, 0, JSON.stringify(rows));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

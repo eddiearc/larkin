@@ -61,10 +61,16 @@ export function piChildDistributionFromOverrides(
 
 function existingPiThemeFile(directory: string): string | undefined {
   const theme = path.join(directory, "dist", "modes", "interactive", "theme", "dark.json");
+  let fd: number | undefined;
   try {
-    return fs.statSync(theme).isFile() ? theme : undefined;
+    fd = fs.openSync(theme, fs.constants.O_RDONLY);
+    return fs.fstatSync(fd).isFile() ? theme : undefined;
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* already closed or unreadable */ }
+    }
   }
 }
 

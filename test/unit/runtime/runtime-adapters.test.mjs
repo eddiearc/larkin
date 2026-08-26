@@ -811,8 +811,14 @@ test("inherited builtin PI_PACKAGE_DIR does not drop production extension versio
     assert.equal(versions.every((row) => row.packageDir == null), true, JSON.stringify(versions));
     const sessionLaunch = rows.find((row) => row.kind === "argv" && row.args.includes("--session-dir"));
     assert.ok(sessionLaunch, JSON.stringify(rows));
-    const extensionArgs = sessionLaunch.args.filter((arg) => arg === "-e");
-    assert.equal(extensionArgs.length, 2, JSON.stringify(sessionLaunch.args));
+    const extensionPaths = [];
+    for (let index = 0; index < sessionLaunch.args.length; index += 1) {
+      if (sessionLaunch.args[index] === "-e") extensionPaths.push(sessionLaunch.args[index + 1]);
+    }
+    assert.equal(extensionPaths.length, 2, JSON.stringify(sessionLaunch.args));
+    assert.ok(extensionPaths.some((entry) => String(entry).includes("pi-subagents")), JSON.stringify(extensionPaths));
+    assert.ok(extensionPaths.some((entry) => String(entry).includes("pi-bash-timeout")), JSON.stringify(extensionPaths));
+    assert.ok(extensionPaths.every((entry) => fs.existsSync(entry)), JSON.stringify(extensionPaths));
     assert.equal(session.effectiveModel, "test-provider/test-model");
   } finally {
     await session?.close("inherited extension probe test complete").catch(() => {});

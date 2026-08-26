@@ -235,14 +235,15 @@ function targetDirectory(configDir: string, agentId: string): string {
   if (!AGENT_ID.test(agentId)) throw new Error("Pi Agent ID 格式无效");
   return path.join(path.resolve(configDir), "providers", "pi", agentId);
 }
-function sourceVersion(env: NodeJS.ProcessEnv, cwd: string): ExecutableState {
+function sourceVersion(env: NodeJS.ProcessEnv, cwd: string, alreadySanitized = false): ExecutableState {
   const command = String(env.LARKIN_PI_COMMAND || "pi");
   const executable = resolveRuntimeExecutable(command, env);
   if (!executable) throw new Error("外部 Pi 0.84.2 profile import requires an installed Pi executable");
   const executableState = readExecutable(executable, "external Pi executable");
+  const probeEnv = alreadySanitized ? env : applyPiPackageDirForChild(env, { distribution: "external" });
   const result = spawnSync(executableState.path, ["--version"], {
     cwd,
-    env: applyPiPackageDirForChild(env, { distribution: "external" }),
+    env: probeEnv,
     encoding: "utf8",
     timeout: 5_000,
     maxBuffer: 64 * 1024,
@@ -285,7 +286,7 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
   const sourceDir = sourceDirectory(sanitized);
   verifySourceProfile(sourceDir);
   const sourceDirectoryState = assertDirectory(sourceDir, "external Pi profile") as fs.Stats;
-  const sourceExecutable = sourceVersion(sanitized, sourceDir);
+  const sourceExecutable = sourceVersion(sanitized, sourceDir, true);
   const sourceFiles = Object.fromEntries(FILES.map((name) => {
     const file = readRegular(path.join(sourceDir, name), `external Pi ${name}`, false);
     if (!file) throw new Error(`external Pi ${name} is required`);
@@ -313,7 +314,7 @@ export function preparePiProfileMigration(env: NodeJS.ProcessEnv, configDir: str
       "settings.json": imported["settings.json"] },
     sourceEnvironment: {
       PATH: sanitized.PATH,
-      LARKIN_PI_COMMAND: sanitized.LARKIN_PI_COMMAND,
+      LARKIN_PI_COMMAND: String(sanitized.LARKIN_PI_COMMAND || "pi"),
       ...(sanitized.PI_PACKAGE_DIR ? { PI_PACKAGE_DIR: sanitized.PI_PACKAGE_DIR } : {}),
     },
   };
@@ -352,11 +353,24 @@ export function validatePiProfileMigrationState(value: unknown): asserts value i
   }
 }
 
+function replayExternalPiPackageEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next = { ...env };
+  const planned = env.PI_PACKAGE_DIR;
+  if (!planned) {
+    delete next.PI_PACKAGE_DIR;
+    return next;
+  }
+  const resolved = applyPiPackageDirForChild({ PI_PACKAGE_DIR: planned }, { distribution: "external", explicitPackageDir: planned }).PI_PACKAGE_DIR;
+  if (!resolved) throw new Error("external Pi package root changed; refusing migration");
+  next.PI_PACKAGE_DIR = resolved;
+  return next;
+}
+
 function assertSourceUnchanged(state: PiProfileMigrationState, resolutionEnvironment: NodeJS.ProcessEnv = process.env, verifyResolution = true): void {
   const directory = assertDirectory(state.sourceDir, "external Pi profile");
   if ((directory!.mode & 0o777) !== state.sourceDirMode) throw new Error("external Pi profile changed; refusing migration");
   verifySourceProfile(state.sourceDir);
-  const probeEnvironment = { ...process.env, ...resolutionEnvironment };
+  const probeEnvironment = replayExternalPiPackageEnv(resolutionEnvironment);
   const resolved = verifyResolution ? resolveRuntimeExecutable(state.sourceCommand, probeEnvironment) : state.sourceExecutable.path;
   if (!resolved) throw new Error("external Pi executable changed; refusing migration");
   const executable = readExecutable(resolved, "external Pi executable");
@@ -366,7 +380,7 @@ function assertSourceUnchanged(state: PiProfileMigrationState, resolutionEnviron
   }
   const result = spawnSync(executable.path, ["--version"], {
     cwd: state.sourceDir,
-    env: applyPiPackageDirForChild(probeEnvironment, { distribution: "external" }),
+    env: probeEnvironment,
     encoding: "utf8",
     timeout: 5_000,
     maxBuffer: 64 * 1024,
@@ -441,7 +455,9 @@ function restoreFile(file: string, prior: FileState): void {
 }
 
 export function applyPiProfileMigration(plan: PiProfileMigrationPlan): void {
-  const replayEnv = { ...process.env, ...plan.sourceEnvironment };
+  const replayEnv: NodeJS.ProcessEnv = { ...process.env, PATH: plan.sourceEnvironment.PATH ?? process.env.PATH };
+  if (plan.sourceEnvironment.LARKIN_PI_COMMAND) replayEnv.LARKIN_PI_COMMAND = plan.sourceEnvironment.LARKIN_PI_COMMAND;
+  else delete replayEnv.LARKIN_PI_COMMAND;
   if (plan.sourceEnvironment.PI_PACKAGE_DIR) replayEnv.PI_PACKAGE_DIR = plan.sourceEnvironment.PI_PACKAGE_DIR;
   else delete replayEnv.PI_PACKAGE_DIR;
   assertSourceUnchanged(plan.state, replayEnv);

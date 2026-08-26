@@ -20,7 +20,13 @@ function fixture({ target = false } = {}) {
   fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
   fs.mkdirSync(config, { recursive: true, mode: 0o700 });
   const version = path.join(bin, "pi");
-  fs.writeFileSync(version, `#!${process.execPath}\nconsole.log("0.84.2")\n`, { mode: 0o700 });
+  const probeLog = path.join(root, "pi-version.ndjson");
+  fs.writeFileSync(probeLog, "");
+  fs.writeFileSync(version, `#!${process.execPath}
+const fs = require("node:fs");
+try { if (process.env.LARKIN_PI_PROBE_LOG) fs.appendFileSync(process.env.LARKIN_PI_PROBE_LOG, JSON.stringify({ packageDir: process.env.PI_PACKAGE_DIR || null }) + "\\n"); } catch {}
+console.log("0.84.2");
+`, { mode: 0o700 });
   fs.chmodSync(version, 0o700);
   const auth = Buffer.from('{"fixture":{"type":"api_key","key":"PRIVATE_FIXTURE_SECRET"}}\n');
   const models = Buffer.from('{"providers":{"fixture":{"models":[{"id":"fixture-model","contextWindow":272000}]}}}\n');
@@ -36,8 +42,8 @@ function fixture({ target = false } = {}) {
     fs.writeFileSync(path.join(targetDir, "settings.json"), JSON.stringify({ keep: true, compaction: { enabled: false } }), { mode: 0o600 });
     fs.writeFileSync(path.join(targetDir, "unrelated.txt"), "must-survive", { mode: 0o600 });
   }
-  const env = { HOME: root, PATH: `${bin}:/usr/bin:/bin`, PI_CODING_AGENT_DIR: source };
-  return { root, source, config, targetDir, agent, env, auth, models };
+  const env = { HOME: root, PATH: `${bin}:/usr/bin:/bin`, PI_CODING_AGENT_DIR: source, LARKIN_PI_PROBE_LOG: probeLog };
+  return { root, source, config, targetDir, agent, env, auth, models, probeLog };
 }
 
 function clean(f) { fs.rmSync(f.root, { recursive: true, force: true }); }
@@ -51,17 +57,43 @@ test("profile apply does not inherit a later ambient package root when the plan 
   fs.mkdirSync(path.join(later, "dist", "modes", "interactive", "theme"), { recursive: true });
   fs.writeFileSync(path.join(later, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
   const previous = process.env.PI_PACKAGE_DIR;
+  const previousProbeLog = process.env.LARKIN_PI_PROBE_LOG;
   try {
+    fs.writeFileSync(f.probeLog, "");
     const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: minimal }, f.config, f.agent, "external");
     assert.equal(plan.sourceEnvironment.PI_PACKAGE_DIR, undefined);
+    const prepareProbes = fs.readFileSync(f.probeLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    assert.ok(prepareProbes.length >= 1);
+    assert.equal(prepareProbes.every((row) => row.packageDir == null), true, JSON.stringify(prepareProbes));
     process.env.PI_PACKAGE_DIR = later;
+    process.env.LARKIN_PI_PROBE_LOG = f.probeLog;
+    fs.writeFileSync(f.probeLog, "");
     migration.applyPiProfileMigration(plan);
+    const applyProbes = fs.readFileSync(f.probeLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    assert.ok(applyProbes.length >= 1);
+    assert.equal(applyProbes.every((row) => row.packageDir == null), true, JSON.stringify(applyProbes));
     assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), true);
   } finally {
     if (previous === undefined) delete process.env.PI_PACKAGE_DIR;
     else process.env.PI_PACKAGE_DIR = previous;
+    if (previousProbeLog === undefined) delete process.env.LARKIN_PI_PROBE_LOG;
+    else process.env.LARKIN_PI_PROBE_LOG = previousProbeLog;
     clean(f);
   }
+});
+
+test("profile apply fails closed when the planned package root becomes stale", () => {
+  const f = fixture();
+  const pkg = path.join(f.root, "planned-root");
+  fs.mkdirSync(path.join(pkg, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(pkg, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
+  try {
+    const plan = migration.preparePiProfileMigration({ ...f.env, PI_PACKAGE_DIR: pkg }, f.config, f.agent, "external");
+    assert.equal(plan.sourceEnvironment.PI_PACKAGE_DIR, fs.realpathSync(pkg));
+    fs.rmSync(pkg, { recursive: true, force: true });
+    assert.throws(() => migration.applyPiProfileMigration(plan), /package root changed/);
+    assert.equal(fs.existsSync(path.join(f.targetDir, "auth.json")), false);
+  } finally { clean(f); }
 });
 
 test("profile migration plan persists a canonical external package root", () => {

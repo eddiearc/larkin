@@ -738,8 +738,9 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     const sessionFile = path.join(sessionDir, `${input.resumeSessionId}.jsonl`);
     fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
     const piCommand = "/fixture/external-pi";
+    const inheritedPackageDir = path.join(root, ".larkin-official-pi-package");
     const pending = createNativeRuntimeAdapter("pi", {
-      env: { LARKIN_PI_COMMAND: piCommand },
+      env: { LARKIN_PI_COMMAND: piCommand, PI_PACKAGE_DIR: inheritedPackageDir },
       resolvePiProcessExtensionArgs: () => [],
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
@@ -764,11 +765,13 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
       assert.equal(launch.command, piCommand);
       assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
       assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
+      assert.equal(launch.options.env.PI_PACKAGE_DIR, undefined);
     } else {
       assert.ok(launch.args.includes("__internal") && launch.args.includes("pi-rpc"));
       assert.equal(launch.args.includes("-e"), false, "builtin extensions are passed inline by binary-entry");
       assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, "builtin");
       assert.equal(launch.options.env.PI_TELEMETRY, "0");
+      assert.equal(launch.options.env.PI_PACKAGE_DIR, inheritedPackageDir);
     }
     await session.close("test complete");
   } finally {

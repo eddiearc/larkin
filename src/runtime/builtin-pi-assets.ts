@@ -43,3 +43,28 @@ export function prepareBuiltinPiPackageAssets(): void {
   writeEmbeddedFile(path.join(themeDir, "light.json"), assets.lightTheme);
   process.env.PI_PACKAGE_DIR = packageDir;
 }
+
+export function piChildDistribution(env: NodeJS.ProcessEnv | undefined): "builtin" | "external" {
+  return env?.LARKIN_PI_DISTRIBUTION === "builtin" ? "builtin" : "external";
+}
+
+/** Host process env may be builtin Pi; only explicit child overrides select bundled assets. */
+export function piChildDistributionFromOverrides(
+  ...overrides: Array<NodeJS.ProcessEnv | undefined>
+): "builtin" | "external" {
+  for (let index = overrides.length - 1; index >= 0; index -= 1) {
+    const value = overrides[index]?.LARKIN_PI_DISTRIBUTION;
+    if (value === "builtin" || value === "external") return value;
+  }
+  return "external";
+}
+
+/** External/npm Pi resolves PI_PACKAGE_DIR as a Node package root and looks for dist/themes. */
+export function applyPiPackageDirForChild(
+  env: NodeJS.ProcessEnv,
+  distribution: "builtin" | "external" = piChildDistribution(env),
+): NodeJS.ProcessEnv {
+  const next = { ...env };
+  if (distribution !== "builtin") delete next.PI_PACKAGE_DIR;
+  return next;
+}

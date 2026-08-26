@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
@@ -11,6 +12,7 @@ import {
   findExactPiModel,
   supportedPiThinkingLevels,
 } from "../../../dist/runtime/pi-model-catalog.mjs";
+import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "../../../dist/runtime/builtin-pi-assets.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const require = createRequire(import.meta.url);
@@ -79,6 +81,68 @@ test("Pi thinking levels follow official reasoning metadata without Codex ultra"
   assert.deepEqual(supportedPiThinkingLevels(models[0]), ["off"]);
   assert.equal(supportedPiThinkingLevels(models[1]).includes("max"), true);
   assert.equal(supportedPiThinkingLevels(models[1]).includes("ultra"), false);
+});
+
+test("child Pi distribution ignores host builtin unless an override says so", () => {
+  assert.equal(piChildDistributionFromOverrides(undefined), "external");
+  assert.equal(piChildDistributionFromOverrides({ LARKIN_PI_DISTRIBUTION: "builtin" }), "builtin");
+  assert.equal(piChildDistributionFromOverrides({ LARKIN_PI_DISTRIBUTION: "builtin" }, { LARKIN_PI_DISTRIBUTION: "external" }), "external");
+});
+
+test("external Pi child env drops inherited builtin PI_PACKAGE_DIR", () => {
+  const env = applyPiPackageDirForChild({
+    PI_PACKAGE_DIR: "/tmp/agent/.larkin-official-pi-package",
+    PI_CODING_AGENT_DIR: "/tmp/agent",
+    LARKIN_PI_DISTRIBUTION: "external",
+  });
+  assert.equal(env.PI_PACKAGE_DIR, undefined);
+  assert.equal(env.PI_CODING_AGENT_DIR, "/tmp/agent");
+});
+
+test("builtin Pi child env keeps PI_PACKAGE_DIR", () => {
+  const packageDir = "/tmp/agent/.larkin-official-pi-package";
+  const env = applyPiPackageDirForChild({
+    PI_PACKAGE_DIR: packageDir,
+    LARKIN_PI_DISTRIBUTION: "builtin",
+  }, "builtin");
+  assert.equal(env.PI_PACKAGE_DIR, packageDir);
+});
+
+test("external catalog discovery succeeds after builtin assets materialize without reading dist themes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-"));
+  const packageDir = path.join(root, ".larkin-official-pi-package");
+  const themeDir = path.join(packageDir, "theme");
+  fs.mkdirSync(themeDir, { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "package.json"), "{\"name\":\"fixture-builtin-pi\"}\n");
+  fs.writeFileSync(path.join(themeDir, "dark.json"), "{}\n");
+  fs.writeFileSync(path.join(themeDir, "light.json"), "{}\n");
+  const probe = path.join(root, "external-pi.mjs");
+  fs.writeFileSync(probe, `
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
+const packageDir = process.env.PI_PACKAGE_DIR;
+if (packageDir) fs.readFileSync(path.join(packageDir, "dist/modes/interactive/theme/dark.json"));
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  const model = { provider: "plain", id: "chat", name: "Chat", reasoning: false, contextWindow: 32000 };
+  const data = request.type === "get_available_models" ? { models: [model] } : { model, thinkingLevel: "off" };
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+});
+`);
+  try {
+    const catalog = await discoverPiModelCatalog({
+      cwd: root,
+      command: process.execPath,
+      commandArgs: [probe],
+      env: { PI_PACKAGE_DIR: packageDir },
+    });
+    assert.equal(catalog.effectiveModel, "plain/chat");
+    assert.equal(catalog.models[0].id, "plain/chat");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("production graph pins official Pi and exposes it only through the shared RPC contract", () => {

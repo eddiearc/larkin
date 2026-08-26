@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
 import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
@@ -106,7 +107,12 @@ function executableVersion(executable: string, env: NodeJS.ProcessEnv, commandAr
 /** Resolve and handshake through each runtime's structured native control protocol. */
 export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeReadinessOptions): Promise<RuntimeReadiness> {
   const env = { ...process.env, ...options.env };
-  if (options.runtime === "pi" && env.LARKIN_PI_DISTRIBUTION === "builtin") {
+  const piDistribution = options.runtime === "pi" ? piChildDistributionFromOverrides(options.env) : "external";
+  if (piDistribution !== "builtin") {
+    if (env.LARKIN_PI_DISTRIBUTION === "builtin") delete env.LARKIN_PI_DISTRIBUTION;
+    delete env.PI_PACKAGE_DIR;
+  }
+  if (options.runtime === "pi" && piDistribution === "builtin") {
     try {
       if (!options.agentId || !env.LARKIN_CONFIG_DIR) throw new Error("内置 Pi readiness 缺少 Agent/config identity");
       assertBuiltinPiAgentDirectory(piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId));

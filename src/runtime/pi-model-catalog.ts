@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as path from "node:path";
+import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
 import { PiRpcClient, type PiRpcProcess } from "./pi-rpc-client.js";
 import { classifyRuntimePrerequisite, RuntimePrerequisiteError } from "./runtime-readiness.js";
 
@@ -90,9 +91,15 @@ export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions):
 async function discoverPiModelCatalogUncached(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {
   const spawn = options.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, [...args], spawnOptions as any) as unknown as PiRpcProcess);
   const command = options.command ?? options.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
+  const mergedEnv = {
+    ...process.env,
+    ...options.env,
+    ...(options.agentDir ? { PI_CODING_AGENT_DIR: path.resolve(options.agentDir) } : {}),
+    NO_COLOR: "1",
+  };
   const child = spawn(command, [...(options.commandArgs ?? []), "--mode", "rpc", "--no-session"], {
     cwd: options.cwd,
-    env: { ...process.env, ...options.env, ...(options.agentDir ? { PI_CODING_AGENT_DIR: path.resolve(options.agentDir) } : {}), NO_COLOR: "1" },
+    env: applyPiPackageDirForChild(mergedEnv, piChildDistributionFromOverrides(options.env)),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const client = new PiRpcClient(child, { requestTimeoutMs: options.timeoutMs ?? 10_000 });

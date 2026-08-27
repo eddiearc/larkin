@@ -1,12 +1,11 @@
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { BashToolInput } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
 
 /**
- * pi bash 工具超时护栏扩展。
- *
- * 父会话强制 <= MAX_BASH_SECONDS（默认 60s）。授权 nested wait 不走全局
- * WeakMap：child session 由 pi-subagents runAgent 把带闭包 cap 的 bash
- * execute 直接装到该 session 的 bash tool 上。
+ * pi bash 超时护栏。父会话 cap 默认 60s。
+ * nested 授权 wait 由 child session 上带闭包 cap + revoked flag 的 bash execute 承担。
+ * 不使用正则判断 detached：supervised spawn 在命令结束后回收整个进程组。
  */
 
 const MAX_BASH_SECONDS = 60;
@@ -17,25 +16,69 @@ export function effectiveParentBashTimeout(): number {
   return MAX_BASH_SECONDS;
 }
 
-export function commandUsesDetachedShell(command: string): boolean {
-  if (/\bnohup\b/.test(command) || /\bdisown\b/.test(command)) return true;
-  const stripped = command.replace(/&&/g, " ");
-  return /(?:^|[\s;|&])&(?:[\s;]|$)/.test(stripped) || /(?:^|[\s;])[^>&\n]*&\s*$/.test(stripped);
+function killProcessTree(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  }
+}
+
+export function createSupervisedBashOperations() {
+  return {
+    exec: async (command: string, cwd: string, { onData, signal, timeout, env }: { onData: (chunk: Buffer | string) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }) => {
+      if (signal?.aborted) throw new Error("aborted");
+      const child = spawn("/bin/bash", ["-c", command], {
+        cwd,
+        detached: process.platform !== "win32",
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      const pid = child.pid;
+      let timedOut = false;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => { if (pid) killProcessTree(pid); };
+      try {
+        if (typeof timeout === "number" && timeout > 0) {
+          timeoutHandle = setTimeout(() => {
+            timedOut = true;
+            if (pid) killProcessTree(pid);
+          }, timeout * 1000);
+        }
+        child.stdout?.on("data", onData);
+        child.stderr?.on("data", onData);
+        if (signal) {
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }
+        const exitCode = await new Promise<number>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("exit", (code) => resolve(code ?? 1));
+        });
+        if (signal?.aborted) throw new Error("aborted");
+        if (timedOut) throw new Error(`timeout:${timeout}`);
+        return { exitCode };
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        if (pid) killProcessTree(pid);
+      }
+    },
+  };
 }
 
 export function installGuardedBashTool(pi: ExtensionAPI, cap: number): void {
   const cwd = process.cwd();
-  const builtin = createBashToolDefinition(cwd);
+  const builtin = createBashToolDefinition(cwd, { operations: createSupervisedBashOperations() as never });
   const MAX = cap;
   const authorized = MAX > effectiveParentBashTimeout();
   const guidance = authorized
-    ? `This command exceeded the ${MAX}s authorized background-subagent bash limit. Pass timeout <= ${MAX}. Do not use nohup / '&' / disown.`
+    ? `This command exceeded the ${MAX}s authorized background-subagent bash limit. Pass timeout <= ${MAX}.`
     : `This command exceeded the ${MAX}s foreground hard limit. ` +
       "Long-running or deploy-style work MUST run in a background subagent instead: " +
       "call Agent({ prompt, description, run_in_background: true, max_command_wait_seconds: <61-600> }), " +
-      "report the returned agent id, and end the turn; a completion notification arrives automatically. " +
-      "Do NOT retry this command in the foreground, and do not use nohup / '&' / disown shell background jobs " +
-      "(they bypass subagent isolation and die with this run).";
+      "report the returned agent id, and end the turn.";
 
   pi.registerTool({
     ...builtin,
@@ -43,10 +86,6 @@ export function installGuardedBashTool(pi: ExtensionAPI, cap: number): void {
     label: "bash",
     description: builtin.description,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const command = typeof params.command === "string" ? params.command : "";
-      if (commandUsesDetachedShell(command)) {
-        throw new Error("detached shell process is not allowed (nohup, '&', disown). Use a background Agent with max_command_wait_seconds instead.");
-      }
       const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : effectiveParentBashTimeout();
       if (requested > MAX) {
         throw new Error(`timeout:${requested} exceeds the ${MAX}s ${authorized ? "background-subagent bash" : "foreground hard"} limit. ${guidance}`);
@@ -56,7 +95,7 @@ export function installGuardedBashTool(pi: ExtensionAPI, cap: number): void {
         return await builtin.execute(toolCallId, { ...params, timeout } satisfies BashToolInput, signal, onUpdate, ctx);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/timed out after/i.test(message)) {
+        if (/timed out after/i.test(message) || /^timeout:/.test(message)) {
           throw new Error(`${message}\n\n${guidance}`);
         }
         throw error;

@@ -160,16 +160,18 @@ test("Agent schema to nested session authorizes only that child past the parent 
     assert.ok(JSON.stringify(siblingSpawned));
 
     const manager = globalThis[Symbol.for("pi-subagents:manager")];
-    manager?.abort?.(agentId);
-    const child = manager?.getRecord?.(agentId)?.session;
-    if (child) {
-      const childBash = child.getToolDefinition("bash");
-      await assert.rejects(
-        childBash.execute("after-revoke", { command: "printf no", timeout: 3 },
-          new AbortController().signal, () => {}, { sessionManager: child.sessionManager }),
-        /timeout:3 exceeds the 2s foreground hard limit/,
-      );
-    }
+    assert.equal(typeof manager?.abort, "function", "registry must expose abort");
+    assert.equal(manager.abort(agentId), true);
+    const record = manager.getRecord(agentId);
+    if (record?.promise) await Promise.resolve(record.promise).catch(() => {});
+    const child = record?.session;
+    assert.ok(child, "aborted child session must still be inspectable");
+    const childBash = child.getToolDefinition("bash");
+    await assert.rejects(
+      childBash.execute("after-revoke", { command: "printf no", timeout: 3 },
+        new AbortController().signal, () => {}, { sessionManager: child.sessionManager }),
+      /timeout:3 exceeds the 2s foreground hard limit|authorized bash wait was revoked/,
+    );
   } finally {
     AgentManager.prototype.spawn = originalSpawn;
     if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;

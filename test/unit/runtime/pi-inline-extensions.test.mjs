@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,7 @@ import {
   invokeBuiltinPiRpc,
 } from "../../../dist/runtime/pi-inline-extensions.mjs";
 import { parseMaxCommandWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
-import { commandUsesDetachedShell, installGuardedBashTool } from "../../../dist/runtime/pi-bash-timeout-extension.mjs";
+import { installGuardedBashTool } from "../../../dist/runtime/pi-bash-timeout-extension.mjs";
 
 test("builtin Pi RPC receives exactly the three static inline extension factories", async () => {
   let invocation;
@@ -143,20 +144,16 @@ test("authorized nested bash abort does not leave a running sleep", async () => 
   }
 });
 
-test("bash guard rejects detached shell jobs", async () => {
-  assert.equal(commandUsesDetachedShell("true &"), true);
-  assert.equal(commandUsesDetachedShell("nohup sleep 30"), true);
-  assert.equal(commandUsesDetachedShell("sleep 30; disown"), true);
-  assert.equal(commandUsesDetachedShell("sleep 3 && printf ok"), false);
+test("supervised bash reaps nested background children", async () => {
   let bashTool;
   const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
   const factory = typeof extension === "function" ? extension : extension.factory;
   await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
-  await assert.rejects(
-    bashTool.execute("detached", { command: "true &", timeout: 1 },
-      new AbortController().signal, () => {}, {}),
-    /detached shell process is not allowed/,
-  );
+  const marker = `larkin-issue161-detach-${process.pid}-${Date.now()}`;
+  await bashTool.execute("detached", { command: `perl -e 'sleep 30' # ${marker} &`, timeout: 1 },
+    new AbortController().signal, () => {}, { sessionManager: { getSessionId: () => "p", getSessionFile: () => undefined } }).catch(() => {});
+  const leftover = spawnSync("pgrep", ["-fl", marker], { encoding: "utf8" });
+  assert.equal((leftover.stdout || "").trim(), "", leftover.stdout);
 });
 
 test("max_command_wait_seconds parse is fail-closed", () => {

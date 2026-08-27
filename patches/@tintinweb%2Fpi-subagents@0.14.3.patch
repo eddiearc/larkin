@@ -1,5 +1,5 @@
 diff --git a/dist/agent-manager.js b/dist/agent-manager.js
-index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d50d291295 100644
+index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..1fa9472ae95c76e5f822a1e6b66af04e8c3a1c37 100644
 --- a/dist/agent-manager.js
 +++ b/dist/agent-manager.js
 @@ -8,7 +8,7 @@
@@ -7,7 +7,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
  import { statSync } from "node:fs";
  import { isAbsolute } from "node:path";
 -import { resumeAgent, runAgent } from "./agent-runner.js";
-+import { clearSubagentBashWait, resumeAgent, runAgent } from "./agent-runner.js";
++import { clearSubagentBashWait, installClosedBashGuard, parentBashTimeoutSeconds, resumeAgent, runAgent } from "./agent-runner.js";
  import { addUsage } from "./usage.js";
  import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
  /** Default max concurrent background agents. */
@@ -50,7 +50,15 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
          const abortController = new AbortController();
          const record = {
              id,
-@@ -166,6 +184,7 @@ export class AgentManager {
+@@ -110,6 +128,7 @@ export class AgentManager {
+             this.startAgent(id, record, args);
+         }
+         catch (err) {
++            this.revokeCommandWait(record);
+             this.agents.delete(id);
+             throw err;
+         }
+@@ -166,6 +185,7 @@ export class AgentManager {
              isolated: options.isolated,
              inheritContext: options.inheritContext,
              thinkingLevel: options.thinkingLevel,
@@ -58,7 +66,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
              // Worktree wins for the working dir (the agent must run in the copy —
              // which, with a custom cwd, was created from that target). Config stays
              // with the parent project when a caller-supplied cwd is in play; it must
-@@ -190,7 +209,7 @@ export class AgentManager {
+@@ -190,7 +210,7 @@ export class AgentManager {
                  this.onCompact?.(record, info);
                  options.onCompaction?.(info);
              },
@@ -67,7 +75,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
                  record.session = session;
                  // Flush any steers that arrived before the session was ready
                  if (record.pendingSteers?.length) {
-@@ -199,7 +218,7 @@ export class AgentManager {
+@@ -199,7 +219,7 @@ export class AgentManager {
                      }
                      record.pendingSteers = undefined;
                  }
@@ -76,7 +84,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
              },
          })
              .then(({ responseText, session, aborted, steered, failure }) => {
-@@ -243,6 +262,7 @@ export class AgentManager {
+@@ -243,6 +263,7 @@ export class AgentManager {
                          `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
                  }
              }
@@ -84,7 +92,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
              // Fire onComplete for foreground agents too — lifecycle symmetry.
              // Mark resultConsumed so the callback skips notifications (result returned inline).
              if (!options.isBackground) {
-@@ -269,6 +289,7 @@ export class AgentManager {
+@@ -269,6 +290,7 @@ export class AgentManager {
              }
              record.error = err instanceof Error ? err.message : String(err);
              record.completedAt ??= Date.now();
@@ -92,25 +100,50 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..cea93662ad12d58b493a246d950567d5
              detach();
              // Final flush of streaming output file on error
              if (record.outputCleanup) {
-@@ -441,8 +462,13 @@ export class AgentManager {
-         record.abortController?.abort();
-         record.status = "stopped";
-         record.completedAt = Date.now();
+@@ -365,6 +387,7 @@ export class AgentManager {
+         record.completedAt = undefined;
+         record.result = undefined;
+         record.error = undefined;
++        installClosedBashGuard(record.session, parentBashTimeoutSeconds());
+         try {
+             const { text, failure } = await resumeAgent(record.session, prompt, {
+                 onToolActivity: (activity) => {
+@@ -436,13 +459,25 @@ export class AgentManager {
+             record.completedAt = Date.now();
+             return true;
+         }
+-        if (record.status !== "running")
+-            return false;
+-        record.abortController?.abort();
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
++        if (record.status === "running") {
++            record.abortController?.abort();
++            record.status = "stopped";
++            record.completedAt = Date.now();
++            const pending = record.promise;
++            void Promise.resolve(pending).finally(() => this.revokeCommandWait(record));
++            if (!pending)
++                this.revokeCommandWait(record);
++            return true;
++        }
 +        this.revokeCommandWait(record);
          return true;
      }
 +    revokeCommandWait(record) {
 +        this.commandWaitById.delete(record.id);
 +        clearSubagentBashWait(record.session?.sessionManager);
++        if (record.session)
++            installClosedBashGuard(record.session, parentBashTimeoutSeconds());
 +    }
      /** Dispose a record's session and remove it from the map. */
      removeRecord(id, record) {
          record.session?.dispose?.();
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..b8973e36208dd43477a0e47a275fbbb8cea70848 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..77a1fbb348c2193c2f53d87477abea28dcb3dab2 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
-@@ -1,9 +1,10 @@
+@@ -1,10 +1,12 @@
  /**
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
@@ -118,26 +151,100 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..b8973e36208dd43477a0e47a275fbbb8
 +import { existsSync, readFileSync } from "node:fs";
  import { homedir } from "node:os";
  import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
 +import { fileURLToPath } from "node:url";
- import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
++import { spawn } from "node:child_process";
++import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
  import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
  import { buildParentContext, extractText } from "./context.js";
-@@ -384,6 +385,39 @@ function resolveConfiguredSessionDir(sessionDir, cwd) {
+ import { DEFAULT_AGENTS } from "./default-agents.js";
+@@ -384,6 +386,110 @@ function resolveConfiguredSessionDir(sessionDir, cwd) {
          return sessionDir;
      return resolve(cwd, sessionDir);
  }
-+const LARKIN_BASH_WAIT = Symbol.for("larkin-pi-subagent-bash-wait");
 +const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
-+function authorizeSubagentBashWait(sessionManager, seconds) {
-+    const bag = globalThis;
-+    bag[LARKIN_BASH_WAIT] ??= new WeakMap();
-+    bag[LARKIN_BASH_WAIT].set(sessionManager, seconds);
++export function clearSubagentBashWait(_sessionManager) { }
++export function parentBashTimeoutSeconds() {
++    const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
++    if (Number.isInteger(raw) && raw > 0)
++        return Math.min(raw, 60);
++    return 60;
 +}
-+export function clearSubagentBashWait(sessionManager) {
-+    if (!sessionManager)
++function killProcessTree(pid) {
++    try { process.kill(-pid, "SIGKILL"); }
++    catch {
++        try { process.kill(pid, "SIGKILL"); }
++        catch { /* already dead */ }
++    }
++}
++function supervisedBashOperations() {
++    return {
++        exec: async (command, cwd, opts) => {
++            if (opts.signal?.aborted)
++                throw new Error("aborted");
++            const child = spawn("/bin/bash", ["-c", command], {
++                cwd,
++                detached: process.platform !== "win32",
++                env: opts.env,
++                stdio: ["ignore", "pipe", "pipe"],
++                windowsHide: true,
++            });
++            const pid = child.pid;
++            let timedOut = false;
++            let timeoutHandle;
++            const onAbort = () => { if (pid) killProcessTree(pid); };
++            try {
++                if (typeof opts.timeout === "number" && opts.timeout > 0) {
++                    timeoutHandle = setTimeout(() => { timedOut = true; if (pid) killProcessTree(pid); }, opts.timeout * 1000);
++                }
++                child.stdout?.on("data", opts.onData);
++                child.stderr?.on("data", opts.onData);
++                if (opts.signal) {
++                    if (opts.signal.aborted)
++                        onAbort();
++                    else
++                        opts.signal.addEventListener("abort", onAbort, { once: true });
++                }
++                const exitCode = await new Promise((resolve, reject) => {
++                    child.once("error", reject);
++                    child.once("exit", (code) => resolve(code ?? 1));
++                });
++                if (opts.signal?.aborted)
++                    throw new Error("aborted");
++                if (timedOut)
++                    throw new Error(`timeout:${opts.timeout}`);
++                return { exitCode };
++            }
++            finally {
++                if (timeoutHandle)
++                    clearTimeout(timeoutHandle);
++                if (opts.signal)
++                    opts.signal.removeEventListener("abort", onAbort);
++                if (pid)
++                    killProcessTree(pid);
++            }
++        },
++    };
++}
++export function installClosedBashGuard(session, cap) {
++    const bash = session.getToolDefinition?.("bash");
++    if (!bash || typeof bash.execute !== "function")
 +        return;
-+    const bag = globalThis;
-+    bag[LARKIN_BASH_WAIT]?.delete(sessionManager);
++    if (bash.execute.__larkinGuard)
++        bash.execute.__larkinGuard.revoked = true;
++    const state = { revoked: false };
++    const builtin = createBashToolDefinition(process.cwd(), { operations: supervisedBashOperations() });
++    const authorized = cap > parentBashTimeoutSeconds();
++    const next = async (toolCallId, params, signal, onUpdate, ctx) => {
++        if (state.revoked)
++            throw new Error("authorized bash wait was revoked");
++        const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : parentBashTimeoutSeconds();
++        if (requested > cap)
++            throw new Error(`timeout:${requested} exceeds the ${cap}s ${authorized ? "background-subagent bash" : "foreground hard"} limit.`);
++        return builtin.execute(toolCallId, { ...params, timeout: Math.min(requested, cap) }, signal, onUpdate, ctx);
++    };
++    next.__larkinGuard = state;
++    bash.execute = next;
 +}
 +function resolveLarkinBashTimeoutExtensionPath() {
 +    const fromGlobal = globalThis[LARKIN_BASH_TIMEOUT_PATH];
@@ -162,7 +269,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..b8973e36208dd43477a0e47a275fbbb8
  export async function runAgent(ctx, type, prompt, options) {
      const config = getConfig(type);
      const agentConfig = getAgentConfig(type);
-@@ -483,30 +517,45 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -483,30 +589,45 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -223,7 +330,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..b8973e36208dd43477a0e47a275fbbb8
          extensionsOverride,
          noSkills,
          noPromptTemplates: true,
-@@ -662,6 +711,13 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -662,6 +783,12 @@ export async function runAgent(ctx, type, prompt, options) {
          sessionOpts.thinkingLevel = thinkingLevel;
      }
      const { session } = await createAgentSession(sessionOpts);
@@ -232,12 +339,19 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..b8973e36208dd43477a0e47a275fbbb8
 +        if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
 +            throw new Error("maxCommandWaitSeconds must be an integer 61..600");
 +        }
-+        authorizeSubagentBashWait(session.sessionManager, raw);
 +    }
      const baseSessionName = agentConfig?.name ?? type;
      session.setSessionName(options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName);
      // Bind extensions so that session_start fires and extensions can initialize
-@@ -691,7 +747,7 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -676,6 +803,7 @@ export async function runAgent(ctx, type, prompt, options) {
+             });
+         },
+     });
++    installClosedBashGuard(session, options.maxCommandWaitSeconds ?? parentBashTimeoutSeconds());
+     // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
+     // the ACTIVE set still needs managing: pi activates only its four default
+     // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
+@@ -691,7 +819,7 @@ export async function runAgent(ctx, type, prompt, options) {
              narrowing,
          });
      }
@@ -263,7 +377,7 @@ index 663d53b58bb6ce7832d098c5c8758dc354d52a33..02f66c851d8cd9fa0c29cdddb38ae2f0
              const registry = ctx.modelRegistry;
              if (!registry) {
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e401075833160 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d7896219b 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -69,6 +69,45 @@ function abortable(promise, signal) {
@@ -345,7 +459,15 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
      // Expose manager via Symbol.for() global registry for cross-package access.
      // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
      //
-@@ -850,6 +895,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -448,6 +493,7 @@ export default function (pi) {
+         hasRunning: () => manager.hasRunning(),
+         spawn: (piRef, ctx, type, prompt, options) => manager.spawn(piRef, ctx, type, prompt, options),
+         getRecord: (id) => manager.getRecord(id),
++        abort: (id) => manager.abort(id),
+     };
+     const ownsManagerRegistry = globalThis[MANAGER_KEY] === undefined;
+     if (ownsManagerRegistry) {
+@@ -850,6 +896,11 @@ Terse command-style prompts produce shallow, generic work.
              run_in_background: Type.Optional(Type.Boolean({
                  description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
              })),
@@ -357,7 +479,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
              resume: Type.Optional(Type.String({
                  description: "Optional agent ID to resume from. Continues from previous context.",
              })),
-@@ -1041,6 +1091,23 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1041,6 +1092,23 @@ Terse command-style prompts produce shallow, generic work.
                  modelName,
                  tags: agentTags.length > 0 ? agentTags : undefined,
              };
@@ -381,7 +503,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
              // ---- Schedule: register a job, don't spawn now ----
              if (params.schedule) {
                  if (!isSchedulingEnabled()) {
-@@ -1124,6 +1191,7 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1124,6 +1192,7 @@ Terse command-style prompts produce shallow, generic work.
                          inheritContext,
                          thinkingLevel: thinking,
                          isBackground: true,
@@ -389,7 +511,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
                          isolation,
                          invocation: agentInvocation,
                          ...bgCallbacks,
-@@ -1293,6 +1361,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1293,6 +1362,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -399,7 +521,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1378,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1379,15 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
@@ -420,7 +542,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1401,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1402,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -437,7 +559,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/agent-manager.ts b/src/agent-manager.ts
-index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f45db8e182 100644
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..1ca9b0c38292329f1da0de488652502ded61012c 100644
 --- a/src/agent-manager.ts
 +++ b/src/agent-manager.ts
 @@ -11,7 +11,7 @@ import { statSync } from "node:fs";
@@ -496,7 +618,15 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
      const abortController = new AbortController();
      const record: AgentRecord = {
        id,
-@@ -252,6 +273,7 @@ export class AgentManager {
+@@ -190,6 +211,7 @@ export class AgentManager {
+     try {
+       this.startAgent(id, record, args);
+     } catch (err) {
++      this.revokeCommandWait(record);
+       this.agents.delete(id);
+       throw err;
+     }
+@@ -252,6 +274,7 @@ export class AgentManager {
        isolated: options.isolated,
        inheritContext: options.inheritContext,
        thinkingLevel: options.thinkingLevel,
@@ -504,7 +634,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
        // Worktree wins for the working dir (the agent must run in the copy —
        // which, with a custom cwd, was created from that target). Config stays
        // with the parent project when a caller-supplied cwd is in play; it must
-@@ -275,7 +297,7 @@ export class AgentManager {
+@@ -275,7 +298,7 @@ export class AgentManager {
          this.onCompact?.(record, info);
          options.onCompaction?.(info);
        },
@@ -513,7 +643,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
          record.session = session;
          // Flush any steers that arrived before the session was ready
          if (record.pendingSteers?.length) {
-@@ -284,7 +306,7 @@ export class AgentManager {
+@@ -284,7 +307,7 @@ export class AgentManager {
            }
            record.pendingSteers = undefined;
          }
@@ -522,7 +652,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
        },
      })
        .then(({ responseText, session, aborted, steered, failure }) => {
-@@ -327,6 +349,7 @@ export class AgentManager {
+@@ -327,6 +350,7 @@ export class AgentManager {
            }
          }
  
@@ -530,7 +660,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
          // Fire onComplete for foreground agents too — lifecycle symmetry.
          // Mark resultConsumed so the callback skips notifications (result returned inline).
          if (!options.isBackground) {
-@@ -346,6 +369,7 @@ export class AgentManager {
+@@ -346,6 +370,7 @@ export class AgentManager {
          }
          record.error = err instanceof Error ? err.message : String(err);
          record.completedAt ??= Date.now();
@@ -538,7 +668,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
  
          detach();
  
-@@ -398,6 +422,7 @@ export class AgentManager {
+@@ -398,6 +423,7 @@ export class AgentManager {
          record.status = "error";
          record.error = err instanceof Error ? err.message : String(err);
          record.completedAt = Date.now();
@@ -546,7 +676,15 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
          this.onComplete?.(record);
        }
      }
-@@ -525,6 +550,7 @@ export class AgentManager {
+@@ -456,6 +482,7 @@ export class AgentManager {
+     record.result = undefined;
+     record.error = undefined;
+ 
++    if (record.session) installClosedBashGuard(record.session, parentBashTimeoutSeconds());
+     try {
+       const { text, failure } = await resumeAgent(record.session, prompt, {
+         onToolActivity: (activity) => {
+@@ -525,16 +552,29 @@ export class AgentManager {
        this.queue = this.queue.filter(q => q.id !== id);
        record.status = "stopped";
        record.completedAt = Date.now();
@@ -554,10 +692,19 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
        return true;
      }
  
-@@ -532,9 +558,16 @@ export class AgentManager {
-     record.abortController?.abort();
-     record.status = "stopped";
-     record.completedAt = Date.now();
+-    if (record.status !== "running") return false;
+-    record.abortController?.abort();
+-    record.status = "stopped";
+-    record.completedAt = Date.now();
++    if (record.status === "running") {
++      record.abortController?.abort();
++      record.status = "stopped";
++      record.completedAt = Date.now();
++      const pending = record.promise;
++      void Promise.resolve(pending).finally(() => this.revokeCommandWait(record));
++      if (!pending) this.revokeCommandWait(record);
++      return true;
++    }
 +    this.revokeCommandWait(record);
      return true;
    }
@@ -571,7 +718,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
    /** Dispose a record's session and remove it from the map. */
    private removeRecord(id: string, record: AgentRecord): void {
      record.session?.dispose?.();
-@@ -587,12 +620,15 @@ export class AgentManager {
+@@ -587,12 +627,15 @@ export class AgentManager {
      this.queue = [];
      // Abort running agents
      for (const record of this.agents.values()) {
@@ -592,7 +739,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
      }
      return count;
    }
-@@ -617,6 +653,7 @@ export class AgentManager {
+@@ -617,6 +660,7 @@ export class AgentManager {
      // Clear queue
      this.queue = [];
      for (const record of this.agents.values()) {
@@ -601,7 +748,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f4
      }
      this.agents.clear();
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d3dcd96b1 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..de5b97e9badfdd528787c2e79fc943ec5fcecab6 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
 @@ -2,15 +2,17 @@
@@ -632,16 +779,13 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -497,6 +501,61 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
+@@ -497,6 +501,103 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
    return resolve(cwd, sessionDir);
  }
  
-+const LARKIN_BASH_WAIT = Symbol.for("larkin-pi-subagent-bash-wait");
 +const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
 +
-+export function clearSubagentBashWait(_sessionManager?: object): void {
-+  /* nested bash caps are closures on the child tool; nothing global to clear */
-+}
++export function clearSubagentBashWait(_sessionManager?: object): void {}
 +
 +export function parentBashTimeoutSeconds(): number {
 +  const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
@@ -649,28 +793,73 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d
 +  return 60;
 +}
 +
-+function commandUsesDetachedShell(command: string): boolean {
-+  if (/\bnohup\b/.test(command) || /\bdisown\b/.test(command)) return true;
-+  const stripped = command.replace(/&&/g, " ");
-+  return /(?:^|[\s;|&])&(?:[\s;]|$)/.test(stripped) || /(?:^|[\s;])[^>&\n]*&\s*$/.test(stripped);
++function killProcessTree(pid: number): void {
++  try { process.kill(-pid, "SIGKILL"); }
++  catch {
++    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
++  }
++}
++
++function supervisedBashOperations() {
++  return {
++    exec: async (command: string, cwd: string, opts: { onData: (chunk: Buffer | string) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }) => {
++      if (opts.signal?.aborted) throw new Error("aborted");
++      const { spawn } = await import("node:child_process");
++      const child = spawn("/bin/bash", ["-c", command], {
++        cwd,
++        detached: process.platform !== "win32",
++        env: opts.env,
++        stdio: ["ignore", "pipe", "pipe"],
++        windowsHide: true,
++      });
++      const pid = child.pid;
++      let timedOut = false;
++      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
++      const onAbort = () => { if (pid) killProcessTree(pid); };
++      try {
++        if (typeof opts.timeout === "number" && opts.timeout > 0) {
++          timeoutHandle = setTimeout(() => { timedOut = true; if (pid) killProcessTree(pid); }, opts.timeout * 1000);
++        }
++        child.stdout?.on("data", opts.onData);
++        child.stderr?.on("data", opts.onData);
++        if (opts.signal) {
++          if (opts.signal.aborted) onAbort();
++          else opts.signal.addEventListener("abort", onAbort, { once: true });
++        }
++        const exitCode = await new Promise<number>((resolve, reject) => {
++          child.once("error", reject);
++          child.once("exit", (code) => resolve(code ?? 1));
++        });
++        if (opts.signal?.aborted) throw new Error("aborted");
++        if (timedOut) throw new Error(`timeout:${opts.timeout}`);
++        return { exitCode };
++      } finally {
++        if (timeoutHandle) clearTimeout(timeoutHandle);
++        if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
++        if (pid) killProcessTree(pid);
++      }
++    },
++  };
 +}
 +
 +export function installClosedBashGuard(session: AgentSession, cap: number): void {
 +  const bash = session.getToolDefinition?.("bash") as { execute?: (...args: never[]) => unknown } | undefined;
 +  if (!bash || typeof bash.execute !== "function") return;
-+  const builtin = createBashToolDefinition(process.cwd());
++  const previous = bash.execute as { __larkinGuard?: { revoked: boolean } };
++  if (previous.__larkinGuard) previous.__larkinGuard.revoked = true;
++  const state = { revoked: false };
++  const builtin = createBashToolDefinition(process.cwd(), { operations: supervisedBashOperations() as never });
 +  const authorized = cap > parentBashTimeoutSeconds();
-+  bash.execute = async (toolCallId: string, params: { command?: string; timeout?: number }, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => {
-+    const command = typeof params.command === "string" ? params.command : "";
-+    if (commandUsesDetachedShell(command)) {
-+      throw new Error("detached shell process is not allowed (nohup, '&', disown). Use a background Agent with max_command_wait_seconds instead.");
-+    }
++  const next = async (toolCallId: string, params: { command?: string; timeout?: number }, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => {
++    if (state.revoked) throw new Error("authorized bash wait was revoked");
 +    const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : parentBashTimeoutSeconds();
 +    if (requested > cap) {
 +      throw new Error(`timeout:${requested} exceeds the ${cap}s ${authorized ? "background-subagent bash" : "foreground hard"} limit.`);
 +    }
 +    return builtin.execute(toolCallId, { ...params, timeout: Math.min(requested, cap) }, signal, onUpdate as never, ctx as never);
 +  };
++  (next as { __larkinGuard?: { revoked: boolean } }).__larkinGuard = state;
++  bash.execute = next as typeof bash.execute;
 +}
 +
 +function resolveLarkinBashTimeoutExtensionPath(): string | undefined {
@@ -694,7 +883,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d
  export async function runAgent(
    ctx: ExtensionContext,
    type: SubagentType,
-@@ -612,31 +671,44 @@ export async function runAgent(
+@@ -612,31 +713,44 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -755,7 +944,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d
      extensionsOverride,
      noSkills,
      noPromptTemplates: true,
-@@ -808,6 +880,12 @@ export async function runAgent(
+@@ -808,6 +922,12 @@ export async function runAgent(
    }
  
    const { session } = await createAgentSession(sessionOpts);
@@ -768,7 +957,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d
  
    const baseSessionName = agentConfig?.name ?? type;
    session.setSessionName(
-@@ -826,6 +904,10 @@ export async function runAgent(
+@@ -826,6 +946,10 @@ export async function runAgent(
        });
      },
    });
@@ -779,7 +968,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d
  
    // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
    // the ACTIVE set still needs managing: pi activates only its four default
-@@ -843,7 +925,7 @@ export async function runAgent(
+@@ -843,7 +967,7 @@ export async function runAgent(
      });
    }
  
@@ -805,7 +994,7 @@ index 2f8a622fe2a966b36c0319441aeec907ad7fe681..84e932b30d03d702c45728e89eecd881
          const registry = (ctx as { modelRegistry?: ModelRegistry }).modelRegistry;
          if (!registry) {
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc13ca26e6 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..d36c07d2a9af89532c46831f17842588481ca45b 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -91,6 +91,55 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -898,7 +1087,15 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc
  
    // Expose manager via Symbol.for() global registry for cross-package access.
    // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-@@ -949,6 +1003,13 @@ Terse command-style prompts produce shallow, generic work.
+@@ -508,6 +562,7 @@ export default function (pi: ExtensionAPI) {
+     spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
+       manager.spawn(piRef, ctx, type, prompt, options),
+     getRecord: (id: string) => manager.getRecord(id),
++    abort: (id: string) => manager.abort(id),
+   };
+   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
+   if (ownsManagerRegistry) {
+@@ -949,6 +1004,13 @@ Terse command-style prompts produce shallow, generic work.
            description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
          }),
        ),
@@ -912,7 +1109,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc
        resume: Type.Optional(
          Type.String({
            description: "Optional agent ID to resume from. Continues from previous context.",
-@@ -1168,6 +1229,24 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1168,6 +1230,24 @@ Terse command-style prompts produce shallow, generic work.
          tags: agentTags.length > 0 ? agentTags : undefined,
        };
  
@@ -937,7 +1134,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc
        // ---- Schedule: register a job, don't spawn now ----
        if (params.schedule) {
          if (!isSchedulingEnabled()) {
-@@ -1259,6 +1338,7 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1259,6 +1339,7 @@ Terse command-style prompts produce shallow, generic work.
              inheritContext,
              thinkingLevel: thinking,
              isBackground: true,
@@ -945,7 +1142,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc
              isolation,
              invocation: agentInvocation,
              ...bgCallbacks,
-@@ -1453,6 +1533,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1453,6 +1534,11 @@ Terse command-style prompts produce shallow, generic work.
            description: "If true, wait for the agent to complete before returning. Default: false.",
          }),
        ),
@@ -957,7 +1154,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc
        verbose: Type.Optional(
          Type.Boolean({
            description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-@@ -1470,14 +1555,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1470,14 +1556,15 @@ Terse command-style prompts produce shallow, generic work.
        // completion notification can still be delivered.
        // Queued agents have no promise yet (it's created when the queue starts
        // them), so poll until they leave the queue, then await like a running one.
@@ -980,7 +1177,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9061422feb9b151431b46a0b99697edc
        }
  
        const displayName = getDisplayName(record.type);
-@@ -1492,11 +1578,13 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1492,11 +1579,13 @@ Terse command-style prompts produce shallow, generic work.
  
        let output =
          `Agent: ${record.id}\n` +

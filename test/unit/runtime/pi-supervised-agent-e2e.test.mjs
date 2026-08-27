@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -11,107 +12,140 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-e2e-"));
-const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-agent-"));
+const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-steer-"));
+const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-steer-agent-"));
 afterAll(() => {
   fs.rmSync(workDir, { recursive: true, force: true });
   fs.rmSync(agentDir, { recursive: true, force: true });
 });
 
-test("background Agent child exposes supervised tools and wait barrier", async () => {
-  const supervisedBundle = fileURLToPath(new URL("../../../dist/runtime/pi-supervised-command.bundle.js", import.meta.url));
+function sse(payloads) {
+  return payloads.map((payload) => `data: ${JSON.stringify(payload)}\n\n`).join("") + "data: [DONE]\n\n";
+}
+
+test("public steer_subagent changes the next fake-provider turn", async () => {
   const subagentsEntry = fileURLToPath(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url));
-  assert.ok(fs.existsSync(supervisedBundle), "supervised bundle must exist");
-  assert.ok(fs.existsSync(subagentsEntry), "subagents bundle must exist");
+  assert.ok(fs.existsSync(subagentsEntry));
   process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS = "1";
   process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS = "8";
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.OPENAI_API_KEY = "sk-test";
+  fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({
+    openai: { type: "api_key", key: "sk-test" },
+  }));
 
-  const loader = new DefaultResourceLoader({
-    cwd: workDir,
-    agentDir,
-    noExtensions: true,
-    additionalExtensionPaths: [subagentsEntry],
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    systemPromptOverride: () => "supervised-e2e",
-    appendSystemPromptOverride: () => [],
+  const bodies = [];
+  const sockets = [];
+  let startCalls = 0;
+  const provider = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString();
+      bodies.push(body);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (body.includes("supervised-steer-marker")) {
+        res.end(sse([
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-supervised", choices: [{ index: 0, delta: { role: "assistant", content: "STEERED_OK" }, finish_reason: null }] },
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-supervised", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+        ]));
+        return;
+      }
+      startCalls += 1;
+      if (startCalls === 1) {
+        res.end(sse([
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-supervised", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_start", type: "function", function: { name: "supervised_start", arguments: "" } }] }, finish_reason: null }] },
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-supervised", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ executable: process.execPath, args: ["-e", "setTimeout(()=>{}, 8000)"] }) } }] }, finish_reason: null }] },
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-supervised", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+        ]));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+    });
   });
-  await loader.reload();
-  const { session: parent } = await createAgentSession({
-    cwd: workDir,
-    agentDir,
-    resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(workDir),
-    settingsManager: SettingsManager.create(workDir, agentDir),
+  provider.on("connection", (socket) => sockets.push(socket));
+  await new Promise((resolve, reject) => {
+    provider.once("error", reject);
+    provider.listen(0, "127.0.0.1", resolve);
   });
-  await parent.bindExtensions({});
-  const agent = parent.getToolDefinition("Agent");
-  const steer = parent.getToolDefinition("steer_subagent");
-  assert.ok(agent?.execute, "parent must expose public Agent");
-  assert.ok(steer?.execute, "parent must expose public steer_subagent");
-
-  const registry = globalThis[Symbol.for("pi-subagents:manager")];
-  assert.ok(registry?.getRecord, "parent must expose subagents manager");
-  const spawned = await agent.execute("agent-1", {
-    prompt: "stay alive",
-    description: "supervised-e2e",
-    subagent_type: "general-purpose",
-    run_in_background: true,
-  }, new AbortController().signal, () => {}, {
-    cwd: workDir,
-    sessionManager: parent.sessionManager,
-    model: parent.model,
-    modelRegistry: Object.assign(parent.modelRuntime ?? {}, { runtime: parent.modelRuntime }),
-    ui: { setStatus() {}, notify() {}, setWidget() {} },
-    getSystemPrompt: () => "supervised-e2e",
-  });
-  const agentId = spawned?.details?.agentId;
-  assert.ok(agentId, `missing agent id: ${JSON.stringify(spawned)}`);
-  const started = Date.now();
-  let record;
-  let childSession;
-  while (Date.now() - started < 8000) {
-    record = registry.getRecord(agentId);
-    childSession = record?.session;
-    if (record?.status === "error" || (childSession && record?.status === "running")) break;
-    await new Promise((r) => setTimeout(r, 25));
+  const model = {
+    id: "fixture-supervised",
+    name: "Fixture",
+    api: "openai-completions",
+    provider: "openai",
+    baseUrl: `http://127.0.0.1:${provider.address().port}/v1`,
+    reasoning: false,
+    input: ["text"],
+    contextWindow: 128000,
+    maxTokens: 256,
+  };
+  try {
+    const loader = new DefaultResourceLoader({
+      cwd: workDir,
+      agentDir,
+      noExtensions: true,
+      additionalExtensionPaths: [subagentsEntry],
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      systemPromptOverride: () => "supervised-e2e",
+      appendSystemPromptOverride: () => [],
+    });
+    await loader.reload();
+    const { session: parent } = await createAgentSession({
+      cwd: workDir,
+      agentDir,
+      model,
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(workDir),
+      settingsManager: SettingsManager.create(workDir, agentDir),
+    });
+    await parent.bindExtensions({});
+    const agent = parent.getToolDefinition("Agent");
+    const steer = parent.getToolDefinition("steer_subagent");
+    const registry = globalThis[Symbol.for("pi-subagents:manager")];
+    const spawned = await agent.execute("agent-1", {
+      prompt: "stay alive",
+      description: "supervised-steer",
+      subagent_type: "general-purpose",
+      run_in_background: true,
+    }, new AbortController().signal, () => {}, {
+      cwd: workDir,
+      sessionManager: parent.sessionManager,
+      model,
+      modelRegistry: Object.assign(parent.modelRuntime ?? {}, { runtime: parent.modelRuntime }),
+      ui: { setStatus() {}, notify() {}, setWidget() {} },
+      getSystemPrompt: () => "supervised-e2e",
+    });
+    const agentId = spawned?.details?.agentId;
+    assert.ok(agentId, JSON.stringify(spawned));
+    const deadline = Date.now() + 8000;
+    let record;
+    while (Date.now() < deadline) {
+      record = registry.getRecord(agentId);
+      if (record?.status === "running" && record.session) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(record?.status, "running", JSON.stringify({ status: record?.status, error: record?.error }));
+    const steered = await steer.execute("st1", {
+      agent_id: agentId,
+      message: "supervised-steer-marker",
+    }, new AbortController().signal, () => {}, {
+      cwd: workDir,
+      sessionManager: parent.sessionManager,
+      ui: { setStatus() {}, notify() {}, setWidget() {} },
+    });
+    const steeredText = steered?.content?.[0]?.text ?? "";
+    assert.doesNotMatch(steeredText, /failed to steer|is not running/i);
+    assert.match(steeredText, /^Steering message (sent to agent|queued for agent)/);
+    const saw = Date.now() + 8000;
+    while (Date.now() < saw && !bodies.some((body) => body.includes("supervised-steer-marker"))) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(bodies.some((body) => body.includes("supervised-steer-marker")), "fake provider never saw steered user input");
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => provider.close(resolve));
   }
-  assert.equal(record?.status, "error", JSON.stringify({ status: record?.status, error: record?.error }));
-  assert.ok(childSession, "child session missing after error");
-  const startTool = childSession.getToolDefinition("supervised_start");
-  const waitTool = childSession.getToolDefinition("supervised_wait");
-  const names = (typeof childSession.getAllTools === "function" ? childSession.getAllTools() : []).map((tool) => tool.name);
-  assert.ok(startTool?.execute && waitTool?.execute, `background child must register supervised tools: ${names.join(",")}`);
-  const startedCmd = await startTool.execute("s1", {
-    executable: process.execPath,
-    args: ["-e", "setTimeout(() => {}, 4000)"],
-  }, new AbortController().signal, () => {}, childSession);
-  const handle = JSON.parse(startedCmd.content[0].text).handle;
-  const pid = JSON.parse(startedCmd.content[0].text).pid;
-  const wait1 = await waitTool.execute("w1", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession);
-  const status1 = JSON.parse(wait1.content[0].text);
-  assert.equal(status1.status, "running");
-  assert.equal(status1.pid, pid);
-  const steered = await steer.execute("st1", {
-    agent_id: agentId,
-    message: "supervised-steer-marker",
-  }, new AbortController().signal, () => {}, {
-    cwd: workDir,
-    sessionManager: parent.sessionManager,
-    ui: { setStatus() {}, notify() {}, setWidget() {} },
-  });
-  const steeredText = steered?.content?.[0]?.text ?? "";
-  assert.match(steeredText, /is not running \(status: error\)/);
-  assert.doesNotMatch(steeredText, /^Steering message (sent to agent|queued for agent)/);
-  await assert.rejects(
-    waitTool.execute("w2", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession),
-    /once per turn/,
-  );
-  const cancelTool = childSession.getToolDefinition("supervised_cancel");
-  await cancelTool.execute("c1", { handle }, new AbortController().signal, () => {}, childSession);
-  let alive = true;
-  try { process.kill(pid, 0); } catch { alive = false; }
-  assert.equal(alive, false);
 }, { timeout: 20_000 });

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 declare global {
   // Filled by the standalone wrapper (scripts/release/standalone-entry.ts).
   var __LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__: string | undefined;
+  var __LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__: string | undefined;
 }
 
 /**
@@ -38,7 +39,32 @@ export function materializeEmbeddedPiSubagentBundle(configDir: string | undefine
       fs.renameSync(temporary, target);
       fs.chmodSync(target, 0o600);
     }
+    materializeEmbeddedPiSupervisedCommandBundle(dir);
     return target;
+  } catch {
+    return null;
+  }
+}
+
+function writePrivateBundle(dir: string, name: string, embedded: string): string {
+  const target = path.join(dir, name);
+  if (!fs.existsSync(target) || fs.readFileSync(target, "utf8") !== embedded) {
+    const temporary = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, embedded, { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, target);
+    fs.chmodSync(target, 0o600);
+  }
+  return target;
+}
+
+export function materializeEmbeddedPiSupervisedCommandBundle(dirOrConfig?: string): string | null {
+  const embedded = globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
+  if (!embedded || !dirOrConfig) return null;
+  const dir = dirOrConfig.endsWith("extensions") ? dirOrConfig : path.join(path.resolve(dirOrConfig), "providers", "pi", "extensions");
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    return writePrivateBundle(dir, "pi-supervised-command.bundle.js", embedded);
   } catch {
     return null;
   }
@@ -86,6 +112,7 @@ export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv
  * 重复注册导致 pi 扩展加载 FATAL（pi 对 duplicate tool registration 是硬失败）。
  */
 const BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
+const SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
 
 type UserPiSubagentsWaitCapability = "absent" | "bounded" | "unbounded";
 
@@ -122,7 +149,10 @@ function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsW
     // marker in a build artifact when the manifest points Pi at another file.
     const capabilityFiles = extensions.map((entry) => path.resolve(installedRoot, entry));
     const hasCapability = capabilityFiles.every((file) => {
-      try { return fs.readFileSync(file, "utf8").includes(BOUNDED_WAIT_CAPABILITY); }
+      try {
+        const source = fs.readFileSync(file, "utf8");
+        return source.includes(BOUNDED_WAIT_CAPABILITY) && source.includes(SUPERVISED_COMMAND_CAPABILITY);
+      }
       catch { return false; }
     });
     return hasCapability ? "bounded" : "unbounded";
@@ -157,7 +187,7 @@ export function resolvePiSubagentExtensionArg(
       throw new Error(
         "[larkin] WARNING: refusing external Pi because the user-installed " +
         "pi-subagents extension is unbounded or unverifiable; remove it or install " +
-        "a version advertising larkin-pi-subagents-bounded-wait-v1.",
+        "a version advertising larkin-pi-subagents-bounded-wait-v1 and larkin-pi-supervised-command-v1.",
       );
     }
     return null;

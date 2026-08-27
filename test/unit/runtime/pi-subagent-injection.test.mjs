@@ -174,7 +174,7 @@ test("resolvePiSubagentExtensionArg accepts a user extension with the bounded ca
     fsMod.writeFileSync(pathMod.join(packageDir, "package.json"),
       JSON.stringify({ pi: { extensions: ["./src/index.ts"] } }));
     fsMod.writeFileSync(pathMod.join(packageDir, "src", "index.ts"),
-      "larkin-pi-subagents-bounded-wait-v1");
+      "larkin-pi-subagents-bounded-wait-v1\nlarkin-pi-supervised-command-v1");
     fsMod.writeFileSync(pathMod.join(packageDir, "dist", "index.js"), "upstream build");
     const decision = resolvePiSubagentExtensionArg(
       { distribution: "external", piCommand: "pi", env: { PI_CODING_AGENT_DIR: agentDir } },

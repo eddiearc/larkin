@@ -40,7 +40,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..a9c5cdfeeb4a58fc7fef346e8bc9add7
              // which, with a custom cwd, was created from that target). Config stays
              // with the parent project when a caller-supplied cwd is in play; it must
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d5798ffe43b8431512fedc26f270243c05ae7d8f 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d2d4f91fb7a23f025a597d139b15032c1f0d6ba0 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
 @@ -1,9 +1,10 @@
@@ -55,19 +55,16 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d5798ffe43b8431512fedc26f270243c
  import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
  import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
  import { buildParentContext, extractText } from "./context.js";
-@@ -483,7 +484,19 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -483,7 +484,16 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -    const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
 +    const supervisedPath = options.allowSupervisedCommands === true ? (() => {
-+        try {
-+            const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
-+            return existsSync(sibling) ? sibling : undefined;
-+        }
-+        catch {
-+            return undefined;
-+        }
++        const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++        if (!existsSync(sibling))
++            throw new Error("supervised command bundle is missing");
++        return sibling;
 +    })() : undefined;
 +    const additionalExtensionPaths = [
 +        ...(extensionsSpec?.paths ?? []),
@@ -76,7 +73,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d5798ffe43b8431512fedc26f270243c
      // Pre-filter discovered set, captured by the override — the exclude-typo warning
      // must compare against this, not the surviving set (absence from survivors is
      // an exclude *succeeding*).
-@@ -506,7 +519,7 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -506,7 +516,7 @@ export async function runAgent(ctx, type, prompt, options) {
          cwd: configCwd,
          agentDir,
          noExtensions,
@@ -86,10 +83,10 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d5798ffe43b8431512fedc26f270243c
          noSkills,
          noPromptTemplates: true,
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631babbc61a 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..d2854bb58486e3f7c9f8e317ce74acdc516a1c92 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -69,6 +69,44 @@ function abortable(promise, signal) {
+@@ -69,6 +69,45 @@ function abortable(promise, signal) {
          });
      });
  }
@@ -131,10 +128,11 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
 +    return (await waitWithDeadline(record.promise, remainingMs, signal)).timedOut;
 +}
 +const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
++const LARKIN_SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
  export function renderRunningAgentStatus(frame, statsText, activity, theme) {
      const container = new Container();
      container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-@@ -280,9 +318,14 @@ export default function (pi) {
+@@ -280,9 +319,14 @@ export default function (pi) {
      // before they reach pi.sendMessage (fire-and-forget).
      const pendingNudges = new Map();
      const NUDGE_HOLD_MS = 200;
@@ -150,7 +148,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
      function scheduleNudge(key, send, delay = NUDGE_HOLD_MS) {
          cancelNudge(key);
          pendingNudges.set(key, setTimeout(() => {
-@@ -378,6 +421,7 @@ export default function (pi) {
+@@ -378,6 +422,7 @@ export default function (pi) {
          };
      }
      // Background completion: route through group join or send individual nudge
@@ -158,7 +156,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
      const manager = new AgentManager((record) => {
          // Emit lifecycle event based on terminal status
          const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-@@ -432,7 +476,7 @@ export default function (pi) {
+@@ -432,7 +477,7 @@ export default function (pi) {
              tokensBefore: info.tokensBefore,
              compactionCount: record.compactionCount,
          });
@@ -167,7 +165,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
      // Expose manager via Symbol.for() global registry for cross-package access.
      // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
      //
-@@ -1124,6 +1168,7 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1124,6 +1169,7 @@ Terse command-style prompts produce shallow, generic work.
                          inheritContext,
                          thinkingLevel: thinking,
                          isBackground: true,
@@ -175,7 +173,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
                          isolation,
                          invocation: agentInvocation,
                          ...bgCallbacks,
-@@ -1293,6 +1338,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1293,6 +1339,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -185,7 +183,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1355,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1356,15 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
@@ -206,7 +204,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1378,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1379,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -273,7 +271,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..5dd075b46fb28ef792a7773b1e3a7d24
        // which, with a custom cwd, was created from that target). Config stays
        // with the parent project when a caller-supplied cwd is in play; it must
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..3204a01ab82a9d72768285924fedf3cb4b177a2d 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..6e363608145703c49df35ce0d6e6c8eff93a1e0e 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
 @@ -2,9 +2,10 @@
@@ -297,18 +295,15 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..3204a01ab82a9d72768285924fedf3cb
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -612,7 +615,18 @@ export async function runAgent(
+@@ -612,7 +615,15 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
 +  const supervisedPath = options.allowSupervisedCommands === true ? (() => {
-+    try {
-+      const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
-+      return existsSync(sibling) ? sibling : undefined;
-+    } catch {
-+      return undefined;
-+    }
++    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++    if (!existsSync(sibling)) throw new Error("supervised command bundle is missing");
++    return sibling;
 +  })() : undefined;
 +  const additionalExtensionPaths = [
 +    ...(extensionsSpec?.paths ?? []),
@@ -317,7 +312,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..3204a01ab82a9d72768285924fedf3cb
    // Pre-filter discovered set, captured by the override — the exclude-typo warning
    // must compare against this, not the surviving set (absence from survivors is
    // an exclude *succeeding*).
-@@ -636,7 +650,7 @@ export async function runAgent(
+@@ -636,7 +647,7 @@ export async function runAgent(
      cwd: configCwd,
      agentDir,
      noExtensions,
@@ -327,10 +322,10 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..3204a01ab82a9d72768285924fedf3cb
      noSkills,
      noPromptTemplates: true,
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d61748166d36 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..008c346c19d13e7119695526dfa33c6ea0744a28 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -91,6 +91,54 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+@@ -91,6 +91,55 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
    });
  }
  
@@ -381,11 +376,12 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
 +}
 +
 +export const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
++export const LARKIN_SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
 +
  export function renderRunningAgentStatus(
    frame: string,
    statsText: string,
-@@ -330,10 +378,14 @@ export default function (pi: ExtensionAPI) {
+@@ -330,10 +379,14 @@ export default function (pi: ExtensionAPI) {
    // before they reach pi.sendMessage (fire-and-forget).
    const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
    const NUDGE_HOLD_MS = 200;
@@ -402,7 +398,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
    function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
      cancelNudge(key);
      pendingNudges.set(key, setTimeout(() => {
-@@ -433,6 +485,7 @@ export default function (pi: ExtensionAPI) {
+@@ -433,6 +486,7 @@ export default function (pi: ExtensionAPI) {
    }
  
    // Background completion: route through group join or send individual nudge
@@ -410,7 +406,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
    const manager = new AgentManager((record) => {
      // Emit lifecycle event based on terminal status
      const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-@@ -490,7 +543,7 @@ export default function (pi: ExtensionAPI) {
+@@ -490,7 +544,7 @@ export default function (pi: ExtensionAPI) {
        tokensBefore: info.tokensBefore,
        compactionCount: record.compactionCount,
      });
@@ -419,7 +415,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
  
    // Expose manager via Symbol.for() global registry for cross-package access.
    // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-@@ -1259,6 +1312,7 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1259,6 +1313,7 @@ Terse command-style prompts produce shallow, generic work.
              inheritContext,
              thinkingLevel: thinking,
              isBackground: true,
@@ -427,7 +423,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
              isolation,
              invocation: agentInvocation,
              ...bgCallbacks,
-@@ -1453,6 +1507,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1453,6 +1508,11 @@ Terse command-style prompts produce shallow, generic work.
            description: "If true, wait for the agent to complete before returning. Default: false.",
          }),
        ),
@@ -439,7 +435,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
        verbose: Type.Optional(
          Type.Boolean({
            description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-@@ -1470,14 +1529,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1470,14 +1530,15 @@ Terse command-style prompts produce shallow, generic work.
        // completion notification can still be delivered.
        // Queued agents have no promise yet (it's created when the queue starts
        // them), so poll until they leave the queue, then await like a running one.
@@ -462,7 +458,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d617
        }
  
        const displayName = getDisplayName(record.type);
-@@ -1492,11 +1552,13 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1492,11 +1553,13 @@ Terse command-style prompts produce shallow, generic work.
  
        let output =
          `Agent: ${record.id}\n` +

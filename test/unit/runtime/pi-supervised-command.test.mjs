@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { afterAll, test } from "bun:test";
 import {
   cancelSupervisedCommand,
+  resolveSupervisedCwd,
   startSupervisedCommand,
   waitSupervisedCommand,
 } from "../../../src/runtime/pi-supervised-command.ts";
@@ -18,6 +18,7 @@ test("supervised start+wait keeps pid and does not kill on wait timeout", async 
     owner,
     executable: process.execPath,
     args: ["-e", "setTimeout(() => {}, 4000)"],
+    cwd: process.cwd(),
   });
   assert.ok(started.handle);
   assert.ok(started.pid > 0);
@@ -28,8 +29,9 @@ test("supervised start+wait keeps pid and does not kill on wait timeout", async 
   assert.equal(second.pid, started.pid);
   const cancelled = await cancelSupervisedCommand(owner, started.handle);
   assert.ok(cancelled.status === "killed" || cancelled.status === "exited");
-  const leftover = spawnSync("ps", ["-p", String(started.pid)], { encoding: "utf8" });
-  assert.ok(!/node/.test(leftover.stdout || "") || leftover.status !== 0);
+  let alive = true;
+  try { process.kill(started.pid, 0); } catch { alive = false; }
+  assert.equal(alive, false);
 });
 
 test("sibling owner cannot wait on another session handle", async () => {
@@ -38,9 +40,14 @@ test("sibling owner cannot wait on another session handle", async () => {
     owner,
     executable: process.execPath,
     args: ["-e", "setTimeout(() => {}, 2000)"],
+    cwd: process.cwd(),
   });
   await assert.rejects(waitSupervisedCommand({}, started.handle, 1), /not found/);
   await cancelSupervisedCommand(owner, started.handle);
+});
+
+test("supervised cwd cannot escape the session root", () => {
+  assert.throws(() => resolveSupervisedCwd(process.cwd(), ".."), /escapes|symlink/);
 });
 
 test("wait above the 60s cap is rejected even when env is raised", async () => {
@@ -49,6 +56,7 @@ test("wait above the 60s cap is rejected even when env is raised", async () => {
     owner,
     executable: process.execPath,
     args: ["-e", "setTimeout(() => {}, 500)"],
+    cwd: process.cwd(),
   });
   await assert.rejects(waitSupervisedCommand(owner, started.handle, 61), /exceeds the \d+s supervised wait limit/);
   await cancelSupervisedCommand(owner, started.handle);

@@ -2,11 +2,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   cancelSupervisedCommand,
+  LARKIN_SUPERVISED_COMMAND_CAPABILITY,
   reapSupervisedCommands,
+  resolveSupervisedCwd,
   startSupervisedCommand,
   supervisedWaitSeconds,
   waitSupervisedCommand,
 } from "./pi-supervised-command.js";
+void LARKIN_SUPERVISED_COMMAND_CAPABILITY;
 
 function ownerOf(ctx: { sessionManager?: object } | undefined): object {
   const owner = ctx?.sessionManager;
@@ -28,12 +31,16 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({
       executable: Type.String({ description: "Executable path or name. No shell." }),
       args: Type.Array(Type.String(), { description: "Argument vector. No shell metacharacters are interpreted." }),
+      cwd: Type.Optional(Type.String({ description: "Optional cwd inside the child session root. Symlinks and path escape are rejected." })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const session = ctx as { sessionManager?: object; cwd?: string };
+      const root = typeof session.cwd === "string" && session.cwd.length > 0 ? session.cwd : process.cwd();
       const started = startSupervisedCommand({
-        owner: ownerOf(ctx as { sessionManager?: object }),
+        owner: ownerOf(session),
         executable: params.executable,
         args: params.args ?? [],
+        cwd: resolveSupervisedCwd(root, params.cwd),
       });
       return { content: [{ type: "text", text: JSON.stringify(started) }], details: started };
     },

@@ -1,8 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 export const DEFAULT_WAIT_SECONDS = 60;
 export const DEFAULT_LIFE_SECONDS = 600;
+export const LARKIN_SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
 const MAX_STREAM_BYTES = 64 * 1024;
 
 export function supervisedWaitSeconds(): number {
@@ -17,9 +20,27 @@ export function supervisedLifeSeconds(): number {
   return DEFAULT_LIFE_SECONDS;
 }
 
-function killProcessTree(pid: number): void {
+export function resolveSupervisedCwd(root: string, requested?: string): string {
+  if (typeof root !== "string" || root.length === 0) throw new Error("supervised cwd root is required");
+  const base = fs.realpathSync(root);
+  const target = requested && requested.length > 0 ? path.resolve(base, requested) : base;
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink()) throw new Error("supervised cwd must not be a symlink");
+  const real = fs.realpathSync(target);
+  const prefix = base.endsWith(path.sep) ? base : base + path.sep;
+  if (real !== base && !real.startsWith(prefix)) throw new Error("supervised cwd escapes the session root");
+  if (!fs.statSync(real).isDirectory()) throw new Error("supervised cwd is not a directory");
+  return real;
+}
+
+async function killProcessTree(pid: number): Promise<void> {
   if (process.platform === "win32") {
-    spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+    await new Promise<void>((resolve) => {
+      const child = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+      const done = () => resolve();
+      child.once("exit", done);
+      child.once("error", done);
+    });
     return;
   }
   try { process.kill(-pid, "SIGKILL"); }
@@ -32,9 +53,10 @@ class ByteCursor {
   private chunks: Buffer[] = [];
   private dropped = 0;
   write(chunk: Buffer): void {
-    this.chunks.push(chunk);
+    let data = chunk.length > MAX_STREAM_BYTES ? chunk.subarray(chunk.length - MAX_STREAM_BYTES) : chunk;
+    this.chunks.push(data);
     let total = this.chunks.reduce((n, c) => n + c.length, 0);
-    while (total > MAX_STREAM_BYTES && this.chunks.length > 1) {
+    while (total > MAX_STREAM_BYTES && this.chunks.length) {
       const gone = this.chunks.shift();
       if (!gone) break;
       this.dropped += gone.length;
@@ -80,6 +102,8 @@ interface HandleRecord {
   exitCode: number | null;
   terminalConsumed: boolean;
   exitWaiters: Array<() => void>;
+  lifetimeTimer?: ReturnType<typeof setTimeout>;
+  chain: Promise<void>;
 }
 
 const handles = new Map<string, HandleRecord>();
@@ -89,11 +113,23 @@ function notify(record: HandleRecord): void {
   for (const wake of waiters) wake();
 }
 
+function finish(record: HandleRecord, status: HandleRecord["status"], exitCode: number | null): void {
+  if (record.lifetimeTimer) {
+    clearTimeout(record.lifetimeTimer);
+    record.lifetimeTimer = undefined;
+  }
+  if (record.status === "running") {
+    record.status = status;
+    record.exitCode = exitCode;
+  }
+  notify(record);
+}
+
 export function startSupervisedCommand(input: {
   owner: object;
   executable: string;
   args: string[];
-  cwd?: string;
+  cwd: string;
 }): { handle: string; pid: number } {
   if (typeof input.executable !== "string" || input.executable.length === 0) {
     throw new Error("executable must be a non-empty string");
@@ -101,8 +137,9 @@ export function startSupervisedCommand(input: {
   if (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string")) {
     throw new Error("args must be a string array");
   }
+  const cwd = resolveSupervisedCwd(input.cwd);
   const child = spawn(input.executable, input.args, {
-    cwd: input.cwd,
+    cwd,
     shell: false,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
@@ -125,26 +162,22 @@ export function startSupervisedCommand(input: {
     exitCode: null,
     terminalConsumed: false,
     exitWaiters: [],
+    chain: Promise.resolve(),
   };
   child.stdout?.on("data", (chunk: Buffer) => record.stdout.write(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk: Buffer) => record.stderr.write(Buffer.from(chunk)));
   child.once("exit", (code) => {
-    if (record.status === "running") {
-      record.status = "exited";
-      record.exitCode = code;
-    }
-    notify(record);
+    void killProcessTree(record.pid).finally(() => finish(record, "exited", code));
   });
   child.once("error", () => {
-    if (record.status === "running") record.status = "killed";
-    notify(record);
+    void killProcessTree(record.pid).finally(() => finish(record, "killed", null));
   });
-  const lifetime = setTimeout(() => {
+  record.lifetimeTimer = setTimeout(() => {
     if (record.status !== "running") return;
     record.status = "lifetime_exceeded";
-    killProcessTree(record.pid);
+    void killProcessTree(record.pid);
   }, supervisedLifeSeconds() * 1000);
-  lifetime.unref?.();
+  record.lifetimeTimer.unref?.();
   handles.set(id, record);
   return { handle: id, pid: record.pid };
 }
@@ -173,47 +206,72 @@ function requireHandle(owner: object, handle: string): HandleRecord {
   return record;
 }
 
+function enqueue(record: HandleRecord, work: () => Promise<SupervisedSnapshot>): Promise<SupervisedSnapshot> {
+  const next = record.chain.then(work, work);
+  record.chain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
 export async function waitSupervisedCommand(owner: object, handle: string, timeoutSeconds?: number): Promise<SupervisedSnapshot> {
   const record = requireHandle(owner, handle);
-  const cap = supervisedWaitSeconds();
-  const requested = typeof timeoutSeconds === "number" && timeoutSeconds > 0 ? timeoutSeconds : cap;
-  if (requested > cap) throw new Error(`wait timeout:${requested} exceeds the ${cap}s supervised wait limit`);
-  const remainingLife = Math.max(0, record.deadlineAt - Date.now());
-  const waitMs = Math.min(requested * 1000, remainingLife, cap * 1000);
-  if (record.status === "running" && waitMs > 0) {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, waitMs);
-      record.exitWaiters.push(() => {
-        clearTimeout(timer);
-        resolve();
+  return enqueue(record, async () => {
+    const cap = supervisedWaitSeconds();
+    const requested = typeof timeoutSeconds === "number" && timeoutSeconds > 0 ? timeoutSeconds : cap;
+    if (requested > cap) throw new Error(`wait timeout:${requested} exceeds the ${cap}s supervised wait limit`);
+    const remainingLife = Math.max(0, record.deadlineAt - Date.now());
+    const waitMs = Math.min(requested * 1000, remainingLife, cap * 1000);
+    if (record.status === "running" && waitMs > 0) {
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finishWait = () => {
+          if (done) return;
+          done = true;
+          record.exitWaiters = record.exitWaiters.filter((item) => item !== finishWait);
+          resolve();
+        };
+        const timer = setTimeout(finishWait, waitMs);
+        record.exitWaiters.push(() => {
+          clearTimeout(timer);
+          finishWait();
+        });
       });
-    });
-  }
-  if (record.status !== "running" && record.terminalConsumed) {
-    throw new Error("supervised terminal result already consumed");
-  }
-  const result = snapshot(record);
-  if (result.status !== "running") record.terminalConsumed = true;
-  return result;
+    }
+    if (record.status !== "running" && record.terminalConsumed) {
+      throw new Error("supervised terminal result already consumed");
+    }
+    const result = snapshot(record);
+    if (result.status !== "running") {
+      record.terminalConsumed = true;
+      handles.delete(record.id);
+    }
+    return result;
+  });
 }
 
 export async function cancelSupervisedCommand(owner: object, handle: string): Promise<SupervisedSnapshot> {
   const record = requireHandle(owner, handle);
-  if (record.status === "running") {
-    record.status = "killed";
-    killProcessTree(record.pid);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 1000);
-      record.exitWaiters.push(() => {
-        clearTimeout(timer);
-        resolve();
+  return enqueue(record, async () => {
+    if (record.status === "running") {
+      record.status = "killed";
+      await killProcessTree(record.pid);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1000);
+        record.exitWaiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
-    });
-  }
-  if (record.terminalConsumed) throw new Error("supervised terminal result already consumed");
-  const result = snapshot(record);
-  record.terminalConsumed = true;
-  return result;
+    }
+    if (record.terminalConsumed) throw new Error("supervised terminal result already consumed");
+    const result = snapshot(record);
+    record.terminalConsumed = true;
+    if (record.lifetimeTimer) {
+      clearTimeout(record.lifetimeTimer);
+      record.lifetimeTimer = undefined;
+    }
+    handles.delete(record.id);
+    return result;
+  });
 }
 
 export async function reapSupervisedCommands(owner: object): Promise<void> {
@@ -221,6 +279,8 @@ export async function reapSupervisedCommands(owner: object): Promise<void> {
   await Promise.all(owned.map(async (record) => {
     try { await cancelSupervisedCommand(owner, record.id); }
     catch { /* already consumed or gone */ }
+    if (record.lifetimeTimer) clearTimeout(record.lifetimeTimer);
+    await killProcessTree(record.pid);
     handles.delete(record.id);
   }));
 }

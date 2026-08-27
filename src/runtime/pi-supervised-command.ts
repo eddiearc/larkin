@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -51,29 +51,55 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+function listDescendantPids(root: number): number[] {
+  if (process.platform === "win32") return [];
+  const found = new Set<number>();
+  const queue = [root];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (current === undefined) break;
+    const listed = spawnSync("pgrep", ["-P", String(current)], { encoding: "utf8" });
+    if (listed.status !== 0 || !listed.stdout) continue;
+    for (const line of listed.stdout.split(/\s+/)) {
+      const child = Number.parseInt(line, 10);
+      if (!Number.isInteger(child) || child <= 0 || found.has(child) || child === root) continue;
+      found.add(child);
+      queue.push(child);
+    }
+  }
+  return [...found];
+}
+
 async function killProcessTree(pid: number): Promise<void> {
-  if (!pidAlive(pid)) return;
+  const descendants = listDescendantPids(pid);
   if (process.platform === "win32") {
-    await new Promise<void>((resolve) => {
+    const result = await new Promise<{ status: number | null; error?: Error }>((resolve) => {
       const child = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
-      const done = () => resolve();
-      child.once("exit", done);
-      child.once("error", done);
+      child.once("error", (error) => resolve({ status: null, error }));
+      child.once("exit", (status) => resolve({ status }));
     });
+    if (result.error && pidAlive(pid)) throw result.error;
   } else {
+    for (const child of [...descendants].reverse()) {
+      try { process.kill(child, "SIGKILL"); } catch { /* already dead */ }
+    }
     try { process.kill(-pid, "SIGKILL"); }
     catch {
       try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
     }
   }
   const started = Date.now();
-  while (pidAlive(pid) && Date.now() - started < 2000) {
+  const pending = () => pidAlive(pid) || descendants.some((child) => pidAlive(child));
+  while (pending() && Date.now() - started < 2000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
     if (process.platform !== "win32") {
+      for (const child of descendants) {
+        try { process.kill(child, "SIGKILL"); } catch { /* already dead */ }
+      }
       try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
     }
   }
-  if (pidAlive(pid)) throw new Error(`supervised process ${pid} still alive`);
+  if (pending()) throw new Error(`supervised process tree ${pid} still alive`);
 }
 
 class ByteCursor {
@@ -235,24 +261,22 @@ export function startSupervisedCommand(input: {
   child.stdout?.on("data", (chunk: Buffer) => record.stdout.write(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk: Buffer) => record.stderr.write(Buffer.from(chunk)));
   child.once("exit", (code) => {
-    void record.chain.then(() => killProcessTree(record.pid)).then(
-      () => finish(record, "exited", code),
-      () => finish(record, "exited", code),
-    );
+    void record.chain.then(async () => {
+      await killProcessTree(record.pid);
+      finish(record, "exited", code);
+    });
   });
   child.once("error", () => {
-    void record.chain.then(() => killProcessTree(record.pid)).then(
-      () => finish(record, "killed", null),
-      () => finish(record, "killed", null),
-    );
+    void record.chain.then(async () => {
+      await killProcessTree(record.pid);
+      finish(record, "killed", null);
+    });
   });
   record.lifetimeTimer = setTimeout(() => {
     void record.chain.then(async () => {
       if (record.status !== "running") return;
       await killProcessTree(record.pid);
       finish(record, "lifetime_exceeded", null);
-    }).catch(() => {
-      if (record.status === "running") finish(record, "lifetime_exceeded", null);
     });
   }, supervisedLifeSeconds() * 1000);
   record.lifetimeTimer.unref?.();
@@ -336,8 +360,8 @@ export async function cancelSupervisedCommand(owner: object, handle: string): Pr
   record.cancelRequested = true;
   notify(record);
   if (record.status === "running") {
-    record.status = "killed";
     await killProcessTree(record.pid);
+    record.status = "killed";
   }
   if (record.lifetimeTimer) {
     clearTimeout(record.lifetimeTimer);
@@ -357,11 +381,14 @@ export async function reapSupervisedCommands(owner: object): Promise<void> {
     if (remembered.owner === owner) terminals.delete(id);
   }
   const owned = [...handles.values()].filter((record) => record.owner === owner);
+  const errors: unknown[] = [];
   await Promise.all(owned.map(async (record) => {
     try { await cancelSupervisedCommand(owner, record.id); }
-    catch { /* already consumed or gone */ }
+    catch (error) { errors.push(error); }
     if (record.lifetimeTimer) clearTimeout(record.lifetimeTimer);
-    await killProcessTree(record.pid);
+    try { await killProcessTree(record.pid); }
+    catch (error) { errors.push(error); }
     handles.delete(record.id);
   }));
+  if (errors.length > 0) throw errors[0];
 }

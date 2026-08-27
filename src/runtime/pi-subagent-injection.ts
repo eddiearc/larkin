@@ -25,6 +25,39 @@ declare global {
  * 把 embedded bundle 落盘到 <configDir>/providers/pi/extensions/pi-subagents.bundle.js（0700/0600）。
  * 无 embedded 资产或 configDir 缺失时返回 null。
  */
+function rejectSymlinkPath(target: string): void {
+  let current = path.resolve(target);
+  for (;;) {
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error("bundle path must not contain a symlink");
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+}
+
+type BundleBackup = { content: Buffer; mode: number } | null;
+
+function backupRegularFile(target: string): BundleBackup {
+  if (!fs.existsSync(target)) return null;
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink()) throw new Error("bundle target must not be a symlink");
+  return { content: fs.readFileSync(target), mode: stat.mode & 0o777 };
+}
+
+function restoreRegularFile(target: string, backup: BundleBackup): void {
+  if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) {
+    throw new Error("bundle target must not be a symlink");
+  }
+  if (!backup) {
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+    return;
+  }
+  fs.writeFileSync(target, backup.content, { mode: backup.mode });
+  fs.chmodSync(target, backup.mode);
+}
+
 export function materializeEmbeddedPiSubagentBundle(configDir: string | undefined): string | null {
   const embedded = globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__;
   const supervised = globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
@@ -33,31 +66,39 @@ export function materializeEmbeddedPiSubagentBundle(configDir: string | undefine
   const dir = path.join(path.resolve(configDir), "providers", "pi", "extensions");
   const subTarget = path.join(dir, "pi-subagents.bundle.js");
   const supTarget = path.join(dir, "pi-supervised-command.bundle.js");
+  const lockPath = path.join(dir, ".materialize.lock");
+  let lock: number | undefined;
   try {
-    if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("extensions dir must not be a symlink");
+    rejectSymlinkPath(dir);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    rejectSymlinkPath(dir);
     fs.chmodSync(dir, 0o700);
-    const oldSub = fs.existsSync(subTarget) ? fs.readFileSync(subTarget) : null;
-    const oldSup = fs.existsSync(supTarget) ? fs.readFileSync(supTarget) : null;
+    lock = fs.openSync(lockPath, "wx", 0o600);
+    const oldSub = backupRegularFile(subTarget);
+    const oldSup = backupRegularFile(supTarget);
     try {
       writePrivateBundle(dir, "pi-subagents.bundle.js", embedded);
       writePrivateBundle(dir, "pi-supervised-command.bundle.js", supervised);
       return subTarget;
     } catch (error) {
-      if (oldSub) fs.writeFileSync(subTarget, oldSub, { mode: 0o600 });
-      else if (fs.existsSync(subTarget)) fs.unlinkSync(subTarget);
-      if (oldSup) fs.writeFileSync(supTarget, oldSup, { mode: 0o600 });
-      else if (fs.existsSync(supTarget)) fs.unlinkSync(supTarget);
+      restoreRegularFile(subTarget, oldSub);
+      restoreRegularFile(supTarget, oldSup);
       throw error;
     }
   } catch (error) {
     if (error instanceof Error && error.message.includes("supervised command bundle is missing")) throw error;
     return null;
+  } finally {
+    if (lock !== undefined) {
+      try { fs.closeSync(lock); } catch { /* ignore */ }
+      try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+    }
   }
 }
 
 function writePrivateBundle(dir: string, name: string, embedded: string): string {
   const target = path.join(dir, name);
+  rejectSymlinkPath(target);
   if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) {
     throw new Error("bundle target must not be a symlink");
   }

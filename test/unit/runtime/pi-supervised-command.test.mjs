@@ -103,6 +103,26 @@ test("supervised cwd cannot escape the session root", () => {
   assert.throws(() => resolveSupervisedCwd(process.cwd(), ".."), /escapes|symlink/);
 });
 
+test("cancel reaps non-detached descendants before returning", async () => {
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'ignore'}); process.stdout.write(String(child.pid)); setTimeout(()=>{},30000);"],
+    cwd: process.cwd(),
+  });
+  const first = await waitSupervisedCommand(owner, started.handle, 1);
+  const childPid = Number.parseInt(first.stdout, 10);
+  assert.ok(childPid > 0);
+  await cancelSupervisedCommand(owner, started.handle);
+  let leaderAlive = true;
+  let childAlive = true;
+  try { process.kill(started.pid, 0); } catch { leaderAlive = false; }
+  try { process.kill(childPid, 0); } catch { childAlive = false; }
+  assert.equal(leaderAlive, false);
+  assert.equal(childAlive, false);
+});
+
 test("reap returns only after the pid is gone", async () => {
   const owner = {};
   const started = startSupervisedCommand({

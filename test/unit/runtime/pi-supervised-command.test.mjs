@@ -46,6 +46,24 @@ test("sibling owner cannot wait on another session handle", async () => {
   await cancelSupervisedCommand(owner, started.handle);
 });
 
+test("cancel interrupts an in-flight wait", async () => {
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 5000)"],
+    cwd: process.cwd(),
+  });
+  const pending = waitSupervisedCommand(owner, started.handle, 1);
+  await cancelSupervisedCommand(owner, started.handle).catch((error) => {
+    assert.match(String(error), /consumed|not found|killed/i);
+  });
+  await pending.catch(() => {});
+  let alive = true;
+  try { process.kill(started.pid, 0); } catch { alive = false; }
+  assert.equal(alive, false);
+});
+
 test("supervised cwd cannot escape the session root", () => {
   assert.throws(() => resolveSupervisedCwd(process.cwd(), ".."), /escapes|symlink/);
 });

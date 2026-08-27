@@ -40,7 +40,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..a9c5cdfeeb4a58fc7fef346e8bc9add7
              // which, with a custom cwd, was created from that target). Config stays
              // with the parent project when a caller-supplied cwd is in play; it must
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d2d4f91fb7a23f025a597d139b15032c1f0d6ba0 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..19e8ae0c897d5514d82b7d287ae25c883d25e9ea 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
 @@ -1,9 +1,10 @@
@@ -55,12 +55,16 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d2d4f91fb7a23f025a597d139b15032c
  import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
  import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
  import { buildParentContext, extractText } from "./context.js";
-@@ -483,7 +484,16 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -483,7 +484,20 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -    const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
 +    const supervisedPath = options.allowSupervisedCommands === true ? (() => {
++        const key = Symbol.for("larkin-pi-supervised-command-bundle");
++        const fromGlobal = globalThis[key];
++        if (typeof fromGlobal === "string" && existsSync(fromGlobal))
++            return fromGlobal;
 +        const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
 +        if (!existsSync(sibling))
 +            throw new Error("supervised command bundle is missing");
@@ -73,7 +77,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d2d4f91fb7a23f025a597d139b15032c
      // Pre-filter discovered set, captured by the override — the exclude-typo warning
      // must compare against this, not the surviving set (absence from survivors is
      // an exclude *succeeding*).
-@@ -506,7 +516,7 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -506,7 +520,7 @@ export async function runAgent(ctx, type, prompt, options) {
          cwd: configCwd,
          agentDir,
          noExtensions,
@@ -221,7 +225,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d2854bb58486e3f7c9f8e317ce74acdc
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/agent-manager.ts b/src/agent-manager.ts
-index 318f88588a05aa1459e7c86288aa886ea85a28b1..5dd075b46fb28ef792a7773b1e3a7d24e42df4a6 100644
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..1945d9b5fb51ad6852493b029c2fafd65331d156 100644
 --- a/src/agent-manager.ts
 +++ b/src/agent-manager.ts
 @@ -113,16 +113,21 @@ export class AgentManager {
@@ -246,7 +250,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..5dd075b46fb28ef792a7773b1e3a7d24
      // Cleanup completed agents after 10 minutes (but keep sessions for resume)
      this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
      this.cleanupInterval.unref();
-@@ -154,8 +159,15 @@ export class AgentManager {
+@@ -154,8 +159,16 @@ export class AgentManager {
      // call, not minutes later at drain. Throw (not warn): programmatic callers
      // can fix and retry; the RPC layer converts throws into error envelopes.
      assertValidSpawnCwd(options.cwd);
@@ -259,10 +263,19 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..5dd075b46fb28ef792a7773b1e3a7d24
  
      const id = randomUUID().slice(0, 17);
 +    if (allowSupervised) this.supervisedById.set(id, true);
++    else this.supervisedById.delete(id);
      const abortController = new AbortController();
      const record: AgentRecord = {
        id,
-@@ -252,6 +264,7 @@ export class AgentManager {
+@@ -190,6 +203,7 @@ export class AgentManager {
+     try {
+       this.startAgent(id, record, args);
+     } catch (err) {
++      this.supervisedById.delete(id);
+       this.agents.delete(id);
+       throw err;
+     }
+@@ -252,6 +266,7 @@ export class AgentManager {
        isolated: options.isolated,
        inheritContext: options.inheritContext,
        thinkingLevel: options.thinkingLevel,
@@ -270,8 +283,87 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..5dd075b46fb28ef792a7773b1e3a7d24
        // Worktree wins for the working dir (the agent must run in the copy —
        // which, with a custom cwd, was created from that target). Config stays
        // with the parent project when a caller-supplied cwd is in play; it must
+@@ -305,6 +320,7 @@ export class AgentManager {
+         record.result = responseText;
+         record.session = session;
+         record.completedAt ??= Date.now();
++        this.supervisedById.delete(id);
+ 
+         detach();
+ 
+@@ -525,18 +541,24 @@ export class AgentManager {
+       this.queue = this.queue.filter(q => q.id !== id);
+       record.status = "stopped";
+       record.completedAt = Date.now();
++      this.supervisedById.delete(id);
+       return true;
+     }
+ 
+-    if (record.status !== "running") return false;
++    if (record.status !== "running") {
++      this.supervisedById.delete(id);
++      return false;
++    }
+     record.abortController?.abort();
+     record.status = "stopped";
+     record.completedAt = Date.now();
++    void Promise.resolve(record.promise).finally(() => this.supervisedById.delete(id));
+     return true;
+   }
+ 
+   /** Dispose a record's session and remove it from the map. */
+   private removeRecord(id: string, record: AgentRecord): void {
++    this.supervisedById.delete(id);
+     record.session?.dispose?.();
+     record.session = undefined;
+     this.agents.delete(id);
+@@ -575,24 +597,9 @@ export class AgentManager {
+   /** Abort all running and queued agents immediately. */
+   abortAll(): number {
+     let count = 0;
+-    // Clear queued agents first
+-    for (const queued of this.queue) {
+-      const record = this.agents.get(queued.id);
+-      if (record) {
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
+-        count++;
+-      }
+-    }
+-    this.queue = [];
+-    // Abort running agents
+-    for (const record of this.agents.values()) {
+-      if (record.status === "running") {
+-        record.abortController?.abort();
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
+-        count++;
+-      }
++    const ids = [...this.agents.keys()];
++    for (const id of ids) {
++      if (this.abort(id)) count++;
+     }
+     return count;
+   }
+@@ -614,12 +621,14 @@ export class AgentManager {
+ 
+   dispose() {
+     clearInterval(this.cleanupInterval);
+-    // Clear queue
++    this.abortAll();
+     this.queue = [];
+-    for (const record of this.agents.values()) {
++    for (const [id, record] of this.agents) {
++      this.supervisedById.delete(id);
+       record.session?.dispose();
+     }
+     this.agents.clear();
++    this.supervisedById.clear();
+     // Prune any orphaned git worktrees (crash recovery)
+     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
+     // Also prune repos that caller-supplied cwds created worktrees in — a clean
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..6e363608145703c49df35ce0d6e6c8eff93a1e0e 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..360dae2e9d3c305a22e8aedcf5bda0801f31dd3e 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
 @@ -2,9 +2,10 @@
@@ -295,12 +387,15 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..6e363608145703c49df35ce0d6e6c8ef
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -612,7 +615,15 @@ export async function runAgent(
+@@ -612,7 +615,18 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
 +  const supervisedPath = options.allowSupervisedCommands === true ? (() => {
++    const key = Symbol.for("larkin-pi-supervised-command-bundle");
++    const fromGlobal = (globalThis as Record<symbol, unknown>)[key];
++    if (typeof fromGlobal === "string" && existsSync(fromGlobal)) return fromGlobal;
 +    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
 +    if (!existsSync(sibling)) throw new Error("supervised command bundle is missing");
 +    return sibling;
@@ -312,7 +407,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..6e363608145703c49df35ce0d6e6c8ef
    // Pre-filter discovered set, captured by the override — the exclude-typo warning
    // must compare against this, not the surviving set (absence from survivors is
    // an exclude *succeeding*).
-@@ -636,7 +647,7 @@ export async function runAgent(
+@@ -636,7 +650,7 @@ export async function runAgent(
      cwd: configCwd,
      agentDir,
      noExtensions,

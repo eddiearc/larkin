@@ -33,6 +33,15 @@ export function resolveSupervisedCwd(root: string, requested?: string): string {
   return real;
 }
 
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function killProcessTree(pid: number): Promise<void> {
   if (process.platform === "win32") {
     await new Promise<void>((resolve) => {
@@ -41,11 +50,18 @@ async function killProcessTree(pid: number): Promise<void> {
       child.once("exit", done);
       child.once("error", done);
     });
-    return;
+  } else {
+    try { process.kill(-pid, "SIGKILL"); }
+    catch {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+    }
   }
-  try { process.kill(-pid, "SIGKILL"); }
-  catch {
-    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  const started = Date.now();
+  while (pidAlive(pid) && Date.now() - started < 2000) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (process.platform !== "win32") {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+    }
   }
 }
 
@@ -53,7 +69,11 @@ class ByteCursor {
   private chunks: Buffer[] = [];
   private dropped = 0;
   write(chunk: Buffer): void {
-    let data = chunk.length > MAX_STREAM_BYTES ? chunk.subarray(chunk.length - MAX_STREAM_BYTES) : chunk;
+    let data = chunk;
+    if (chunk.length > MAX_STREAM_BYTES) {
+      this.dropped += chunk.length - MAX_STREAM_BYTES;
+      data = chunk.subarray(chunk.length - MAX_STREAM_BYTES);
+    }
     this.chunks.push(data);
     let total = this.chunks.reduce((n, c) => n + c.length, 0);
     while (total > MAX_STREAM_BYTES && this.chunks.length) {
@@ -101,6 +121,7 @@ interface HandleRecord {
   status: SupervisedSnapshot["status"];
   exitCode: number | null;
   terminalConsumed: boolean;
+  cancelRequested: boolean;
   exitWaiters: Array<() => void>;
   lifetimeTimer?: ReturnType<typeof setTimeout>;
   chain: Promise<void>;
@@ -161,6 +182,7 @@ export function startSupervisedCommand(input: {
     status: "running",
     exitCode: null,
     terminalConsumed: false,
+    cancelRequested: false,
     exitWaiters: [],
     chain: Promise.resolve(),
   };
@@ -175,7 +197,7 @@ export function startSupervisedCommand(input: {
   record.lifetimeTimer = setTimeout(() => {
     if (record.status !== "running") return;
     record.status = "lifetime_exceeded";
-    void killProcessTree(record.pid);
+    void killProcessTree(record.pid).finally(() => notify(record));
   }, supervisedLifeSeconds() * 1000);
   record.lifetimeTimer.unref?.();
   handles.set(id, record);
@@ -250,28 +272,24 @@ export async function waitSupervisedCommand(owner: object, handle: string, timeo
 
 export async function cancelSupervisedCommand(owner: object, handle: string): Promise<SupervisedSnapshot> {
   const record = requireHandle(owner, handle);
-  return enqueue(record, async () => {
-    if (record.status === "running") {
-      record.status = "killed";
-      await killProcessTree(record.pid);
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 1000);
-        record.exitWaiters.push(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
-    }
-    if (record.terminalConsumed) throw new Error("supervised terminal result already consumed");
-    const result = snapshot(record);
-    record.terminalConsumed = true;
-    if (record.lifetimeTimer) {
-      clearTimeout(record.lifetimeTimer);
-      record.lifetimeTimer = undefined;
-    }
+  record.cancelRequested = true;
+  notify(record);
+  if (record.status === "running") {
+    record.status = "killed";
+    await killProcessTree(record.pid);
+  }
+  if (record.lifetimeTimer) {
+    clearTimeout(record.lifetimeTimer);
+    record.lifetimeTimer = undefined;
+  }
+  if (record.terminalConsumed) {
     handles.delete(record.id);
-    return result;
-  });
+    throw new Error("supervised terminal result already consumed");
+  }
+  const result = snapshot(record);
+  record.terminalConsumed = true;
+  handles.delete(record.id);
+  return result;
 }
 
 export async function reapSupervisedCommands(owner: object): Promise<void> {

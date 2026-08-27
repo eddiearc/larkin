@@ -39,7 +39,9 @@ export function materializeEmbeddedPiSubagentBundle(configDir: string | undefine
       fs.renameSync(temporary, target);
       fs.chmodSync(target, 0o600);
     }
-    materializeEmbeddedPiSupervisedCommandBundle(dir);
+    if (globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ && !materializeEmbeddedPiSupervisedCommandBundle(dir)) {
+      throw new Error("supervised command bundle is missing");
+    }
     return target;
   } catch {
     return null;

@@ -1,4 +1,4 @@
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { InlineExtension, MainOptions } from "@earendil-works/pi-coding-agent";
 import bashTimeoutExtension from "./pi-bash-timeout-extension.js";
 import { bundledPiSubagentExtensionPath } from "./pi-subagent-injection.js";
@@ -43,6 +43,12 @@ type PiMain = (args: string[], options?: MainOptions) => Promise<void>;
 
 /** Invoke Pi RPC with Larkin's builtin-only extension factories. */
 export async function invokeBuiltinPiRpc(piMain: PiMain, rest: readonly string[]): Promise<void> {
+  try {
+    const supervised = fileURLToPath(new URL("./pi-supervised-command.bundle.js", import.meta.url));
+    (globalThis as Record<symbol, string>)[Symbol.for("larkin-pi-supervised-command-bundle")] = supervised;
+  } catch {
+    /* child spawn still fail-closes if the bundle is missing */
+  }
   await piMain(["--mode", "rpc", ...rest], {
     extensionFactories: [...BUILTIN_PI_EXTENSION_FACTORIES],
   });

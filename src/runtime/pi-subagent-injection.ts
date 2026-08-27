@@ -33,17 +33,23 @@ export function materializeEmbeddedPiSubagentBundle(configDir: string | undefine
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
-    if (!fs.existsSync(target) || fs.readFileSync(target, "utf8") !== embedded) {
+    const wroteSubagents = !fs.existsSync(target) || fs.readFileSync(target, "utf8") !== embedded;
+    if (wroteSubagents) {
       const temporary = `${target}.${process.pid}.tmp`;
       fs.writeFileSync(temporary, embedded, { mode: 0o600, flag: "wx" });
       fs.renameSync(temporary, target);
       fs.chmodSync(target, 0o600);
     }
-    if (globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ && !materializeEmbeddedPiSupervisedCommandBundle(dir)) {
+    const supervised = materializeEmbeddedPiSupervisedCommandBundle(dir);
+    if (!supervised) {
+      if (wroteSubagents) {
+        try { fs.unlinkSync(target); } catch { /* ignore */ }
+      }
       throw new Error("supervised command bundle is missing");
     }
     return target;
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("supervised command bundle is missing")) throw error;
     return null;
   }
 }

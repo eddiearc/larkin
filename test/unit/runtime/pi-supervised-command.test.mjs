@@ -46,7 +46,24 @@ test("sibling owner cannot wait on another session handle", async () => {
   await cancelSupervisedCommand(owner, started.handle);
 });
 
-test("cancel interrupts an in-flight wait", async () => {
+test("ring buffer keeps the newest 64KiB across two 40KiB chunks", async () => {
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "process.stdout.write('A'.repeat(40000)); process.stdout.write('B'.repeat(40000));"],
+    cwd: process.cwd(),
+  });
+  const done = await waitSupervisedCommand(owner, started.handle, 1);
+  assert.ok(done.status === "exited" || done.status === "running");
+  const text = done.stdout;
+  assert.ok(Buffer.byteLength(text) <= 64 * 1024);
+  assert.ok(text.endsWith("B".repeat(100)));
+  assert.match(text, /A/);
+  await cancelSupervisedCommand(owner, started.handle).catch(() => {});
+});
+
+test("cancel is idempotent after wait consumes the terminal", async () => {
   const owner = {};
   const started = startSupervisedCommand({
     owner,
@@ -59,6 +76,8 @@ test("cancel interrupts an in-flight wait", async () => {
     assert.match(String(error), /consumed|not found|killed/i);
   });
   await pending.catch(() => {});
+  const again = await cancelSupervisedCommand(owner, started.handle);
+  assert.ok(again.status === "killed" || again.status === "exited");
   let alive = true;
   try { process.kill(started.pid, 0); } catch { alive = false; }
   assert.equal(alive, false);

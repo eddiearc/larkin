@@ -22,11 +22,20 @@ export function supervisedLifeSeconds(): number {
 
 export function resolveSupervisedCwd(root: string, requested?: string): string {
   if (typeof root !== "string" || root.length === 0) throw new Error("supervised cwd root is required");
+  if (fs.lstatSync(root).isSymbolicLink()) throw new Error("supervised cwd must not be a symlink");
   const base = fs.realpathSync(root);
   const target = requested && requested.length > 0 ? path.resolve(base, requested) : base;
-  const stat = fs.lstatSync(target);
-  if (stat.isSymbolicLink()) throw new Error("supervised cwd must not be a symlink");
-  const real = fs.realpathSync(target);
+  const relative = path.relative(base, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("supervised cwd escapes the session root");
+  let current = base;
+  if (relative && relative !== ".") {
+    for (const part of relative.split(path.sep)) {
+      if (!part || part === ".") continue;
+      current = path.join(current, part);
+      if (fs.lstatSync(current).isSymbolicLink()) throw new Error("supervised cwd must not be a symlink");
+    }
+  }
+  const real = fs.realpathSync(current);
   const prefix = base.endsWith(path.sep) ? base : base + path.sep;
   if (real !== base && !real.startsWith(prefix)) throw new Error("supervised cwd escapes the session root");
   if (!fs.statSync(real).isDirectory()) throw new Error("supervised cwd is not a directory");
@@ -77,20 +86,30 @@ class ByteCursor {
     this.chunks.push(data);
     let total = this.chunks.reduce((n, c) => n + c.length, 0);
     while (total > MAX_STREAM_BYTES && this.chunks.length) {
-      const gone = this.chunks.shift();
-      if (!gone) break;
-      this.dropped += gone.length;
-      total -= gone.length;
+      const overflow = total - MAX_STREAM_BYTES;
+      const head = this.chunks[0];
+      if (head.length <= overflow) {
+        this.chunks.shift();
+        this.dropped += head.length;
+        total -= head.length;
+      } else {
+        this.chunks[0] = head.subarray(overflow);
+        this.dropped += overflow;
+        total -= overflow;
+      }
     }
   }
   snapshot(cursor: number): { text: string; cursor: number; truncated: boolean } {
     const joined = Buffer.concat(this.chunks);
-    const start = Math.max(0, cursor - this.dropped);
+    let start = Math.max(0, cursor - this.dropped);
+    if (start < joined.length) {
+      while (start < joined.length && (joined[start] & 0b1100_0000) === 0b1000_0000) start++;
+    }
     const slice = joined.subarray(Math.min(start, joined.length));
     return {
       text: slice.toString("utf8"),
       cursor: this.dropped + joined.length,
-      truncated: this.dropped > cursor,
+      truncated: this.dropped > cursor || start > Math.max(0, cursor - this.dropped),
     };
   }
 }
@@ -128,6 +147,7 @@ interface HandleRecord {
 }
 
 const handles = new Map<string, HandleRecord>();
+const terminals = new Map<string, { owner: object; snapshot: SupervisedSnapshot }>();
 
 function notify(record: HandleRecord): void {
   const waiters = record.exitWaiters.splice(0);
@@ -264,6 +284,7 @@ export async function waitSupervisedCommand(owner: object, handle: string, timeo
     const result = snapshot(record);
     if (result.status !== "running") {
       record.terminalConsumed = true;
+      terminals.set(record.id, { owner, snapshot: result });
       handles.delete(record.id);
     }
     return result;
@@ -271,6 +292,8 @@ export async function waitSupervisedCommand(owner: object, handle: string, timeo
 }
 
 export async function cancelSupervisedCommand(owner: object, handle: string): Promise<SupervisedSnapshot> {
+  const remembered = terminals.get(handle);
+  if (remembered && remembered.owner === owner && !handles.has(handle)) return remembered.snapshot;
   const record = requireHandle(owner, handle);
   record.cancelRequested = true;
   notify(record);
@@ -282,12 +305,11 @@ export async function cancelSupervisedCommand(owner: object, handle: string): Pr
     clearTimeout(record.lifetimeTimer);
     record.lifetimeTimer = undefined;
   }
-  if (record.terminalConsumed) {
-    handles.delete(record.id);
-    throw new Error("supervised terminal result already consumed");
-  }
-  const result = snapshot(record);
+  const result = record.terminalConsumed && remembered?.owner === owner
+    ? remembered.snapshot
+    : snapshot(record);
   record.terminalConsumed = true;
+  terminals.set(record.id, { owner, snapshot: result });
   handles.delete(record.id);
   return result;
 }

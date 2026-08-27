@@ -225,7 +225,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d2854bb58486e3f7c9f8e317ce74acdc
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/agent-manager.ts b/src/agent-manager.ts
-index 318f88588a05aa1459e7c86288aa886ea85a28b1..1945d9b5fb51ad6852493b029c2fafd65331d156 100644
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..7ba5fc205bcbb683519b8ba12db7b252ac2a3a4e 100644
 --- a/src/agent-manager.ts
 +++ b/src/agent-manager.ts
 @@ -113,16 +113,21 @@ export class AgentManager {
@@ -291,7 +291,15 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..1945d9b5fb51ad6852493b029c2fafd6
  
          detach();
  
-@@ -525,18 +541,24 @@ export class AgentManager {
+@@ -346,6 +362,7 @@ export class AgentManager {
+         }
+         record.error = err instanceof Error ? err.message : String(err);
+         record.completedAt ??= Date.now();
++        this.supervisedById.delete(id);
+ 
+         detach();
+ 
+@@ -525,18 +542,24 @@ export class AgentManager {
        this.queue = this.queue.filter(q => q.id !== id);
        record.status = "stopped";
        record.completedAt = Date.now();
@@ -317,7 +325,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..1945d9b5fb51ad6852493b029c2fafd6
      record.session?.dispose?.();
      record.session = undefined;
      this.agents.delete(id);
-@@ -575,24 +597,9 @@ export class AgentManager {
+@@ -575,24 +598,9 @@ export class AgentManager {
    /** Abort all running and queued agents immediately. */
    abortAll(): number {
      let count = 0;
@@ -345,7 +353,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..1945d9b5fb51ad6852493b029c2fafd6
      }
      return count;
    }
-@@ -614,12 +621,14 @@ export class AgentManager {
+@@ -614,12 +622,14 @@ export class AgentManager {
  
    dispose() {
      clearInterval(this.cleanupInterval);

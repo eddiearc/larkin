@@ -73,7 +73,9 @@ test("embedded bundle materializes under configDir with private permissions", as
   try {
     const marker = "larkin-embedded-marker-" + Math.random().toString(16).slice(2);
     const previous = globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__;
+    const previousSupervised = globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
     globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ = `console.log("${marker}");`;
+    globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__ = "larkin-pi-supervised-command-v1";
     try {
       const target = materializeEmbeddedPiSubagentBundle(pathMod.join(root, "config"));
       assert.ok(target, "embedded bundle must materialize");
@@ -86,6 +88,7 @@ test("embedded bundle materializes under configDir with private permissions", as
       assert.equal(materializeEmbeddedPiSubagentBundle(pathMod.join(root, "config")), target);
     } finally {
       globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ = previous;
+      globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__ = previousSupervised;
     }
   } finally {
     fsMod.rmSync(root, { recursive: true, force: true });

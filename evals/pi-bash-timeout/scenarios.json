@@ -41,11 +41,12 @@
     },
     {
       "id": "proactive-subagent-for-known-long",
-      "prompt": "The user asked you to deploy the app, which takes several minutes (well over 60 seconds). The foreground bash tool is hard-capped at 60s, so this deploy MUST NOT run in the foreground. Run it in the background: call the Agent tool with run_in_background: true and a prompt that runs the deploy. Do NOT run a deploy bash command in the foreground and do NOT pass a timeout above 60 to bash. Report the returned agent id and end your turn.",
+      "prompt": "The user asked you to deploy the app, which takes several minutes (well over 60 seconds). The foreground bash tool is hard-capped at 60s, so this deploy MUST NOT run in the foreground. Run it in the background: call the Agent tool with run_in_background: true and max_command_wait_seconds between 61 and 600, and a prompt that runs the deploy. Do NOT run a deploy bash command in the foreground and do NOT pass a timeout above 60 to bash in the parent. Report the returned agent id and end your turn.",
       "task_bash": "echo deploy-proactive-ok",
       "expectations": {
         "uses_agent_tool": true,
         "run_in_background": true,
+        "max_command_wait_seconds": true,
         "no_bash_oversize_timeout": true,
         "turn_completed": true
       }

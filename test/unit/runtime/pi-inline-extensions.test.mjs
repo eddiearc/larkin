@@ -7,6 +7,7 @@ import {
   BUILTIN_PI_EXTENSION_FACTORIES,
   invokeBuiltinPiRpc,
 } from "../../../dist/runtime/pi-inline-extensions.mjs";
+import { parseMaxCommandWaitSeconds, setSubagentBashWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
 
 test("builtin Pi RPC receives exactly the three static inline extension factories", async () => {
   let invocation;
@@ -71,65 +72,117 @@ test("record watchdog contains non-ENOENT filesystem errors on sweep", async () 
 
 test("inline bash extension preserves the 60s foreground hard guard", async () => {
   const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  const priorRoot = process.env.LARKIN_PI_ROOT_SESSION_ID;
+  process.env.LARKIN_PI_ROOT_SESSION_ID = "spoof-root";
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  delete process.env.LARKIN_PI_ROOT_SESSION_ID;
   try {
     let bashTool;
     const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({
-      registerTool(tool) { bashTool = tool; },
-      on(event, handler) {
-        if (event === "session_start") handler({ sessionManager: { getSessionId: () => "root-session" } });
-      },
-    });
+    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
     assert.equal(bashTool.name, "bash");
     await assert.rejects(
       bashTool.execute("call-1", { command: "printf should-not-run", timeout: 61 },
-        new AbortController().signal, () => {}, { sessionManager: { getSessionId: () => "root-session" } }),
+        new AbortController().signal, () => {}, { sessionManager: {} }),
       /timeout:61 exceeds the 60s foreground hard limit/,
     );
   } finally {
     if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
     else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
-    if (priorRoot === undefined) delete process.env.LARKIN_PI_ROOT_SESSION_ID;
-    else process.env.LARKIN_PI_ROOT_SESSION_ID = priorRoot;
+    delete process.env.LARKIN_PI_ROOT_SESSION_ID;
   }
 });
 
-test("nested subagent bash may request a bounded wait above 60s", async () => {
+test("authorized nested session bash may wait up to the WeakMap cap", async () => {
   const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  const priorRoot = process.env.LARKIN_PI_ROOT_SESSION_ID;
-  const priorNested = process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS;
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  delete process.env.LARKIN_PI_ROOT_SESSION_ID;
-  delete process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS;
+  const childManager = { getSessionId: () => "child", getSessionFile: () => undefined };
   try {
     let bashTool;
     const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({
-      registerTool(tool) { bashTool = tool; },
-      on(event, handler) {
-        if (event === "session_start") handler({ sessionManager: { getSessionId: () => "root-session" } });
-      },
-    });
-    const nestedCtx = { sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined } };
-    const result = await bashTool.execute("call-nested", { command: "printf nested-ok", timeout: 120 },
+    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
+    setSubagentBashWaitSeconds(childManager, 120);
+    const nestedCtx = { sessionManager: childManager };
+    const result = await bashTool.execute("call-nested", { command: "printf nested-ok", timeout: 90 },
       new AbortController().signal, () => {}, nestedCtx);
     assert.match(JSON.stringify(result), /nested-ok/);
     await assert.rejects(
-      bashTool.execute("call-too-long", { command: "printf should-not-run", timeout: 601 },
+      bashTool.execute("call-too-long", { command: "printf should-not-run", timeout: 121 },
         new AbortController().signal, () => {}, nestedCtx),
-      /timeout:601 exceeds the 600s background-subagent bash limit/,
+      /timeout:121 exceeds the 120s background-subagent bash limit/,
+    );
+    const sibling = {};
+    await assert.rejects(
+      bashTool.execute("call-sibling", { command: "printf should-not-run", timeout: 61 },
+        new AbortController().signal, () => {}, { sessionManager: sibling }),
+      /timeout:61 exceeds the 60s foreground hard limit/,
     );
   } finally {
     if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
     else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
-    if (priorRoot === undefined) delete process.env.LARKIN_PI_ROOT_SESSION_ID;
-    else process.env.LARKIN_PI_ROOT_SESSION_ID = priorRoot;
-    if (priorNested === undefined) delete process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS;
-    else process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS = priorNested;
+  }
+});
+
+test("authorized nested bash abort does not leave a running sleep", async () => {
+  const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  const childManager = { getSessionId: () => "child", getSessionFile: () => undefined };
+  try {
+    let bashTool;
+    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
+    const factory = typeof extension === "function" ? extension : extension.factory;
+    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
+    setSubagentBashWaitSeconds(childManager, 90);
+    const ac = new AbortController();
+    const pending = bashTool.execute("call-abort", { command: "sleep 30", timeout: 90 },
+      ac.signal, () => {}, { sessionManager: childManager });
+    ac.abort();
+    await assert.rejects(pending, /abort/i);
+  } finally {
+    if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+    else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
+  }
+});
+
+test("max_command_wait_seconds parse is fail-closed", () => {
+  assert.equal(parseMaxCommandWaitSeconds(undefined, true), undefined);
+  assert.equal(parseMaxCommandWaitSeconds(90, true), 90);
+  assert.throws(() => parseMaxCommandWaitSeconds(90, false), /run_in_background/);
+  assert.throws(() => parseMaxCommandWaitSeconds(60, true), /61..600/);
+  assert.throws(() => parseMaxCommandWaitSeconds(601, true), /61..600/);
+  assert.throws(() => parseMaxCommandWaitSeconds(90.5, true), /61..600/);
+});
+
+test("background spawn wrap authorizes only that session manager", async () => {
+  const key = Symbol.for("pi-subagents:manager");
+  const prior = globalThis[key];
+  const childManager = { getSessionId: () => "child", getSessionFile: () => undefined };
+  const registry = {
+    spawn(_pi, _ctx, _type, _prompt, options) {
+      options.onSessionCreated?.({ sessionManager: childManager });
+      return "agent-1";
+    },
+  };
+  globalThis[key] = registry;
+  try {
+    let bashTool;
+    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
+    const factory = typeof extension === "function" ? extension : extension.factory;
+    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
+    registry.spawn(null, null, "general-purpose", "go", {
+      isBackground: true,
+      maxCommandWaitSeconds: 90,
+    });
+    const result = await bashTool.execute("from-spawn", { command: "printf spawn-ok", timeout: 61 },
+      new AbortController().signal, () => {}, { sessionManager: childManager });
+    assert.match(JSON.stringify(result), /spawn-ok/);
+    await assert.rejects(
+      bashTool.execute("parent", { command: "printf no", timeout: 61 },
+        new AbortController().signal, () => {}, { sessionManager: {} }),
+      /timeout:61 exceeds the 60s foreground hard limit/,
+    );
+  } finally {
+    if (prior === undefined) delete globalThis[key];
+    else globalThis[key] = prior;
   }
 });

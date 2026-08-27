@@ -20,7 +20,7 @@ export function loadPiBashTimeoutEval(file) {
       if (!scenario.prompt || typeof scenario.prompt !== "string") throw new Error(`scenario ${scenario.id}.prompt required`);
       if (!scenario.task_bash || typeof scenario.task_bash !== "string") throw new Error(`scenario ${scenario.id}.task_bash required`);
       if (!scenario.expectations || typeof scenario.expectations !== "object") throw new Error(`scenario ${scenario.id}.expectations required`);
-      for (const key of ["uses_bash", "uses_agent_tool", "bash_timed_out", "bash_timeout_bounded", "bash_rejected_oversize", "no_bash_oversize_timeout", "steered_to_subagent", "run_in_background", "no_foreground_retry_loop", "turn_completed"]) {
+      for (const key of ["uses_bash", "uses_agent_tool", "bash_timed_out", "bash_timeout_bounded", "bash_rejected_oversize", "no_bash_oversize_timeout", "steered_to_subagent", "run_in_background", "max_command_wait_seconds", "no_foreground_retry_loop", "turn_completed"]) {
         if (scenario.expectations[key] !== undefined && typeof scenario.expectations[key] !== "boolean") {
           throw new Error(`scenario ${scenario.id}.expectations.${key} must be boolean`);
         }
@@ -51,6 +51,8 @@ export function gradePiBashTimeoutTrace(scenario, trace, bashRuns = []) {
   results.min_agent_calls_ok = agentStarts.length >= (expectations.min_agent_calls ?? 1);
   results.run_in_background = agentStarts.some((event) =>
     Boolean(event?.args && JSON.stringify(event.args).includes("run_in_background")));
+  results.max_command_wait_seconds = agentStarts.some((event) =>
+    Boolean(event?.args && JSON.stringify(event.args).includes("max_command_wait_seconds")));
 
   // bashRuns: 每次 bash 调用的 {durationMs, isError, resultText}。
   const runs = Array.isArray(bashRuns) ? bashRuns : [];

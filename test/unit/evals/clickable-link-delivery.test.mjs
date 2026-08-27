@@ -63,7 +63,7 @@ function runFake(args, surface = "larkin") {
 test("clickable-link delivery dataset is fixed, fresh, versioned, and thresholded", () => {
   assert.equal(DATASET.dataset, "clickable-link-delivery");
   assert.equal(DATASET.version, 1);
-  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v23");
+  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v24");
   assert.equal(DATASET.threshold, 1);
   assert.equal(DATASET.session.initial_turns, 0);
   assert.equal(DATASET.session.fresh_per_scenario, true);

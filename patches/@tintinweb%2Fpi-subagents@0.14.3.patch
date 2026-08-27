@@ -1,3 +1,6 @@
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-3fadcd1707a055f8 b/.bun-tag-3fadcd1707a055f8
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-58e08ce8246a76a0 b/.bun-tag-58e08ce8246a76a0
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -8,7 +11,7 @@ diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-80c5d241789d23ea b/.b
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b39fdfd60 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62223140db 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -69,6 +69,44 @@ function abortable(promise, signal) {
@@ -72,7 +75,45 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
      function scheduleNudge(key, send, delay = NUDGE_HOLD_MS) {
          cancelNudge(key);
          pendingNudges.set(key, setTimeout(() => {
-@@ -1293,6 +1336,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -850,6 +893,11 @@ Terse command-style prompts produce shallow, generic work.
+             run_in_background: Type.Optional(Type.Boolean({
+                 description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
+             })),
++            max_command_wait_seconds: Type.Optional(Type.Number({
++                description: "Background-only. Authorize nested bash timeouts from 61 to 600 seconds. Requires run_in_background: true. Invalid values fail closed.",
++                minimum: 61,
++                maximum: 600,
++            })),
+             resume: Type.Optional(Type.String({
+                 description: "Optional agent ID to resume from. Continues from previous context.",
+             })),
+@@ -1100,6 +1148,17 @@ Terse command-style prompts produce shallow, generic work.
+                 }
+                 return textResult(record.result?.trim() || "No output.", buildDetails(detailBase, record));
+             }
++            let maxCommandWaitSeconds;
++            if (params.max_command_wait_seconds !== undefined) {
++                if (runInBackground !== true) {
++                    return textResult("max_command_wait_seconds requires run_in_background: true");
++                }
++                const raw = params.max_command_wait_seconds;
++                if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
++                    return textResult("max_command_wait_seconds must be an integer 61..600");
++                }
++                maxCommandWaitSeconds = raw;
++            }
+             // Background execution
+             if (runInBackground) {
+                 const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
+@@ -1124,6 +1183,7 @@ Terse command-style prompts produce shallow, generic work.
+                         inheritContext,
+                         thinkingLevel: thinking,
+                         isBackground: true,
++                        maxCommandWaitSeconds,
+                         isolation,
+                         invocation: agentInvocation,
+                         ...bgCallbacks,
+@@ -1293,6 +1353,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -82,7 +123,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1353,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1370,15 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
@@ -103,7 +144,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1376,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1393,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -120,7 +161,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95bbe4bb1f 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..5f0dab24b520f42cd6d2d29d3677a8dd16d35ff6 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -91,6 +91,54 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

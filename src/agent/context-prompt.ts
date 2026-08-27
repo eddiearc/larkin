@@ -16,7 +16,7 @@ import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } fr
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v23";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v24";
 
 /**
  * Agent 间协作唤醒引导（issue #75）：纯文本 @ 不会产生飞书 mention 事件，
@@ -120,7 +120,7 @@ export class ContextPromptBuilder {
         "",
         "## Background subagents (pi)",
         "Long-running, independent work MUST use the Agent tool with run_in_background: true. It is the ONLY supported background mechanism. nohup, `&`, disown, and shell background jobs are forbidden for delegated work.",
-        "Foreground bash is hard-capped at 60 seconds. Never pass a bash timeout above 60 (it is refused immediately), and never run a command you expect to exceed 60s in the foreground. If a task is expected to take longer than 60s, delegate it to a background subagent (Agent with run_in_background: true) BEFORE running any bash. If a foreground bash call is refused or times out at the 60s limit, do NOT retry it in the foreground; delegate the work to a background subagent instead.",
+        "Foreground bash is hard-capped at 60 seconds. Never pass a bash timeout above 60 (it is refused immediately), and never run a command you expect to exceed 60s in the foreground. If a task is expected to take longer than 60s, delegate it to a background subagent BEFORE running any bash: Agent({ prompt, description, run_in_background: true, max_command_wait_seconds: <61-600> }). The nested bash tool may then pass an explicit timeout up to that authorized bound. If a foreground bash call is refused or times out at the 60s limit, do NOT retry it in the foreground.",
         "Correct pattern:",
         "1. Call Agent with arguments like {\"prompt\": \"<task>\", \"description\": \"<short label>\", \"run_in_background\": true}.",
         "2. The tool returns an agent id immediately. Report it to the user and end the turn.",

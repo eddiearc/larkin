@@ -1,84 +1,44 @@
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { BashToolInput } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
 
 /**
- * pi bash 超时护栏。父会话 cap 默认 60s。
- * nested 授权 wait 由 child session 上带闭包 cap + revoked flag 的 bash execute 承担。
- * 不使用正则判断 detached：supervised spawn 在命令结束后回收整个进程组。
+ * pi bash 工具超时护栏扩展。
+ *
+ * 由 Larkin 向 builtin Pi 传入 inline factory，或通过 external Pi 的
+ * `pi --extension/-e <bundle>` 注入，覆盖内置 `bash` 工具：
+ * - 无论模型是否传 `timeout`，都强制收窄到 <= MAX_BASH_SECONDS（默认 60s），
+ *   避免单个 bash 调用无限期占住整个 agent 回合（issue #55）。
+ * - 超时时 pi 会杀掉整个进程树（不残留卡死子进程，issue #56 的进程堆积），
+ *   并在返回的错误里明确提示：长任务必须改用后台 subagent
+ *   （Agent(run_in_background: true)，来自 pi-subagents 扩展）。
+ *
+ * 这是 pi 扩展，运行在 Pi RPC 子进程内部；build.mjs 仍为 external Pi
+ * 单独产出注入 bundle。
  */
 
+/** 前台 bash 的硬性上限（秒）。issue #55 建议默认 60s。 */
 const MAX_BASH_SECONDS = 60;
 
-export function effectiveParentBashTimeout(): number {
+/** 解析生效超时：默认 60，允许用 LARKIN_PI_BASH_TIMEOUT_SECONDS 调低（用于快速 eval），硬上限 60。 */
+function effectiveBashTimeout(): number {
   const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
   if (Number.isInteger(raw) && raw > 0) return Math.min(raw, MAX_BASH_SECONDS);
   return MAX_BASH_SECONDS;
 }
 
-function killProcessTree(pid: number): void {
-  try {
-    process.kill(-pid, "SIGKILL");
-  } catch {
-    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
-  }
-}
-
-export function createSupervisedBashOperations() {
-  return {
-    exec: async (command: string, cwd: string, { onData, signal, timeout, env }: { onData: (chunk: Buffer | string) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }) => {
-      if (signal?.aborted) throw new Error("aborted");
-      const child = spawn("/bin/bash", ["-c", command], {
-        cwd,
-        detached: process.platform !== "win32",
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-      const pid = child.pid;
-      let timedOut = false;
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      const onAbort = () => { if (pid) killProcessTree(pid); };
-      try {
-        if (typeof timeout === "number" && timeout > 0) {
-          timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            if (pid) killProcessTree(pid);
-          }, timeout * 1000);
-        }
-        child.stdout?.on("data", onData);
-        child.stderr?.on("data", onData);
-        if (signal) {
-          if (signal.aborted) onAbort();
-          else signal.addEventListener("abort", onAbort, { once: true });
-        }
-        const exitCode = await new Promise<number>((resolve, reject) => {
-          child.once("error", reject);
-          child.once("exit", (code) => resolve(code ?? 1));
-        });
-        if (signal?.aborted) throw new Error("aborted");
-        if (timedOut) throw new Error(`timeout:${timeout}`);
-        return { exitCode };
-      } finally {
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        if (signal) signal.removeEventListener("abort", onAbort);
-        if (pid) killProcessTree(pid);
-      }
-    },
-  };
-}
-
-export function installGuardedBashTool(pi: ExtensionAPI, cap: number): void {
+export default function (pi: ExtensionAPI): void {
   const cwd = process.cwd();
-  const builtin = createBashToolDefinition(cwd, { operations: createSupervisedBashOperations() as never });
-  const MAX = cap;
-  const authorized = MAX > effectiveParentBashTimeout();
-  const guidance = authorized
-    ? `This command exceeded the ${MAX}s authorized background-subagent bash limit. Pass timeout <= ${MAX}.`
-    : `This command exceeded the ${MAX}s foreground hard limit. ` +
-      "Long-running or deploy-style work MUST run in a background subagent instead: " +
-      "call Agent({ prompt, description, run_in_background: true, max_command_wait_seconds: <61-600> }), " +
-      "report the returned agent id, and end the turn.";
+  // Built-in bash tool definition (keeps renderCall/renderResult/system-prompt metadata).
+  const builtin = createBashToolDefinition(cwd);
+  const MAX = effectiveBashTimeout();
+
+  const SUBAGENT_GUIDANCE =
+    `This command exceeded the ${MAX}s foreground hard limit. ` +
+    "Long-running or deploy-style work MUST run in a background subagent instead: " +
+    "call Agent({ prompt, description, run_in_background: true }), report the returned agent id, and end the turn; " +
+    "a completion notification arrives automatically. " +
+    "Do NOT retry this command in the foreground, and do not use nohup / '&' / disown shell background jobs " +
+    "(they bypass subagent isolation and die with this run).";
 
   pi.registerTool({
     ...builtin,
@@ -86,24 +46,22 @@ export function installGuardedBashTool(pi: ExtensionAPI, cap: number): void {
     label: "bash",
     description: builtin.description,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : effectiveParentBashTimeout();
+      const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : MAX;
+      // 模型显式设置 timeout > 上限 → 它已知这是长任务。立即报错引导改用后台 subagent，
+      // 不真的跑（省掉白等 + 避免产生部分副作用）。
       if (requested > MAX) {
-        throw new Error(`timeout:${requested} exceeds the ${MAX}s ${authorized ? "background-subagent bash" : "foreground hard"} limit. ${guidance}`);
+        throw new Error(`timeout:${requested} exceeds the ${MAX}s foreground hard limit. ${SUBAGENT_GUIDANCE}`);
       }
       const timeout = Math.min(requested, MAX);
       try {
         return await builtin.execute(toolCallId, { ...params, timeout } satisfies BashToolInput, signal, onUpdate, ctx);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/timed out after/i.test(message) || /^timeout:/.test(message)) {
-          throw new Error(`${message}\n\n${guidance}`);
+        if (/timed out after/i.test(message)) {
+          throw new Error(`${message}\n\n${SUBAGENT_GUIDANCE}`);
         }
         throw error;
       }
     },
   });
-}
-
-export default function (pi: ExtensionAPI): void {
-  installGuardedBashTool(pi, effectiveParentBashTimeout());
 }

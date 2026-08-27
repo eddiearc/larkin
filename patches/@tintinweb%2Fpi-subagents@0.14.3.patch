@@ -1,149 +1,49 @@
 diff --git a/dist/agent-manager.js b/dist/agent-manager.js
-index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..1fa9472ae95c76e5f822a1e6b66af04e8c3a1c37 100644
+index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..a9c5cdfeeb4a58fc7fef346e8bc9add77f63e421 100644
 --- a/dist/agent-manager.js
 +++ b/dist/agent-manager.js
-@@ -8,7 +8,7 @@
- import { randomUUID } from "node:crypto";
- import { statSync } from "node:fs";
- import { isAbsolute } from "node:path";
--import { resumeAgent, runAgent } from "./agent-runner.js";
-+import { clearSubagentBashWait, installClosedBashGuard, parentBashTimeoutSeconds, resumeAgent, runAgent } from "./agent-runner.js";
- import { addUsage } from "./usage.js";
- import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
- /** Default max concurrent background agents. */
 @@ -50,11 +50,13 @@ export class AgentManager {
      queue = [];
      /** Number of currently running background agents. */
      runningBackground = 0;
 -    constructor(onComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart, onCompact) {
-+    constructor(onComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart, onCompact, commandWaitKey) {
-+        this.commandWaitById = new Map();
++    constructor(onComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart, onCompact, supervisedKey) {
++        this.supervisedById = new Map();
          this.onComplete = onComplete;
          this.onStart = onStart;
          this.onCompact = onCompact;
          this.maxConcurrent = maxConcurrent;
-+        this.commandWaitKey = commandWaitKey;
++        this.supervisedKey = supervisedKey;
          // Cleanup completed agents after 10 minutes (but keep sessions for resume)
          this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
          this.cleanupInterval.unref();
-@@ -77,7 +79,23 @@ export class AgentManager {
+@@ -77,7 +79,13 @@ export class AgentManager {
          // call, not minutes later at drain. Throw (not warn): programmatic callers
          // can fix and retry; the RPC layer converts throws into error envelopes.
          assertValidSpawnCwd(options.cwd);
-+        if (Object.prototype.hasOwnProperty.call(options, "maxCommandWaitSeconds")) {
-+            throw new Error("maxCommandWaitSeconds is not a public spawn option");
++        if (Object.prototype.hasOwnProperty.call(options, "allowSupervisedCommands")) {
++            throw new Error("allowSupervisedCommands is not a public spawn option");
 +        }
-+        const commandWaitSeconds = this.commandWaitKey
-+            ? options[this.commandWaitKey]
-+            : undefined;
-+        if (commandWaitSeconds !== undefined) {
-+            if (options.isBackground !== true) {
-+                throw new Error("command wait requires isBackground: true");
-+            }
-+            if (!Number.isInteger(commandWaitSeconds) || Number(commandWaitSeconds) < 61 || Number(commandWaitSeconds) > 600) {
-+                throw new Error("command wait must be an integer 61..600");
-+            }
-+        }
++        const allowSupervised = this.supervisedKey ? options[this.supervisedKey] === true : false;
          const id = randomUUID().slice(0, 17);
-+        if (typeof commandWaitSeconds === "number")
-+            this.commandWaitById.set(id, commandWaitSeconds);
++        if (allowSupervised)
++            this.supervisedById.set(id, true);
          const abortController = new AbortController();
          const record = {
              id,
-@@ -110,6 +128,7 @@ export class AgentManager {
-             this.startAgent(id, record, args);
-         }
-         catch (err) {
-+            this.revokeCommandWait(record);
-             this.agents.delete(id);
-             throw err;
-         }
-@@ -166,6 +185,7 @@ export class AgentManager {
+@@ -166,6 +174,7 @@ export class AgentManager {
              isolated: options.isolated,
              inheritContext: options.inheritContext,
              thinkingLevel: options.thinkingLevel,
-+            maxCommandWaitSeconds: this.commandWaitById.get(id),
++            allowSupervisedCommands: this.supervisedById.get(id) === true,
              // Worktree wins for the working dir (the agent must run in the copy —
              // which, with a custom cwd, was created from that target). Config stays
              // with the parent project when a caller-supplied cwd is in play; it must
-@@ -190,7 +210,7 @@ export class AgentManager {
-                 this.onCompact?.(record, info);
-                 options.onCompaction?.(info);
-             },
--            onSessionCreated: (session) => {
-+            onSessionCreated: async (session) => {
-                 record.session = session;
-                 // Flush any steers that arrived before the session was ready
-                 if (record.pendingSteers?.length) {
-@@ -199,7 +219,7 @@ export class AgentManager {
-                     }
-                     record.pendingSteers = undefined;
-                 }
--                options.onSessionCreated?.(session);
-+                await options.onSessionCreated?.(session);
-             },
-         })
-             .then(({ responseText, session, aborted, steered, failure }) => {
-@@ -243,6 +263,7 @@ export class AgentManager {
-                         `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
-                 }
-             }
-+            this.revokeCommandWait(record);
-             // Fire onComplete for foreground agents too — lifecycle symmetry.
-             // Mark resultConsumed so the callback skips notifications (result returned inline).
-             if (!options.isBackground) {
-@@ -269,6 +290,7 @@ export class AgentManager {
-             }
-             record.error = err instanceof Error ? err.message : String(err);
-             record.completedAt ??= Date.now();
-+            this.revokeCommandWait(record);
-             detach();
-             // Final flush of streaming output file on error
-             if (record.outputCleanup) {
-@@ -365,6 +387,7 @@ export class AgentManager {
-         record.completedAt = undefined;
-         record.result = undefined;
-         record.error = undefined;
-+        installClosedBashGuard(record.session, parentBashTimeoutSeconds());
-         try {
-             const { text, failure } = await resumeAgent(record.session, prompt, {
-                 onToolActivity: (activity) => {
-@@ -436,13 +459,25 @@ export class AgentManager {
-             record.completedAt = Date.now();
-             return true;
-         }
--        if (record.status !== "running")
--            return false;
--        record.abortController?.abort();
--        record.status = "stopped";
--        record.completedAt = Date.now();
-+        if (record.status === "running") {
-+            record.abortController?.abort();
-+            record.status = "stopped";
-+            record.completedAt = Date.now();
-+            const pending = record.promise;
-+            void Promise.resolve(pending).finally(() => this.revokeCommandWait(record));
-+            if (!pending)
-+                this.revokeCommandWait(record);
-+            return true;
-+        }
-+        this.revokeCommandWait(record);
-         return true;
-     }
-+    revokeCommandWait(record) {
-+        this.commandWaitById.delete(record.id);
-+        clearSubagentBashWait(record.session?.sessionManager);
-+        if (record.session)
-+            installClosedBashGuard(record.session, parentBashTimeoutSeconds());
-+    }
-     /** Dispose a record's session and remove it from the map. */
-     removeRecord(id, record) {
-         record.session?.dispose?.();
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..77a1fbb348c2193c2f53d87477abea28dcb3dab2 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..d5798ffe43b8431512fedc26f270243c05ae7d8f 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
-@@ -1,10 +1,12 @@
+@@ -1,9 +1,10 @@
  /**
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
@@ -151,177 +51,32 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..77a1fbb348c2193c2f53d87477abea28
 +import { existsSync, readFileSync } from "node:fs";
  import { homedir } from "node:os";
  import { basename, dirname, isAbsolute, join, resolve } from "node:path";
--import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
 +import { fileURLToPath } from "node:url";
-+import { spawn } from "node:child_process";
-+import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
+ import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
  import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
  import { buildParentContext, extractText } from "./context.js";
- import { DEFAULT_AGENTS } from "./default-agents.js";
-@@ -384,6 +386,110 @@ function resolveConfiguredSessionDir(sessionDir, cwd) {
-         return sessionDir;
-     return resolve(cwd, sessionDir);
- }
-+const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
-+export function clearSubagentBashWait(_sessionManager) { }
-+export function parentBashTimeoutSeconds() {
-+    const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
-+    if (Number.isInteger(raw) && raw > 0)
-+        return Math.min(raw, 60);
-+    return 60;
-+}
-+function killProcessTree(pid) {
-+    try { process.kill(-pid, "SIGKILL"); }
-+    catch {
-+        try { process.kill(pid, "SIGKILL"); }
-+        catch { /* already dead */ }
-+    }
-+}
-+function supervisedBashOperations() {
-+    return {
-+        exec: async (command, cwd, opts) => {
-+            if (opts.signal?.aborted)
-+                throw new Error("aborted");
-+            const child = spawn("/bin/bash", ["-c", command], {
-+                cwd,
-+                detached: process.platform !== "win32",
-+                env: opts.env,
-+                stdio: ["ignore", "pipe", "pipe"],
-+                windowsHide: true,
-+            });
-+            const pid = child.pid;
-+            let timedOut = false;
-+            let timeoutHandle;
-+            const onAbort = () => { if (pid) killProcessTree(pid); };
-+            try {
-+                if (typeof opts.timeout === "number" && opts.timeout > 0) {
-+                    timeoutHandle = setTimeout(() => { timedOut = true; if (pid) killProcessTree(pid); }, opts.timeout * 1000);
-+                }
-+                child.stdout?.on("data", opts.onData);
-+                child.stderr?.on("data", opts.onData);
-+                if (opts.signal) {
-+                    if (opts.signal.aborted)
-+                        onAbort();
-+                    else
-+                        opts.signal.addEventListener("abort", onAbort, { once: true });
-+                }
-+                const exitCode = await new Promise((resolve, reject) => {
-+                    child.once("error", reject);
-+                    child.once("exit", (code) => resolve(code ?? 1));
-+                });
-+                if (opts.signal?.aborted)
-+                    throw new Error("aborted");
-+                if (timedOut)
-+                    throw new Error(`timeout:${opts.timeout}`);
-+                return { exitCode };
-+            }
-+            finally {
-+                if (timeoutHandle)
-+                    clearTimeout(timeoutHandle);
-+                if (opts.signal)
-+                    opts.signal.removeEventListener("abort", onAbort);
-+                if (pid)
-+                    killProcessTree(pid);
-+            }
-+        },
-+    };
-+}
-+export function installClosedBashGuard(session, cap) {
-+    const bash = session.getToolDefinition?.("bash");
-+    if (!bash || typeof bash.execute !== "function")
-+        return;
-+    if (bash.execute.__larkinGuard)
-+        bash.execute.__larkinGuard.revoked = true;
-+    const state = { revoked: false };
-+    const builtin = createBashToolDefinition(process.cwd(), { operations: supervisedBashOperations() });
-+    const authorized = cap > parentBashTimeoutSeconds();
-+    const next = async (toolCallId, params, signal, onUpdate, ctx) => {
-+        if (state.revoked)
-+            throw new Error("authorized bash wait was revoked");
-+        const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : parentBashTimeoutSeconds();
-+        if (requested > cap)
-+            throw new Error(`timeout:${requested} exceeds the ${cap}s ${authorized ? "background-subagent bash" : "foreground hard"} limit.`);
-+        return builtin.execute(toolCallId, { ...params, timeout: Math.min(requested, cap) }, signal, onUpdate, ctx);
-+    };
-+    next.__larkinGuard = state;
-+    bash.execute = next;
-+}
-+function resolveLarkinBashTimeoutExtensionPath() {
-+    const fromGlobal = globalThis[LARKIN_BASH_TIMEOUT_PATH];
-+    if (typeof fromGlobal === "string" && existsSync(fromGlobal))
-+        return fromGlobal;
-+    try {
-+        const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-bash-timeout.bundle.js");
-+        if (existsSync(sibling))
-+            return sibling;
-+    }
-+    catch {
-+        /* ignore */
-+    }
-+    const argv = process.argv;
-+    for (let i = 0; i < argv.length; i++) {
-+        if ((argv[i] === "-e" || argv[i] === "--extension") && typeof argv[i + 1] === "string" && argv[i + 1].includes("pi-bash-timeout")) {
-+            return argv[i + 1];
-+        }
-+    }
-+    return undefined;
-+}
- export async function runAgent(ctx, type, prompt, options) {
-     const config = getConfig(type);
-     const agentConfig = getAgentConfig(type);
-@@ -483,30 +589,45 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -483,7 +484,19 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -    const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
-+    const bashTimeoutPath = resolveLarkinBashTimeoutExtensionPath();
++    const supervisedPath = options.allowSupervisedCommands === true ? (() => {
++        try {
++            const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++            return existsSync(sibling) ? sibling : undefined;
++        }
++        catch {
++            return undefined;
++        }
++    })() : undefined;
 +    const additionalExtensionPaths = [
 +        ...(extensionsSpec?.paths ?? []),
-+        ...(bashTimeoutPath ? [bashTimeoutPath] : []),
++        ...(supervisedPath ? [supervisedPath] : []),
 +    ];
      // Pre-filter discovered set, captured by the override — the exclude-typo warning
      // must compare against this, not the surviving set (absence from survivors is
      // an exclude *succeeding*).
-     let discoveredNames;
--    const extensionsOverride = noExtensions || (loadAll && !hasExcludes)
--        ? undefined
--        : (base) => {
-+    const isBashTimeoutGuard = (extensionPath) => {
-+        if (!bashTimeoutPath)
-+            return /pi-bash-timeout/.test(extensionPath);
-+        return extensionPath === bashTimeoutPath || extensionPath.endsWith("pi-bash-timeout.bundle.js") || /pi-bash-timeout/.test(extensionPath);
-+    };
-+    const withForcedBashTimeoutGuard = (base, filtered) => {
-+        const without = filtered.filter((entry) => !isBashTimeoutGuard(entry.path));
-+        const guard = base.extensions.find((entry) => isBashTimeoutGuard(entry.path))
-+            ?? filtered.find((entry) => isBashTimeoutGuard(entry.path));
-+        return guard ? [...without, guard] : without;
-+    };
-+    const extensionsOverride = (base) => {
-+        if (!(noExtensions || (loadAll && !hasExcludes))) {
-             discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
--            return {
--                ...base,
--                extensions: base.extensions.filter((e) => {
--                    const canons = extensionCanonicalNames(e.path);
--                    if (canons.some((n) => excludeNames.has(n)))
--                        return false; // exclude wins
--                    return loadAll || canons.some((n) => keepNames.has(n));
--                }),
--            };
--        };
-+        }
-+        const filtered = (noExtensions || (loadAll && !hasExcludes))
-+            ? base.extensions
-+            : base.extensions.filter((e) => {
-+                const canons = extensionCanonicalNames(e.path);
-+                if (canons.some((n) => excludeNames.has(n)) && !isBashTimeoutGuard(e.path))
-+                    return false;
-+                return loadAll || canons.some((n) => keepNames.has(n)) || isBashTimeoutGuard(e.path);
-+            });
-+        return { ...base, extensions: withForcedBashTimeoutGuard(base, filtered) };
-+    };
-     const loader = new DefaultResourceLoader({
+@@ -506,7 +519,7 @@ export async function runAgent(ctx, type, prompt, options) {
          cwd: configCwd,
          agentDir,
          noExtensions,
@@ -330,57 +85,11 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..77a1fbb348c2193c2f53d87477abea28
          extensionsOverride,
          noSkills,
          noPromptTemplates: true,
-@@ -662,6 +783,12 @@ export async function runAgent(ctx, type, prompt, options) {
-         sessionOpts.thinkingLevel = thinkingLevel;
-     }
-     const { session } = await createAgentSession(sessionOpts);
-+    if (options.maxCommandWaitSeconds !== undefined) {
-+        const raw = options.maxCommandWaitSeconds;
-+        if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
-+            throw new Error("maxCommandWaitSeconds must be an integer 61..600");
-+        }
-+    }
-     const baseSessionName = agentConfig?.name ?? type;
-     session.setSessionName(options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName);
-     // Bind extensions so that session_start fires and extensions can initialize
-@@ -676,6 +803,7 @@ export async function runAgent(ctx, type, prompt, options) {
-             });
-         },
-     });
-+    installClosedBashGuard(session, options.maxCommandWaitSeconds ?? parentBashTimeoutSeconds());
-     // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
-     // the ACTIVE set still needs managing: pi activates only its four default
-     // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
-@@ -691,7 +819,7 @@ export async function runAgent(ctx, type, prompt, options) {
-             narrowing,
-         });
-     }
--    options.onSessionCreated?.(session);
-+    await options.onSessionCreated?.(session);
-     // Track turns for graceful max_turns enforcement
-     let turnCount = 0;
-     const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
-diff --git a/dist/cross-extension-rpc.js b/dist/cross-extension-rpc.js
-index 663d53b58bb6ce7832d098c5c8758dc354d52a33..02f66c851d8cd9fa0c29cdddb38ae2f0375f73f2 100644
---- a/dist/cross-extension-rpc.js
-+++ b/dist/cross-extension-rpc.js
-@@ -52,6 +52,11 @@ export function registerRpcHandlers(deps) {
-         // agent's auth lookup doesn't crash with "No API key found for
-         // undefined".
-         let normalizedOptions = options ?? {};
-+        if (normalizedOptions.maxCommandWaitSeconds !== undefined
-+            || normalizedOptions.commandWaitSeconds !== undefined
-+            || normalizedOptions.commandWaitGrant !== undefined) {
-+            throw new Error("command wait is not available over cross-extension RPC");
-+        }
-         if (typeof normalizedOptions.model === "string") {
-             const registry = ctx.modelRegistry;
-             if (!registry) {
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d7896219b 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..e69de853782b45a8b13946075fa51631babbc61a 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -69,6 +69,45 @@ function abortable(promise, signal) {
+@@ -69,6 +69,44 @@ function abortable(promise, signal) {
          });
      });
  }
@@ -422,11 +131,10 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d
 +    return (await waitWithDeadline(record.promise, remainingMs, signal)).timedOut;
 +}
 +const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
-+const LARKIN_COMMAND_WAIT_CAPABILITY = "larkin-pi-subagents-command-wait-v1";
  export function renderRunningAgentStatus(frame, statsText, activity, theme) {
      const container = new Container();
      container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-@@ -280,9 +319,14 @@ export default function (pi) {
+@@ -280,9 +318,14 @@ export default function (pi) {
      // before they reach pi.sendMessage (fire-and-forget).
      const pendingNudges = new Map();
      const NUDGE_HOLD_MS = 200;
@@ -442,76 +150,32 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d
      function scheduleNudge(key, send, delay = NUDGE_HOLD_MS) {
          cancelNudge(key);
          pendingNudges.set(key, setTimeout(() => {
-@@ -378,6 +422,7 @@ export default function (pi) {
+@@ -378,6 +421,7 @@ export default function (pi) {
          };
      }
      // Background completion: route through group join or send individual nudge
-+    const commandWaitKey = Symbol("larkin-command-wait");
++    const supervisedKey = Symbol("larkin-supervised-commands");
      const manager = new AgentManager((record) => {
          // Emit lifecycle event based on terminal status
          const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-@@ -432,7 +477,7 @@ export default function (pi) {
+@@ -432,7 +476,7 @@ export default function (pi) {
              tokensBefore: info.tokensBefore,
              compactionCount: record.compactionCount,
          });
 -    });
-+    }, commandWaitKey);
++    }, supervisedKey);
      // Expose manager via Symbol.for() global registry for cross-package access.
      // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
      //
-@@ -448,6 +493,7 @@ export default function (pi) {
-         hasRunning: () => manager.hasRunning(),
-         spawn: (piRef, ctx, type, prompt, options) => manager.spawn(piRef, ctx, type, prompt, options),
-         getRecord: (id) => manager.getRecord(id),
-+        abort: (id) => manager.abort(id),
-     };
-     const ownsManagerRegistry = globalThis[MANAGER_KEY] === undefined;
-     if (ownsManagerRegistry) {
-@@ -850,6 +896,11 @@ Terse command-style prompts produce shallow, generic work.
-             run_in_background: Type.Optional(Type.Boolean({
-                 description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
-             })),
-+            max_command_wait_seconds: Type.Optional(Type.Number({
-+                description: "Background-only. Authorize nested bash timeouts from 61 to 600 seconds. Requires run_in_background: true. Invalid values fail closed.",
-+                minimum: 61,
-+                maximum: 600,
-+            })),
-             resume: Type.Optional(Type.String({
-                 description: "Optional agent ID to resume from. Continues from previous context.",
-             })),
-@@ -1041,6 +1092,23 @@ Terse command-style prompts produce shallow, generic work.
-                 modelName,
-                 tags: agentTags.length > 0 ? agentTags : undefined,
-             };
-+            let maxCommandWaitSeconds;
-+            if (params.max_command_wait_seconds !== undefined) {
-+                if (params.schedule) {
-+                    return textResult("max_command_wait_seconds cannot be combined with schedule");
-+                }
-+                if (params.resume) {
-+                    return textResult("max_command_wait_seconds cannot be combined with resume");
-+                }
-+                if (params.run_in_background !== true) {
-+                    return textResult("max_command_wait_seconds requires run_in_background: true");
-+                }
-+                const raw = params.max_command_wait_seconds;
-+                if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
-+                    return textResult("max_command_wait_seconds must be an integer 61..600");
-+                }
-+                maxCommandWaitSeconds = raw;
-+            }
-             // ---- Schedule: register a job, don't spawn now ----
-             if (params.schedule) {
-                 if (!isSchedulingEnabled()) {
-@@ -1124,6 +1192,7 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1124,6 +1168,7 @@ Terse command-style prompts produce shallow, generic work.
                          inheritContext,
                          thinkingLevel: thinking,
                          isBackground: true,
-+                        ...(maxCommandWaitSeconds !== undefined ? { [commandWaitKey]: maxCommandWaitSeconds } : {}),
++                        ...(params.run_in_background === true ? { [supervisedKey]: true } : {}),
                          isolation,
                          invocation: agentInvocation,
                          ...bgCallbacks,
-@@ -1293,6 +1362,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1293,6 +1338,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -521,7 +185,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1379,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1355,15 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
@@ -542,7 +206,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1402,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1378,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -559,199 +223,60 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..d6aa8f75caf6b316ad7d315eb7c9231d
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/agent-manager.ts b/src/agent-manager.ts
-index 318f88588a05aa1459e7c86288aa886ea85a28b1..1ca9b0c38292329f1da0de488652502ded61012c 100644
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..5dd075b46fb28ef792a7773b1e3a7d24e42df4a6 100644
 --- a/src/agent-manager.ts
 +++ b/src/agent-manager.ts
-@@ -11,7 +11,7 @@ import { statSync } from "node:fs";
- import { isAbsolute } from "node:path";
- import type { Model } from "@earendil-works/pi-ai";
- import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
--import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-+import { clearSubagentBashWait, installClosedBashGuard, parentBashTimeoutSeconds, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
- import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
- import { addUsage } from "./usage.js";
- import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 @@ -113,16 +113,21 @@ export class AgentManager {
    /** Number of currently running background agents. */
    private runningBackground = 0;
  
-+  private commandWaitKey?: symbol;
-+  private commandWaitById = new Map<string, number>();
++  private supervisedKey?: symbol;
++  private supervisedById = new Map<string, boolean>();
 +
    constructor(
      onComplete?: OnAgentComplete,
      maxConcurrent = DEFAULT_MAX_CONCURRENT,
      onStart?: OnAgentStart,
      onCompact?: OnAgentCompact,
-+    commandWaitKey?: symbol,
++    supervisedKey?: symbol,
    ) {
      this.onComplete = onComplete;
      this.onStart = onStart;
      this.onCompact = onCompact;
      this.maxConcurrent = maxConcurrent;
-+    this.commandWaitKey = commandWaitKey;
++    this.supervisedKey = supervisedKey;
      // Cleanup completed agents after 10 minutes (but keep sessions for resume)
      this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
      this.cleanupInterval.unref();
-@@ -154,8 +159,24 @@ export class AgentManager {
+@@ -154,8 +159,15 @@ export class AgentManager {
      // call, not minutes later at drain. Throw (not warn): programmatic callers
      // can fix and retry; the RPC layer converts throws into error envelopes.
      assertValidSpawnCwd(options.cwd);
-+    if (Object.prototype.hasOwnProperty.call(options, "maxCommandWaitSeconds")) {
-+      throw new Error("maxCommandWaitSeconds is not a public spawn option");
++    if (Object.prototype.hasOwnProperty.call(options, "allowSupervisedCommands")) {
++      throw new Error("allowSupervisedCommands is not a public spawn option");
 +    }
-+    const commandWaitSeconds = this.commandWaitKey
-+      ? (options as Record<symbol, unknown>)[this.commandWaitKey]
-+      : undefined;
-+    if (commandWaitSeconds !== undefined) {
-+      if (options.isBackground !== true) {
-+        throw new Error("command wait requires isBackground: true");
-+      }
-+      if (!Number.isInteger(commandWaitSeconds) || Number(commandWaitSeconds) < 61 || Number(commandWaitSeconds) > 600) {
-+        throw new Error("command wait must be an integer 61..600");
-+      }
-+    }
-+
++    const allowSupervised = this.supervisedKey
++      ? (options as Record<symbol, unknown>)[this.supervisedKey] === true
++      : false;
  
      const id = randomUUID().slice(0, 17);
-+    if (typeof commandWaitSeconds === "number") this.commandWaitById.set(id, commandWaitSeconds);
++    if (allowSupervised) this.supervisedById.set(id, true);
      const abortController = new AbortController();
      const record: AgentRecord = {
        id,
-@@ -190,6 +211,7 @@ export class AgentManager {
-     try {
-       this.startAgent(id, record, args);
-     } catch (err) {
-+      this.revokeCommandWait(record);
-       this.agents.delete(id);
-       throw err;
-     }
-@@ -252,6 +274,7 @@ export class AgentManager {
+@@ -252,6 +264,7 @@ export class AgentManager {
        isolated: options.isolated,
        inheritContext: options.inheritContext,
        thinkingLevel: options.thinkingLevel,
-+      maxCommandWaitSeconds: this.commandWaitById.get(id),
++      allowSupervisedCommands: this.supervisedById.get(id) === true,
        // Worktree wins for the working dir (the agent must run in the copy —
        // which, with a custom cwd, was created from that target). Config stays
        // with the parent project when a caller-supplied cwd is in play; it must
-@@ -275,7 +298,7 @@ export class AgentManager {
-         this.onCompact?.(record, info);
-         options.onCompaction?.(info);
-       },
--      onSessionCreated: (session) => {
-+      onSessionCreated: async (session) => {
-         record.session = session;
-         // Flush any steers that arrived before the session was ready
-         if (record.pendingSteers?.length) {
-@@ -284,7 +307,7 @@ export class AgentManager {
-           }
-           record.pendingSteers = undefined;
-         }
--        options.onSessionCreated?.(session);
-+        await options.onSessionCreated?.(session);
-       },
-     })
-       .then(({ responseText, session, aborted, steered, failure }) => {
-@@ -327,6 +350,7 @@ export class AgentManager {
-           }
-         }
- 
-+        this.revokeCommandWait(record);
-         // Fire onComplete for foreground agents too — lifecycle symmetry.
-         // Mark resultConsumed so the callback skips notifications (result returned inline).
-         if (!options.isBackground) {
-@@ -346,6 +370,7 @@ export class AgentManager {
-         }
-         record.error = err instanceof Error ? err.message : String(err);
-         record.completedAt ??= Date.now();
-+        this.revokeCommandWait(record);
- 
-         detach();
- 
-@@ -398,6 +423,7 @@ export class AgentManager {
-         record.status = "error";
-         record.error = err instanceof Error ? err.message : String(err);
-         record.completedAt = Date.now();
-+        this.revokeCommandWait(record);
-         this.onComplete?.(record);
-       }
-     }
-@@ -456,6 +482,7 @@ export class AgentManager {
-     record.result = undefined;
-     record.error = undefined;
- 
-+    if (record.session) installClosedBashGuard(record.session, parentBashTimeoutSeconds());
-     try {
-       const { text, failure } = await resumeAgent(record.session, prompt, {
-         onToolActivity: (activity) => {
-@@ -525,16 +552,29 @@ export class AgentManager {
-       this.queue = this.queue.filter(q => q.id !== id);
-       record.status = "stopped";
-       record.completedAt = Date.now();
-+      this.revokeCommandWait(record);
-       return true;
-     }
- 
--    if (record.status !== "running") return false;
--    record.abortController?.abort();
--    record.status = "stopped";
--    record.completedAt = Date.now();
-+    if (record.status === "running") {
-+      record.abortController?.abort();
-+      record.status = "stopped";
-+      record.completedAt = Date.now();
-+      const pending = record.promise;
-+      void Promise.resolve(pending).finally(() => this.revokeCommandWait(record));
-+      if (!pending) this.revokeCommandWait(record);
-+      return true;
-+    }
-+    this.revokeCommandWait(record);
-     return true;
-   }
- 
-+  private revokeCommandWait(record: AgentRecord): void {
-+    this.commandWaitById.delete(record.id);
-+    clearSubagentBashWait(record.session?.sessionManager);
-+    if (record.session) installClosedBashGuard(record.session, parentBashTimeoutSeconds());
-+  }
-+
-   /** Dispose a record's session and remove it from the map. */
-   private removeRecord(id: string, record: AgentRecord): void {
-     record.session?.dispose?.();
-@@ -587,12 +627,15 @@ export class AgentManager {
-     this.queue = [];
-     // Abort running agents
-     for (const record of this.agents.values()) {
--      if (record.status === "running") {
--        record.abortController?.abort();
--        record.status = "stopped";
--        record.completedAt = Date.now();
--        count++;
-+      if (record.status === "running" || record.status === "stopped" && this.commandWaitById.has(record.id)) {
-+        if (record.status === "running") {
-+          record.abortController?.abort();
-+          record.status = "stopped";
-+          record.completedAt = Date.now();
-+          count++;
-+        }
-       }
-+      this.revokeCommandWait(record);
-     }
-     return count;
-   }
-@@ -617,6 +660,7 @@ export class AgentManager {
-     // Clear queue
-     this.queue = [];
-     for (const record of this.agents.values()) {
-+      this.revokeCommandWait(record);
-       record.session?.dispose();
-     }
-     this.agents.clear();
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..de5b97e9badfdd528787c2e79fc943ec5fcecab6 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..3204a01ab82a9d72768285924fedf3cb4b177a2d 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
-@@ -2,15 +2,17 @@
+@@ -2,9 +2,10 @@
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
  
@@ -763,179 +288,36 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..de5b97e9badfdd528787c2e79fc943ec
  import type { Model } from "@earendil-works/pi-ai";
  import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
  import {
-   type AgentSession,
-   type AgentSessionEvent,
-   createAgentSession,
-+  createBashToolDefinition,
-   DefaultResourceLoader,
-   type ExtensionAPI,
-   getAgentDir,
-@@ -358,6 +360,8 @@ export interface RunOptions {
+@@ -358,6 +359,8 @@ export interface RunOptions {
    isolated?: boolean;
    inheritContext?: boolean;
    thinkingLevel?: ThinkingLevel;
-+  /** Background-only nested bash timeout cap, integer 61..600. */
-+  maxCommandWaitSeconds?: number;
++  /** Set only by Agent(run_in_background: true). Loads supervised command tools. */
++  allowSupervisedCommands?: boolean;
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -497,6 +501,103 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
-   return resolve(cwd, sessionDir);
- }
- 
-+const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
-+
-+export function clearSubagentBashWait(_sessionManager?: object): void {}
-+
-+export function parentBashTimeoutSeconds(): number {
-+  const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
-+  if (Number.isInteger(raw) && raw > 0) return Math.min(raw, 60);
-+  return 60;
-+}
-+
-+function killProcessTree(pid: number): void {
-+  try { process.kill(-pid, "SIGKILL"); }
-+  catch {
-+    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
-+  }
-+}
-+
-+function supervisedBashOperations() {
-+  return {
-+    exec: async (command: string, cwd: string, opts: { onData: (chunk: Buffer | string) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }) => {
-+      if (opts.signal?.aborted) throw new Error("aborted");
-+      const { spawn } = await import("node:child_process");
-+      const child = spawn("/bin/bash", ["-c", command], {
-+        cwd,
-+        detached: process.platform !== "win32",
-+        env: opts.env,
-+        stdio: ["ignore", "pipe", "pipe"],
-+        windowsHide: true,
-+      });
-+      const pid = child.pid;
-+      let timedOut = false;
-+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-+      const onAbort = () => { if (pid) killProcessTree(pid); };
-+      try {
-+        if (typeof opts.timeout === "number" && opts.timeout > 0) {
-+          timeoutHandle = setTimeout(() => { timedOut = true; if (pid) killProcessTree(pid); }, opts.timeout * 1000);
-+        }
-+        child.stdout?.on("data", opts.onData);
-+        child.stderr?.on("data", opts.onData);
-+        if (opts.signal) {
-+          if (opts.signal.aborted) onAbort();
-+          else opts.signal.addEventListener("abort", onAbort, { once: true });
-+        }
-+        const exitCode = await new Promise<number>((resolve, reject) => {
-+          child.once("error", reject);
-+          child.once("exit", (code) => resolve(code ?? 1));
-+        });
-+        if (opts.signal?.aborted) throw new Error("aborted");
-+        if (timedOut) throw new Error(`timeout:${opts.timeout}`);
-+        return { exitCode };
-+      } finally {
-+        if (timeoutHandle) clearTimeout(timeoutHandle);
-+        if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
-+        if (pid) killProcessTree(pid);
-+      }
-+    },
-+  };
-+}
-+
-+export function installClosedBashGuard(session: AgentSession, cap: number): void {
-+  const bash = session.getToolDefinition?.("bash") as { execute?: (...args: never[]) => unknown } | undefined;
-+  if (!bash || typeof bash.execute !== "function") return;
-+  const previous = bash.execute as { __larkinGuard?: { revoked: boolean } };
-+  if (previous.__larkinGuard) previous.__larkinGuard.revoked = true;
-+  const state = { revoked: false };
-+  const builtin = createBashToolDefinition(process.cwd(), { operations: supervisedBashOperations() as never });
-+  const authorized = cap > parentBashTimeoutSeconds();
-+  const next = async (toolCallId: string, params: { command?: string; timeout?: number }, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => {
-+    if (state.revoked) throw new Error("authorized bash wait was revoked");
-+    const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : parentBashTimeoutSeconds();
-+    if (requested > cap) {
-+      throw new Error(`timeout:${requested} exceeds the ${cap}s ${authorized ? "background-subagent bash" : "foreground hard"} limit.`);
-+    }
-+    return builtin.execute(toolCallId, { ...params, timeout: Math.min(requested, cap) }, signal, onUpdate as never, ctx as never);
-+  };
-+  (next as { __larkinGuard?: { revoked: boolean } }).__larkinGuard = state;
-+  bash.execute = next as typeof bash.execute;
-+}
-+
-+function resolveLarkinBashTimeoutExtensionPath(): string | undefined {
-+  const fromGlobal = (globalThis as Record<symbol, unknown>)[LARKIN_BASH_TIMEOUT_PATH];
-+  if (typeof fromGlobal === "string" && existsSync(fromGlobal)) return fromGlobal;
-+  try {
-+    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-bash-timeout.bundle.js");
-+    if (existsSync(sibling)) return sibling;
-+  } catch {
-+    /* ignore */
-+  }
-+  const argv = process.argv;
-+  for (let i = 0; i < argv.length; i++) {
-+    if ((argv[i] === "-e" || argv[i] === "--extension") && typeof argv[i + 1] === "string" && argv[i + 1].includes("pi-bash-timeout")) {
-+      return argv[i + 1];
-+    }
-+  }
-+  return undefined;
-+}
-+
- export async function runAgent(
-   ctx: ExtensionContext,
-   type: SubagentType,
-@@ -612,31 +713,44 @@ export async function runAgent(
+@@ -612,7 +615,18 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
-+  const bashTimeoutPath = resolveLarkinBashTimeoutExtensionPath();
++  const supervisedPath = options.allowSupervisedCommands === true ? (() => {
++    try {
++      const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++      return existsSync(sibling) ? sibling : undefined;
++    } catch {
++      return undefined;
++    }
++  })() : undefined;
 +  const additionalExtensionPaths = [
 +    ...(extensionsSpec?.paths ?? []),
-+    ...(bashTimeoutPath ? [bashTimeoutPath] : []),
++    ...(supervisedPath ? [supervisedPath] : []),
 +  ];
    // Pre-filter discovered set, captured by the override — the exclude-typo warning
    // must compare against this, not the surviving set (absence from survivors is
    // an exclude *succeeding*).
-   let discoveredNames: Set<string> | undefined;
--  const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
--    noExtensions || (loadAll && !hasExcludes)
--      ? undefined
--      : (base) => {
--          discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
--          return {
--            ...base,
--            extensions: base.extensions.filter((e) => {
--              const canons = extensionCanonicalNames(e.path);
--              if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
--              return loadAll || canons.some((n) => keepNames.has(n));
--            }),
--          };
--        };
-+  const isBashTimeoutGuard = (extensionPath: string): boolean => {
-+    if (!bashTimeoutPath) return /pi-bash-timeout/.test(extensionPath);
-+    return extensionPath === bashTimeoutPath || extensionPath.endsWith("pi-bash-timeout.bundle.js") || /pi-bash-timeout/.test(extensionPath);
-+  };
-+  const withForcedBashTimeoutGuard = (base: LoadExtensionsResult, filtered: LoadExtensionsResult["extensions"]): LoadExtensionsResult["extensions"] => {
-+    const without = filtered.filter((entry) => !isBashTimeoutGuard(entry.path));
-+    const guard = base.extensions.find((entry) => isBashTimeoutGuard(entry.path))
-+      ?? filtered.find((entry) => isBashTimeoutGuard(entry.path));
-+    return guard ? [...without, guard] : without;
-+  };
-+  const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) = (base) => {
-+    if (!(noExtensions || (loadAll && !hasExcludes))) {
-+      discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
-+    }
-+    const filtered = (noExtensions || (loadAll && !hasExcludes))
-+      ? base.extensions
-+      : base.extensions.filter((e) => {
-+          const canons = extensionCanonicalNames(e.path);
-+          if (canons.some((n) => excludeNames.has(n)) && !isBashTimeoutGuard(e.path)) return false;
-+          return loadAll || canons.some((n) => keepNames.has(n)) || isBashTimeoutGuard(e.path);
-+        });
-+    return { ...base, extensions: withForcedBashTimeoutGuard(base, filtered) };
-+  };
- 
-   const loader = new DefaultResourceLoader({
+@@ -636,7 +650,7 @@ export async function runAgent(
      cwd: configCwd,
      agentDir,
      noExtensions,
@@ -944,60 +326,11 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..de5b97e9badfdd528787c2e79fc943ec
      extensionsOverride,
      noSkills,
      noPromptTemplates: true,
-@@ -808,6 +922,12 @@ export async function runAgent(
-   }
- 
-   const { session } = await createAgentSession(sessionOpts);
-+  if (options.maxCommandWaitSeconds !== undefined) {
-+    const raw = options.maxCommandWaitSeconds;
-+    if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
-+      throw new Error("maxCommandWaitSeconds must be an integer 61..600");
-+    }
-+  }
- 
-   const baseSessionName = agentConfig?.name ?? type;
-   session.setSessionName(
-@@ -826,6 +946,10 @@ export async function runAgent(
-       });
-     },
-   });
-+  installClosedBashGuard(
-+    session,
-+    options.maxCommandWaitSeconds ?? parentBashTimeoutSeconds(),
-+  );
- 
-   // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
-   // the ACTIVE set still needs managing: pi activates only its four default
-@@ -843,7 +967,7 @@ export async function runAgent(
-     });
-   }
- 
--  options.onSessionCreated?.(session);
-+  await options.onSessionCreated?.(session);
- 
-   // Track turns for graceful max_turns enforcement
-   let turnCount = 0;
-diff --git a/src/cross-extension-rpc.ts b/src/cross-extension-rpc.ts
-index 2f8a622fe2a966b36c0319441aeec907ad7fe681..84e932b30d03d702c45728e89eecd881cf28e659 100644
---- a/src/cross-extension-rpc.ts
-+++ b/src/cross-extension-rpc.ts
-@@ -91,6 +91,11 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
-       // agent's auth lookup doesn't crash with "No API key found for
-       // undefined".
-       let normalizedOptions = options ?? {};
-+      if (normalizedOptions.maxCommandWaitSeconds !== undefined
-+        || normalizedOptions.commandWaitSeconds !== undefined
-+        || normalizedOptions.commandWaitGrant !== undefined) {
-+        throw new Error("command wait is not available over cross-extension RPC");
-+      }
-       if (typeof normalizedOptions.model === "string") {
-         const registry = (ctx as { modelRegistry?: ModelRegistry }).modelRegistry;
-         if (!registry) {
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..d36c07d2a9af89532c46831f17842588481ca45b 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..05b2581de1c49067e152333ea480d61748166d36 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -91,6 +91,55 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+@@ -91,6 +91,54 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
    });
  }
  
@@ -1048,12 +381,11 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..d36c07d2a9af89532c46831f17842588
 +}
 +
 +export const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
-+export const LARKIN_COMMAND_WAIT_CAPABILITY = "larkin-pi-subagents-command-wait-v1";
 +
  export function renderRunningAgentStatus(
    frame: string,
    statsText: string,
-@@ -330,10 +379,14 @@ export default function (pi: ExtensionAPI) {
+@@ -330,10 +378,14 @@ export default function (pi: ExtensionAPI) {
    // before they reach pi.sendMessage (fire-and-forget).
    const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
    const NUDGE_HOLD_MS = 200;
@@ -1070,79 +402,32 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..d36c07d2a9af89532c46831f17842588
    function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
      cancelNudge(key);
      pendingNudges.set(key, setTimeout(() => {
-@@ -433,6 +486,7 @@ export default function (pi: ExtensionAPI) {
+@@ -433,6 +485,7 @@ export default function (pi: ExtensionAPI) {
    }
  
    // Background completion: route through group join or send individual nudge
-+  const commandWaitKey = Symbol("larkin-command-wait");
++  const supervisedKey = Symbol("larkin-supervised-commands");
    const manager = new AgentManager((record) => {
      // Emit lifecycle event based on terminal status
      const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-@@ -490,7 +544,7 @@ export default function (pi: ExtensionAPI) {
+@@ -490,7 +543,7 @@ export default function (pi: ExtensionAPI) {
        tokensBefore: info.tokensBefore,
        compactionCount: record.compactionCount,
      });
 -  });
-+  }, commandWaitKey);
++  }, supervisedKey);
  
    // Expose manager via Symbol.for() global registry for cross-package access.
    // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-@@ -508,6 +562,7 @@ export default function (pi: ExtensionAPI) {
-     spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-       manager.spawn(piRef, ctx, type, prompt, options),
-     getRecord: (id: string) => manager.getRecord(id),
-+    abort: (id: string) => manager.abort(id),
-   };
-   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
-   if (ownsManagerRegistry) {
-@@ -949,6 +1004,13 @@ Terse command-style prompts produce shallow, generic work.
-           description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
-         }),
-       ),
-+      max_command_wait_seconds: Type.Optional(
-+        Type.Number({
-+          description: "Background-only. Authorize nested bash timeouts from 61 to 600 seconds. Requires run_in_background: true. Invalid values fail closed.",
-+          minimum: 61,
-+          maximum: 600,
-+        }),
-+      ),
-       resume: Type.Optional(
-         Type.String({
-           description: "Optional agent ID to resume from. Continues from previous context.",
-@@ -1168,6 +1230,24 @@ Terse command-style prompts produce shallow, generic work.
-         tags: agentTags.length > 0 ? agentTags : undefined,
-       };
- 
-+      let maxCommandWaitSeconds: number | undefined;
-+      if (params.max_command_wait_seconds !== undefined) {
-+        if (params.schedule) {
-+          return textResult("max_command_wait_seconds cannot be combined with schedule");
-+        }
-+        if (params.resume) {
-+          return textResult("max_command_wait_seconds cannot be combined with resume");
-+        }
-+        if (params.run_in_background !== true) {
-+          return textResult("max_command_wait_seconds requires run_in_background: true");
-+        }
-+        const raw = params.max_command_wait_seconds;
-+        if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
-+          return textResult("max_command_wait_seconds must be an integer 61..600");
-+        }
-+        maxCommandWaitSeconds = raw;
-+      }
-+
-       // ---- Schedule: register a job, don't spawn now ----
-       if (params.schedule) {
-         if (!isSchedulingEnabled()) {
-@@ -1259,6 +1339,7 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1259,6 +1312,7 @@ Terse command-style prompts produce shallow, generic work.
              inheritContext,
              thinkingLevel: thinking,
              isBackground: true,
-+            ...(maxCommandWaitSeconds !== undefined ? { [commandWaitKey]: maxCommandWaitSeconds } : {}),
++            ...(params.run_in_background === true ? { [supervisedKey]: true } : {}),
              isolation,
              invocation: agentInvocation,
              ...bgCallbacks,
-@@ -1453,6 +1534,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1453,6 +1507,11 @@ Terse command-style prompts produce shallow, generic work.
            description: "If true, wait for the agent to complete before returning. Default: false.",
          }),
        ),
@@ -1154,7 +439,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..d36c07d2a9af89532c46831f17842588
        verbose: Type.Optional(
          Type.Boolean({
            description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-@@ -1470,14 +1556,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1470,14 +1529,15 @@ Terse command-style prompts produce shallow, generic work.
        // completion notification can still be delivered.
        // Queued agents have no promise yet (it's created when the queue starts
        // them), so poll until they leave the queue, then await like a running one.
@@ -1177,7 +462,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..d36c07d2a9af89532c46831f17842588
        }
  
        const displayName = getDisplayName(record.type);
-@@ -1492,11 +1579,13 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1492,11 +1552,13 @@ Terse command-style prompts produce shallow, generic work.
  
        let output =
          `Agent: ${record.id}\n` +

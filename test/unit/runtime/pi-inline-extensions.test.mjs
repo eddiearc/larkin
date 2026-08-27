@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,8 +7,6 @@ import {
   BUILTIN_PI_EXTENSION_FACTORIES,
   invokeBuiltinPiRpc,
 } from "../../../dist/runtime/pi-inline-extensions.mjs";
-import { parseMaxCommandWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
-import { installGuardedBashTool } from "../../../dist/runtime/pi-bash-timeout-extension.mjs";
 
 test("builtin Pi RPC receives exactly the three static inline extension factories", async () => {
   let invocation;
@@ -74,46 +71,15 @@ test("record watchdog contains non-ENOENT filesystem errors on sweep", async () 
 
 test("inline bash extension preserves the 60s foreground hard guard", async () => {
   const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  process.env.LARKIN_PI_ROOT_SESSION_ID = "spoof-root";
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
   try {
     let bashTool;
     const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
+    await factory({ registerTool(tool) { bashTool = tool; } });
     assert.equal(bashTool.name, "bash");
     await assert.rejects(
       bashTool.execute("call-1", { command: "printf should-not-run", timeout: 61 },
-        new AbortController().signal, () => {}, { sessionManager: {} }),
-      /timeout:61 exceeds the 60s foreground hard limit/,
-    );
-  } finally {
-    if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-    else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
-    delete process.env.LARKIN_PI_ROOT_SESSION_ID;
-  }
-});
-
-test("closed-over nested bash cap does not leak to the parent tool", async () => {
-  const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  try {
-    let parentBash;
-    let childBash;
-    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
-    const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({ registerTool(tool) { parentBash = tool; }, on() {} });
-    installGuardedBashTool({ registerTool(tool) { childBash = tool; }, on() {} }, 120);
-    const result = await childBash.execute("call-nested", { command: "printf nested-ok", timeout: 90 },
-      new AbortController().signal, () => {}, { sessionManager: { getSessionId: () => "child", getSessionFile: () => undefined } });
-    assert.match(JSON.stringify(result), /nested-ok/);
-    await assert.rejects(
-      childBash.execute("call-too-long", { command: "printf should-not-run", timeout: 121 },
-        new AbortController().signal, () => {}, {}),
-      /timeout:121 exceeds the 120s background-subagent bash limit/,
-    );
-    await assert.rejects(
-      parentBash.execute("call-parent", { command: "printf should-not-run", timeout: 61 },
         new AbortController().signal, () => {}, {}),
       /timeout:61 exceeds the 60s foreground hard limit/,
     );
@@ -121,57 +87,4 @@ test("closed-over nested bash cap does not leak to the parent tool", async () =>
     if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
     else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
   }
-});
-
-test("authorized nested bash abort does not leave a running sleep", async () => {
-  const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  const childManager = { getSessionId: () => "child", getSessionFile: () => undefined };
-  try {
-    let bashTool;
-    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
-    const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
-    installGuardedBashTool({ registerTool(tool) { bashTool = tool; }, on() {} }, 90);
-    const ac = new AbortController();
-    const pending = bashTool.execute("call-abort", { command: "sleep 30", timeout: 90 },
-      ac.signal, () => {}, { sessionManager: childManager });
-    ac.abort();
-    await assert.rejects(pending, /abort/i);
-  } finally {
-    if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-    else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
-  }
-});
-
-test("supervised bash reaps nested background children", async () => {
-  let bashTool;
-  const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
-  const factory = typeof extension === "function" ? extension : extension.factory;
-  await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
-  const marker = `larkin-issue161-detach-${process.pid}-${Date.now()}`;
-  await bashTool.execute("detached", { command: `perl -e 'sleep 30' # ${marker} &`, timeout: 1 },
-    new AbortController().signal, () => {}, { sessionManager: { getSessionId: () => "p", getSessionFile: () => undefined } }).catch(() => {});
-  const leftover = spawnSync("pgrep", ["-fl", marker], { encoding: "utf8" });
-  assert.equal((leftover.stdout || "").trim(), "", leftover.stdout);
-});
-
-test("max_command_wait_seconds parse is fail-closed", () => {
-  assert.equal(parseMaxCommandWaitSeconds(undefined, true), undefined);
-  assert.equal(parseMaxCommandWaitSeconds(90, true), 90);
-  assert.throws(() => parseMaxCommandWaitSeconds(90, false), /run_in_background/);
-  assert.throws(() => parseMaxCommandWaitSeconds(60, true), /61..600/);
-  assert.throws(() => parseMaxCommandWaitSeconds(601, true), /61..600/);
-  assert.throws(() => parseMaxCommandWaitSeconds(90.5, true), /61..600/);
-});
-
-test("production subagents bundle keeps max_command_wait_seconds on the Agent schema", () => {
-  const bundle = fs.readFileSync(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url), "utf8");
-  assert.match(bundle, /max_command_wait_seconds/);
-  assert.match(bundle, /requires run_in_background: true/);
-  assert.match(bundle, /cannot be combined with schedule/);
-  assert.match(bundle, /cannot be combined with resume/);
-  assert.match(bundle, /maxCommandWaitSeconds/);
-  assert.match(bundle, /larkin-pi-subagents-command-wait-v1/);
-  assert.match(bundle, /not a public spawn option/);
 });

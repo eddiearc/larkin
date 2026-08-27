@@ -87,7 +87,7 @@ function hasBoundedVisibleUrl(body, expectedUrl) {
 export function loadClickableLinkDeliveryEval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "clickable-link-delivery" || value.version !== 1) throw new Error("eval dataset/version mismatch");
-  if (value.standing_prompt_version !== "larkin-standing-v24") throw new Error("standing prompt version mismatch");
+  if (value.standing_prompt_version !== "larkin-standing-v25") throw new Error("standing prompt version mismatch");
   if (value.threshold !== 1 || value.grader?.name !== "clickable-link-delivery-trace-grader"
       || value.grader.version !== 1 || value.grader.threshold !== 1) throw new Error("eval grader metadata mismatch");
   if (value.session?.initial_turns !== 0 || value.session?.fresh_per_scenario !== true) throw new Error("eval requires fresh sessions");

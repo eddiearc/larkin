@@ -86,8 +86,6 @@ export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv
  * 重复注册导致 pi 扩展加载 FATAL（pi 对 duplicate tool registration 是硬失败）。
  */
 const BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
-const COMMAND_WAIT_CAPABILITY = "larkin-pi-subagents-command-wait-v1";
-const REQUIRED_SUBAGENT_CAPABILITIES = [BOUNDED_WAIT_CAPABILITY, COMMAND_WAIT_CAPABILITY];
 
 type UserPiSubagentsWaitCapability = "absent" | "bounded" | "unbounded";
 
@@ -124,10 +122,7 @@ function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsW
     // marker in a build artifact when the manifest points Pi at another file.
     const capabilityFiles = extensions.map((entry) => path.resolve(installedRoot, entry));
     const hasCapability = capabilityFiles.every((file) => {
-      try {
-        const source = fs.readFileSync(file, "utf8");
-        return REQUIRED_SUBAGENT_CAPABILITIES.every((marker) => source.includes(marker));
-      }
+      try { return fs.readFileSync(file, "utf8").includes(BOUNDED_WAIT_CAPABILITY); }
       catch { return false; }
     });
     return hasCapability ? "bounded" : "unbounded";
@@ -162,7 +157,7 @@ export function resolvePiSubagentExtensionArg(
       throw new Error(
         "[larkin] WARNING: refusing external Pi because the user-installed " +
         "pi-subagents extension is unbounded or unverifiable; remove it or install " +
-        "a version advertising larkin-pi-subagents-bounded-wait-v1 and larkin-pi-subagents-command-wait-v1.",
+        "a version advertising larkin-pi-subagents-bounded-wait-v1.",
       );
     }
     return null;

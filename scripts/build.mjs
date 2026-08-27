@@ -248,6 +248,27 @@ function bundlePiBashTimeoutExtension(outFile) {
   return true;
 }
 
+function bundlePiSupervisedCommandExtension(outFile) {
+  const entry = path.join(ROOT, "src", "runtime", "pi-supervised-command-extension.ts");
+  if (!fs.existsSync(entry)) {
+    process.stderr.write(`[build] pi-supervised-command extension entry missing: ${entry}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  const result = spawnSync("bun", ["build", entry, "--outfile", outFile, "--external", "@earendil-works/pi-*", "--target", "bun"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    process.stderr.write(result.stderr || result.stdout || `[build] pi-supervised-command bundle failed: ${result.error?.message || result.status}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  process.stderr.write(result.stderr || result.stdout || "");
+  console.error(`[build] pi-supervised-command bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
+  return true;
+}
+
 function bundlePiSubagentRecordWatchdogExtension(outFile) {
   const entry = path.join(ROOT, "src", "runtime", "pi-subagent-record-watchdog.ts");
   if (!fs.existsSync(entry)) {
@@ -337,6 +358,7 @@ try {
   if (!bundlePiSubagentExtension(path.join(outputStage, "runtime", "pi-subagents.bundle.js"))) throw new CompilationFailed();
   if (!bundlePiBashTimeoutExtension(path.join(outputStage, "runtime", "pi-bash-timeout.bundle.js"))) throw new CompilationFailed();
   if (!bundlePiSubagentRecordWatchdogExtension(path.join(outputStage, "runtime", "pi-subagent-record-watchdog.bundle.js"))) throw new CompilationFailed();
+  if (!bundlePiSupervisedCommandExtension(path.join(outputStage, "runtime", "pi-supervised-command.bundle.js"))) throw new CompilationFailed();
 
   // Materialize the whole graph before touching the active dist tree. Failed builds
   // preserve the prior output; successful builds replace it wholesale, removing stale files.

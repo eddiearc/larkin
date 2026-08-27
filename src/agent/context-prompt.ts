@@ -16,7 +16,7 @@ import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } fr
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v24";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v25";
 
 /**
  * Agent 间协作唤醒引导（issue #75）：纯文本 @ 不会产生飞书 mention 事件，
@@ -120,16 +120,16 @@ export class ContextPromptBuilder {
         "",
         "## Background subagents (pi)",
         "Long-running, independent work MUST use the Agent tool with run_in_background: true. It is the ONLY supported background mechanism. nohup, `&`, disown, and shell background jobs are forbidden for delegated work.",
-        "Foreground bash is hard-capped at 60 seconds. Never pass a bash timeout above 60 (it is refused immediately), and never run a command you expect to exceed 60s in the foreground. If a task is expected to take longer than 60s, delegate it to a background subagent BEFORE running any bash: Agent({ prompt, description, run_in_background: true, max_command_wait_seconds: <61-600> }). The nested bash tool may then pass an explicit timeout up to that authorized bound. If a foreground bash call is refused or times out at the 60s limit, do NOT retry it in the foreground.",
+        "Foreground bash is hard-capped at 60 seconds. Never pass a bash timeout above 60. Never use nested bash to outlive 60s. If work must outlive 60s, Agent({ prompt, description, run_in_background: true }) and inside that background agent use supervised_start (executable+args, shell:false) once, then loop supervised_wait (timeout <= 60). Wait timeout returns still running and does NOT kill the process; Steer can arrive after each wait. Total lifetime is 600s. Abort/cancel/shutdown reaps the process tree. Do not use nohup / '&' / disown.",
         "Correct pattern:",
-        "1. Call Agent with arguments like {\"prompt\": \"<task>\", \"description\": \"<short label>\", \"run_in_background\": true, \"max_command_wait_seconds\": 90}.",
+        "1. Call Agent with arguments like {\"prompt\": \"<task>\", \"description\": \"<short label>\", \"run_in_background\": true}.",
         "2. The tool returns an agent id immediately. Report it to the user and end the turn.",
         "3. Do NOT poll or sleep; a completion notification arrives automatically.",
         "4. On the notification, check the Inbox, then publish exactly one final summary.",
         "If you explicitly use get_subagent_result with wait: true, make at most one bounded wait call per turn. If it returns timedOut: true, do not loop or call wait again in the same turn; yield and let the completion notification wake you.",
         "Forbidden pattern (never acceptable): `nohup sh -c '...' > /tmp/x.out 2>&1 &`, `sleep N; cat ...`, disown, or any shell background substitute. These bypass subagent isolation.",
         "Keep corrections, approvals, short commands, and Feishu writes in the foreground; do not delegate them.",
-        "Parallel independent tasks: when the user clearly asks for two or more independent tasks with no dependencies between them, delegate EACH task to its own background subagent in a single message with multiple Agent tool calls (one per task, all with run_in_background: true and max_command_wait_seconds between 61 and 600 when nested bash must wait longer than 60s), report every job id, and end the turn. Do not run them one-by-one in the foreground and do not merge them into one subagent.",
+        "Parallel independent tasks: when the user clearly asks for two or more independent tasks with no dependencies between them, delegate EACH task to its own background subagent in a single message with multiple Agent tool calls (one per task, all with run_in_background: true), report every job id, and end the turn. Do not run them one-by-one in the foreground and do not merge them into one subagent.",
         "Sequential dependent tasks: when tasks depend on each other, sending the user an order message is a REQUIRED first step: before executing any follow-up work, send a message stating the execution order (for example: first I will do A, then B; I will report back after each step). Then execute in order and report as promised; never stay silent while chaining long work.",
         "Reporting location: always report job ids and final summaries in the same conversation and thread where the user's message arrived (reply-in-thread when the request arrived in a thread). Never start a new conversation or DM for subagent status reports.",
       ""] : []),

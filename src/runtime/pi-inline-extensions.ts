@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import type { InlineExtension, MainOptions } from "@earendil-works/pi-coding-agent";
 import bashTimeoutExtension from "./pi-bash-timeout-extension.js";
 import { bundledPiSubagentExtensionPath } from "./pi-subagent-injection.js";
+import piSubagentRecordWatchdog from "./pi-subagent-record-watchdog.js";
 
 /**
  * Load the prebuilt, patched subagent bundle shipped in dist/ rather than the
@@ -29,7 +30,11 @@ const bundledSubagentsExtension: InlineExtension = async (pi) => {
   else await extension.factory(pi);
 };
 
+// Watchdog must register session_shutdown before the bundled subagent extension
+// so the final sweep can still read AgentManager.getRecord and bridge consumed
+// terminals before manager teardown.
 export const BUILTIN_PI_EXTENSION_FACTORIES: readonly InlineExtension[] = Object.freeze([
+  piSubagentRecordWatchdog,
   bundledSubagentsExtension,
   bashTimeoutExtension,
 ]);

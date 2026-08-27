@@ -1,21 +1,72 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "bun:test";
 import {
   BUILTIN_PI_EXTENSION_FACTORIES,
   invokeBuiltinPiRpc,
 } from "../../../dist/runtime/pi-inline-extensions.mjs";
 
-test("builtin Pi RPC receives exactly the two static inline extension factories", async () => {
+test("builtin Pi RPC receives exactly the three static inline extension factories", async () => {
   let invocation;
   await invokeBuiltinPiRpc(async (args, options) => { invocation = { args, options }; }, ["--no-session"]);
 
   assert.deepEqual(invocation.args, ["--mode", "rpc", "--no-session"]);
   assert.equal(Object.isFrozen(BUILTIN_PI_EXTENSION_FACTORIES), true);
-  assert.equal(BUILTIN_PI_EXTENSION_FACTORIES.length, 2);
+  assert.equal(BUILTIN_PI_EXTENSION_FACTORIES.length, 3);
   assert.deepEqual(invocation.options.extensionFactories, [...BUILTIN_PI_EXTENSION_FACTORIES]);
   assert.notEqual(invocation.options.extensionFactories, BUILTIN_PI_EXTENSION_FACTORIES,
     "Pi receives a mutable copy while the exported factory list remains immutable");
   assert.ok(BUILTIN_PI_EXTENSION_FACTORIES.every((factory) => typeof factory === "function"));
+});
+
+test("record watchdog registers session_shutdown before bundled subagents", async () => {
+  const priorStateDir = process.env.LARKIN_STATE_DIR;
+  const priorOwner = process.env.LARKIN_PI_SESSION_OWNER;
+  process.env.LARKIN_STATE_DIR = "/tmp/larkin-watchdog-order";
+  process.env.LARKIN_PI_SESSION_OWNER = "session-order";
+  try {
+    const events = [];
+    const first = BUILTIN_PI_EXTENSION_FACTORIES[0];
+    const factory = typeof first === "function" ? first : first.factory;
+    await factory({ on(event) { events.push(event); } });
+    assert.deepEqual(events, ["session_shutdown"],
+      "shutdown sweep must register before AgentManager teardown");
+  } finally {
+    if (priorStateDir === undefined) delete process.env.LARKIN_STATE_DIR;
+    else process.env.LARKIN_STATE_DIR = priorStateDir;
+    if (priorOwner === undefined) delete process.env.LARKIN_PI_SESSION_OWNER;
+    else process.env.LARKIN_PI_SESSION_OWNER = priorOwner;
+  }
+});
+
+test("record watchdog contains non-ENOENT filesystem errors on sweep", async () => {
+  const priorStateDir = process.env.LARKIN_STATE_DIR;
+  const priorOwner = process.env.LARKIN_PI_SESSION_OWNER;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-watchdog-fs-"));
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const priorManager = globalThis[managerKey];
+  process.env.LARKIN_STATE_DIR = root;
+  process.env.LARKIN_PI_SESSION_OWNER = "session-fs-error";
+  fs.writeFileSync(path.join(root, "pi-subagent-records"), "not-a-directory\n");
+  globalThis[managerKey] = { getRecord: () => undefined };
+  try {
+    let shutdown;
+    const first = BUILTIN_PI_EXTENSION_FACTORIES[0];
+    const factory = typeof first === "function" ? first : first.factory;
+    await factory({ on(event, handler) { if (event === "session_shutdown") shutdown = handler; } });
+    assert.equal(typeof shutdown, "function");
+    shutdown();
+  } finally {
+    if (priorManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = priorManager;
+    if (priorStateDir === undefined) delete process.env.LARKIN_STATE_DIR;
+    else process.env.LARKIN_STATE_DIR = priorStateDir;
+    if (priorOwner === undefined) delete process.env.LARKIN_PI_SESSION_OWNER;
+    else process.env.LARKIN_PI_SESSION_OWNER = priorOwner;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("inline bash extension preserves the 60s foreground hard guard", async () => {
@@ -23,7 +74,7 @@ test("inline bash extension preserves the 60s foreground hard guard", async () =
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
   try {
     let bashTool;
-    const extension = BUILTIN_PI_EXTENSION_FACTORIES[1];
+    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
     await factory({ registerTool(tool) { bashTool = tool; } });
     assert.equal(bashTool.name, "bash");

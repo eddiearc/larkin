@@ -160,4 +160,6 @@ test("production subagents bundle keeps max_command_wait_seconds on the Agent sc
   assert.match(bundle, /cannot be combined with schedule/);
   assert.match(bundle, /cannot be combined with resume/);
   assert.match(bundle, /maxCommandWaitSeconds/);
+  assert.match(bundle, /larkin-pi-subagents-command-wait-v1/);
+  assert.match(bundle, /not a public spawn option/);
 });

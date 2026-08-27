@@ -17,6 +17,10 @@ export function getSubagentBashWaitSeconds(sessionManager: object | undefined): 
   return sessionManager ? waitMap().get(sessionManager) : undefined;
 }
 
+export function clearSubagentBashWaitSeconds(sessionManager: object | undefined): void {
+  if (sessionManager) waitMap().delete(sessionManager);
+}
+
 export function parseMaxCommandWaitSeconds(value: unknown, runInBackground: boolean): number | undefined {
   if (value === undefined) return undefined;
   if (runInBackground !== true) {

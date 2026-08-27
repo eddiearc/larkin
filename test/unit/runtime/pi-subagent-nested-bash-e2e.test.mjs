@@ -10,8 +10,9 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
 import { bundledPiBashTimeoutExtensionPath } from "../../../dist/runtime/pi-bash-timeout-injection.mjs";
-import { setSubagentBashWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
+import { getSubagentBashWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
 import { AgentManager } from "../../../node_modules/@tintinweb/pi-subagents/src/agent-manager.ts";
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue161-nested-"));
@@ -21,14 +22,12 @@ afterAll(() => {
   fs.rmSync(agentDir, { recursive: true, force: true });
 });
 
-async function nestedSessionWithBashGuard() {
-  const bundle = bundledPiBashTimeoutExtensionPath();
-  assert.ok(bundle, "pi-bash-timeout bundle must exist (run bun run build first)");
+async function sessionWithCliExtensions(paths) {
   const loader = new DefaultResourceLoader({
     cwd: workDir,
     agentDir,
     noExtensions: true,
-    additionalExtensionPaths: [bundle],
+    additionalExtensionPaths: paths,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
@@ -43,54 +42,145 @@ async function nestedSessionWithBashGuard() {
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(workDir),
     settingsManager: SettingsManager.create(workDir, agentDir),
-    tools: ["bash"],
   });
   await session.bindExtensions({});
-  const bash = session.getToolDefinition("bash");
-  assert.ok(bash?.execute, "child session must expose the bash tool from the Larkin guard");
-  return { session, bash };
+  return session;
 }
 
-test("child loader applies Larkin bash guard and WeakMap cap", async () => {
-  const { session, bash } = await nestedSessionWithBashGuard();
-  const ctx = { sessionManager: session.sessionManager };
-  await assert.rejects(
-    bash.execute("cap-60", { command: "printf should-not-run", timeout: 61 },
-      new AbortController().signal, () => {}, ctx),
-    /timeout:61 exceeds the 60s foreground hard limit/,
-  );
-  setSubagentBashWaitSeconds(session.sessionManager, 90);
-  const result = await bash.execute("cap-90", { command: "printf nested-ok", timeout: 90 },
-    new AbortController().signal, () => {}, ctx);
-  assert.match(JSON.stringify(result), /nested-ok/);
-  await assert.rejects(
-    bash.execute("cap-91", { command: "printf should-not-run", timeout: 91 },
-      new AbortController().signal, () => {}, ctx),
-    /timeout:91 exceeds the 90s background-subagent bash limit/,
-  );
-});
+function toolCtx(session) {
+  return {
+    cwd: workDir,
+    sessionManager: session.sessionManager,
+    model: session.model,
+    modelRegistry: Object.assign(session.modelRuntime ?? {}, { runtime: session.modelRuntime }),
+    ui: { setStatus() {}, notify() {}, setWidget() {}, },
+    getSystemPrompt: () => "nested-bash-e2e",
+  };
+}
 
-test("authorized nested bash abort reclaims the sleep process", async () => {
-  const { session, bash } = await nestedSessionWithBashGuard();
-  setSubagentBashWaitSeconds(session.sessionManager, 90);
-  const marker = `larkin-issue161-abort-${process.pid}-${Date.now()}`;
-  const ac = new AbortController();
-  const pending = bash.execute("abort-sleep", { command: `sleep 30 # ${marker}`, timeout: 90 },
-    ac.signal, () => {}, { sessionManager: session.sessionManager });
-  ac.abort();
-  await assert.rejects(pending, /abort/i);
-  const leftover = spawnSync("pgrep", ["-fl", marker], { encoding: "utf8" });
-  assert.equal((leftover.stdout || "").trim(), "", leftover.stdout);
-});
+async function waitFor(predicate, timeoutMs = 15_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("wait timed out");
+}
 
-test("AgentManager spawn rejects unauthorized or oversized wait caps", () => {
+test("Agent schema to nested session authorizes only that child past the parent cap", async () => {
+  const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = "2";
+  const originalSpawn = AgentManager.prototype.spawn;
+  try {
+    const bashBundle = bundledPiBashTimeoutExtensionPath();
+    const subagentsEntry = fileURLToPath(new URL("../../../node_modules/@tintinweb/pi-subagents/src/index.ts", import.meta.url));
+    assert.ok(bashBundle);
+    const parent = await sessionWithCliExtensions([bashBundle, subagentsEntry]);
+    const bash = parent.getToolDefinition("bash");
+    const agent = parent.getToolDefinition("Agent");
+    assert.ok(bash?.execute && agent?.execute);
+    const ctx = toolCtx(parent);
+    await assert.rejects(
+      bash.execute("parent-oversize", { command: "printf parent-no", timeout: 3 },
+        new AbortController().signal, () => {}, ctx),
+      /timeout:3 exceeds the 2s foreground hard limit/,
+    );
+
+    const probes = [];
+    AgentManager.prototype.spawn = function spawnWithProbe(...args) {
+      const options = args[4] && typeof args[4] === "object" ? args[4] : {};
+      const previous = options.onSessionCreated;
+      const next = { ...options, onSessionCreated: (session) => {
+        probes.push((async () => {
+          const childBash = session.getToolDefinition("bash");
+          assert.ok(childBash?.execute, "child session must load the bash guard");
+          const authorized = getSubagentBashWaitSeconds(session.sessionManager);
+          if (authorized === 90) {
+            const started = Date.now();
+            const childResult = await childBash.execute("child-sleep", { command: "sleep 3 && printf child-ok", timeout: 5 },
+              new AbortController().signal, () => {}, { sessionManager: session.sessionManager });
+            assert.ok(Date.now() - started >= 2500, "child must outlive the 2s parent cap");
+            assert.match(JSON.stringify(childResult), /child-ok/);
+            const marker = `larkin-issue161-abort-${process.pid}-${Date.now()}`;
+            const ac = new AbortController();
+            const pending = childBash.execute("abort-sleep", { command: `sleep 30 # ${marker}`, timeout: 90 },
+              ac.signal, () => {}, { sessionManager: session.sessionManager });
+            ac.abort();
+            await assert.rejects(pending, /abort/i);
+            const leftover = spawnSync("pgrep", ["-fl", marker], { encoding: "utf8" });
+            assert.equal((leftover.stdout || "").trim(), "", leftover.stdout);
+          } else {
+            await assert.rejects(
+              childBash.execute("sib", { command: "printf no", timeout: 3 },
+                new AbortController().signal, () => {}, { sessionManager: session.sessionManager }),
+              /timeout:3 exceeds the 2s foreground hard limit/,
+            );
+          }
+        })());
+        previous?.(session);
+        return probes[probes.length - 1];
+      } };
+      for (const key of Object.getOwnPropertySymbols(options)) next[key] = options[key];
+      args[4] = next;
+      return originalSpawn.apply(this, args);
+    };
+
+    const spawned = await agent.execute("agent-1", {
+      prompt: "do not talk; wait",
+      description: "nested-e2e",
+      subagent_type: "general-purpose",
+      run_in_background: true,
+      max_command_wait_seconds: 90,
+      isolated: true,
+    }, new AbortController().signal, () => {}, ctx);
+    const authorizedProbe = await waitFor(() => probes[0]);
+    await authorizedProbe;
+    const spawnedText = JSON.stringify(spawned);
+    const agentId = spawnedText.match(/\b[0-9a-f]{17}\b/i)?.[0]
+      ?? spawnedText.match(/[0-9a-f-]{8,}/i)?.[0];
+    assert.ok(agentId, spawnedText);
+
+    const siblingSpawned = await agent.execute("agent-2", {
+      prompt: "sibling",
+      description: "sibling-e2e",
+      subagent_type: "general-purpose",
+      run_in_background: true,
+      isolated: true,
+    }, new AbortController().signal, () => {}, ctx);
+    const siblingProbe = await waitFor(() => probes[1]);
+    await siblingProbe;
+    assert.ok(JSON.stringify(siblingSpawned));
+
+    const manager = globalThis[Symbol.for("pi-subagents:manager")];
+    manager?.abort?.(agentId);
+    const child = manager?.getRecord?.(agentId)?.session;
+    if (child) {
+      assert.equal(getSubagentBashWaitSeconds(child.sessionManager), undefined);
+      const childBash = child.getToolDefinition("bash");
+      await assert.rejects(
+        childBash.execute("after-revoke", { command: "printf no", timeout: 3 },
+          new AbortController().signal, () => {}, { sessionManager: child.sessionManager }),
+        /timeout:3 exceeds the 2s foreground hard limit/,
+      );
+    }
+  } finally {
+    AgentManager.prototype.spawn = originalSpawn;
+    if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+    else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
+  }
+}, { timeout: 30_000 });
+
+test("AgentManager spawn rejects public maxCommandWaitSeconds", () => {
   const manager = new AgentManager();
-  const spawn = (options) => manager.spawn({}, {}, "general-purpose", "go", {
+  assert.throws(() => manager.spawn({}, {}, "general-purpose", "go", {
     description: "e2e",
-    ...options,
-  });
-  assert.throws(() => spawn({ isBackground: false, maxCommandWaitSeconds: 90 }), /isBackground: true/);
-  assert.throws(() => spawn({ isBackground: true, maxCommandWaitSeconds: 60 }), /61..600/);
-  assert.throws(() => spawn({ isBackground: true, maxCommandWaitSeconds: 601 }), /61..600/);
-  assert.throws(() => spawn({ isBackground: true, maxCommandWaitSeconds: 90.5 }), /61..600/);
+    isBackground: true,
+    maxCommandWaitSeconds: 90,
+  }), /not a public spawn option/);
+  assert.throws(() => manager.spawn({}, {}, "general-purpose", "go", {
+    description: "e2e",
+    isBackground: true,
+    maxCommandWaitSeconds: 600,
+  }), /not a public spawn option/);
 });

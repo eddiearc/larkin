@@ -988,9 +988,10 @@ test("inherited builtin PI_PACKAGE_DIR does not drop production extension versio
     for (let index = 0; index < sessionLaunch.args.length; index += 1) {
       if (sessionLaunch.args[index] === "-e") extensionPaths.push(sessionLaunch.args[index + 1]);
     }
-    assert.equal(extensionPaths.length, 2, JSON.stringify(sessionLaunch.args));
+    assert.equal(extensionPaths.length, 3, JSON.stringify(sessionLaunch.args));
     const expected = [
       path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-bash-timeout.bundle.js"),
+      path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-subagent-record-watchdog.bundle.js"),
       path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-subagents.bundle.js"),
     ].map((entry) => fs.realpathSync(entry)).sort();
     assert.deepEqual(extensionPaths.map((entry) => fs.realpathSync(entry)).sort(), expected);

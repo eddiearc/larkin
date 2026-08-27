@@ -1,6 +1,7 @@
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { BashToolInput } from "@earendil-works/pi-coding-agent";
-import { getSubagentBashWaitSeconds, setSubagentBashWaitSeconds } from "./pi-subagent-bash-wait.js";
+import { fileURLToPath } from "node:url";
+import { getSubagentBashWaitSeconds } from "./pi-subagent-bash-wait.js";
 
 /**
  * pi bash 工具超时护栏扩展。
@@ -9,12 +10,12 @@ import { getSubagentBashWaitSeconds, setSubagentBashWaitSeconds } from "./pi-sub
  * `pi --extension/-e <bundle>` 注入，覆盖内置 `bash` 工具：
  * - 父会话无论模型是否传 `timeout`，都强制收窄到 <= MAX_BASH_SECONDS（默认 60s）。
  * - 仅当 Agent(run_in_background: true) 显式传入 max_command_wait_seconds (61..600)
- *   时，对应子会话的 bash 才允许该上限（issue #161）。
+ *   时，对应子会话的 bash 才允许该上限（issue #161）。子会话通过 loader 加载本扩展。
  * - 超时时 pi 会杀掉整个进程树，并禁止 nohup/`&`/disown。
  */
 
 const MAX_BASH_SECONDS = 60;
-const PI_SUBAGENTS_MANAGER = Symbol.for("pi-subagents:manager");
+const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
 
 function effectiveBashTimeout(): number {
   const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
@@ -22,39 +23,20 @@ function effectiveBashTimeout(): number {
   return MAX_BASH_SECONDS;
 }
 
-interface SpawnRegistry {
-  spawn?: (...args: unknown[]) => unknown;
-  __larkinBashWaitWrapped?: boolean;
-}
-
-function wrapSubagentSpawn(): void {
-  const registry = (globalThis as Record<symbol, SpawnRegistry | undefined>)[PI_SUBAGENTS_MANAGER];
-  if (!registry?.spawn || registry.__larkinBashWaitWrapped) return;
-  const original = registry.spawn.bind(registry);
-  registry.spawn = (...args: unknown[]) => {
-    const options = (args[4] && typeof args[4] === "object" ? args[4] : {}) as Record<string, unknown>;
-    const wait = options.maxCommandWaitSeconds;
-    const previous = options.onSessionCreated as ((session: { sessionManager?: object }) => void) | undefined;
-    args[4] = {
-      ...options,
-      onSessionCreated: (session: { sessionManager?: object }) => {
-        if (options.isBackground === true && typeof wait === "number" && session?.sessionManager) {
-          setSubagentBashWaitSeconds(session.sessionManager, wait);
-        }
-        previous?.(session);
-      },
-    };
-    return original(...args);
-  };
-  registry.__larkinBashWaitWrapped = true;
+function rememberExtensionPath(): void {
+  try {
+    const here = fileURLToPath(import.meta.url);
+    (globalThis as Record<symbol, string>)[LARKIN_BASH_TIMEOUT_PATH] = here;
+  } catch {
+    /* ignore */
+  }
 }
 
 export default function (pi: ExtensionAPI): void {
   const cwd = process.cwd();
   const builtin = createBashToolDefinition(cwd);
   const MAX = effectiveBashTimeout();
-  wrapSubagentSpawn();
-  pi.on("session_start", (_event, _ctx) => { wrapSubagentSpawn(); });
+  rememberExtensionPath();
 
   const PARENT_GUIDANCE =
     `This command exceeded the ${MAX}s foreground hard limit. ` +

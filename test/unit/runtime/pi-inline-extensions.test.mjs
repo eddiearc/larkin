@@ -153,36 +153,11 @@ test("max_command_wait_seconds parse is fail-closed", () => {
   assert.throws(() => parseMaxCommandWaitSeconds(90.5, true), /61..600/);
 });
 
-test("background spawn wrap authorizes only that session manager", async () => {
-  const key = Symbol.for("pi-subagents:manager");
-  const prior = globalThis[key];
-  const childManager = { getSessionId: () => "child", getSessionFile: () => undefined };
-  const registry = {
-    spawn(_pi, _ctx, _type, _prompt, options) {
-      options.onSessionCreated?.({ sessionManager: childManager });
-      return "agent-1";
-    },
-  };
-  globalThis[key] = registry;
-  try {
-    let bashTool;
-    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
-    const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
-    registry.spawn(null, null, "general-purpose", "go", {
-      isBackground: true,
-      maxCommandWaitSeconds: 90,
-    });
-    const result = await bashTool.execute("from-spawn", { command: "printf spawn-ok", timeout: 61 },
-      new AbortController().signal, () => {}, { sessionManager: childManager });
-    assert.match(JSON.stringify(result), /spawn-ok/);
-    await assert.rejects(
-      bashTool.execute("parent", { command: "printf no", timeout: 61 },
-        new AbortController().signal, () => {}, { sessionManager: {} }),
-      /timeout:61 exceeds the 60s foreground hard limit/,
-    );
-  } finally {
-    if (prior === undefined) delete globalThis[key];
-    else globalThis[key] = prior;
-  }
+test("production subagents bundle keeps max_command_wait_seconds on the Agent schema", () => {
+  const bundle = fs.readFileSync(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url), "utf8");
+  assert.match(bundle, /max_command_wait_seconds/);
+  assert.match(bundle, /requires run_in_background: true/);
+  assert.match(bundle, /cannot be combined with schedule/);
+  assert.match(bundle, /cannot be combined with resume/);
+  assert.match(bundle, /maxCommandWaitSeconds/);
 });

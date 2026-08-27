@@ -10,8 +10,125 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-80c5d241789d23ea b/.bun-tag-80c5d241789d23ea
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-be5c346803cf4d5f b/.bun-tag-be5c346803cf4d5f
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/agent-manager.js b/dist/agent-manager.js
+index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..1059822908b7efa7db7159104a1c9ea7bfd33627 100644
+--- a/dist/agent-manager.js
++++ b/dist/agent-manager.js
+@@ -77,6 +77,15 @@ export class AgentManager {
+         // call, not minutes later at drain. Throw (not warn): programmatic callers
+         // can fix and retry; the RPC layer converts throws into error envelopes.
+         assertValidSpawnCwd(options.cwd);
++        if (options.maxCommandWaitSeconds !== undefined) {
++            if (options.isBackground !== true) {
++                throw new Error("maxCommandWaitSeconds requires isBackground: true");
++            }
++            const raw = options.maxCommandWaitSeconds;
++            if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
++                throw new Error("maxCommandWaitSeconds must be an integer 61..600");
++            }
++        }
+         const id = randomUUID().slice(0, 17);
+         const abortController = new AbortController();
+         const record = {
+@@ -166,6 +175,7 @@ export class AgentManager {
+             isolated: options.isolated,
+             inheritContext: options.inheritContext,
+             thinkingLevel: options.thinkingLevel,
++            maxCommandWaitSeconds: options.maxCommandWaitSeconds,
+             // Worktree wins for the working dir (the agent must run in the copy —
+             // which, with a custom cwd, was created from that target). Config stays
+             // with the parent project when a caller-supplied cwd is in play; it must
+diff --git a/dist/agent-runner.js b/dist/agent-runner.js
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..041fab87451a82316e9980f1ec50d4f63927259b 100644
+--- a/dist/agent-runner.js
++++ b/dist/agent-runner.js
+@@ -1,9 +1,10 @@
+ /**
+  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
+  */
+-import { readFileSync } from "node:fs";
++import { existsSync, readFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
+ import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+ import { buildParentContext, extractText } from "./context.js";
+@@ -384,6 +385,33 @@ function resolveConfiguredSessionDir(sessionDir, cwd) {
+         return sessionDir;
+     return resolve(cwd, sessionDir);
+ }
++const LARKIN_BASH_WAIT = Symbol.for("larkin-pi-subagent-bash-wait");
++const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
++function authorizeSubagentBashWait(sessionManager, seconds) {
++    const bag = globalThis;
++    bag[LARKIN_BASH_WAIT] ??= new WeakMap();
++    bag[LARKIN_BASH_WAIT].set(sessionManager, seconds);
++}
++function resolveLarkinBashTimeoutExtensionPath() {
++    const fromGlobal = globalThis[LARKIN_BASH_TIMEOUT_PATH];
++    if (typeof fromGlobal === "string" && existsSync(fromGlobal))
++        return fromGlobal;
++    try {
++        const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-bash-timeout.bundle.js");
++        if (existsSync(sibling))
++            return sibling;
++    }
++    catch {
++        /* ignore */
++    }
++    const argv = process.argv;
++    for (let i = 0; i < argv.length; i++) {
++        if ((argv[i] === "-e" || argv[i] === "--extension") && typeof argv[i + 1] === "string" && argv[i + 1].includes("pi-bash-timeout")) {
++            return argv[i + 1];
++        }
++    }
++    return undefined;
++}
+ export async function runAgent(ctx, type, prompt, options) {
+     const config = getConfig(type);
+     const agentConfig = getAgentConfig(type);
+@@ -483,7 +511,11 @@ export async function runAgent(ctx, type, prompt, options) {
+     // It's only needed when we're neither loading everything without excludes
+     // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
+     const loadAll = extensions === true || extensionsSpec?.wildcard === true;
+-    const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
++    const bashTimeoutPath = resolveLarkinBashTimeoutExtensionPath();
++    const additionalExtensionPaths = [
++        ...(extensionsSpec?.paths ?? []),
++        ...(bashTimeoutPath ? [bashTimeoutPath] : []),
++    ];
+     // Pre-filter discovered set, captured by the override — the exclude-typo warning
+     // must compare against this, not the surviving set (absence from survivors is
+     // an exclude *succeeding*).
+@@ -506,7 +538,7 @@ export async function runAgent(ctx, type, prompt, options) {
+         cwd: configCwd,
+         agentDir,
+         noExtensions,
+-        additionalExtensionPaths,
++        additionalExtensionPaths: additionalExtensionPaths.length ? additionalExtensionPaths : undefined,
+         extensionsOverride,
+         noSkills,
+         noPromptTemplates: true,
+@@ -662,6 +694,13 @@ export async function runAgent(ctx, type, prompt, options) {
+         sessionOpts.thinkingLevel = thinkingLevel;
+     }
+     const { session } = await createAgentSession(sessionOpts);
++    if (options.maxCommandWaitSeconds !== undefined) {
++        const raw = options.maxCommandWaitSeconds;
++        if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
++            throw new Error("maxCommandWaitSeconds must be an integer 61..600");
++        }
++        authorizeSubagentBashWait(session.sessionManager, raw);
++    }
+     const baseSessionName = agentConfig?.name ?? type;
+     session.setSessionName(options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName);
+     // Bind extensions so that session_start fires and extensions can initialize
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62223140db 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..75b709e6329473bd83c689066f5ebca8c328f41f 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -69,6 +69,44 @@ function abortable(promise, signal) {
@@ -87,13 +204,19 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62
              resume: Type.Optional(Type.String({
                  description: "Optional agent ID to resume from. Continues from previous context.",
              })),
-@@ -1100,6 +1148,17 @@ Terse command-style prompts produce shallow, generic work.
-                 }
-                 return textResult(record.result?.trim() || "No output.", buildDetails(detailBase, record));
-             }
+@@ -1041,6 +1089,23 @@ Terse command-style prompts produce shallow, generic work.
+                 modelName,
+                 tags: agentTags.length > 0 ? agentTags : undefined,
+             };
 +            let maxCommandWaitSeconds;
 +            if (params.max_command_wait_seconds !== undefined) {
-+                if (runInBackground !== true) {
++                if (params.schedule) {
++                    return textResult("max_command_wait_seconds cannot be combined with schedule");
++                }
++                if (params.resume) {
++                    return textResult("max_command_wait_seconds cannot be combined with resume");
++                }
++                if (params.run_in_background !== true) {
 +                    return textResult("max_command_wait_seconds requires run_in_background: true");
 +                }
 +                const raw = params.max_command_wait_seconds;
@@ -102,10 +225,10 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62
 +                }
 +                maxCommandWaitSeconds = raw;
 +            }
-             // Background execution
-             if (runInBackground) {
-                 const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
-@@ -1124,6 +1183,7 @@ Terse command-style prompts produce shallow, generic work.
+             // ---- Schedule: register a job, don't spawn now ----
+             if (params.schedule) {
+                 if (!isSchedulingEnabled()) {
+@@ -1124,6 +1189,7 @@ Terse command-style prompts produce shallow, generic work.
                          inheritContext,
                          thinkingLevel: thinking,
                          isBackground: true,
@@ -113,7 +236,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62
                          isolation,
                          invocation: agentInvocation,
                          ...bgCallbacks,
-@@ -1293,6 +1353,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1293,6 +1359,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -123,7 +246,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1370,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1376,15 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
@@ -144,7 +267,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1393,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1399,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -160,8 +283,140 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..80235f393946048b6030cfb09d47af62
              }
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
+diff --git a/src/agent-manager.ts b/src/agent-manager.ts
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..736fb5e7d24c8582e8ccfb6a0bf2db2166872650 100644
+--- a/src/agent-manager.ts
++++ b/src/agent-manager.ts
+@@ -62,6 +62,8 @@ interface SpawnOptions {
+   inheritContext?: boolean;
+   thinkingLevel?: ThinkingLevel;
+   isBackground?: boolean;
++  /** Background-only. Nested bash timeout cap, integer 61..600. */
++  maxCommandWaitSeconds?: number;
+   /**
+    * Skip the maxConcurrent queue check for this spawn — start immediately even
+    * if the configured concurrency limit would otherwise queue it. Used by the
+@@ -154,6 +156,15 @@ export class AgentManager {
+     // call, not minutes later at drain. Throw (not warn): programmatic callers
+     // can fix and retry; the RPC layer converts throws into error envelopes.
+     assertValidSpawnCwd(options.cwd);
++    if (options.maxCommandWaitSeconds !== undefined) {
++      if (options.isBackground !== true) {
++        throw new Error("maxCommandWaitSeconds requires isBackground: true");
++      }
++      const raw = options.maxCommandWaitSeconds;
++      if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
++        throw new Error("maxCommandWaitSeconds must be an integer 61..600");
++      }
++    }
+ 
+     const id = randomUUID().slice(0, 17);
+     const abortController = new AbortController();
+@@ -252,6 +263,7 @@ export class AgentManager {
+       isolated: options.isolated,
+       inheritContext: options.inheritContext,
+       thinkingLevel: options.thinkingLevel,
++      maxCommandWaitSeconds: options.maxCommandWaitSeconds,
+       // Worktree wins for the working dir (the agent must run in the copy —
+       // which, with a custom cwd, was created from that target). Config stays
+       // with the parent project when a caller-supplied cwd is in play; it must
+diff --git a/src/agent-runner.ts b/src/agent-runner.ts
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..fa83bb80359182238e097d68816d8c5fa3cf43e9 100644
+--- a/src/agent-runner.ts
++++ b/src/agent-runner.ts
+@@ -2,9 +2,10 @@
+  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
+  */
+ 
+-import { readFileSync } from "node:fs";
++import { existsSync, readFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
+ import type { Model } from "@earendil-works/pi-ai";
+ import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+ import {
+@@ -358,6 +359,8 @@ export interface RunOptions {
+   isolated?: boolean;
+   inheritContext?: boolean;
+   thinkingLevel?: ThinkingLevel;
++  /** Background-only nested bash timeout cap, integer 61..600. */
++  maxCommandWaitSeconds?: number;
+   /** Override working directory (e.g. for worktree isolation). */
+   cwd?: string;
+   /**
+@@ -497,6 +500,33 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
+   return resolve(cwd, sessionDir);
+ }
+ 
++const LARKIN_BASH_WAIT = Symbol.for("larkin-pi-subagent-bash-wait");
++const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
++
++function authorizeSubagentBashWait(sessionManager: object, seconds: number): void {
++  const bag = globalThis as Record<symbol, WeakMap<object, number> | undefined>;
++  bag[LARKIN_BASH_WAIT] ??= new WeakMap();
++  bag[LARKIN_BASH_WAIT].set(sessionManager, seconds);
++}
++
++function resolveLarkinBashTimeoutExtensionPath(): string | undefined {
++  const fromGlobal = (globalThis as Record<symbol, unknown>)[LARKIN_BASH_TIMEOUT_PATH];
++  if (typeof fromGlobal === "string" && existsSync(fromGlobal)) return fromGlobal;
++  try {
++    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-bash-timeout.bundle.js");
++    if (existsSync(sibling)) return sibling;
++  } catch {
++    /* ignore */
++  }
++  const argv = process.argv;
++  for (let i = 0; i < argv.length; i++) {
++    if ((argv[i] === "-e" || argv[i] === "--extension") && typeof argv[i + 1] === "string" && argv[i + 1].includes("pi-bash-timeout")) {
++      return argv[i + 1];
++    }
++  }
++  return undefined;
++}
++
+ export async function runAgent(
+   ctx: ExtensionContext,
+   type: SubagentType,
+@@ -612,7 +642,11 @@ export async function runAgent(
+   // It's only needed when we're neither loading everything without excludes
+   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
+   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
+-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
++  const bashTimeoutPath = resolveLarkinBashTimeoutExtensionPath();
++  const additionalExtensionPaths = [
++    ...(extensionsSpec?.paths ?? []),
++    ...(bashTimeoutPath ? [bashTimeoutPath] : []),
++  ];
+   // Pre-filter discovered set, captured by the override — the exclude-typo warning
+   // must compare against this, not the surviving set (absence from survivors is
+   // an exclude *succeeding*).
+@@ -636,7 +670,7 @@ export async function runAgent(
+     cwd: configCwd,
+     agentDir,
+     noExtensions,
+-    additionalExtensionPaths,
++    additionalExtensionPaths: additionalExtensionPaths.length ? additionalExtensionPaths : undefined,
+     extensionsOverride,
+     noSkills,
+     noPromptTemplates: true,
+@@ -808,6 +842,13 @@ export async function runAgent(
+   }
+ 
+   const { session } = await createAgentSession(sessionOpts);
++  if (options.maxCommandWaitSeconds !== undefined) {
++    const raw = options.maxCommandWaitSeconds;
++    if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
++      throw new Error("maxCommandWaitSeconds must be an integer 61..600");
++    }
++    authorizeSubagentBashWait(session.sessionManager, raw);
++  }
+ 
+   const baseSessionName = agentConfig?.name ?? type;
+   session.setSessionName(
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..5f0dab24b520f42cd6d2d29d3677a8dd16d35ff6 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..43cbb27d3324f9d8962227c5786f3d0f65e4d3a2 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -91,6 +91,54 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -236,7 +491,54 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..5f0dab24b520f42cd6d2d29d3677a8dd
    function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
      cancelNudge(key);
      pendingNudges.set(key, setTimeout(() => {
-@@ -1453,6 +1505,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -949,6 +1001,13 @@ Terse command-style prompts produce shallow, generic work.
+           description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
+         }),
+       ),
++      max_command_wait_seconds: Type.Optional(
++        Type.Number({
++          description: "Background-only. Authorize nested bash timeouts from 61 to 600 seconds. Requires run_in_background: true. Invalid values fail closed.",
++          minimum: 61,
++          maximum: 600,
++        }),
++      ),
+       resume: Type.Optional(
+         Type.String({
+           description: "Optional agent ID to resume from. Continues from previous context.",
+@@ -1168,6 +1227,24 @@ Terse command-style prompts produce shallow, generic work.
+         tags: agentTags.length > 0 ? agentTags : undefined,
+       };
+ 
++      let maxCommandWaitSeconds: number | undefined;
++      if (params.max_command_wait_seconds !== undefined) {
++        if (params.schedule) {
++          return textResult("max_command_wait_seconds cannot be combined with schedule");
++        }
++        if (params.resume) {
++          return textResult("max_command_wait_seconds cannot be combined with resume");
++        }
++        if (params.run_in_background !== true) {
++          return textResult("max_command_wait_seconds requires run_in_background: true");
++        }
++        const raw = params.max_command_wait_seconds;
++        if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
++          return textResult("max_command_wait_seconds must be an integer 61..600");
++        }
++        maxCommandWaitSeconds = raw;
++      }
++
+       // ---- Schedule: register a job, don't spawn now ----
+       if (params.schedule) {
+         if (!isSchedulingEnabled()) {
+@@ -1259,6 +1336,7 @@ Terse command-style prompts produce shallow, generic work.
+             inheritContext,
+             thinkingLevel: thinking,
+             isBackground: true,
++            maxCommandWaitSeconds,
+             isolation,
+             invocation: agentInvocation,
+             ...bgCallbacks,
+@@ -1453,6 +1531,11 @@ Terse command-style prompts produce shallow, generic work.
            description: "If true, wait for the agent to complete before returning. Default: false.",
          }),
        ),
@@ -248,7 +550,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..5f0dab24b520f42cd6d2d29d3677a8dd
        verbose: Type.Optional(
          Type.Boolean({
            description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-@@ -1470,14 +1527,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1470,14 +1553,15 @@ Terse command-style prompts produce shallow, generic work.
        // completion notification can still be delivered.
        // Queued agents have no promise yet (it's created when the queue starts
        // them), so poll until they leave the queue, then await like a running one.
@@ -271,7 +573,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..5f0dab24b520f42cd6d2d29d3677a8dd
        }
  
        const displayName = getDisplayName(record.type);
-@@ -1492,11 +1550,13 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1492,11 +1576,13 @@ Terse command-style prompts produce shallow, generic work.
  
        let output =
          `Agent: ${record.id}\n` +

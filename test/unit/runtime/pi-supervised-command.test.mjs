@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, test } from "bun:test";
 import {
   cancelSupervisedCommand,
@@ -97,6 +99,27 @@ test("cancel is idempotent after wait consumes the terminal", async () => {
   let alive = true;
   try { process.kill(started.pid, 0); } catch { alive = false; }
   assert.equal(alive, false);
+});
+
+test("missing executable fails without an unhandled spawn error", async () => {
+  const owner = {};
+  const unhandled = [];
+  const onError = (error) => { unhandled.push(error); };
+  process.on("uncaughtException", onError);
+  process.on("unhandledRejection", onError);
+  try {
+    assert.throws(() => startSupervisedCommand({
+      owner,
+      executable: path.join(os.tmpdir(), "larkin-missing-supervised-bin"),
+      args: [],
+      cwd: process.cwd(),
+    }), /failed to spawn|ENOENT|not found/i);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(unhandled.length, 0, String(unhandled[0]));
+  } finally {
+    process.off("uncaughtException", onError);
+    process.off("unhandledRejection", onError);
+  }
 });
 
 test("supervised cwd cannot escape the session root", () => {

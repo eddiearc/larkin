@@ -70,8 +70,14 @@ function listDescendantPids(root: number): number[] {
   return [...found];
 }
 
-async function killProcessTree(pid: number): Promise<void> {
-  const descendants = listDescendantPids(pid);
+function refreshTreePids(pid: number, known: Set<number>): number[] {
+  known.add(pid);
+  for (const child of listDescendantPids(pid)) known.add(child);
+  return [...known];
+}
+
+async function killProcessTree(pid: number, known: Set<number> = new Set([pid])): Promise<void> {
+  const descendants = refreshTreePids(pid, known).filter((child) => child !== pid);
   if (process.platform === "win32") {
     const result = await new Promise<{ status: number | null; error?: Error }>((resolve) => {
       const child = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
@@ -185,6 +191,8 @@ interface HandleRecord {
   cancelRequested: boolean;
   exitWaiters: Array<() => void>;
   lifetimeTimer?: ReturnType<typeof setTimeout>;
+  treePoll?: ReturnType<typeof setInterval>;
+  treePids: Set<number>;
   chain: Promise<void>;
 }
 
@@ -210,6 +218,10 @@ function finish(record: HandleRecord, status: HandleRecord["status"], exitCode: 
   if (record.lifetimeTimer) {
     clearTimeout(record.lifetimeTimer);
     record.lifetimeTimer = undefined;
+  }
+  if (record.treePoll) {
+    clearInterval(record.treePoll);
+    record.treePoll = undefined;
   }
   if (record.status === "running") {
     record.status = status;
@@ -238,9 +250,19 @@ export function startSupervisedCommand(input: {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
+  let record: HandleRecord | undefined;
+  child.on("error", (error) => {
+    if (!record) return;
+    const current = record;
+    void current.chain.then(async () => {
+      await killProcessTree(current.pid, current.treePids);
+      finish(current, "killed", null);
+    });
+    void error;
+  });
   if (!child.pid) throw new Error("failed to spawn supervised command");
   const id = randomBytes(16).toString("hex");
-  const record: HandleRecord = {
+  record = {
     id,
     owner: input.owner,
     child,
@@ -256,32 +278,32 @@ export function startSupervisedCommand(input: {
     terminalConsumed: false,
     cancelRequested: false,
     exitWaiters: [],
+    treePids: new Set([child.pid]),
     chain: Promise.resolve(),
   };
-  child.stdout?.on("data", (chunk: Buffer) => record.stdout.write(Buffer.from(chunk)));
-  child.stderr?.on("data", (chunk: Buffer) => record.stderr.write(Buffer.from(chunk)));
-  child.once("exit", (code) => {
-    void record.chain.then(async () => {
-      await killProcessTree(record.pid);
-      finish(record, "exited", code);
+  const started = record;
+  child.stdout?.on("data", (chunk: Buffer) => started.stdout.write(Buffer.from(chunk)));
+  child.stderr?.on("data", (chunk: Buffer) => started.stderr.write(Buffer.from(chunk)));
+  started.treePoll = setInterval(() => {
+    refreshTreePids(started.pid, started.treePids);
+  }, 50);
+  started.treePoll.unref?.();
+  child.once("close", (code) => {
+    void started.chain.then(async () => {
+      await killProcessTree(started.pid, started.treePids);
+      finish(started, "exited", code);
     });
   });
-  child.once("error", () => {
-    void record.chain.then(async () => {
-      await killProcessTree(record.pid);
-      finish(record, "killed", null);
-    });
-  });
-  record.lifetimeTimer = setTimeout(() => {
-    void record.chain.then(async () => {
-      if (record.status !== "running") return;
-      await killProcessTree(record.pid);
-      finish(record, "lifetime_exceeded", null);
+  started.lifetimeTimer = setTimeout(() => {
+    void started.chain.then(async () => {
+      if (started.status !== "running") return;
+      await killProcessTree(started.pid, started.treePids);
+      finish(started, "lifetime_exceeded", null);
     });
   }, supervisedLifeSeconds() * 1000);
-  record.lifetimeTimer.unref?.();
-  handles.set(id, record);
-  return { handle: id, pid: record.pid };
+  started.lifetimeTimer.unref?.();
+  handles.set(id, started);
+  return { handle: id, pid: started.pid };
 }
 
 function snapshot(record: HandleRecord): SupervisedSnapshot {
@@ -357,23 +379,25 @@ export async function cancelSupervisedCommand(owner: object, handle: string): Pr
   const remembered = terminals.get(handle);
   if (remembered && remembered.owner === owner && !handles.has(handle)) return remembered.snapshot;
   const record = requireHandle(owner, handle);
-  record.cancelRequested = true;
-  notify(record);
-  if (record.status === "running") {
-    await killProcessTree(record.pid);
-    record.status = "killed";
-  }
-  if (record.lifetimeTimer) {
-    clearTimeout(record.lifetimeTimer);
-    record.lifetimeTimer = undefined;
-  }
-  const result = record.terminalConsumed && remembered?.owner === owner
-    ? remembered.snapshot
-    : snapshot(record);
-  record.terminalConsumed = true;
-  rememberTerminal(record.id, owner, result);
-  handles.delete(record.id);
-  return result;
+  return enqueue(record, async () => {
+    record.cancelRequested = true;
+    notify(record);
+    if (record.status === "running") {
+      await killProcessTree(record.pid, record.treePids);
+      record.status = "killed";
+    }
+    if (record.lifetimeTimer) {
+      clearTimeout(record.lifetimeTimer);
+      record.lifetimeTimer = undefined;
+    }
+    const result = record.terminalConsumed && remembered?.owner === owner
+      ? remembered.snapshot
+      : snapshot(record);
+    record.terminalConsumed = true;
+    rememberTerminal(record.id, owner, result);
+    handles.delete(record.id);
+    return result;
+  });
 }
 
 export async function reapSupervisedCommands(owner: object): Promise<void> {
@@ -386,7 +410,7 @@ export async function reapSupervisedCommands(owner: object): Promise<void> {
     try { await cancelSupervisedCommand(owner, record.id); }
     catch (error) { errors.push(error); }
     if (record.lifetimeTimer) clearTimeout(record.lifetimeTimer);
-    try { await killProcessTree(record.pid); }
+    try { await killProcessTree(record.pid, record.treePids); }
     catch (error) { errors.push(error); }
     handles.delete(record.id);
   }));

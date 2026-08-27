@@ -10,8 +10,6 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { AgentManager } from "../../../node_modules/@tintinweb/pi-subagents/src/agent-manager.ts";
-
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-e2e-"));
 const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-agent-"));
 afterAll(() => {
@@ -21,9 +19,9 @@ afterAll(() => {
 
 test("background Agent child exposes supervised tools and accepts steer between waits", async () => {
   const supervisedBundle = fileURLToPath(new URL("../../../dist/runtime/pi-supervised-command.bundle.js", import.meta.url));
-  const subagentsEntry = fileURLToPath(new URL("../../../node_modules/@tintinweb/pi-subagents/src/index.ts", import.meta.url));
+  const subagentsEntry = fileURLToPath(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url));
   assert.ok(fs.existsSync(supervisedBundle), "supervised bundle must exist");
-  globalThis[Symbol.for("larkin-pi-supervised-command-bundle")] = supervisedBundle;
+  assert.ok(fs.existsSync(subagentsEntry), "subagents bundle must exist");
   process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS = "1";
   process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS = "8";
 
@@ -52,19 +50,8 @@ test("background Agent child exposes supervised tools and accepts steer between 
   const steer = parent.getToolDefinition("steer_subagent");
   assert.ok(agent?.execute, "parent must expose public Agent");
 
-  const originalSpawn = AgentManager.prototype.spawn;
-  let childSession;
-  AgentManager.prototype.spawn = function spawnProbe(...args) {
-    const options = args[4] && typeof args[4] === "object" ? args[4] : {};
-    const previous = options.onSessionCreated;
-    const next = { ...options, onSessionCreated: (session) => {
-      childSession = session;
-      previous?.(session);
-    } };
-    for (const key of Object.getOwnPropertySymbols(options)) next[key] = options[key];
-    args[4] = next;
-    return originalSpawn.apply(this, args);
-  };
+  const registry = globalThis[Symbol.for("pi-subagents:manager")];
+  assert.ok(registry?.getRecord, "parent must expose subagents manager");
   try {
     const spawned = await agent.execute("agent-1", {
       prompt: "stay alive",
@@ -79,8 +66,15 @@ test("background Agent child exposes supervised tools and accepts steer between 
       ui: { setStatus() {}, notify() {}, setWidget() {} },
       getSystemPrompt: () => "supervised-e2e",
     });
+    const agentId = spawned?.details?.agentId;
+    assert.ok(agentId, `missing agent id: ${JSON.stringify(spawned)}`);
     const started = Date.now();
-    while (!childSession && Date.now() - started < 8000) await new Promise((r) => setTimeout(r, 25));
+    let childSession;
+    while (Date.now() - started < 8000) {
+      childSession = registry.getRecord(agentId)?.session;
+      if (childSession) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
     assert.ok(childSession, `child session missing: ${JSON.stringify(spawned)}`);
     const startTool = childSession.getToolDefinition("supervised_start");
     const waitTool = childSession.getToolDefinition("supervised_wait");
@@ -102,6 +96,6 @@ test("background Agent child exposes supervised tools and accepts steer between 
       /once per turn/,
     );
   } finally {
-    AgentManager.prototype.spawn = originalSpawn;
+
   }
 }, { timeout: 20_000 });

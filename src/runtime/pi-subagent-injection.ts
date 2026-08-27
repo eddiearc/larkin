@@ -27,27 +27,29 @@ declare global {
  */
 export function materializeEmbeddedPiSubagentBundle(configDir: string | undefined): string | null {
   const embedded = globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__;
+  const supervised = globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
   if (!embedded || !configDir) return null;
+  if (!supervised) throw new Error("supervised command bundle is missing");
   const dir = path.join(path.resolve(configDir), "providers", "pi", "extensions");
-  const target = path.join(dir, "pi-subagents.bundle.js");
+  const subTarget = path.join(dir, "pi-subagents.bundle.js");
+  const supTarget = path.join(dir, "pi-supervised-command.bundle.js");
   try {
+    if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("extensions dir must not be a symlink");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
-    const wroteSubagents = !fs.existsSync(target) || fs.readFileSync(target, "utf8") !== embedded;
-    if (wroteSubagents) {
-      const temporary = `${target}.${process.pid}.tmp`;
-      fs.writeFileSync(temporary, embedded, { mode: 0o600, flag: "wx" });
-      fs.renameSync(temporary, target);
-      fs.chmodSync(target, 0o600);
+    const oldSub = fs.existsSync(subTarget) ? fs.readFileSync(subTarget) : null;
+    const oldSup = fs.existsSync(supTarget) ? fs.readFileSync(supTarget) : null;
+    try {
+      writePrivateBundle(dir, "pi-subagents.bundle.js", embedded);
+      writePrivateBundle(dir, "pi-supervised-command.bundle.js", supervised);
+      return subTarget;
+    } catch (error) {
+      if (oldSub) fs.writeFileSync(subTarget, oldSub, { mode: 0o600 });
+      else if (fs.existsSync(subTarget)) fs.unlinkSync(subTarget);
+      if (oldSup) fs.writeFileSync(supTarget, oldSup, { mode: 0o600 });
+      else if (fs.existsSync(supTarget)) fs.unlinkSync(supTarget);
+      throw error;
     }
-    const supervised = materializeEmbeddedPiSupervisedCommandBundle(dir);
-    if (!supervised) {
-      if (wroteSubagents) {
-        try { fs.unlinkSync(target); } catch { /* ignore */ }
-      }
-      throw new Error("supervised command bundle is missing");
-    }
-    return target;
   } catch (error) {
     if (error instanceof Error && error.message.includes("supervised command bundle is missing")) throw error;
     return null;

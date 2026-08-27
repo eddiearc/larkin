@@ -23,11 +23,15 @@ export default function (pi: ExtensionAPI): void {
   const resetWaitTurn = () => { waitUsedThisTurn = false; };
   pi.on("agent_start", resetWaitTurn);
   pi.on("turn_end", resetWaitTurn);
-  pi.on("agent_end", resetWaitTurn);
-  pi.on("session_shutdown", async (_event, ctx) => {
-    const owner = (ctx as { sessionManager?: object } | undefined)?.sessionManager;
+  const reapOwner = async (_event: unknown, ctx: { sessionManager?: object } | undefined) => {
+    const owner = ctx?.sessionManager;
     if (owner) await reapSupervisedCommands(owner);
+  };
+  pi.on("agent_end", async (event, ctx) => {
+    resetWaitTurn();
+    await reapOwner(event, ctx as { sessionManager?: object } | undefined);
   });
+  pi.on("session_shutdown", reapOwner);
 
   pi.registerTool({
     name: "supervised_start",

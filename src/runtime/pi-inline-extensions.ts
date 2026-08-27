@@ -11,11 +11,6 @@ import piSubagentRecordWatchdog from "./pi-subagent-record-watchdog.js";
  * continue to use the prebuilt patched bundle.
  */
 async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
-  if (process.env.LARKIN_STANDALONE === "1") {
-    const loaded = await import("@tintinweb/pi-subagents/dist/index.js") as unknown as { default?: InlineExtension };
-    if (!loaded.default) throw new Error("Larkin bounded pi-subagents package is invalid; refusing to start builtin Pi");
-    return loaded.default;
-  }
   const bundle = bundledPiSubagentExtensionPath(process.env.LARKIN_CONFIG_DIR);
   if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start builtin Pi");
   const loaded = await import(pathToFileURL(bundle).href) as { default?: InlineExtension };

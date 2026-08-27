@@ -58,12 +58,15 @@ export function materializeEmbeddedPiSubagentBundle(configDir: string | undefine
 
 function writePrivateBundle(dir: string, name: string, embedded: string): string {
   const target = path.join(dir, name);
+  if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) {
+    throw new Error("bundle target must not be a symlink");
+  }
   if (!fs.existsSync(target) || fs.readFileSync(target, "utf8") !== embedded) {
     const temporary = `${target}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, embedded, { mode: 0o600, flag: "wx" });
     fs.renameSync(temporary, target);
-    fs.chmodSync(target, 0o600);
   }
+  fs.chmodSync(target, 0o600);
   return target;
 }
 

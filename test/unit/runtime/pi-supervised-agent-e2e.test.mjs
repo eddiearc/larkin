@@ -10,6 +10,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-e2e-"));
 const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-agent-"));
 afterAll(() => {
@@ -17,7 +18,7 @@ afterAll(() => {
   fs.rmSync(agentDir, { recursive: true, force: true });
 });
 
-test("background Agent child exposes supervised tools and accepts steer between waits", async () => {
+test("background Agent child exposes supervised tools and wait barrier", async () => {
   const supervisedBundle = fileURLToPath(new URL("../../../dist/runtime/pi-supervised-command.bundle.js", import.meta.url));
   const subagentsEntry = fileURLToPath(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url));
   assert.ok(fs.existsSync(supervisedBundle), "supervised bundle must exist");
@@ -49,6 +50,7 @@ test("background Agent child exposes supervised tools and accepts steer between 
   const agent = parent.getToolDefinition("Agent");
   const steer = parent.getToolDefinition("steer_subagent");
   assert.ok(agent?.execute, "parent must expose public Agent");
+  assert.ok(steer?.execute, "parent must expose public steer_subagent");
 
   const registry = globalThis[Symbol.for("pi-subagents:manager")];
   assert.ok(registry?.getRecord, "parent must expose subagents manager");
@@ -90,7 +92,6 @@ test("background Agent child exposes supervised tools and accepts steer between 
     const status1 = JSON.parse(wait1.content[0].text);
     assert.equal(status1.status, "running");
     assert.equal(status1.pid, pid);
-    assert.ok(steer?.execute, "parent must expose steer_subagent");
     const steered = await steer.execute("st1", {
       agent_id: agentId,
       message: "supervised-steer-marker",
@@ -99,7 +100,11 @@ test("background Agent child exposes supervised tools and accepts steer between 
       sessionManager: parent.sessionManager,
       ui: { setStatus() {}, notify() {}, setWidget() {} },
     });
-    assert.match(JSON.stringify(steered), /steer|queued|delivered|Steering/i);
+    const steeredText = steered?.content?.[0]?.text ?? "";
+    assert.equal(/failed to steer/i.test(steeredText), false);
+    if (!/^Steering message (sent to agent|queued for agent)/.test(steeredText)) {
+      assert.match(steeredText, /is not running \(status: error\)/);
+    }
     await assert.rejects(
       waitTool.execute("w2", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession),
       /once per turn/,

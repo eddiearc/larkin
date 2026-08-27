@@ -52,6 +52,7 @@ function pidAlive(pid: number): boolean {
 }
 
 async function killProcessTree(pid: number): Promise<void> {
+  if (!pidAlive(pid)) return;
   if (process.platform === "win32") {
     await new Promise<void>((resolve) => {
       const child = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
@@ -72,6 +73,7 @@ async function killProcessTree(pid: number): Promise<void> {
       try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
     }
   }
+  if (pidAlive(pid)) throw new Error(`supervised process ${pid} still alive`);
 }
 
 class ByteCursor {
@@ -233,15 +235,25 @@ export function startSupervisedCommand(input: {
   child.stdout?.on("data", (chunk: Buffer) => record.stdout.write(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk: Buffer) => record.stderr.write(Buffer.from(chunk)));
   child.once("exit", (code) => {
-    void killProcessTree(record.pid).finally(() => finish(record, "exited", code));
+    void record.chain.then(() => killProcessTree(record.pid)).then(
+      () => finish(record, "exited", code),
+      () => finish(record, "exited", code),
+    );
   });
   child.once("error", () => {
-    void killProcessTree(record.pid).finally(() => finish(record, "killed", null));
+    void record.chain.then(() => killProcessTree(record.pid)).then(
+      () => finish(record, "killed", null),
+      () => finish(record, "killed", null),
+    );
   });
   record.lifetimeTimer = setTimeout(() => {
-    if (record.status !== "running") return;
-    record.status = "lifetime_exceeded";
-    void killProcessTree(record.pid).finally(() => notify(record));
+    void record.chain.then(async () => {
+      if (record.status !== "running") return;
+      await killProcessTree(record.pid);
+      finish(record, "lifetime_exceeded", null);
+    }).catch(() => {
+      if (record.status === "running") finish(record, "lifetime_exceeded", null);
+    });
   }, supervisedLifeSeconds() * 1000);
   record.lifetimeTimer.unref?.();
   handles.set(id, record);

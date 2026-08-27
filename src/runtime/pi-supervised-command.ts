@@ -105,10 +105,24 @@ class ByteCursor {
     if (start < joined.length) {
       while (start < joined.length && (joined[start] & 0b1100_0000) === 0b1000_0000) start++;
     }
-    const slice = joined.subarray(Math.min(start, joined.length));
+    let end = joined.length;
+    if (end > start) {
+      let cont = 0;
+      let i = end;
+      while (i > start && (joined[i - 1] & 0b1100_0000) === 0b1000_0000) {
+        i--;
+        cont++;
+      }
+      if (i > start) {
+        const lead = joined[i - 1];
+        const need = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+        if (cont + 1 < need) end = i - 1;
+      }
+    }
+    const slice = joined.subarray(Math.min(start, end), end);
     return {
       text: slice.toString("utf8"),
-      cursor: this.dropped + joined.length,
+      cursor: this.dropped + end,
       truncated: this.dropped > cursor || start > Math.max(0, cursor - this.dropped),
     };
   }
@@ -255,6 +269,8 @@ function enqueue(record: HandleRecord, work: () => Promise<SupervisedSnapshot>):
 }
 
 export async function waitSupervisedCommand(owner: object, handle: string, timeoutSeconds?: number): Promise<SupervisedSnapshot> {
+  const remembered = terminals.get(handle);
+  if (remembered && remembered.owner === owner && !handles.has(handle)) return remembered.snapshot;
   const record = requireHandle(owner, handle);
   return enqueue(record, async () => {
     const cap = supervisedWaitSeconds();
@@ -315,6 +331,9 @@ export async function cancelSupervisedCommand(owner: object, handle: string): Pr
 }
 
 export async function reapSupervisedCommands(owner: object): Promise<void> {
+  for (const [id, remembered] of terminals) {
+    if (remembered.owner === owner) terminals.delete(id);
+  }
   const owned = [...handles.values()].filter((record) => record.owner === owner);
   await Promise.all(owned.map(async (record) => {
     try { await cancelSupervisedCommand(owner, record.id); }

@@ -46,6 +46,21 @@ test("sibling owner cannot wait on another session handle", async () => {
   await cancelSupervisedCommand(owner, started.handle);
 });
 
+test("split utf-8 euro is not replaced then dropped", async () => {
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "process.stdout.write(Buffer.from([0xe2])); setTimeout(() => process.stdout.write(Buffer.from([0x82, 0xac])), 1200); setTimeout(() => {}, 2500);"],
+    cwd: process.cwd(),
+  });
+  const first = await waitSupervisedCommand(owner, started.handle, 1);
+  assert.equal(first.stdout.includes("\uFFFD"), false);
+  const second = await waitSupervisedCommand(owner, started.handle, 1);
+  assert.ok(first.stdout.includes("€") || second.stdout.includes("€"));
+  await cancelSupervisedCommand(owner, started.handle).catch(() => {});
+});
+
 test("ring buffer keeps the newest 64KiB across two 40KiB chunks", async () => {
   const owner = {};
   const started = startSupervisedCommand({

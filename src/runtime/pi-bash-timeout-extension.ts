@@ -18,6 +18,9 @@ import type { BashToolInput } from "@earendil-works/pi-coding-agent";
 
 /** 前台 bash 的硬性上限（秒）。issue #55 建议默认 60s。 */
 const MAX_BASH_SECONDS = 60;
+/** Background Agent 子会话允许的显式 bash 上限（秒）。issue #161。 */
+const MAX_SUBAGENT_BASH_SECONDS = 600;
+const ROOT_SESSION_ENV = "LARKIN_PI_ROOT_SESSION_ID";
 
 /** 解析生效超时：默认 60，允许用 LARKIN_PI_BASH_TIMEOUT_SECONDS 调低（用于快速 eval），硬上限 60。 */
 function effectiveBashTimeout(): number {
@@ -26,11 +29,31 @@ function effectiveBashTimeout(): number {
   return MAX_BASH_SECONDS;
 }
 
+function effectiveSubagentBashTimeout(): number {
+  const raw = Number.parseInt(process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS || "", 10);
+  if (Number.isInteger(raw) && raw > 0) return Math.min(raw, MAX_SUBAGENT_BASH_SECONDS);
+  return MAX_SUBAGENT_BASH_SECONDS;
+}
+
+function rememberRootSession(ctx: { sessionManager?: { getSessionId?: () => string } } | undefined): void {
+  if (process.env[ROOT_SESSION_ENV]) return;
+  const id = ctx?.sessionManager?.getSessionId?.();
+  if (typeof id === "string" && id) process.env[ROOT_SESSION_ENV] = id;
+}
+
+function isNestedSubagentSession(ctx: { sessionManager?: { getSessionId?: () => string } } | undefined): boolean {
+  const root = process.env[ROOT_SESSION_ENV];
+  const current = ctx?.sessionManager?.getSessionId?.();
+  return Boolean(root && current && current !== root);
+}
+
 export default function (pi: ExtensionAPI): void {
   const cwd = process.cwd();
   // Built-in bash tool definition (keeps renderCall/renderResult/system-prompt metadata).
   const builtin = createBashToolDefinition(cwd);
   const MAX = effectiveBashTimeout();
+  const SUBAGENT_MAX = effectiveSubagentBashTimeout();
+  pi.on("session_start", (ctx) => rememberRootSession(ctx as { sessionManager?: { getSessionId?: () => string } }));
 
   const SUBAGENT_GUIDANCE =
     `This command exceeded the ${MAX}s foreground hard limit. ` +
@@ -39,6 +62,9 @@ export default function (pi: ExtensionAPI): void {
     "a completion notification arrives automatically. " +
     "Do NOT retry this command in the foreground, and do not use nohup / '&' / disown shell background jobs " +
     "(they bypass subagent isolation and die with this run).";
+  const NESTED_GUIDANCE =
+    `This command exceeded the ${SUBAGENT_MAX}s background-subagent bash limit. ` +
+    "Pass an explicit bash timeout no greater than that bound. Do not use nohup / '&' / disown.";
 
   pi.registerTool({
     ...builtin,
@@ -46,19 +72,23 @@ export default function (pi: ExtensionAPI): void {
     label: "bash",
     description: builtin.description,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const nested = isNestedSubagentSession(ctx as { sessionManager?: { getSessionId?: () => string } } | undefined);
+      const cap = nested ? SUBAGENT_MAX : MAX;
       const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : MAX;
-      // 模型显式设置 timeout > 上限 → 它已知这是长任务。立即报错引导改用后台 subagent，
-      // 不真的跑（省掉白等 + 避免产生部分副作用）。
-      if (requested > MAX) {
+      if (!nested && requested > MAX) {
         throw new Error(`timeout:${requested} exceeds the ${MAX}s foreground hard limit. ${SUBAGENT_GUIDANCE}`);
       }
-      const timeout = Math.min(requested, MAX);
+      if (nested && requested > cap) {
+        throw new Error(`timeout:${requested} exceeds the ${cap}s background-subagent bash limit. ${NESTED_GUIDANCE}`);
+      }
+      const timeout = nested ? Math.min(requested, cap) : Math.min(requested, MAX);
+      const guidance = nested ? NESTED_GUIDANCE : SUBAGENT_GUIDANCE;
       try {
         return await builtin.execute(toolCallId, { ...params, timeout } satisfies BashToolInput, signal, onUpdate, ctx);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (/timed out after/i.test(message)) {
-          throw new Error(`${message}\n\n${SUBAGENT_GUIDANCE}`);
+          throw new Error(`${message}\n\n${guidance}`);
         }
         throw error;
       }

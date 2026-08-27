@@ -71,20 +71,65 @@ test("record watchdog contains non-ENOENT filesystem errors on sweep", async () 
 
 test("inline bash extension preserves the 60s foreground hard guard", async () => {
   const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  const priorRoot = process.env.LARKIN_PI_ROOT_SESSION_ID;
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  delete process.env.LARKIN_PI_ROOT_SESSION_ID;
   try {
     let bashTool;
     const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({ registerTool(tool) { bashTool = tool; } });
+    await factory({
+      registerTool(tool) { bashTool = tool; },
+      on(event, handler) {
+        if (event === "session_start") handler({ sessionManager: { getSessionId: () => "root-session" } });
+      },
+    });
     assert.equal(bashTool.name, "bash");
     await assert.rejects(
       bashTool.execute("call-1", { command: "printf should-not-run", timeout: 61 },
-        new AbortController().signal, () => {}, {}),
+        new AbortController().signal, () => {}, { sessionManager: { getSessionId: () => "root-session" } }),
       /timeout:61 exceeds the 60s foreground hard limit/,
     );
   } finally {
     if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
     else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
+    if (priorRoot === undefined) delete process.env.LARKIN_PI_ROOT_SESSION_ID;
+    else process.env.LARKIN_PI_ROOT_SESSION_ID = priorRoot;
+  }
+});
+
+test("nested subagent bash may request a bounded wait above 60s", async () => {
+  const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  const priorRoot = process.env.LARKIN_PI_ROOT_SESSION_ID;
+  const priorNested = process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS;
+  delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+  delete process.env.LARKIN_PI_ROOT_SESSION_ID;
+  delete process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS;
+  try {
+    let bashTool;
+    const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
+    const factory = typeof extension === "function" ? extension : extension.factory;
+    await factory({
+      registerTool(tool) { bashTool = tool; },
+      on(event, handler) {
+        if (event === "session_start") handler({ sessionManager: { getSessionId: () => "root-session" } });
+      },
+    });
+    const nestedCtx = { sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined } };
+    const result = await bashTool.execute("call-nested", { command: "printf nested-ok", timeout: 120 },
+      new AbortController().signal, () => {}, nestedCtx);
+    assert.match(JSON.stringify(result), /nested-ok/);
+    await assert.rejects(
+      bashTool.execute("call-too-long", { command: "printf should-not-run", timeout: 601 },
+        new AbortController().signal, () => {}, nestedCtx),
+      /timeout:601 exceeds the 600s background-subagent bash limit/,
+    );
+  } finally {
+    if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
+    else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
+    if (priorRoot === undefined) delete process.env.LARKIN_PI_ROOT_SESSION_ID;
+    else process.env.LARKIN_PI_ROOT_SESSION_ID = priorRoot;
+    if (priorNested === undefined) delete process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS;
+    else process.env.LARKIN_PI_SUBAGENT_BASH_TIMEOUT_SECONDS = priorNested;
   }
 });

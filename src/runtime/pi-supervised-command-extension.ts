@@ -19,6 +19,11 @@ function ownerOf(ctx: { sessionManager?: object } | undefined): object {
 
 export default function (pi: ExtensionAPI): void {
   const waitCap = supervisedWaitSeconds();
+  let waitUsedThisTurn = false;
+  const resetWaitTurn = () => { waitUsedThisTurn = false; };
+  pi.on("agent_start", resetWaitTurn);
+  pi.on("turn_end", resetWaitTurn);
+  pi.on("agent_end", resetWaitTurn);
   pi.on("session_shutdown", async (_event, ctx) => {
     const owner = (ctx as { sessionManager?: object } | undefined)?.sessionManager;
     if (owner) await reapSupervisedCommands(owner);
@@ -49,12 +54,16 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "supervised_wait",
     label: "supervised_wait",
-    description: `Wait on a supervised handle for at most ${waitCap}s. Timeout returns status=running without killing the process. Then the turn can accept Steer before the next wait.`,
+    description: `Wait on a supervised handle for at most ${waitCap}s. Timeout returns status=running without killing the process. At most one wait per assistant turn so queued Steer is consumed before the next wait.`,
     parameters: Type.Object({
       handle: Type.String({ description: "Handle from supervised_start" }),
       timeout: Type.Optional(Type.Number({ description: `Wait seconds, max ${waitCap}`, maximum: waitCap, minimum: 1 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (waitUsedThisTurn) {
+        throw new Error("supervised_wait is limited to once per turn; return to the model so queued Steer can run first");
+      }
+      waitUsedThisTurn = true;
       const result = await waitSupervisedCommand(ownerOf(ctx as { sessionManager?: object }), params.handle, params.timeout);
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },

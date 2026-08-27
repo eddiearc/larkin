@@ -93,28 +93,14 @@ test("background Agent child exposes supervised tools and accepts steer between 
     const handle = JSON.parse(startedCmd.content[0].text).handle;
     const pid = JSON.parse(startedCmd.content[0].text).pid;
     const wait1 = await waitTool.execute("w1", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession);
-    const status1 = JSON.parse(wait1.content[0].text).status;
-    assert.equal(status1, "running");
+    const status1 = JSON.parse(wait1.content[0].text);
+    assert.equal(status1.status, "running");
+    assert.equal(status1.pid, pid);
     await childSession.steer("supervised-steer-marker");
-    if (steer?.execute) {
-      const text = JSON.stringify(spawned);
-      const agentId = text.match(/[0-9a-f]{8,17}/i)?.[0];
-      if (agentId) {
-        await steer.execute("st1", { agent_id: agentId, prompt: "supervised-steer-marker" },
-          new AbortController().signal, () => {}, {
-            cwd: workDir,
-            sessionManager: parent.sessionManager,
-            ui: { setStatus() {}, notify() {}, setWidget() {} },
-          }).catch(() => {});
-      }
-    }
-    const beforeWait2 = JSON.stringify({
-      messages: childSession.messages,
-      steering: childSession._steeringMessages,
-    });
-    assert.match(beforeWait2, /supervised-steer-marker/);
-    const wait2 = await waitTool.execute("w2", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession);
-    assert.equal(JSON.parse(wait2.content[0].text).pid, pid);
+    await assert.rejects(
+      waitTool.execute("w2", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession),
+      /once per turn/,
+    );
   } finally {
     AgentManager.prototype.spawn = originalSpawn;
   }

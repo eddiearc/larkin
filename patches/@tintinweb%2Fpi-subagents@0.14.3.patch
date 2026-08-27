@@ -40,7 +40,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..a9c5cdfeeb4a58fc7fef346e8bc9add7
              // which, with a custom cwd, was created from that target). Config stays
              // with the parent project when a caller-supplied cwd is in play; it must
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..19e8ae0c897d5514d82b7d287ae25c883d25e9ea 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..e1999854c8a44db0e2623635ab70b40f1dec778d 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
 @@ -1,9 +1,10 @@
@@ -48,14 +48,15 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..19e8ae0c897d5514d82b7d287ae25c88
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
 -import { readFileSync } from "node:fs";
-+import { existsSync, readFileSync } from "node:fs";
- import { homedir } from "node:os";
+-import { homedir } from "node:os";
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import { homedir, tmpdir } from "node:os";
  import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 +import { fileURLToPath } from "node:url";
  import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
  import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
  import { buildParentContext, extractText } from "./context.js";
-@@ -483,7 +484,20 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -483,7 +484,29 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -66,9 +67,18 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..19e8ae0c897d5514d82b7d287ae25c88
 +        if (typeof fromGlobal === "string" && existsSync(fromGlobal))
 +            return fromGlobal;
 +        const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
-+        if (!existsSync(sibling))
-+            throw new Error("supervised command bundle is missing");
-+        return sibling;
++        if (existsSync(sibling))
++            return sibling;
++        const embedded = globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
++        if (typeof embedded === "string" && embedded.length > 0) {
++            const dir = join(tmpdir(), "larkin-pi-supervised");
++            mkdirSync(dir, { recursive: true, mode: 0o700 });
++            const target = join(dir, "pi-supervised-command.bundle.js");
++            if (!existsSync(target) || readFileSync(target, "utf8") !== embedded)
++                writeFileSync(target, embedded, { mode: 0o600 });
++            return target;
++        }
++        throw new Error("supervised command bundle is missing");
 +    })() : undefined;
 +    const additionalExtensionPaths = [
 +        ...(extensionsSpec?.paths ?? []),
@@ -77,7 +87,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..19e8ae0c897d5514d82b7d287ae25c88
      // Pre-filter discovered set, captured by the override — the exclude-typo warning
      // must compare against this, not the surviving set (absence from survivors is
      // an exclude *succeeding*).
-@@ -506,7 +520,7 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -506,7 +529,7 @@ export async function runAgent(ctx, type, prompt, options) {
          cwd: configCwd,
          agentDir,
          noExtensions,
@@ -371,7 +381,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..7ba5fc205bcbb683519b8ba12db7b252
      try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
      // Also prune repos that caller-supplied cwds created worktrees in — a clean
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..360dae2e9d3c305a22e8aedcf5bda0801f31dd3e 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..b00d3e79ef61a96142a428f79390a0a1c7b15c41 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
 @@ -2,9 +2,10 @@
@@ -379,8 +389,9 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..360dae2e9d3c305a22e8aedcf5bda080
   */
  
 -import { readFileSync } from "node:fs";
-+import { existsSync, readFileSync } from "node:fs";
- import { homedir } from "node:os";
+-import { homedir } from "node:os";
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import { homedir, tmpdir } from "node:os";
  import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 +import { fileURLToPath } from "node:url";
  import type { Model } from "@earendil-works/pi-ai";
@@ -395,7 +406,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..360dae2e9d3c305a22e8aedcf5bda080
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -612,7 +615,18 @@ export async function runAgent(
+@@ -612,7 +615,28 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -405,8 +416,18 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..360dae2e9d3c305a22e8aedcf5bda080
 +    const fromGlobal = (globalThis as Record<symbol, unknown>)[key];
 +    if (typeof fromGlobal === "string" && existsSync(fromGlobal)) return fromGlobal;
 +    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
-+    if (!existsSync(sibling)) throw new Error("supervised command bundle is missing");
-+    return sibling;
++    if (existsSync(sibling)) return sibling;
++    const embedded = (globalThis as { __LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__?: string }).__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
++    if (typeof embedded === "string" && embedded.length > 0) {
++      const dir = join(tmpdir(), "larkin-pi-supervised");
++      mkdirSync(dir, { recursive: true, mode: 0o700 });
++      const target = join(dir, "pi-supervised-command.bundle.js");
++      if (!existsSync(target) || readFileSync(target, "utf8") !== embedded) {
++        writeFileSync(target, embedded, { mode: 0o600 });
++      }
++      return target;
++    }
++    throw new Error("supervised command bundle is missing");
 +  })() : undefined;
 +  const additionalExtensionPaths = [
 +    ...(extensionsSpec?.paths ?? []),
@@ -415,7 +436,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..360dae2e9d3c305a22e8aedcf5bda080
    // Pre-filter discovered set, captured by the override — the exclude-typo warning
    // must compare against this, not the surviving set (absence from survivors is
    // an exclude *succeeding*).
-@@ -636,7 +650,7 @@ export async function runAgent(
+@@ -636,7 +660,7 @@ export async function runAgent(
      cwd: configCwd,
      agentDir,
      noExtensions,

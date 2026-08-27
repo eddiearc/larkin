@@ -72,32 +72,48 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..743eace16173fec33a0f7704a178721f
          try {
              pruneWorktrees(process.cwd());
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..2c1f037ceb4d0d5d1853521108995b6a6740465f 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..ed48ba27d4c9f42a990d4636d41bc76673298892 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
-@@ -1,7 +1,7 @@
+@@ -1,9 +1,10 @@
  /**
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
 -import { readFileSync } from "node:fs";
-+import { existsSync, readFileSync } from "node:fs";
++import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
  import { homedir } from "node:os";
  import { basename, dirname, isAbsolute, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
  import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
-@@ -483,7 +483,19 @@ export async function runAgent(ctx, type, prompt, options) {
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+ import { buildParentContext, extractText } from "./context.js";
+@@ -23,6 +24,20 @@ export const SUBAGENT_TOOL_NAMES = {
+     GET_RESULT: "get_subagent_result",
+     STEER: "steer_subagent",
+ };
++function resolveTrustedSupervisedBundle(candidate) {
++    if (candidate === undefined)
++        return undefined;
++    if (typeof candidate !== "string" || candidate.length === 0)
++        throw new Error("supervised command bundle is missing");
++    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++    for (const file of [sibling, candidate]) {
++        if (!existsSync(file) || lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile())
++            throw new Error("supervised command bundle is missing");
++    }
++    if (realpathSync(candidate) !== realpathSync(sibling))
++        throw new Error("supervised command bundle is missing");
++    return realpathSync(sibling);
++}
+ /** Names of tools registered by this extension that subagents must NOT inherit. */
+ const EXCLUDED_TOOL_NAMES = Object.values(SUBAGENT_TOOL_NAMES);
+ /**
+@@ -483,7 +498,11 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -    const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
-+    const supervisedPath = typeof options.allowSupervisedCommands === "string" && options.allowSupervisedCommands.length > 0
-+        ? options.allowSupervisedCommands
-+        : undefined;
-+    if (options.allowSupervisedCommands !== undefined && !supervisedPath) {
-+        throw new Error("supervised command bundle is missing");
-+    }
-+    if (supervisedPath && !existsSync(supervisedPath)) {
-+        throw new Error("supervised command bundle is missing");
-+    }
++    const supervisedPath = resolveTrustedSupervisedBundle(options.allowSupervisedCommands);
 +    const additionalExtensionPaths = [
 +        ...(extensionsSpec?.paths ?? []),
 +        ...(supervisedPath ? [supervisedPath] : []),
@@ -105,7 +121,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..2c1f037ceb4d0d5d1853521108995b6a
      // Pre-filter discovered set, captured by the override — the exclude-typo warning
      // must compare against this, not the surviving set (absence from survivors is
      // an exclude *succeeding*).
-@@ -506,7 +518,7 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -506,7 +525,7 @@ export async function runAgent(ctx, type, prompt, options) {
          cwd: configCwd,
          agentDir,
          noExtensions,
@@ -284,7 +300,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
 @@ -113,16 +113,21 @@ export class AgentManager {
    /** Number of currently running background agents. */
    private runningBackground = 0;
- 
+
 +  private supervisedKey?: symbol;
 +  private supervisedById = new Map<string, string>();
 +
@@ -316,7 +332,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
 +    if (typeof supervisedPath === "string" && supervisedPath.length === 0) {
 +      throw new Error("supervised command bundle is missing");
 +    }
- 
+
      const id = randomUUID().slice(0, 17);
 +    if (typeof supervisedPath === "string") this.supervisedById.set(id, supervisedPath);
 +    else this.supervisedById.delete(id);
@@ -344,17 +360,17 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
          record.session = session;
          record.completedAt ??= Date.now();
 +        this.supervisedById.delete(id);
- 
+
          detach();
- 
+
 @@ -346,6 +365,7 @@ export class AgentManager {
          }
          record.error = err instanceof Error ? err.message : String(err);
          record.completedAt ??= Date.now();
 +        this.supervisedById.delete(id);
- 
+
          detach();
- 
+
 @@ -525,18 +545,24 @@ export class AgentManager {
        this.queue = this.queue.filter(q => q.id !== id);
        record.status = "stopped";
@@ -362,7 +378,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
 +      this.supervisedById.delete(id);
        return true;
      }
- 
+
 -    if (record.status !== "running") return false;
 +    if (record.status !== "running") {
 +      this.supervisedById.delete(id);
@@ -374,7 +390,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
 +    void Promise.resolve(record.promise).finally(() => this.supervisedById.delete(id));
      return true;
    }
- 
+
    /** Dispose a record's session and remove it from the map. */
    private removeRecord(id: string, record: AgentRecord): void {
 +    this.supervisedById.delete(id);
@@ -412,7 +428,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
 @@ -612,14 +623,23 @@ export class AgentManager {
      }
    }
- 
+
 -  dispose() {
 +  async dispose() {
      clearInterval(this.cleanupInterval);
@@ -438,19 +454,46 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..97361389900a83586e6100c134ff8926
      try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
      // Also prune repos that caller-supplied cwds created worktrees in — a clean
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..cbb08f3dd2a64559a5ad272ad3499c0d6083e3e4 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43d441669c 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
-@@ -2,7 +2,7 @@
+@@ -2,9 +2,10 @@
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
- 
+
 -import { readFileSync } from "node:fs";
-+import { existsSync, readFileSync } from "node:fs";
++import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
  import { homedir } from "node:os";
  import { basename, dirname, isAbsolute, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
  import type { Model } from "@earendil-works/pi-ai";
-@@ -358,6 +358,8 @@ export interface RunOptions {
+ import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+ import {
+@@ -38,6 +39,23 @@ export const SUBAGENT_TOOL_NAMES = {
+   STEER: "steer_subagent",
+ } as const;
+
++function resolveTrustedSupervisedBundle(candidate: string | undefined): string | undefined {
++  if (candidate === undefined) return undefined;
++  if (typeof candidate !== "string" || candidate.length === 0) {
++    throw new Error("supervised command bundle is missing");
++  }
++  const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++  for (const file of [sibling, candidate]) {
++    if (!existsSync(file) || lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile()) {
++      throw new Error("supervised command bundle is missing");
++    }
++  }
++  if (realpathSync(candidate) !== realpathSync(sibling)) {
++    throw new Error("supervised command bundle is missing");
++  }
++  return realpathSync(sibling);
++}
++
+ /** Names of tools registered by this extension that subagents must NOT inherit. */
+ const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
+
+@@ -358,6 +376,8 @@ export interface RunOptions {
    isolated?: boolean;
    inheritContext?: boolean;
    thinkingLevel?: ThinkingLevel;
@@ -459,20 +502,12 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..cbb08f3dd2a64559a5ad272ad3499c0d
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -612,7 +614,19 @@ export async function runAgent(
+@@ -612,7 +632,11 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
 -  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
-+  const supervisedPath = typeof options.allowSupervisedCommands === "string" && options.allowSupervisedCommands.length > 0
-+    ? options.allowSupervisedCommands
-+    : undefined;
-+  if (options.allowSupervisedCommands !== undefined && !supervisedPath) {
-+    throw new Error("supervised command bundle is missing");
-+  }
-+  if (supervisedPath && !existsSync(supervisedPath)) {
-+    throw new Error("supervised command bundle is missing");
-+  }
++  const supervisedPath = resolveTrustedSupervisedBundle(options.allowSupervisedCommands);
 +  const additionalExtensionPaths = [
 +    ...(extensionsSpec?.paths ?? []),
 +    ...(supervisedPath ? [supervisedPath] : []),
@@ -480,7 +515,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..cbb08f3dd2a64559a5ad272ad3499c0d
    // Pre-filter discovered set, captured by the override — the exclude-typo warning
    // must compare against this, not the surviving set (absence from survivors is
    // an exclude *succeeding*).
-@@ -636,7 +650,7 @@ export async function runAgent(
+@@ -636,7 +660,7 @@ export async function runAgent(
      cwd: configCwd,
      agentDir,
      noExtensions,
@@ -495,7 +530,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..ee74c835247798ccd38d1f046e5cb30f
 +++ b/src/index.ts
 @@ -11,7 +11,8 @@
   */
- 
+
  import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 -import { join } from "node:path";
 +import { dirname, join } from "node:path";
@@ -506,7 +541,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..ee74c835247798ccd38d1f046e5cb30f
 @@ -91,6 +92,55 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
    });
  }
- 
+
 +const RESULT_WAIT_QUEUE_POLL_MS = 50;
 +const DEFAULT_RESULT_WAIT_TIMEOUT_MS = 30_000;
 +const MAX_RESULT_WAIT_TIMEOUT_MS = 60_000;
@@ -578,7 +613,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..ee74c835247798ccd38d1f046e5cb30f
      pendingNudges.set(key, setTimeout(() => {
 @@ -433,6 +487,12 @@ export default function (pi: ExtensionAPI) {
    }
- 
+
    // Background completion: route through group join or send individual nudge
 +  function supervisedCommandBundlePath(): string {
 +    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
@@ -595,7 +630,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..ee74c835247798ccd38d1f046e5cb30f
      });
 -  });
 +  }, supervisedKey);
- 
+
    // Expose manager via Symbol.for() global registry for cross-package access.
    // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
 @@ -592,7 +652,7 @@ export default function (pi: ExtensionAPI) {
@@ -605,7 +640,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..ee74c835247798ccd38d1f046e5cb30f
 -    manager.dispose();
 +    await manager.dispose();
    });
- 
+
    // Live widget: show running agents above editor.
 @@ -1259,6 +1319,7 @@ Terse command-style prompts produce shallow, generic work.
              inheritContext,
@@ -648,16 +683,16 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..ee74c835247798ccd38d1f046e5cb30f
 +        resultWaitConsumedInParentTurn = true;
 +        timedOut = await waitForSubagentResult(record, waitTimeoutMs, signal);
        }
- 
+
        const displayName = getDisplayName(record.type);
 @@ -1492,11 +1559,13 @@ Terse command-style prompts produce shallow, generic work.
- 
+
        let output =
          `Agent: ${record.id}\n` +
 -        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
 +        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)}${timedOut ? " | timedOut: true" : ""} | ${statsParts.join(" | ")}\n` +
          `Description: ${record.description}\n\n`;
- 
+
 -      if (record.status === "running") {
 -        output += "Agent is still running. Use wait: true or check back later.";
 +      if (record.status === "running" || record.status === "queued") {

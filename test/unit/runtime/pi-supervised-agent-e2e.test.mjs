@@ -90,12 +90,30 @@ test("background Agent child exposes supervised tools and accepts steer between 
     const status1 = JSON.parse(wait1.content[0].text);
     assert.equal(status1.status, "running");
     assert.equal(status1.pid, pid);
-    await childSession.steer("supervised-steer-marker");
+    assert.ok(steer?.execute, "parent must expose steer_subagent");
+    const steered = await steer.execute("st1", {
+      agent_id: agentId,
+      message: "supervised-steer-marker",
+    }, new AbortController().signal, () => {}, {
+      cwd: workDir,
+      sessionManager: parent.sessionManager,
+      ui: { setStatus() {}, notify() {}, setWidget() {} },
+    });
+    assert.match(JSON.stringify(steered), /steer|queued|delivered|Steering/i);
     await assert.rejects(
       waitTool.execute("w2", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession),
       /once per turn/,
     );
+    await childSession._extensionRunner?.emit?.({ type: "turn_end" });
+    const wait2 = await waitTool.execute("w3", { handle, timeout: 1 }, new AbortController().signal, () => {}, childSession);
+    assert.equal(JSON.parse(wait2.content[0].text).pid, pid);
+    const cancelTool = childSession.getToolDefinition("supervised_cancel");
+    await cancelTool.execute("c1", { handle }, new AbortController().signal, () => {}, childSession);
+    await registry.dispose?.();
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    assert.equal(alive, false);
   } finally {
-
+    await registry.dispose?.().catch(() => {});
   }
 }, { timeout: 20_000 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterAll, test } from "bun:test";
 import {
   cancelSupervisedCommand,
+  reapSupervisedCommands,
   resolveSupervisedCwd,
   startSupervisedCommand,
   waitSupervisedCommand,
@@ -100,6 +101,20 @@ test("cancel is idempotent after wait consumes the terminal", async () => {
 
 test("supervised cwd cannot escape the session root", () => {
   assert.throws(() => resolveSupervisedCwd(process.cwd(), ".."), /escapes|symlink/);
+});
+
+test("reap returns only after the pid is gone", async () => {
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 30000)"],
+    cwd: process.cwd(),
+  });
+  await reapSupervisedCommands(owner);
+  let alive = true;
+  try { process.kill(started.pid, 0); } catch { alive = false; }
+  assert.equal(alive, false);
 });
 
 test("wait above the 60s cap is rejected even when env is raised", async () => {

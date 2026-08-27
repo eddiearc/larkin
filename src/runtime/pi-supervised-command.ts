@@ -162,6 +162,16 @@ interface HandleRecord {
 
 const handles = new Map<string, HandleRecord>();
 const terminals = new Map<string, { owner: object; snapshot: SupervisedSnapshot }>();
+const MAX_TERMINALS = 32;
+
+function rememberTerminal(id: string, owner: object, snapshot: SupervisedSnapshot): void {
+  terminals.set(id, { owner, snapshot });
+  while (terminals.size > MAX_TERMINALS) {
+    const oldest = terminals.keys().next().value;
+    if (!oldest) break;
+    terminals.delete(oldest);
+  }
+}
 
 function notify(record: HandleRecord): void {
   const waiters = record.exitWaiters.splice(0);
@@ -300,7 +310,7 @@ export async function waitSupervisedCommand(owner: object, handle: string, timeo
     const result = snapshot(record);
     if (result.status !== "running") {
       record.terminalConsumed = true;
-      terminals.set(record.id, { owner, snapshot: result });
+      rememberTerminal(record.id, owner, result);
       handles.delete(record.id);
     }
     return result;
@@ -325,7 +335,7 @@ export async function cancelSupervisedCommand(owner: object, handle: string): Pr
     ? remembered.snapshot
     : snapshot(record);
   record.terminalConsumed = true;
-  terminals.set(record.id, { owner, snapshot: result });
+  rememberTerminal(record.id, owner, result);
   handles.delete(record.id);
   return result;
 }

@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { bundledPiBashTimeoutExtensionPath } from "../../../dist/runtime/pi-bash-timeout-injection.mjs";
-import { getSubagentBashWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
+
 import { AgentManager } from "../../../node_modules/@tintinweb/pi-subagents/src/agent-manager.ts";
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue161-nested-"));
@@ -95,8 +95,15 @@ test("Agent schema to nested session authorizes only that child past the parent 
         probes.push((async () => {
           const childBash = session.getToolDefinition("bash");
           assert.ok(childBash?.execute, "child session must load the bash guard");
-          const authorized = getSubagentBashWaitSeconds(session.sessionManager);
-          if (authorized === 90) {
+          let authorized = false;
+          try {
+            await childBash.execute("probe-cap", { command: "printf cap-ok", timeout: 5 },
+              new AbortController().signal, () => {}, { sessionManager: session.sessionManager });
+            authorized = true;
+          } catch {
+            authorized = false;
+          }
+          if (authorized) {
             const started = Date.now();
             const childResult = await childBash.execute("child-sleep", { command: "sleep 3 && printf child-ok", timeout: 5 },
               new AbortController().signal, () => {}, { sessionManager: session.sessionManager });
@@ -156,7 +163,6 @@ test("Agent schema to nested session authorizes only that child past the parent 
     manager?.abort?.(agentId);
     const child = manager?.getRecord?.(agentId)?.session;
     if (child) {
-      assert.equal(getSubagentBashWaitSeconds(child.sessionManager), undefined);
       const childBash = child.getToolDefinition("bash");
       await assert.rejects(
         childBash.execute("after-revoke", { command: "printf no", timeout: 3 },

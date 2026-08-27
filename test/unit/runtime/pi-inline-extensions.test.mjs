@@ -7,7 +7,8 @@ import {
   BUILTIN_PI_EXTENSION_FACTORIES,
   invokeBuiltinPiRpc,
 } from "../../../dist/runtime/pi-inline-extensions.mjs";
-import { parseMaxCommandWaitSeconds, setSubagentBashWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
+import { parseMaxCommandWaitSeconds } from "../../../dist/runtime/pi-subagent-bash-wait.mjs";
+import { commandUsesDetachedShell, installGuardedBashTool } from "../../../dist/runtime/pi-bash-timeout-extension.mjs";
 
 test("builtin Pi RPC receives exactly the three static inline extension factories", async () => {
   let invocation;
@@ -92,29 +93,27 @@ test("inline bash extension preserves the 60s foreground hard guard", async () =
   }
 });
 
-test("authorized nested session bash may wait up to the WeakMap cap", async () => {
+test("closed-over nested bash cap does not leak to the parent tool", async () => {
   const prior = process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
   delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
-  const childManager = { getSessionId: () => "child", getSessionFile: () => undefined };
   try {
-    let bashTool;
+    let parentBash;
+    let childBash;
     const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
-    await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
-    setSubagentBashWaitSeconds(childManager, 120);
-    const nestedCtx = { sessionManager: childManager };
-    const result = await bashTool.execute("call-nested", { command: "printf nested-ok", timeout: 90 },
-      new AbortController().signal, () => {}, nestedCtx);
+    await factory({ registerTool(tool) { parentBash = tool; }, on() {} });
+    installGuardedBashTool({ registerTool(tool) { childBash = tool; }, on() {} }, 120);
+    const result = await childBash.execute("call-nested", { command: "printf nested-ok", timeout: 90 },
+      new AbortController().signal, () => {}, { sessionManager: { getSessionId: () => "child", getSessionFile: () => undefined } });
     assert.match(JSON.stringify(result), /nested-ok/);
     await assert.rejects(
-      bashTool.execute("call-too-long", { command: "printf should-not-run", timeout: 121 },
-        new AbortController().signal, () => {}, nestedCtx),
+      childBash.execute("call-too-long", { command: "printf should-not-run", timeout: 121 },
+        new AbortController().signal, () => {}, {}),
       /timeout:121 exceeds the 120s background-subagent bash limit/,
     );
-    const sibling = {};
     await assert.rejects(
-      bashTool.execute("call-sibling", { command: "printf should-not-run", timeout: 61 },
-        new AbortController().signal, () => {}, { sessionManager: sibling }),
+      parentBash.execute("call-parent", { command: "printf should-not-run", timeout: 61 },
+        new AbortController().signal, () => {}, {}),
       /timeout:61 exceeds the 60s foreground hard limit/,
     );
   } finally {
@@ -132,7 +131,7 @@ test("authorized nested bash abort does not leave a running sleep", async () => 
     const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
     const factory = typeof extension === "function" ? extension : extension.factory;
     await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
-    setSubagentBashWaitSeconds(childManager, 90);
+    installGuardedBashTool({ registerTool(tool) { bashTool = tool; }, on() {} }, 90);
     const ac = new AbortController();
     const pending = bashTool.execute("call-abort", { command: "sleep 30", timeout: 90 },
       ac.signal, () => {}, { sessionManager: childManager });
@@ -142,6 +141,22 @@ test("authorized nested bash abort does not leave a running sleep", async () => 
     if (prior === undefined) delete process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS;
     else process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS = prior;
   }
+});
+
+test("bash guard rejects detached shell jobs", async () => {
+  assert.equal(commandUsesDetachedShell("true &"), true);
+  assert.equal(commandUsesDetachedShell("nohup sleep 30"), true);
+  assert.equal(commandUsesDetachedShell("sleep 30; disown"), true);
+  assert.equal(commandUsesDetachedShell("sleep 3 && printf ok"), false);
+  let bashTool;
+  const extension = BUILTIN_PI_EXTENSION_FACTORIES[2];
+  const factory = typeof extension === "function" ? extension : extension.factory;
+  await factory({ registerTool(tool) { bashTool = tool; }, on() {} });
+  await assert.rejects(
+    bashTool.execute("detached", { command: "true &", timeout: 1 },
+      new AbortController().signal, () => {}, {}),
+    /detached shell process is not allowed/,
+  );
 });
 
 test("max_command_wait_seconds parse is fail-closed", () => {

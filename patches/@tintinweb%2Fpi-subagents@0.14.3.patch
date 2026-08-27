@@ -437,7 +437,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..68acf18b1f2b042507f4a498667e4010
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
 diff --git a/src/agent-manager.ts b/src/agent-manager.ts
-index 318f88588a05aa1459e7c86288aa886ea85a28b1..35665e5e93b0b1d9761c42d807a97c74c911b5ae 100644
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..a340d766e540c338901ea35acb3189f45db8e182 100644
 --- a/src/agent-manager.ts
 +++ b/src/agent-manager.ts
 @@ -11,7 +11,7 @@ import { statSync } from "node:fs";
@@ -445,7 +445,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..35665e5e93b0b1d9761c42d807a97c74
  import type { Model } from "@earendil-works/pi-ai";
  import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 -import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-+import { clearSubagentBashWait, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
++import { clearSubagentBashWait, installClosedBashGuard, parentBashTimeoutSeconds, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
  import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
  import { addUsage } from "./usage.js";
  import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -554,7 +554,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..35665e5e93b0b1d9761c42d807a97c74
        return true;
      }
  
-@@ -532,9 +558,15 @@ export class AgentManager {
+@@ -532,9 +558,16 @@ export class AgentManager {
      record.abortController?.abort();
      record.status = "stopped";
      record.completedAt = Date.now();
@@ -565,16 +565,46 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..35665e5e93b0b1d9761c42d807a97c74
 +  private revokeCommandWait(record: AgentRecord): void {
 +    this.commandWaitById.delete(record.id);
 +    clearSubagentBashWait(record.session?.sessionManager);
++    if (record.session) installClosedBashGuard(record.session, parentBashTimeoutSeconds());
 +  }
 +
    /** Dispose a record's session and remove it from the map. */
    private removeRecord(id: string, record: AgentRecord): void {
      record.session?.dispose?.();
+@@ -587,12 +620,15 @@ export class AgentManager {
+     this.queue = [];
+     // Abort running agents
+     for (const record of this.agents.values()) {
+-      if (record.status === "running") {
+-        record.abortController?.abort();
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
+-        count++;
++      if (record.status === "running" || record.status === "stopped" && this.commandWaitById.has(record.id)) {
++        if (record.status === "running") {
++          record.abortController?.abort();
++          record.status = "stopped";
++          record.completedAt = Date.now();
++          count++;
++        }
+       }
++      this.revokeCommandWait(record);
+     }
+     return count;
+   }
+@@ -617,6 +653,7 @@ export class AgentManager {
+     // Clear queue
+     this.queue = [];
+     for (const record of this.agents.values()) {
++      this.revokeCommandWait(record);
+       record.session?.dispose();
+     }
+     this.agents.clear();
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..29e5c505745046190e956c8ab934ef1bd481d567 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..55054f5300981fa52d4fabf8e76f5f2d3dcd96b1 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
-@@ -2,9 +2,10 @@
+@@ -2,15 +2,17 @@
   * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
   */
  
@@ -586,7 +616,14 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..29e5c505745046190e956c8ab934ef1b
  import type { Model } from "@earendil-works/pi-ai";
  import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
  import {
-@@ -358,6 +359,8 @@ export interface RunOptions {
+   type AgentSession,
+   type AgentSessionEvent,
+   createAgentSession,
++  createBashToolDefinition,
+   DefaultResourceLoader,
+   type ExtensionAPI,
+   getAgentDir,
+@@ -358,6 +360,8 @@ export interface RunOptions {
    isolated?: boolean;
    inheritContext?: boolean;
    thinkingLevel?: ThinkingLevel;
@@ -595,23 +632,45 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..29e5c505745046190e956c8ab934ef1b
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -497,6 +500,39 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
+@@ -497,6 +501,61 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
    return resolve(cwd, sessionDir);
  }
  
 +const LARKIN_BASH_WAIT = Symbol.for("larkin-pi-subagent-bash-wait");
 +const LARKIN_BASH_TIMEOUT_PATH = Symbol.for("larkin-pi-bash-timeout-extension-path");
 +
-+function authorizeSubagentBashWait(sessionManager: object, seconds: number): void {
-+  const bag = globalThis as Record<symbol, WeakMap<object, number> | undefined>;
-+  bag[LARKIN_BASH_WAIT] ??= new WeakMap();
-+  bag[LARKIN_BASH_WAIT].set(sessionManager, seconds);
++export function clearSubagentBashWait(_sessionManager?: object): void {
++  /* nested bash caps are closures on the child tool; nothing global to clear */
 +}
 +
-+export function clearSubagentBashWait(sessionManager?: object): void {
-+  if (!sessionManager) return;
-+  const bag = globalThis as Record<symbol, WeakMap<object, number> | undefined>;
-+  bag[LARKIN_BASH_WAIT]?.delete(sessionManager);
++export function parentBashTimeoutSeconds(): number {
++  const raw = Number.parseInt(process.env.LARKIN_PI_BASH_TIMEOUT_SECONDS || "", 10);
++  if (Number.isInteger(raw) && raw > 0) return Math.min(raw, 60);
++  return 60;
++}
++
++function commandUsesDetachedShell(command: string): boolean {
++  if (/\bnohup\b/.test(command) || /\bdisown\b/.test(command)) return true;
++  const stripped = command.replace(/&&/g, " ");
++  return /(?:^|[\s;|&])&(?:[\s;]|$)/.test(stripped) || /(?:^|[\s;])[^>&\n]*&\s*$/.test(stripped);
++}
++
++export function installClosedBashGuard(session: AgentSession, cap: number): void {
++  const bash = session.getToolDefinition?.("bash") as { execute?: (...args: never[]) => unknown } | undefined;
++  if (!bash || typeof bash.execute !== "function") return;
++  const builtin = createBashToolDefinition(process.cwd());
++  const authorized = cap > parentBashTimeoutSeconds();
++  bash.execute = async (toolCallId: string, params: { command?: string; timeout?: number }, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => {
++    const command = typeof params.command === "string" ? params.command : "";
++    if (commandUsesDetachedShell(command)) {
++      throw new Error("detached shell process is not allowed (nohup, '&', disown). Use a background Agent with max_command_wait_seconds instead.");
++    }
++    const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : parentBashTimeoutSeconds();
++    if (requested > cap) {
++      throw new Error(`timeout:${requested} exceeds the ${cap}s ${authorized ? "background-subagent bash" : "foreground hard"} limit.`);
++    }
++    return builtin.execute(toolCallId, { ...params, timeout: Math.min(requested, cap) }, signal, onUpdate as never, ctx as never);
++  };
 +}
 +
 +function resolveLarkinBashTimeoutExtensionPath(): string | undefined {
@@ -635,7 +694,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..29e5c505745046190e956c8ab934ef1b
  export async function runAgent(
    ctx: ExtensionContext,
    type: SubagentType,
-@@ -612,31 +648,44 @@ export async function runAgent(
+@@ -612,31 +671,44 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -696,7 +755,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..29e5c505745046190e956c8ab934ef1b
      extensionsOverride,
      noSkills,
      noPromptTemplates: true,
-@@ -808,6 +857,13 @@ export async function runAgent(
+@@ -808,6 +880,12 @@ export async function runAgent(
    }
  
    const { session } = await createAgentSession(sessionOpts);
@@ -705,12 +764,22 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..29e5c505745046190e956c8ab934ef1b
 +    if (!Number.isInteger(raw) || raw < 61 || raw > 600) {
 +      throw new Error("maxCommandWaitSeconds must be an integer 61..600");
 +    }
-+    authorizeSubagentBashWait(session.sessionManager, raw);
 +  }
  
    const baseSessionName = agentConfig?.name ?? type;
    session.setSessionName(
-@@ -843,7 +899,7 @@ export async function runAgent(
+@@ -826,6 +904,10 @@ export async function runAgent(
+       });
+     },
+   });
++  installClosedBashGuard(
++    session,
++    options.maxCommandWaitSeconds ?? parentBashTimeoutSeconds(),
++  );
+ 
+   // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
+   // the ACTIVE set still needs managing: pi activates only its four default
+@@ -843,7 +925,7 @@ export async function runAgent(
      });
    }
  

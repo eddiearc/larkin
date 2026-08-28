@@ -1,4 +1,19 @@
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-1cce67bbcb821bd9 b/.bun-tag-1cce67bbcb821bd9
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-2a826c9b186cb67c b/.bun-tag-2a826c9b186cb67c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-3fadcd1707a055f8 b/.bun-tag-3fadcd1707a055f8
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-521d9b2ad9a104fa b/.bun-tag-521d9b2ad9a104fa
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-58e08ce8246a76a0 b/.bun-tag-58e08ce8246a76a0
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-60f990c0070fb268 b/.bun-tag-60f990c0070fb268
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-6ef69510e99ece5d b/.bun-tag-6ef69510e99ece5d
@@ -7,11 +22,296 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-80c5d241789d23ea b/.bun-tag-80c5d241789d23ea
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-8c139481f6770606 b/.bun-tag-8c139481f6770606
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-93fb9cd92e52c135 b/.bun-tag-93fb9cd92e52c135
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-a192c07cdd151919 b/.bun-tag-a192c07cdd151919
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-a6be946c74d62c48 b/.bun-tag-a6be946c74d62c48
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-bd9424a2f5d10a5e b/.bun-tag-bd9424a2f5d10a5e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-f064cf221732e6fa b/.bun-tag-f064cf221732e6fa
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-fcccdb30b0e20493 b/.bun-tag-fcccdb30b0e20493
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/agent-manager.js b/dist/agent-manager.js
+index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..23de2b5bc0a27acbcbb1f133625d3c95bd9a5f7f 100644
+--- a/dist/agent-manager.js
++++ b/dist/agent-manager.js
+@@ -50,11 +50,14 @@ export class AgentManager {
+     queue = [];
+     /** Number of currently running background agents. */
+     runningBackground = 0;
+-    constructor(onComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart, onCompact) {
++    constructor(onComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart, onCompact, supervisedKey) {
++        this.supervisedById = new Map();
++        this.reaps = new Map();
+         this.onComplete = onComplete;
+         this.onStart = onStart;
+         this.onCompact = onCompact;
+         this.maxConcurrent = maxConcurrent;
++        this.supervisedKey = supervisedKey;
+         // Cleanup completed agents after 10 minutes (but keep sessions for resume)
+         this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
+         this.cleanupInterval.unref();
+@@ -77,7 +80,18 @@ export class AgentManager {
+         // call, not minutes later at drain. Throw (not warn): programmatic callers
+         // can fix and retry; the RPC layer converts throws into error envelopes.
+         assertValidSpawnCwd(options.cwd);
++        if (Object.prototype.hasOwnProperty.call(options, "allowSupervisedCommands")) {
++            throw new Error("allowSupervisedCommands is not a public spawn option");
++        }
++        const supervisedPath = this.supervisedKey ? options[this.supervisedKey] : undefined;
++        if (typeof supervisedPath === "string" && supervisedPath.length === 0) {
++            throw new Error("supervised command bundle is missing");
++        }
+         const id = randomUUID().slice(0, 17);
++        if (typeof supervisedPath === "string")
++            this.supervisedById.set(id, supervisedPath);
++        else
++            this.supervisedById.delete(id);
+         const abortController = new AbortController();
+         const record = {
+             id,
+@@ -166,6 +180,7 @@ export class AgentManager {
+             isolated: options.isolated,
+             inheritContext: options.inheritContext,
+             thinkingLevel: options.thinkingLevel,
++            allowSupervisedCommands: this.supervisedById.get(id),
+             // Worktree wins for the working dir (the agent must run in the copy —
+             // which, with a custom cwd, was created from that target). Config stays
+             // with the parent project when a caller-supplied cwd is in play; it must
+@@ -202,25 +217,29 @@ export class AgentManager {
+                 options.onSessionCreated?.(session);
+             },
+         })
+-            .then(({ responseText, session, aborted, steered, failure }) => {
++            .then(async ({ responseText, session, aborted, steered, failure }) => {
++            let nextStatus = record.status;
+             // Don't overwrite status if externally stopped via abort()
+             if (record.status !== "stopped") {
+                 // Precedence: a hard abort keeps "aborted"; then a failed final turn
+                 // (provider error that pi resolved instead of rejecting, #144) is an
+                 // honest "error" — not a completion with an empty or stale result.
+                 if (aborted) {
+-                    record.status = "aborted";
++                    nextStatus = "aborted";
+                 }
+                 else if (failure) {
+-                    record.status = "error";
++                    nextStatus = "error";
+                     record.error = failure;
+                 }
+                 else {
+-                    record.status = steered ? "steered" : "completed";
++                    nextStatus = steered ? "steered" : "completed";
+                 }
+             }
+             record.result = responseText;
+             record.session = session;
++            await this.finalize(id, record, nextStatus === "error" ? "error" : "complete");
++            if (record.status !== "stopped")
++                record.status = nextStatus;
+             record.completedAt ??= Date.now();
+             detach();
+             // Final flush of streaming output file
+@@ -262,12 +281,11 @@ export class AgentManager {
+             }
+             return responseText;
+         })
+-            .catch((err) => {
+-            // Don't overwrite status if externally stopped via abort()
+-            if (record.status !== "stopped") {
+-                record.status = "error";
+-            }
++            .catch(async (err) => {
+             record.error = err instanceof Error ? err.message : String(err);
++            await this.finalize(id, record, "error");
++            if (record.status !== "stopped")
++                record.status = "error";
+             record.completedAt ??= Date.now();
+             detach();
+             // Final flush of streaming output file on error
+@@ -439,10 +457,27 @@ export class AgentManager {
+         if (record.status !== "running")
+             return false;
+         record.abortController?.abort();
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
++        const done = this.finalize(id, record, "abort").then(() => {
++            record.status = "stopped";
++            record.completedAt ??= Date.now();
++        });
++        this.reaps.set(id, done);
+         return true;
+     }
++    finalize(id, record, reason) {
++        const existing = this.reaps.get(id);
++        if (existing)
++            return existing;
++        const work = (async () => {
++            const session = record.session;
++            const runner = session?._extensionRunner;
++            if (runner?.emit)
++                await runner.emit({ type: "session_shutdown", reason });
++            this.supervisedById.delete(id);
++        })();
++        this.reaps.set(id, work);
++        return work;
++    }
+     /** Dispose a record's session and remove it from the map. */
+     removeRecord(id, record) {
+         record.session?.dispose?.();
+@@ -478,28 +513,14 @@ export class AgentManager {
+     hasRunning() {
+         return [...this.agents.values()].some(r => r.status === "running" || r.status === "queued");
+     }
+-    /** Abort all running and queued agents immediately. */
+-    abortAll() {
++    async abortAll() {
+         let count = 0;
+-        // Clear queued agents first
+-        for (const queued of this.queue) {
+-            const record = this.agents.get(queued.id);
+-            if (record) {
+-                record.status = "stopped";
+-                record.completedAt = Date.now();
++        const ids = [...this.agents.keys()];
++        for (const id of ids) {
++            if (this.abort(id))
+                 count++;
+-            }
+-        }
+-        this.queue = [];
+-        // Abort running agents
+-        for (const record of this.agents.values()) {
+-            if (record.status === "running") {
+-                record.abortController?.abort();
+-                record.status = "stopped";
+-                record.completedAt = Date.now();
+-                count++;
+-            }
+         }
++        await Promise.all([...this.reaps.values()]);
+         return count;
+     }
+     /** Wait for all running and queued agents to complete (including queued ones). */
+@@ -517,14 +538,16 @@ export class AgentManager {
+             await Promise.allSettled(pending);
+         }
+     }
+-    dispose() {
++    async dispose() {
+         clearInterval(this.cleanupInterval);
+-        // Clear queue
++        await this.abortAll();
+         this.queue = [];
+-        for (const record of this.agents.values()) {
+-            record.session?.dispose();
++        for (const [id, record] of this.agents) {
++            this.supervisedById.delete(id);
++            record.session?.dispose?.();
+         }
+         this.agents.clear();
++        this.supervisedById.clear();
+         // Prune any orphaned git worktrees (crash recovery)
+         try {
+             pruneWorktrees(process.cwd());
+diff --git a/dist/agent-runner.js b/dist/agent-runner.js
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..a38552e22b5cd0683ef438885c0c97e336e017fc 100644
+--- a/dist/agent-runner.js
++++ b/dist/agent-runner.js
+@@ -1,9 +1,10 @@
+ /**
+  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
+  */
+-import { readFileSync } from "node:fs";
++import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
+ import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+ import { buildParentContext, extractText } from "./context.js";
+@@ -23,6 +24,26 @@ export const SUBAGENT_TOOL_NAMES = {
+     GET_RESULT: "get_subagent_result",
+     STEER: "steer_subagent",
+ };
++export function supervisedSiblingPath() {
++    const fromEnv = process.env.LARKIN_PI_SUPERVISED_BUNDLE;
++    if (typeof fromEnv === "string" && fromEnv.length > 0)
++        return fromEnv;
++    return join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++}
++function resolveTrustedSupervisedBundle(candidate) {
++    if (candidate === undefined)
++        return undefined;
++    if (typeof candidate !== "string" || candidate.length === 0)
++        throw new Error("supervised command bundle is missing");
++    const sibling = supervisedSiblingPath();
++    for (const file of [sibling, candidate]) {
++        if (!existsSync(file) || lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile())
++            throw new Error("supervised command bundle is missing");
++    }
++    if (realpathSync(candidate) !== realpathSync(sibling))
++        throw new Error("supervised command bundle is missing");
++    return realpathSync(sibling);
++}
+ /** Names of tools registered by this extension that subagents must NOT inherit. */
+ const EXCLUDED_TOOL_NAMES = Object.values(SUBAGENT_TOOL_NAMES);
+ /**
+@@ -483,7 +504,11 @@ export async function runAgent(ctx, type, prompt, options) {
+     // It's only needed when we're neither loading everything without excludes
+     // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
+     const loadAll = extensions === true || extensionsSpec?.wildcard === true;
+-    const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
++    const supervisedPath = resolveTrustedSupervisedBundle(options.allowSupervisedCommands);
++    const additionalExtensionPaths = [
++        ...(extensionsSpec?.paths ?? []),
++        ...(supervisedPath ? [supervisedPath] : []),
++    ];
+     // Pre-filter discovered set, captured by the override — the exclude-typo warning
+     // must compare against this, not the surviving set (absence from survivors is
+     // an exclude *succeeding*).
+@@ -506,7 +531,7 @@ export async function runAgent(ctx, type, prompt, options) {
+         cwd: configCwd,
+         agentDir,
+         noExtensions,
+-        additionalExtensionPaths,
++        additionalExtensionPaths: additionalExtensionPaths.length ? additionalExtensionPaths : undefined,
+         extensionsOverride,
+         noSkills,
+         noPromptTemplates: true,
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b39fdfd60 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..c6e7ccd02f016c36c6f098323e88c07063862805 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -69,6 +69,44 @@ function abortable(promise, signal) {
+@@ -10,12 +10,13 @@
+  *   /agents                 — Interactive agent management menu
+  */
+ import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+-import { join } from "node:path";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
+ import { defineTool, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+ import { Container, Key, matchesKey, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+ import { Type } from "@sinclair/typebox";
+ import { AgentManager } from "./agent-manager.js";
+-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
++import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent, supervisedSiblingPath } from "./agent-runner.js";
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+ import { registerRpcHandlers } from "./cross-extension-rpc.js";
+ import { loadCustomAgents } from "./custom-agents.js";
+@@ -69,6 +70,45 @@ function abortable(promise, signal) {
          });
      });
  }
@@ -53,10 +353,11 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
 +    return (await waitWithDeadline(record.promise, remainingMs, signal)).timedOut;
 +}
 +const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
++const LARKIN_SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
  export function renderRunningAgentStatus(frame, statsText, activity, theme) {
      const container = new Container();
      container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-@@ -280,9 +318,14 @@ export default function (pi) {
+@@ -280,9 +320,14 @@ export default function (pi) {
      // before they reach pi.sendMessage (fire-and-forget).
      const pendingNudges = new Map();
      const NUDGE_HOLD_MS = 200;
@@ -72,7 +373,53 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
      function scheduleNudge(key, send, delay = NUDGE_HOLD_MS) {
          cancelNudge(key);
          pendingNudges.set(key, setTimeout(() => {
-@@ -1293,6 +1336,9 @@ Terse command-style prompts produce shallow, generic work.
+@@ -378,6 +423,13 @@ export default function (pi) {
+         };
+     }
+     // Background completion: route through group join or send individual nudge
++    function supervisedCommandBundlePath() {
++        const sibling = supervisedSiblingPath();
++        if (!existsSync(sibling))
++            throw new Error("supervised command bundle is missing");
++        return sibling;
++    }
++    const supervisedKey = Symbol("larkin-supervised-commands");
+     const manager = new AgentManager((record) => {
+         // Emit lifecycle event based on terminal status
+         const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
+@@ -432,7 +484,7 @@ export default function (pi) {
+             tokensBefore: info.tokensBefore,
+             compactionCount: record.compactionCount,
+         });
+-    });
++    }, supervisedKey);
+     // Expose manager via Symbol.for() global registry for cross-package access.
+     // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
+     //
+@@ -525,12 +577,12 @@ export default function (pi) {
+             delete globalThis[MANAGER_KEY];
+         }
+         scheduler.stop();
+-        manager.abortAll();
++        await manager.abortAll();
+         for (const timer of pendingNudges.values())
+             clearTimeout(timer);
+         pendingNudges.clear();
+         fleet.dispose();
+-        manager.dispose();
++        await manager.dispose();
+     });
+     // Live widget: show running agents above editor.
+     // widgetMode (default "background") selects what the widget shows: "all" =
+@@ -1124,6 +1176,7 @@ Terse command-style prompts produce shallow, generic work.
+                         inheritContext,
+                         thinkingLevel: thinking,
+                         isBackground: true,
++                        ...(params.run_in_background === true ? { [supervisedKey]: supervisedCommandBundlePath() } : {}),
+                         isolation,
+                         invocation: agentInvocation,
+                         ...bgCallbacks,
+@@ -1293,6 +1346,9 @@ Terse command-style prompts produce shallow, generic work.
              wait: Type.Optional(Type.Boolean({
                  description: "If true, wait for the agent to complete before returning. Default: false.",
              })),
@@ -82,7 +429,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
              verbose: Type.Optional(Type.Boolean({
                  description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
              })),
-@@ -1307,12 +1353,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1307,12 +1363,15 @@ Terse command-style prompts produce shallow, generic work.
              // completion notification can still be delivered.
              // Queued agents have no promise yet (it's created when the queue starts
              // them), so poll until they leave the queue, then await like a running one.
@@ -103,7 +450,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
              }
              const displayName = getDisplayName(record.type);
              const duration = formatDuration(record.startedAt, record.completedAt);
-@@ -1327,10 +1376,12 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1327,10 +1386,12 @@ Terse command-style prompts produce shallow, generic work.
                  statsParts.push(`Compactions: ${record.compactionCount}`);
              statsParts.push(`Duration: ${duration}`);
              let output = `Agent: ${record.id}\n` +
@@ -119,14 +466,318 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..dc18e00d2ce4bddb6ee77608364d3c8b
              }
              else if (record.status === "error") {
                  output += `Error: ${record.error}${partialOutputSuffix(record)}`;
+diff --git a/src/agent-manager.ts b/src/agent-manager.ts
+index 318f88588a05aa1459e7c86288aa886ea85a28b1..8e552a73b9ef1e269a2a8f712e50ae1382c54ad6 100644
+--- a/src/agent-manager.ts
++++ b/src/agent-manager.ts
+@@ -113,16 +113,21 @@ export class AgentManager {
+   /** Number of currently running background agents. */
+   private runningBackground = 0;
+
++  private supervisedKey?: symbol;
++  private supervisedById = new Map<string, string>();
++
+   constructor(
+     onComplete?: OnAgentComplete,
+     maxConcurrent = DEFAULT_MAX_CONCURRENT,
+     onStart?: OnAgentStart,
+     onCompact?: OnAgentCompact,
++    supervisedKey?: symbol,
+   ) {
+     this.onComplete = onComplete;
+     this.onStart = onStart;
+     this.onCompact = onCompact;
+     this.maxConcurrent = maxConcurrent;
++    this.supervisedKey = supervisedKey;
+     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
+     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
+     this.cleanupInterval.unref();
+@@ -154,8 +159,19 @@ export class AgentManager {
+     // call, not minutes later at drain. Throw (not warn): programmatic callers
+     // can fix and retry; the RPC layer converts throws into error envelopes.
+     assertValidSpawnCwd(options.cwd);
++    if (Object.prototype.hasOwnProperty.call(options, "allowSupervisedCommands")) {
++      throw new Error("allowSupervisedCommands is not a public spawn option");
++    }
++    const supervisedPath = this.supervisedKey
++      ? (options as Record<symbol, unknown>)[this.supervisedKey]
++      : undefined;
++    if (typeof supervisedPath === "string" && supervisedPath.length === 0) {
++      throw new Error("supervised command bundle is missing");
++    }
+
+     const id = randomUUID().slice(0, 17);
++    if (typeof supervisedPath === "string") this.supervisedById.set(id, supervisedPath);
++    else this.supervisedById.delete(id);
+     const abortController = new AbortController();
+     const record: AgentRecord = {
+       id,
+@@ -190,6 +206,7 @@ export class AgentManager {
+     try {
+       this.startAgent(id, record, args);
+     } catch (err) {
++      this.supervisedById.delete(id);
+       this.agents.delete(id);
+       throw err;
+     }
+@@ -252,6 +269,7 @@ export class AgentManager {
+       isolated: options.isolated,
+       inheritContext: options.inheritContext,
+       thinkingLevel: options.thinkingLevel,
++      allowSupervisedCommands: this.supervisedById.get(id),
+       // Worktree wins for the working dir (the agent must run in the copy —
+       // which, with a custom cwd, was created from that target). Config stays
+       // with the parent project when a caller-supplied cwd is in play; it must
+@@ -287,23 +305,26 @@ export class AgentManager {
+         options.onSessionCreated?.(session);
+       },
+     })
+-      .then(({ responseText, session, aborted, steered, failure }) => {
++      .then(async ({ responseText, session, aborted, steered, failure }) => {
+         // Don't overwrite status if externally stopped via abort()
++        let nextStatus = record.status;
+         if (record.status !== "stopped") {
+           // Precedence: a hard abort keeps "aborted"; then a failed final turn
+           // (provider error that pi resolved instead of rejecting, #144) is an
+           // honest "error" — not a completion with an empty or stale result.
+           if (aborted) {
+-            record.status = "aborted";
++            nextStatus = "aborted";
+           } else if (failure) {
+-            record.status = "error";
++            nextStatus = "error";
+             record.error = failure;
+           } else {
+-            record.status = steered ? "steered" : "completed";
++            nextStatus = steered ? "steered" : "completed";
+           }
+         }
+         record.result = responseText;
+         record.session = session;
++        await this.finalize(id, record, nextStatus === "error" ? "error" : "complete");
++        if (record.status !== "stopped") record.status = nextStatus;
+         record.completedAt ??= Date.now();
+
+         detach();
+@@ -339,12 +360,10 @@ export class AgentManager {
+         }
+         return responseText;
+       })
+-      .catch((err) => {
+-        // Don't overwrite status if externally stopped via abort()
+-        if (record.status !== "stopped") {
+-          record.status = "error";
+-        }
++      .catch(async (err) => {
+         record.error = err instanceof Error ? err.message : String(err);
++        await this.finalize(id, record, "error");
++        if (record.status !== "stopped") record.status = "error";
+         record.completedAt ??= Date.now();
+
+         detach();
+@@ -525,18 +544,41 @@ export class AgentManager {
+       this.queue = this.queue.filter(q => q.id !== id);
+       record.status = "stopped";
+       record.completedAt = Date.now();
++      this.supervisedById.delete(id);
+       return true;
+     }
+
+-    if (record.status !== "running") return false;
++    if (record.status !== "running") {
++      this.supervisedById.delete(id);
++      return false;
++    }
+     record.abortController?.abort();
+-    record.status = "stopped";
+-    record.completedAt = Date.now();
++    const done = this.finalize(id, record, "abort").then(() => {
++      record.status = "stopped";
++      record.completedAt ??= Date.now();
++    });
++    this.reaps.set(id, done);
+     return true;
+   }
+
++  private reaps = new Map<string, Promise<void>>();
++
++  private finalize(id: string, record: AgentRecord, reason: string): Promise<void> {
++    const existing = this.reaps.get(id);
++    if (existing) return existing;
++    const work = (async () => {
++      const session = record.session as { _extensionRunner?: { emit?: (event: unknown) => Promise<unknown> } } | undefined;
++      const runner = session?._extensionRunner;
++      if (runner?.emit) await runner.emit({ type: "session_shutdown", reason });
++      this.supervisedById.delete(id);
++    })();
++    this.reaps.set(id, work);
++    return work;
++  }
++
+   /** Dispose a record's session and remove it from the map. */
+   private removeRecord(id: string, record: AgentRecord): void {
++    this.supervisedById.delete(id);
+     record.session?.dispose?.();
+     record.session = undefined;
+     this.agents.delete(id);
+@@ -572,28 +614,14 @@ export class AgentManager {
+     );
+   }
+
+-  /** Abort all running and queued agents immediately. */
+-  abortAll(): number {
++  /** Abort all running and queued agents and wait until child session_shutdown/reap finishes. */
++  async abortAll(): Promise<number> {
+     let count = 0;
+-    // Clear queued agents first
+-    for (const queued of this.queue) {
+-      const record = this.agents.get(queued.id);
+-      if (record) {
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
+-        count++;
+-      }
+-    }
+-    this.queue = [];
+-    // Abort running agents
+-    for (const record of this.agents.values()) {
+-      if (record.status === "running") {
+-        record.abortController?.abort();
+-        record.status = "stopped";
+-        record.completedAt = Date.now();
+-        count++;
+-      }
++    const ids = [...this.agents.keys()];
++    for (const id of ids) {
++      if (this.abort(id)) count++;
+     }
++    await Promise.all([...this.reaps.values()]);
+     return count;
+   }
+
+@@ -612,14 +640,17 @@ export class AgentManager {
+     }
+   }
+
+-  dispose() {
++  async dispose() {
+     clearInterval(this.cleanupInterval);
+-    // Clear queue
++    await this.abortAll();
+     this.queue = [];
+-    for (const record of this.agents.values()) {
+-      record.session?.dispose();
++    for (const [id, record] of this.agents) {
++      this.supervisedById.delete(id);
++      const session = record.session as { dispose?: () => void } | undefined;
++      session?.dispose?.();
+     }
+     this.agents.clear();
++    this.supervisedById.clear();
+     // Prune any orphaned git worktrees (crash recovery)
+     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
+     // Also prune repos that caller-supplied cwds created worktrees in — a clean
+diff --git a/src/agent-runner.ts b/src/agent-runner.ts
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..f297775376233e0c66c586d9fe186df378b068f5 100644
+--- a/src/agent-runner.ts
++++ b/src/agent-runner.ts
+@@ -2,9 +2,10 @@
+  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
+  */
+
+-import { readFileSync } from "node:fs";
++import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
+ import type { Model } from "@earendil-works/pi-ai";
+ import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+ import {
+@@ -38,6 +39,29 @@ export const SUBAGENT_TOOL_NAMES = {
+   STEER: "steer_subagent",
+ } as const;
+
++export function supervisedSiblingPath(): string {
++  const fromEnv = process.env.LARKIN_PI_SUPERVISED_BUNDLE;
++  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
++  return join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++}
++
++function resolveTrustedSupervisedBundle(candidate: string | undefined): string | undefined {
++  if (candidate === undefined) return undefined;
++  if (typeof candidate !== "string" || candidate.length === 0) {
++    throw new Error("supervised command bundle is missing");
++  }
++  const sibling = supervisedSiblingPath();
++  for (const file of [sibling, candidate]) {
++    if (!existsSync(file) || lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile()) {
++      throw new Error("supervised command bundle is missing");
++    }
++  }
++  if (realpathSync(candidate) !== realpathSync(sibling)) {
++    throw new Error("supervised command bundle is missing");
++  }
++  return realpathSync(sibling);
++}
++
+ /** Names of tools registered by this extension that subagents must NOT inherit. */
+ const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
+
+@@ -358,6 +382,8 @@ export interface RunOptions {
+   isolated?: boolean;
+   inheritContext?: boolean;
+   thinkingLevel?: ThinkingLevel;
++  /** Absolute path to the supervised-command extension. Set only by Agent(run_in_background: true). */
++  allowSupervisedCommands?: string;
+   /** Override working directory (e.g. for worktree isolation). */
+   cwd?: string;
+   /**
+@@ -612,7 +638,11 @@ export async function runAgent(
+   // It's only needed when we're neither loading everything without excludes
+   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
+   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
+-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
++  const supervisedPath = resolveTrustedSupervisedBundle(options.allowSupervisedCommands);
++  const additionalExtensionPaths = [
++    ...(extensionsSpec?.paths ?? []),
++    ...(supervisedPath ? [supervisedPath] : []),
++  ];
+   // Pre-filter discovered set, captured by the override — the exclude-typo warning
+   // must compare against this, not the surviving set (absence from survivors is
+   // an exclude *succeeding*).
+@@ -636,7 +666,7 @@ export async function runAgent(
+     cwd: configCwd,
+     agentDir,
+     noExtensions,
+-    additionalExtensionPaths,
++    additionalExtensionPaths: additionalExtensionPaths.length ? additionalExtensionPaths : undefined,
+     extensionsOverride,
+     noSkills,
+     noPromptTemplates: true,
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95bbe4bb1f 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..379fb9567b671d0349699212eabc8e20151f5e95 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -91,6 +91,54 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+@@ -11,12 +11,13 @@
+  */
+
+ import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+-import { join } from "node:path";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
+ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+ import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+ import { Type } from "@sinclair/typebox";
+ import { AgentManager } from "./agent-manager.js";
+-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
++import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent, supervisedSiblingPath } from "./agent-runner.js";
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
+ import { loadCustomAgents } from "./custom-agents.js";
+@@ -91,6 +92,55 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
    });
  }
- 
+
 +const RESULT_WAIT_QUEUE_POLL_MS = 50;
 +const DEFAULT_RESULT_WAIT_TIMEOUT_MS = 30_000;
 +const MAX_RESULT_WAIT_TIMEOUT_MS = 60_000;
@@ -174,11 +825,12 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95
 +}
 +
 +export const LARKIN_BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
++export const LARKIN_SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
 +
  export function renderRunningAgentStatus(
    frame: string,
    statsText: string,
-@@ -330,10 +378,14 @@ export default function (pi: ExtensionAPI) {
+@@ -330,10 +380,14 @@ export default function (pi: ExtensionAPI) {
    // before they reach pi.sendMessage (fire-and-forget).
    const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
    const NUDGE_HOLD_MS = 200;
@@ -195,7 +847,51 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95
    function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
      cancelNudge(key);
      pendingNudges.set(key, setTimeout(() => {
-@@ -1453,6 +1505,11 @@ Terse command-style prompts produce shallow, generic work.
+@@ -433,6 +487,12 @@ export default function (pi: ExtensionAPI) {
+   }
+
+   // Background completion: route through group join or send individual nudge
++  function supervisedCommandBundlePath(): string {
++    const sibling = supervisedSiblingPath();
++    if (!existsSync(sibling)) throw new Error("supervised command bundle is missing");
++    return sibling;
++  }
++  const supervisedKey = Symbol("larkin-supervised-commands");
+   const manager = new AgentManager((record) => {
+     // Emit lifecycle event based on terminal status
+     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
+@@ -490,7 +550,7 @@ export default function (pi: ExtensionAPI) {
+       tokensBefore: info.tokensBefore,
+       compactionCount: record.compactionCount,
+     });
+-  });
++  }, supervisedKey);
+
+   // Expose manager via Symbol.for() global registry for cross-package access.
+   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
+@@ -588,11 +648,11 @@ export default function (pi: ExtensionAPI) {
+       delete (globalThis as any)[MANAGER_KEY];
+     }
+     scheduler.stop();
+-    manager.abortAll();
++    await manager.abortAll();
+     for (const timer of pendingNudges.values()) clearTimeout(timer);
+     pendingNudges.clear();
+     fleet.dispose();
+-    manager.dispose();
++    await manager.dispose();
+   });
+
+   // Live widget: show running agents above editor.
+@@ -1259,6 +1319,7 @@ Terse command-style prompts produce shallow, generic work.
+             inheritContext,
+             thinkingLevel: thinking,
+             isBackground: true,
++            ...(params.run_in_background === true ? { [supervisedKey]: supervisedCommandBundlePath() } : {}),
+             isolation,
+             invocation: agentInvocation,
+             ...bgCallbacks,
+@@ -1453,6 +1514,11 @@ Terse command-style prompts produce shallow, generic work.
            description: "If true, wait for the agent to complete before returning. Default: false.",
          }),
        ),
@@ -207,7 +903,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95
        verbose: Type.Optional(
          Type.Boolean({
            description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-@@ -1470,14 +1527,15 @@ Terse command-style prompts produce shallow, generic work.
+@@ -1470,14 +1536,15 @@ Terse command-style prompts produce shallow, generic work.
        // completion notification can still be delivered.
        // Queued agents have no promise yet (it's created when the queue starts
        // them), so poll until they leave the queue, then await like a running one.
@@ -228,16 +924,16 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..fb2d3119a50c6aa9c8864037af65ff95
 +        resultWaitConsumedInParentTurn = true;
 +        timedOut = await waitForSubagentResult(record, waitTimeoutMs, signal);
        }
- 
+
        const displayName = getDisplayName(record.type);
-@@ -1492,11 +1550,13 @@ Terse command-style prompts produce shallow, generic work.
- 
+@@ -1492,11 +1559,13 @@ Terse command-style prompts produce shallow, generic work.
+
        let output =
          `Agent: ${record.id}\n` +
 -        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
 +        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)}${timedOut ? " | timedOut: true" : ""} | ${statsParts.join(" | ")}\n` +
          `Description: ${record.description}\n\n`;
- 
+
 -      if (record.status === "running") {
 -        output += "Agent is still running. Use wait: true or check back later.";
 +      if (record.status === "running" || record.status === "queued") {

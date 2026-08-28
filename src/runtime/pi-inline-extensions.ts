@@ -1,8 +1,15 @@
+import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { InlineExtension, MainOptions } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InlineExtension, MainOptions } from "@earendil-works/pi-coding-agent";
 import bashTimeoutExtension from "./pi-bash-timeout-extension.js";
-import { bundledPiSubagentExtensionPath } from "./pi-subagent-injection.js";
+import { bundledPiSubagentExtensionPath, materializeEmbeddedPiSubagentBundle } from "./pi-subagent-injection.js";
 import piSubagentRecordWatchdog from "./pi-subagent-record-watchdog.js";
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __LARKIN_COMPILED_PI_SUBAGENTS__: InlineExtension | undefined;
+}
 
 /**
  * Load the prebuilt, patched subagent bundle shipped in dist/ rather than the
@@ -11,16 +18,38 @@ import piSubagentRecordWatchdog from "./pi-subagent-record-watchdog.js";
  * continue to use the prebuilt patched bundle.
  */
 async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
-  if (process.env.LARKIN_STANDALONE === "1") {
-    const loaded = await import("@tintinweb/pi-subagents/dist/index.js") as unknown as { default?: InlineExtension };
-    if (!loaded.default) throw new Error("Larkin bounded pi-subagents package is invalid; refusing to start builtin Pi");
-    return loaded.default;
+  // Compiled standalone already has the patched package in Bun's module graph.
+  // The materialized sibling bundle externalizes @earendil-works/pi-coding-agent
+  // and cannot be imported from LARKIN_CONFIG_DIR.
+  const compiled = globalThis.__LARKIN_COMPILED_PI_SUBAGENTS__;
+  if (compiled) {
+    if (typeof compiled !== "function" && typeof compiled.factory !== "function") {
+      throw new Error("Larkin compiled pi-subagents factory is missing; refusing to start builtin Pi");
+    }
+    return compiled;
   }
   const bundle = bundledPiSubagentExtensionPath(process.env.LARKIN_CONFIG_DIR);
   if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start builtin Pi");
   const loaded = await import(pathToFileURL(bundle).href) as { default?: InlineExtension };
   if (!loaded.default) throw new Error("Larkin bounded pi-subagents bundle is invalid; refusing to start builtin Pi");
   return loaded.default;
+}
+
+function asFn(mod: unknown, name: string): (pi: ExtensionAPI) => void | Promise<void> {
+  if (typeof mod === "function") return mod as (pi: ExtensionAPI) => void | Promise<void>;
+  const fallback = (mod as { default?: unknown } | undefined)?.default;
+  if (typeof fallback === "function") return fallback as (pi: ExtensionAPI) => void | Promise<void>;
+  throw new Error(`${name} extension factory is missing`);
+}
+
+function wrapFactory(name: string, factory: (pi: ExtensionAPI) => void | Promise<void>): InlineExtension {
+  return async (pi) => {
+    try {
+      await factory(pi);
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(`${name}: ${String(error)}`);
+    }
+  };
 }
 
 /** Builtin Pi extensions are loaded as code, never through Pi's path/data-URL loader. */
@@ -34,15 +63,21 @@ const bundledSubagentsExtension: InlineExtension = async (pi) => {
 // so the final sweep can still read AgentManager.getRecord and bridge consumed
 // terminals before manager teardown.
 export const BUILTIN_PI_EXTENSION_FACTORIES: readonly InlineExtension[] = Object.freeze([
-  piSubagentRecordWatchdog,
-  bundledSubagentsExtension,
-  bashTimeoutExtension,
+  wrapFactory("larkin-pi-subagent-watchdog", asFn(piSubagentRecordWatchdog, "larkin-pi-subagent-watchdog")),
+  wrapFactory("larkin-pi-subagents", bundledSubagentsExtension),
+  wrapFactory("larkin-pi-bash-timeout", asFn(bashTimeoutExtension, "larkin-pi-bash-timeout")),
 ]);
 
 type PiMain = (args: string[], options?: MainOptions) => Promise<void>;
 
 /** Invoke Pi RPC with Larkin's builtin-only extension factories. */
 export async function invokeBuiltinPiRpc(piMain: PiMain, rest: readonly string[]): Promise<void> {
+  if (globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ && process.env.LARKIN_CONFIG_DIR) {
+    const materialized = materializeEmbeddedPiSubagentBundle(process.env.LARKIN_CONFIG_DIR);
+    if (!materialized) throw new Error("standalone pi-subagents bundle failed to materialize");
+    const supervised = path.join(path.dirname(materialized), "pi-supervised-command.bundle.js");
+    process.env.LARKIN_PI_SUPERVISED_BUNDLE = fs.realpathSync(supervised);
+  }
   await piMain(["--mode", "rpc", ...rest], {
     extensionFactories: [...BUILTIN_PI_EXTENSION_FACTORIES],
   });

@@ -50,6 +50,7 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
     "test/unit/feishu/host-runtime-delivery-health.test.mjs",
     "test/unit/platform/release-artifacts.test.mjs",
     "test/unit/runtime/pi-inline-extensions.test.mjs",
+    "test/unit/runtime/pi-supervised-command.test.mjs",
     "test/unit/runtime/runtime-adapters.test.mjs",
     "test/unit/runtime/runtime-inbox-target.test.mjs",
     "test/integration/build/runtime-clean-cutover.test.mjs",

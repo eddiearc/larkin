@@ -8,7 +8,7 @@ function nonempty(value, label) {
 export function loadMentionConstructionEval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "mention-construction" || value.version !== 1) throw new Error("eval dataset/version mismatch");
-  if (value.standing_prompt_version !== "larkin-standing-v23") throw new Error("standing prompt version mismatch");
+  if (value.standing_prompt_version !== "larkin-standing-v25") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
   if (value.grader?.name !== "mention-construction-trace-grader" || value.grader.version !== 1 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");

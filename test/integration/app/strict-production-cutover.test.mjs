@@ -342,6 +342,68 @@ for (const [mode, needle] of [
   });
 }
 
+test("scope failure keeps canonical config and retry succeeds after grant", { timeout: 25_000 }, () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-scope-retry-"));
+  try {
+    const root = path.join(temp, "root");
+    const resultFile = path.join(root, ".setup-result-123.json");
+    fs.mkdirSync(root, { recursive: true });
+    const denied = registerPreload(temp, "scope-denied");
+    const first = spawnSync(process.execPath, ["--preload", denied.loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
+      env: {
+        ...process.env,
+        HOME: path.join(temp, "home"),
+        LARKIN_CONFIG_DIR: root,
+        CALL_MARKER: path.join(temp, "calls-denied.ndjson"),
+        BIND_MARKER: path.join(temp, "bound-denied"),
+        FAST_RETRY_TIMER: "1",
+        LARKIN_TEST_BOT_REGISTER_MODULE: denied.preload,
+        BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${denied.preload}`].filter(Boolean).join(" "),
+      },
+    });
+    assert.notEqual(first.status, 0, first.stderr || first.stdout);
+    assert.equal(fs.existsSync(resultFile), false);
+    const configAfterFail = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
+    assert.equal(configAfterFail.activeAgent, APP);
+    assert.equal(configAfterFail.agents[APP].runtime, "codex");
+    assert.equal(configAfterFail.agents[APP].model, "gpt");
+    assert.equal(configAfterFail.mentionPolicy, "require");
+    const credential = JSON.parse(fs.readFileSync(path.join(root, "bots", `${APP}.json`), "utf8"));
+    assert.equal(credential.appId, APP);
+    assert.equal(credential.appSecret, "canary-secret");
+    const workspace = path.join(root, "lark-cli-config");
+    assert.equal(fs.existsSync(`${workspace}.quarantine`), false);
+    const granted = registerPreload(temp, "ok");
+    const second = spawnSync(process.execPath, ["--preload", granted.loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
+      env: {
+        ...process.env,
+        HOME: path.join(temp, "home"),
+        LARKIN_CONFIG_DIR: root,
+        CALL_MARKER: path.join(temp, "calls-granted.ndjson"),
+        BIND_MARKER: path.join(temp, "bound-granted"),
+        FAST_RETRY_TIMER: "1",
+        LARKIN_TEST_BOT_REGISTER_MODULE: granted.preload,
+        BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${granted.preload}`].filter(Boolean).join(" "),
+      },
+    });
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.equal(fs.existsSync(resultFile), true);
+    const configAfterRetry = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
+    assert.equal(configAfterRetry.activeAgent, APP);
+    assert.equal(configAfterRetry.agents[APP].runtime, "codex");
+    const runSource = fs.readFileSync(path.join(ROOT, "src/app/run.ts"), "utf8");
+    const runtimeSource = fs.readFileSync(path.join(ROOT, "src/app/runtime-process.ts"), "utf8");
+    const attachSource = fs.readFileSync(path.join(ROOT, "src/app/runtime-agent-config.ts"), "utf8");
+    assert.doesNotMatch(attachSource + runSource + runtimeSource, /\.lark-cli-config\.quarantine-/);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("bot-register bounds transient Bot verification retries and preserves authoritative binding state", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-transient-exhaust-"));
   try {

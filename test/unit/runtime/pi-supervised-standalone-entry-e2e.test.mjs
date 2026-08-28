@@ -14,9 +14,20 @@ const ROOT = path.resolve(import.meta.dirname, "../../..");
 const workDir = fs.mkdtempSync(path.join(ROOT, ".tmp-sa-supervised-"));
 const agentDir = fs.mkdtempSync(path.join(ROOT, ".tmp-sa-supervised-agent-"));
 const configDir = fs.mkdtempSync(path.join(workDir, "config-"));
+const priorStandalone = process.env.LARKIN_STANDALONE;
+const priorWait = process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS;
+const priorLife = process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS;
 afterAll(() => {
   fs.rmSync(workDir, { recursive: true, force: true });
   fs.rmSync(agentDir, { recursive: true, force: true });
+  if (priorStandalone === undefined) delete process.env.LARKIN_STANDALONE;
+  else process.env.LARKIN_STANDALONE = priorStandalone;
+  if (priorWait === undefined) delete process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS;
+  else process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS = priorWait;
+  if (priorLife === undefined) delete process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS;
+  else process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS = priorLife;
+  delete globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__;
+  delete globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
 });
 
 test("standalone embed materialize exposes public Agent start/wait/cancel", async () => {

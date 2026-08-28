@@ -26,6 +26,12 @@ function sse(payloads) {
 test("public steer_subagent changes the next fake-provider turn", async () => {
   const subagentsEntry = fileURLToPath(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url));
   assert.ok(fs.existsSync(subagentsEntry));
+  const prior = {
+    wait: process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS,
+    life: process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS,
+    agentDir: process.env.PI_CODING_AGENT_DIR,
+    openai: process.env.OPENAI_API_KEY,
+  };
   process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS = "1";
   process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS = "8";
   process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -60,7 +66,6 @@ test("public steer_subagent changes the next fake-provider turn", async () => {
         ]));
         return;
       }
-      res.writeHead(200, { "content-type": "text/event-stream" });
     });
   });
   provider.on("connection", (socket) => sockets.push(socket));
@@ -147,5 +152,13 @@ test("public steer_subagent changes the next fake-provider turn", async () => {
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise((resolve) => provider.close(resolve));
+    if (prior.wait === undefined) delete process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS;
+    else process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS = prior.wait;
+    if (prior.life === undefined) delete process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS;
+    else process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS = prior.life;
+    if (prior.agentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prior.agentDir;
+    if (prior.openai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = prior.openai;
   }
 }, { timeout: 20_000 });

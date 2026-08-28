@@ -1,3 +1,45 @@
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-1cce67bbcb821bd9 b/.bun-tag-1cce67bbcb821bd9
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-2a826c9b186cb67c b/.bun-tag-2a826c9b186cb67c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-3fadcd1707a055f8 b/.bun-tag-3fadcd1707a055f8
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-521d9b2ad9a104fa b/.bun-tag-521d9b2ad9a104fa
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-58e08ce8246a76a0 b/.bun-tag-58e08ce8246a76a0
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-6ef69510e99ece5d b/.bun-tag-6ef69510e99ece5d
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-80c5d241789d23ea b/.bun-tag-80c5d241789d23ea
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-8c139481f6770606 b/.bun-tag-8c139481f6770606
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-93fb9cd92e52c135 b/.bun-tag-93fb9cd92e52c135
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-a192c07cdd151919 b/.bun-tag-a192c07cdd151919
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-a6be946c74d62c48 b/.bun-tag-a6be946c74d62c48
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-bd9424a2f5d10a5e b/.bun-tag-bd9424a2f5d10a5e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-f064cf221732e6fa b/.bun-tag-f064cf221732e6fa
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@tintinweb/pi-subagents/.bun-tag-fcccdb30b0e20493 b/.bun-tag-fcccdb30b0e20493
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/agent-manager.js b/dist/agent-manager.js
 index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..64e0372bd3602c7885c0ce9abc758b26f58276d2 100644
 --- a/dist/agent-manager.js
@@ -128,7 +170,7 @@ index 5619e266cb828b197965c4953ee9fff8a9d3a9a7..64e0372bd3602c7885c0ce9abc758b26
          try {
              pruneWorktrees(process.cwd());
 diff --git a/dist/agent-runner.js b/dist/agent-runner.js
-index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..ed48ba27d4c9f42a990d4636d41bc76673298892 100644
+index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..a38552e22b5cd0683ef438885c0c97e336e017fc 100644
 --- a/dist/agent-runner.js
 +++ b/dist/agent-runner.js
 @@ -1,9 +1,10 @@
@@ -143,16 +185,22 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..ed48ba27d4c9f42a990d4636d41bc766
  import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
  import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
  import { buildParentContext, extractText } from "./context.js";
-@@ -23,6 +24,20 @@ export const SUBAGENT_TOOL_NAMES = {
+@@ -23,6 +24,26 @@ export const SUBAGENT_TOOL_NAMES = {
      GET_RESULT: "get_subagent_result",
      STEER: "steer_subagent",
  };
++export function supervisedSiblingPath() {
++    const fromEnv = process.env.LARKIN_PI_SUPERVISED_BUNDLE;
++    if (typeof fromEnv === "string" && fromEnv.length > 0)
++        return fromEnv;
++    return join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++}
 +function resolveTrustedSupervisedBundle(candidate) {
 +    if (candidate === undefined)
 +        return undefined;
 +    if (typeof candidate !== "string" || candidate.length === 0)
 +        throw new Error("supervised command bundle is missing");
-+    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++    const sibling = supervisedSiblingPath();
 +    for (const file of [sibling, candidate]) {
 +        if (!existsSync(file) || lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile())
 +            throw new Error("supervised command bundle is missing");
@@ -164,7 +212,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..ed48ba27d4c9f42a990d4636d41bc766
  /** Names of tools registered by this extension that subagents must NOT inherit. */
  const EXCLUDED_TOOL_NAMES = Object.values(SUBAGENT_TOOL_NAMES);
  /**
-@@ -483,7 +498,11 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -483,7 +504,11 @@ export async function runAgent(ctx, type, prompt, options) {
      // It's only needed when we're neither loading everything without excludes
      // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
      const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -177,7 +225,7 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..ed48ba27d4c9f42a990d4636d41bc766
      // Pre-filter discovered set, captured by the override — the exclude-typo warning
      // must compare against this, not the surviving set (absence from survivors is
      // an exclude *succeeding*).
-@@ -506,7 +525,7 @@ export async function runAgent(ctx, type, prompt, options) {
+@@ -506,7 +531,7 @@ export async function runAgent(ctx, type, prompt, options) {
          cwd: configCwd,
          agentDir,
          noExtensions,
@@ -187,10 +235,10 @@ index 40df116e6afdd84b6b9c74c65ddec25a14ce66bb..ed48ba27d4c9f42a990d4636d41bc766
          noSkills,
          noPromptTemplates: true,
 diff --git a/dist/index.js b/dist/index.js
-index ab65ef15b5c1da803c0378b1d0ba383645198028..3c0d552d9dff9083804309ae2ff92e2657bcd68b 100644
+index ab65ef15b5c1da803c0378b1d0ba383645198028..c6e7ccd02f016c36c6f098323e88c07063862805 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -10,7 +10,8 @@
+@@ -10,12 +10,13 @@
   *   /agents                 — Interactive agent management menu
   */
  import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
@@ -200,6 +248,12 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..3c0d552d9dff9083804309ae2ff92e26
  import { defineTool, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
  import { Container, Key, matchesKey, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
  import { Type } from "@sinclair/typebox";
+ import { AgentManager } from "./agent-manager.js";
+-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
++import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent, supervisedSiblingPath } from "./agent-runner.js";
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+ import { registerRpcHandlers } from "./cross-extension-rpc.js";
+ import { loadCustomAgents } from "./custom-agents.js";
 @@ -69,6 +70,45 @@ function abortable(promise, signal) {
          });
      });
@@ -267,7 +321,7 @@ index ab65ef15b5c1da803c0378b1d0ba383645198028..3c0d552d9dff9083804309ae2ff92e26
      }
      // Background completion: route through group join or send individual nudge
 +    function supervisedCommandBundlePath() {
-+        const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++        const sibling = supervisedSiblingPath();
 +        if (!existsSync(sibling))
 +            throw new Error("supervised command bundle is missing");
 +        return sibling;
@@ -555,7 +609,7 @@ index 318f88588a05aa1459e7c86288aa886ea85a28b1..18e5b5202f43ab9dff0113c54e5f87f9
      try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
      // Also prune repos that caller-supplied cwds created worktrees in — a clean
 diff --git a/src/agent-runner.ts b/src/agent-runner.ts
-index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43d441669c 100644
+index 444eb84ab3769c6dba8d1e764b88ac99d968d392..f297775376233e0c66c586d9fe186df378b068f5 100644
 --- a/src/agent-runner.ts
 +++ b/src/agent-runner.ts
 @@ -2,9 +2,10 @@
@@ -570,16 +624,22 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43
  import type { Model } from "@earendil-works/pi-ai";
  import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
  import {
-@@ -38,6 +39,23 @@ export const SUBAGENT_TOOL_NAMES = {
+@@ -38,6 +39,29 @@ export const SUBAGENT_TOOL_NAMES = {
    STEER: "steer_subagent",
  } as const;
  
++export function supervisedSiblingPath(): string {
++  const fromEnv = process.env.LARKIN_PI_SUPERVISED_BUNDLE;
++  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
++  return join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++}
++
 +function resolveTrustedSupervisedBundle(candidate: string | undefined): string | undefined {
 +  if (candidate === undefined) return undefined;
 +  if (typeof candidate !== "string" || candidate.length === 0) {
 +    throw new Error("supervised command bundle is missing");
 +  }
-+  const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++  const sibling = supervisedSiblingPath();
 +  for (const file of [sibling, candidate]) {
 +    if (!existsSync(file) || lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile()) {
 +      throw new Error("supervised command bundle is missing");
@@ -594,7 +654,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43
  /** Names of tools registered by this extension that subagents must NOT inherit. */
  const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
  
-@@ -358,6 +376,8 @@ export interface RunOptions {
+@@ -358,6 +382,8 @@ export interface RunOptions {
    isolated?: boolean;
    inheritContext?: boolean;
    thinkingLevel?: ThinkingLevel;
@@ -603,7 +663,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43
    /** Override working directory (e.g. for worktree isolation). */
    cwd?: string;
    /**
-@@ -612,7 +632,11 @@ export async function runAgent(
+@@ -612,7 +638,11 @@ export async function runAgent(
    // It's only needed when we're neither loading everything without excludes
    // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
    const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -616,7 +676,7 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43
    // Pre-filter discovered set, captured by the override — the exclude-typo warning
    // must compare against this, not the surviving set (absence from survivors is
    // an exclude *succeeding*).
-@@ -636,7 +660,7 @@ export async function runAgent(
+@@ -636,7 +666,7 @@ export async function runAgent(
      cwd: configCwd,
      agentDir,
      noExtensions,
@@ -626,10 +686,10 @@ index 444eb84ab3769c6dba8d1e764b88ac99d968d392..4fb97a2a7aa4510484882ab3180f4d43
      noSkills,
      noPromptTemplates: true,
 diff --git a/src/index.ts b/src/index.ts
-index 828938e6d710dc5a8f99a6185e37f9592b12352d..9c586a6a96371923460077636cfaf47669801225 100644
+index 828938e6d710dc5a8f99a6185e37f9592b12352d..379fb9567b671d0349699212eabc8e20151f5e95 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -11,7 +11,8 @@
+@@ -11,12 +11,13 @@
   */
  
  import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
@@ -639,6 +699,12 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9c586a6a96371923460077636cfaf476
  import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
  import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
  import { Type } from "@sinclair/typebox";
+ import { AgentManager } from "./agent-manager.js";
+-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
++import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent, supervisedSiblingPath } from "./agent-runner.js";
+ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
+ import { loadCustomAgents } from "./custom-agents.js";
 @@ -91,6 +92,55 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
    });
  }
@@ -717,7 +783,7 @@ index 828938e6d710dc5a8f99a6185e37f9592b12352d..9c586a6a96371923460077636cfaf476
  
    // Background completion: route through group join or send individual nudge
 +  function supervisedCommandBundlePath(): string {
-+    const sibling = join(dirname(fileURLToPath(import.meta.url)), "pi-supervised-command.bundle.js");
++    const sibling = supervisedSiblingPath();
 +    if (!existsSync(sibling)) throw new Error("supervised command bundle is missing");
 +    return sibling;
 +  }

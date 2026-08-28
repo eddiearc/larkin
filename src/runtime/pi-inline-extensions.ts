@@ -1,7 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ExtensionAPI, InlineExtension, MainOptions } from "@earendil-works/pi-coding-agent";
 import bashTimeoutExtension from "./pi-bash-timeout-extension.js";
-import { bundledPiSubagentExtensionPath } from "./pi-subagent-injection.js";
+import { bundledPiSubagentExtensionPath, materializeEmbeddedPiSubagentBundle } from "./pi-subagent-injection.js";
 import piSubagentRecordWatchdog from "./pi-subagent-record-watchdog.js";
 
 declare global {
@@ -70,6 +72,12 @@ type PiMain = (args: string[], options?: MainOptions) => Promise<void>;
 
 /** Invoke Pi RPC with Larkin's builtin-only extension factories. */
 export async function invokeBuiltinPiRpc(piMain: PiMain, rest: readonly string[]): Promise<void> {
+  if (process.env.LARKIN_STANDALONE === "1" && globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__) {
+    const materialized = materializeEmbeddedPiSubagentBundle(process.env.LARKIN_CONFIG_DIR);
+    if (!materialized) throw new Error("standalone pi-subagents bundle failed to materialize");
+    const supervised = path.join(path.dirname(materialized), "pi-supervised-command.bundle.js");
+    process.env.LARKIN_PI_SUPERVISED_BUNDLE = fs.realpathSync(supervised);
+  }
   await piMain(["--mode", "rpc", ...rest], {
     extensionFactories: [...BUILTIN_PI_EXTENSION_FACTORIES],
   });

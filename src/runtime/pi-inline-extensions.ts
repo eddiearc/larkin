@@ -4,6 +4,11 @@ import bashTimeoutExtension from "./pi-bash-timeout-extension.js";
 import { bundledPiSubagentExtensionPath } from "./pi-subagent-injection.js";
 import piSubagentRecordWatchdog from "./pi-subagent-record-watchdog.js";
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __LARKIN_COMPILED_PI_SUBAGENTS__: InlineExtension | undefined;
+}
+
 /**
  * Load the prebuilt, patched subagent bundle shipped in dist/ rather than the
  * package-manager copy. Standalone binaries additionally load the patched
@@ -15,11 +20,11 @@ async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
   // The materialized sibling bundle externalizes @earendil-works/pi-coding-agent
   // and cannot be imported from LARKIN_CONFIG_DIR.
   if (process.env.LARKIN_STANDALONE === "1") {
-    // The patched package is JS-only; Bun's compiled graph still resolves it.
-    // @ts-expect-error -- no bundled type declarations for @tintinweb/pi-subagents
-    const loaded = await import("@tintinweb/pi-subagents") as { default?: InlineExtension };
-    if (!loaded.default) throw new Error("Larkin compiled pi-subagents package is invalid; refusing to start builtin Pi");
-    return loaded.default;
+    const loaded = globalThis.__LARKIN_COMPILED_PI_SUBAGENTS__;
+    if (typeof loaded !== "function" && (!loaded || typeof loaded.factory !== "function")) {
+      throw new Error("Larkin compiled pi-subagents factory is missing; refusing to start builtin Pi");
+    }
+    return loaded;
   }
   const bundle = bundledPiSubagentExtensionPath(process.env.LARKIN_CONFIG_DIR);
   if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start builtin Pi");

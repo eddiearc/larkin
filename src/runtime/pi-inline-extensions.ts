@@ -21,12 +21,12 @@ async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
   // Compiled standalone already has the patched package in Bun's module graph.
   // The materialized sibling bundle externalizes @earendil-works/pi-coding-agent
   // and cannot be imported from LARKIN_CONFIG_DIR.
-  if (process.env.LARKIN_STANDALONE === "1") {
-    const loaded = globalThis.__LARKIN_COMPILED_PI_SUBAGENTS__;
-    if (typeof loaded !== "function" && (!loaded || typeof loaded.factory !== "function")) {
+  const compiled = globalThis.__LARKIN_COMPILED_PI_SUBAGENTS__;
+  if (compiled) {
+    if (typeof compiled !== "function" && typeof compiled.factory !== "function") {
       throw new Error("Larkin compiled pi-subagents factory is missing; refusing to start builtin Pi");
     }
-    return loaded;
+    return compiled;
   }
   const bundle = bundledPiSubagentExtensionPath(process.env.LARKIN_CONFIG_DIR);
   if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start builtin Pi");
@@ -72,7 +72,7 @@ type PiMain = (args: string[], options?: MainOptions) => Promise<void>;
 
 /** Invoke Pi RPC with Larkin's builtin-only extension factories. */
 export async function invokeBuiltinPiRpc(piMain: PiMain, rest: readonly string[]): Promise<void> {
-  if (process.env.LARKIN_STANDALONE === "1" && globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__) {
+  if (globalThis.__LARKIN_EMBEDDED_PI_SUBAGENTS_BUNDLE__ && process.env.LARKIN_CONFIG_DIR) {
     const materialized = materializeEmbeddedPiSubagentBundle(process.env.LARKIN_CONFIG_DIR);
     if (!materialized) throw new Error("standalone pi-subagents bundle failed to materialize");
     const supervised = path.join(path.dirname(materialized), "pi-supervised-command.bundle.js");

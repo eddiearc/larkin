@@ -63,7 +63,10 @@ export function materializeEmbeddedPiSubagentBundle(configDir: string | undefine
   const supervised = globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
   if (!embedded || !configDir) return null;
   if (!supervised) throw new Error("supervised command bundle is missing");
-  const dir = path.join(path.resolve(configDir), "providers", "pi", "extensions");
+  const resolvedConfig = path.resolve(configDir);
+  fs.mkdirSync(resolvedConfig, { recursive: true, mode: 0o700 });
+  const canonical = fs.realpathSync(resolvedConfig);
+  const dir = path.join(canonical, "providers", "pi", "extensions");
   const subTarget = path.join(dir, "pi-subagents.bundle.js");
   const supTarget = path.join(dir, "pi-supervised-command.bundle.js");
   const lockPath = path.join(dir, ".materialize.lock");

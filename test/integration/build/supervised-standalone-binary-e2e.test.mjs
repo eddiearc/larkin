@@ -51,6 +51,7 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
     const agentId = "cli_saSupervisedA1";
     const served = [];
     const bodies = [];
+    let startedPid = 0;
     let parentAgent = false;
     const server = http.createServer((request, response) => {
       const chunks = [];
@@ -62,6 +63,9 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
         response.writeHead(200, { "content-type": "text/event-stream" });
         const child = /"name"\s*:\s*"supervised_start"/.test(body);
         const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+        const pidMatch = body.match(/"pid"\s*:\s*(\d+)/);
+        if (pidMatch) startedPid = Number(pidMatch[1]);
+        if (served.includes("supervised_cancel") && /"(killed|exited)"/.test(body)) served.push("cancel_result");
         if (!child && !parentAgent) {
           parentAgent = true;
           served.push("Agent");
@@ -130,13 +134,18 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
       await client.request("prompt", { message: "Spawn a background agent that starts, waits, and cancels a supervised process." });
       const deadline = Date.now() + 45_000;
       while (Date.now() < deadline) {
-        if (served.includes("supervised_start") && served.includes("supervised_wait") && served.includes("supervised_cancel")) break;
+        if (served.includes("supervised_start") && served.includes("supervised_wait") && served.includes("supervised_cancel") && served.includes("cancel_result")) break;
         await new Promise((r) => setTimeout(r, 100));
       }
       assert.match(tools.join("\n"), /Agent/);
       assert.ok(served.includes("supervised_start"), `missing start: ${served.join(",")} bodies=${bodies.length}`);
       assert.ok(served.includes("supervised_wait"), `missing wait: ${served.join(",")}`);
       assert.ok(served.includes("supervised_cancel"), `missing cancel: ${served.join(",")}`);
+      assert.ok(served.includes("cancel_result"), `missing cancel result: ${served.join(",")}`);
+      assert.ok(startedPid > 0, "child pid missing");
+      let alive = true;
+      try { process.kill(startedPid, 0); } catch { alive = false; }
+      assert.equal(alive, false, `pid ${startedPid} still alive`);
     } finally {
       await client.close();
       await new Promise((resolve) => server.close(resolve));

@@ -194,6 +194,7 @@ interface HandleRecord {
   treePoll?: ReturnType<typeof setInterval>;
   treePids: Set<number>;
   chain: Promise<void>;
+  closed: Promise<void>;
 }
 
 const handles = new Map<string, HandleRecord>();
@@ -280,8 +281,11 @@ export function startSupervisedCommand(input: {
     exitWaiters: [],
     treePids: new Set([child.pid]),
     chain: Promise.resolve(),
+    closed: Promise.resolve(),
   };
   const started = record;
+  let markClosed = (): void => {};
+  started.closed = new Promise<void>((resolve) => { markClosed = resolve; });
   child.stdout?.on("data", (chunk: Buffer) => started.stdout.write(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk: Buffer) => started.stderr.write(Buffer.from(chunk)));
   started.treePoll = setInterval(() => {
@@ -289,6 +293,7 @@ export function startSupervisedCommand(input: {
   }, 50);
   started.treePoll.unref?.();
   child.once("close", (code) => {
+    markClosed();
     void started.chain.then(async () => {
       await killProcessTree(started.pid, started.treePids);
       finish(started, "exited", code);
@@ -390,6 +395,7 @@ export async function cancelSupervisedCommand(owner: object, handle: string): Pr
       clearTimeout(record.lifetimeTimer);
       record.lifetimeTimer = undefined;
     }
+    await record.closed;
     const result = record.terminalConsumed && remembered?.owner === owner
       ? remembered.snapshot
       : snapshot(record);

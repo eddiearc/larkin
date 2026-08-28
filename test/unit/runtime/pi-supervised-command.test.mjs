@@ -10,6 +10,7 @@ import {
   startSupervisedCommand,
   waitSupervisedCommand,
 } from "../../../src/runtime/pi-supervised-command.ts";
+import supervisedExtension from "../../../src/runtime/pi-supervised-command-extension.ts";
 
 const priorWait = process.env.LARKIN_PI_SUPERVISED_WAIT_SECONDS;
 const priorLife = process.env.LARKIN_PI_SUPERVISED_LIFE_SECONDS;
@@ -147,8 +148,7 @@ test("cancel reaps non-detached descendants before returning", async () => {
   assert.equal(childAlive, false);
 });
 
-test("cancel reaps the windows process tree", async () => {
-  if (process.platform !== "win32") return;
+test.skipIf(process.platform !== "win32")("cancel reaps the windows process tree", async () => {
   const owner = {};
   const started = startSupervisedCommand({
     owner,
@@ -207,6 +207,32 @@ test("wait above the 60s cap is rejected even when env is raised", async () => {
   });
   await assert.rejects(waitSupervisedCommand(owner, started.handle, 61), /exceeds the \d+s supervised wait limit/);
   await cancelSupervisedCommand(owner, started.handle);
+});
+
+test("supervised_wait resets only on turn_end", async () => {
+  const listeners = {};
+  const tools = {};
+  supervisedExtension({
+    on(event, handler) { listeners[event] = handler; },
+    registerTool(tool) { tools[tool.name] = tool; },
+  });
+  assert.equal(listeners.agent_start, undefined);
+  assert.equal(typeof listeners.turn_end, "function");
+  const ctx = { sessionManager: {}, cwd: process.cwd() };
+  const started = await tools.supervised_start.execute("c1", {
+    executable: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 4000)"],
+  }, new AbortController().signal, () => {}, ctx);
+  const handle = JSON.parse(started.content[0].text).handle;
+  await tools.supervised_wait.execute("c2", { handle, timeout: 1 }, new AbortController().signal, () => {}, ctx);
+  await assert.rejects(
+    tools.supervised_wait.execute("c3", { handle, timeout: 1 }, new AbortController().signal, () => {}, ctx),
+    /once per turn/,
+  );
+  await listeners.turn_end();
+  const second = await tools.supervised_wait.execute("c4", { handle, timeout: 1 }, new AbortController().signal, () => {}, ctx);
+  assert.equal(JSON.parse(second.content[0].text).pid > 0, true);
+  await tools.supervised_cancel.execute("c5", { handle }, new AbortController().signal, () => {}, ctx);
 });
 
 afterAll(() => {

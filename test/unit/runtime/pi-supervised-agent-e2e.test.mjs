@@ -24,6 +24,7 @@ function sse(payloads) {
 }
 
 test("public steer_subagent changes the next fake-provider turn", async () => {
+  delete globalThis[Symbol.for("pi-subagents:manager")];
   const subagentsEntry = fileURLToPath(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url));
   assert.ok(fs.existsSync(subagentsEntry));
   const prior = {

@@ -31,6 +31,7 @@ afterAll(() => {
 });
 
 test("standalone embed materialize exposes public Agent start/wait/cancel", async () => {
+  delete globalThis[Symbol.for("pi-subagents:manager")];
   const subSrc = path.join(ROOT, "dist/runtime/pi-subagents.bundle.js");
   const supSrc = path.join(ROOT, "dist/runtime/pi-supervised-command.bundle.js");
   assert.ok(fs.existsSync(subSrc) && fs.existsSync(supSrc), "production dist bundles must exist");

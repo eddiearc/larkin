@@ -83,11 +83,13 @@ const testFixture = process.env.LARKIN_TEST_BOT_REGISTER_MODULE
     resolveOfficialLarkCli?: typeof resolveOfficialLarkCli;
     spawn?: typeof systemSpawn;
     wait?: (milliseconds: number) => Promise<void>;
+    collectSetupAgentChoice?: () => Promise<SetupAgentChoice | null>;
   }
   : null;
 const registerApp: RegisterApp = testFixture?.registerApp ?? channelRegisterApp as unknown as RegisterApp;
 const qrcode = testFixture?.qrcode ?? qrcodePackage;
 const spawnSync = testFixture?.spawnSync ?? systemSpawnSync;
+const spawnChild = testFixture?.spawn ?? systemSpawn;
 const synchronizeAgentProfile = testFixture?.syncAgentProfile ?? syncAgentProfile;
 const resolveOfficialCli = testFixture?.resolveOfficialLarkCli ?? resolveOfficialLarkCli;
 const wait = testFixture?.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
@@ -361,7 +363,7 @@ async function runBindProcess(command: string, args: readonly string[]): Promise
     return spawnSync(command, [...args], { env: process.env, stdio: "inherit" }).status;
   }
   return await new Promise<number | null>((resolve, reject) => {
-    const child = systemSpawn(command, [...args], { env: process.env, stdio: "inherit" });
+    const child = spawnChild(command, [...args], { env: process.env, stdio: "inherit" });
     trackPendingChild(child);
     let killTimer: NodeJS.Timeout | null = null;
     const abort = (): void => {
@@ -392,7 +394,7 @@ async function runBoundedCliProcess(command: string, args: readonly string[], en
     return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
   }
   return await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = systemSpawn(command, [...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnChild(command, [...args], { env, stdio: ["ignore", "pipe", "pipe"] });
     trackPendingChild(child);
     let stdout = "";
     let stderr = "";
@@ -662,12 +664,13 @@ const documentCommentSubscription: DocumentCommentSubscriptionCapability = comme
     ? { mode: "none", status: "safe-default", source: "setup-default", updatedAt: requestedAt }
     : priorSubscription;
 
-if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_CHOICE === "1")) {
+const injectedAgentChoice = testFixture?.collectSetupAgentChoice;
+if (!flag("--runtime") && (!testFixture || injectedAgentChoice || process.env.LARKIN_TEST_ENABLE_AGENT_CHOICE === "1")) {
   const existing = larkinConfig.loadConfig(process.env).config.agents[id];
   // The official resolver performs a synchronous login-shell probe. Resolve it
   // exactly once before the credential heartbeat lock becomes active.
   resolvedSetupOfficialCli = resolveOfficialCli({ env: process.env });
-  const questioner = terminalSetupQuestioner();
+  const questioner = injectedAgentChoice ? { ask: async () => "", secret: async () => "" } : terminalSetupQuestioner();
   // One setup-owned transaction starts before status/logout and remains active
   // through selection, login, bind, readiness, and the final setup commit.
   pendingPiAuthTransaction = beginBuiltinPiCredentialTransaction(CFG_DIR, id);
@@ -678,35 +681,41 @@ if (!flag("--runtime") && (!testFixture || process.env.LARKIN_TEST_ENABLE_AGENT_
     report: (message: string) => say(message),
   };
   try {
-    const requested = await collectSetupAgentChoice(questioner, existing, authServices);
-    const choice = await recoverUnavailableExternalPi(requested, questioner, () => probeNativeRuntimeReadiness({
-      runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id), env: process.env,
-    }), (message) => say(`! ${message}`), authServices);
+    const requested = injectedAgentChoice
+      ? await injectedAgentChoice()
+      : await collectSetupAgentChoice(questioner, existing, authServices);
+    const choice = injectedAgentChoice
+      ? requested
+      : await recoverUnavailableExternalPi(requested, questioner, () => probeNativeRuntimeReadiness({
+        runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id), env: process.env,
+      }), (message) => say(`! ${message}`), authServices);
     if (choice) {
       let serializedChoice: SetupAgentChoice & { authCompleted?: true; readinessCompleted?: true } = choice;
       if (choice.runtime === "pi" && choice.distribution === "builtin") {
-        const official = choice.preset === "official" ? choice as OfficialPiAuthSelection : null;
-        const configured = official ? null : configureBuiltinPiProviderModel(CFG_DIR, id, choice as BuiltinPiProviderSetupSelection);
-        const providerId = official?.providerId || configured!.provider;
-        const authType = official?.authType || "api_key";
-        let piRuntime: Awaited<ReturnType<typeof createOfficialPiModelRuntime>>;
-        try {
-          say(`正在通过捆绑官方 Pi 登录 ${providerId}（${authType}）…`);
-          piRuntime = await createOfficialPiModelRuntime(CFG_DIR, id);
-          await runOfficialPiLogin(piRuntime, providerId, authType,
-            createOfficialPiAuthInteraction({ questioner, report: (message) => say(message), openUrl: openBrowser }));
-        } catch {
-          pendingPiAuthTransaction.rollback();
-          pendingPiAuthTransaction = null;
-          throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`);
-        }
-        if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN !== "1") {
-          say("正在验证内置 Pi provider（受控单轮，不发送飞书（Lark）消息）…");
-          try { await verifyOfficialPiProviderTurn(piRuntime, choice.model); }
-          catch {
+        if (!injectedAgentChoice) {
+          const official = choice.preset === "official" ? choice as OfficialPiAuthSelection : null;
+          const configured = official ? null : configureBuiltinPiProviderModel(CFG_DIR, id, choice as BuiltinPiProviderSetupSelection);
+          const providerId = official?.providerId || configured!.provider;
+          const authType = official?.authType || "api_key";
+          let piRuntime: Awaited<ReturnType<typeof createOfficialPiModelRuntime>>;
+          try {
+            say(`正在通过捆绑官方 Pi 登录 ${providerId}（${authType}）…`);
+            piRuntime = await createOfficialPiModelRuntime(CFG_DIR, id);
+            await runOfficialPiLogin(piRuntime, providerId, authType,
+              createOfficialPiAuthInteraction({ questioner, report: (message) => say(message), openUrl: openBrowser }));
+          } catch {
             pendingPiAuthTransaction.rollback();
             pendingPiAuthTransaction = null;
-            throw new Error(`官方 Pi ${providerId} readiness 失败；credential/config 未修改`);
+            throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`);
+          }
+          if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN !== "1") {
+            say("正在验证内置 Pi provider（受控单轮，不发送飞书（Lark）消息）…");
+            try { await verifyOfficialPiProviderTurn(piRuntime, choice.model); }
+            catch {
+              pendingPiAuthTransaction.rollback();
+              pendingPiAuthTransaction = null;
+              throw new Error(`官方 Pi ${providerId} readiness 失败；credential/config 未修改`);
+            }
           }
         }
         serializedChoice = { ...choice, authCompleted: true, readinessCompleted: true };

@@ -113,7 +113,6 @@ function runSetup(root, temp, fail) {
       LARKIN_CONFIG_DIR: root,
       LARKIN_HOME: root,
       LARKIN_INTERNAL_DISPATCH: "0",
-      LARKIN_BUN_TEST_RUNNER: "1",
       SPAWN_LOG: path.join(temp, "spawn.ndjson"),
       ATTACH_LOG: path.join(temp, "attach.log"),
       FAKE_REGISTER_FAIL: fail ? "1" : "0",

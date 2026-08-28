@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, test } from "bun:test";
@@ -144,6 +145,22 @@ test("cancel reaps non-detached descendants before returning", async () => {
   try { process.kill(childPid, 0); } catch { childAlive = false; }
   assert.equal(leaderAlive, false);
   assert.equal(childAlive, false);
+});
+
+test("cancel empties the unix process group", async () => {
+  if (process.platform === "win32") return;
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "const {spawn}=require('child_process'); spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'ignore'}); setTimeout(()=>{},30000);"],
+    cwd: process.cwd(),
+  });
+  await waitSupervisedCommand(owner, started.handle, 1);
+  await cancelSupervisedCommand(owner, started.handle);
+  const listed = spawnSync("pgrep", ["-g", String(started.pid)], { encoding: "utf8" });
+  const pids = String(listed.stdout || "").trim().split(/\s+/).filter(Boolean);
+  assert.equal(pids.length, 0, `process group still has ${pids.join(",")}`);
 });
 
 test("reap returns only after the pid is gone", async () => {

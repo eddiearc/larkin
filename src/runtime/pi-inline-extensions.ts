@@ -18,42 +18,37 @@ async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
   return loaded.default;
 }
 
-function asFactory(mod: unknown, name: string): { name: string; factory: (pi: ExtensionAPI) => void | Promise<void> } {
-  const factory = typeof mod === "function"
-    ? mod as (pi: ExtensionAPI) => void | Promise<void>
-    : mod && typeof (mod as { default?: unknown }).default === "function"
-      ? (mod as { default: (pi: ExtensionAPI) => void | Promise<void> }).default
-      : undefined;
-  if (!factory) throw new Error(`${name} extension factory is missing`);
-  return {
-    name,
-    factory: async (pi) => {
-      try {
-        await factory(pi);
-      } catch (error) {
-        throw error instanceof Error ? error : new Error(`${name}: ${String(error)}`);
-      }
-    },
+function asFn(mod: unknown, name: string): (pi: ExtensionAPI) => void | Promise<void> {
+  if (typeof mod === "function") return mod as (pi: ExtensionAPI) => void | Promise<void>;
+  const fallback = (mod as { default?: unknown } | undefined)?.default;
+  if (typeof fallback === "function") return fallback as (pi: ExtensionAPI) => void | Promise<void>;
+  throw new Error(`${name} extension factory is missing`);
+}
+
+function wrapFactory(name: string, factory: (pi: ExtensionAPI) => void | Promise<void>): InlineExtension {
+  return async (pi) => {
+    try {
+      await factory(pi);
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(`${name}: ${String(error)}`);
+    }
   };
 }
 
 /** Builtin Pi extensions are loaded as code, never through Pi's path/data-URL loader. */
-const bundledSubagentsExtension = {
-  name: "larkin-pi-subagents",
-  factory: async (pi: ExtensionAPI) => {
-    const extension = await loadBundledPiSubagentExtension();
-    if (typeof extension === "function") await extension(pi);
-    else await extension.factory(pi);
-  },
+const bundledSubagentsExtension: InlineExtension = async (pi) => {
+  const extension = await loadBundledPiSubagentExtension();
+  if (typeof extension === "function") await extension(pi);
+  else await extension.factory(pi);
 };
 
 // Watchdog must register session_shutdown before the bundled subagent extension
 // so the final sweep can still read AgentManager.getRecord and bridge consumed
 // terminals before manager teardown.
 export const BUILTIN_PI_EXTENSION_FACTORIES: readonly InlineExtension[] = Object.freeze([
-  asFactory(piSubagentRecordWatchdog, "larkin-pi-subagent-watchdog"),
-  bundledSubagentsExtension,
-  asFactory(bashTimeoutExtension, "larkin-pi-bash-timeout"),
+  wrapFactory("larkin-pi-subagent-watchdog", asFn(piSubagentRecordWatchdog, "larkin-pi-subagent-watchdog")),
+  wrapFactory("larkin-pi-subagents", bundledSubagentsExtension),
+  wrapFactory("larkin-pi-bash-timeout", asFn(bashTimeoutExtension, "larkin-pi-bash-timeout")),
 ]);
 
 type PiMain = (args: string[], options?: MainOptions) => Promise<void>;

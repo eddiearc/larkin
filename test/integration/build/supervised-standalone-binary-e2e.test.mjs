@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
+import { PiRpcClient } from "../../../dist/runtime/pi-rpc-client.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const ENABLED = process.env.LARKIN_RUN_SUPERVISED_STANDALONE_BINARY === "1";
@@ -37,6 +38,26 @@ test.skipIf(!ENABLED)("compiled standalone binary embeds supervised tools and st
     assert.ok(bytes.includes(Buffer.from("supervised_cancel")), "compiled binary must embed supervised_cancel");
     const help = spawnSync(artifact, ["--help"], { encoding: "utf8", timeout: 30_000 });
     assert.equal(help.error, undefined, String(help.error));
+    const rpcHome = fs.mkdtempSync(path.join(ROOT, ".tmp-sa-rpc-"));
+    const child = spawn(artifact, ["__internal", "pi-rpc", "--mode", "rpc", "--no-session"], {
+      cwd: rpcHome,
+      env: {
+        ...process.env,
+        LARKIN_CONFIG_DIR: rpcHome,
+        LARKIN_HOME: rpcHome,
+        HOME: rpcHome,
+        PI_TELEMETRY: "0",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const client = new PiRpcClient(child, { requestTimeoutMs: 20_000 });
+    try {
+      const state = await client.request("get_state");
+      assert.match(JSON.stringify(state), /"Agent"/);
+    } finally {
+      await client.close();
+      fs.rmSync(rpcHome, { recursive: true, force: true });
+    }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

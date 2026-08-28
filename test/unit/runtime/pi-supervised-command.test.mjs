@@ -147,6 +147,26 @@ test("cancel reaps non-detached descendants before returning", async () => {
   assert.equal(childAlive, false);
 });
 
+test("cancel reaps the windows process tree", async () => {
+  if (process.platform !== "win32") return;
+  const owner = {};
+  const started = startSupervisedCommand({
+    owner,
+    executable: process.execPath,
+    args: ["-e", "const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'ignore',windowsHide:true}); process.stdout.write(String(child.pid)); setTimeout(()=>{},30000);"],
+    cwd: process.cwd(),
+  });
+  const first = await waitSupervisedCommand(owner, started.handle, 1);
+  const childPid = Number.parseInt(first.stdout, 10);
+  assert.ok(childPid > 0);
+  await cancelSupervisedCommand(owner, started.handle);
+  for (const pid of [started.pid, childPid]) {
+    const listed = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true });
+    const text = String(listed.stdout || "");
+    assert.equal(/\"\d+\"/.test(text) && text.includes(String(pid)), false, text);
+  }
+});
+
 test("cancel empties the unix process group", async () => {
   if (process.platform === "win32") return;
   const owner = {};

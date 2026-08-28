@@ -215,7 +215,12 @@ const cp=require("node:child_process"); const fs=require("node:fs"),path=require
 globalThis.fetch=async()=>{throw new Error("blocked test fetch")};
 cp.spawnSync=function(command,args,options={}){
   fs.appendFileSync(process.env.CALL_MARKER,JSON.stringify({command,args,larkConfigDir:options.env?.LARKSUITE_CLI_CONFIG_DIR,hasHermesHome:Object.hasOwn(options.env||{},"HERMES_HOME"),hasOpenClawHome:Object.hasOwn(options.env||{},"OPENCLAW_HOME"),hasLarkChannel:Object.keys(options.env||{}).some(key=>key==="LARK_CHANNEL"||key.startsWith("LARK_CHANNEL_")),secretViaStdin:options.input==="canary-secret"})+"\\n");
-  if(command==="lark-cli" && args.some((a)=>String(a).includes("application/v6/scopes"))) return {status:0,stdout:${JSON.stringify(GRANTED_SCOPES_STDOUT)},stderr:""};
+  if(command==="lark-cli" && args.some((a)=>String(a).includes("application/v6/scopes"))) {
+    if(${JSON.stringify(mode)}==="scope-denied") return {status:0,stdout:JSON.stringify({data:{scopes:[{scope_name:"im:message.group_msg",grant_status:0}]}}),stderr:""};
+    if(${JSON.stringify(mode)}==="scope-network") return {status:1,stdout:"",stderr:"fetch failed"};
+    if(${JSON.stringify(mode)}==="scope-malformed") return {status:0,stdout:"{",stderr:""};
+    return {status:0,stdout:${JSON.stringify(GRANTED_SCOPES_STDOUT)},stderr:""};
+  }
   if(command==="lark-cli" && args.includes("+chat-list")) { verifyCalls++; if((${JSON.stringify(mode)}==="sync-transient"&&verifyCalls<3)||${JSON.stringify(mode)}==="sync-transient-exhaust")return {status:3,stdout:"",stderr:JSON.stringify({ok:false,error:{subtype:"invalid_client",code:20048,message:"canary-secret must never be printed"}})};if(${JSON.stringify(mode)}==="sync-network"&&verifyCalls<2)return {status:1,stdout:"",stderr:"TypeError: fetch failed; cause: EAI_AGAIN canary-secret"};if(${JSON.stringify(mode)}==="sync-agent-context")return {status:1,stdout:"",stderr:JSON.stringify({ok:false,error:{subtype:"not_configured",message:"workspace is not configured canary-secret"}})};return {status:0,stdout:${JSON.stringify(mode === "verify-fail" ? JSON.stringify({ ok: false, identity: "bot" }) : JSON.stringify({ ok: true, identity: "bot", data: { chats: [] } }))},stderr:""}; }
   if(command===process.execPath){ fs.writeFileSync(process.env.BIND_MARKER,"bound"); if(${JSON.stringify(mode)}!=="bind-fail"){const root=process.env.LARKIN_CONFIG_DIR;fs.writeFileSync(path.join(root,"config.json"),JSON.stringify({version:4,serverId:"strict-register",activeAgent:${JSON.stringify(returnedId)},mentionPolicy:"require",agents:{[${JSON.stringify(returnedId)}]:{runtime:"codex",model:"gpt"}}}),{mode:0o600});} return {status:${mode === "bind-fail" ? 1 : 0},stdout:"",stderr:"bind failed"}; }
   return {status:0,stdout:"",stderr:""};
@@ -291,6 +296,48 @@ for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["s
       assert.equal(fs.existsSync(bindMarker), true);
       assert.doesNotMatch(result.stderr + result.stdout, /canary-secret/);
       if (mode === "sync-agent-context") assert.match(result.stderr, /lark-channel binding\/凭证校验失败/i);
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  });
+}
+
+for (const [mode, needle] of [
+  ["scope-denied", /缺 im:message\.group_msg/],
+  ["scope-network", /scopes API 失败/],
+  ["scope-malformed", /缺 im:message\.group_msg/],
+]) {
+  test(`bot-register fail-closes ${mode} and keeps the actionable scope diagnostic`, { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-register-${mode}-`));
+    try {
+      const root = path.join(temp, "root");
+      const callMarker = path.join(temp, "calls.ndjson");
+      const bindMarker = path.join(temp, "bound");
+      const resultFile = path.join(root, ".setup-result-123.json");
+      fs.mkdirSync(root, { recursive: true });
+      const { preload, loader } = registerPreload(temp, mode);
+      const result = spawnSync(process.execPath, ["--preload", loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
+        env: {
+          ...process.env,
+          HOME: path.join(temp, "home"),
+          LARKIN_CONFIG_DIR: root,
+          CALL_MARKER: callMarker,
+          BIND_MARKER: bindMarker,
+          FAST_RETRY_TIMER: "1",
+          LARKIN_TEST_BOT_REGISTER_MODULE: preload,
+          BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${preload}`].filter(Boolean).join(" "),
+        },
+      });
+      const text = `${result.stderr || ""}\n${result.stdout || ""}`;
+      assert.notEqual(result.status, 0, text);
+      assert.match(text, needle);
+      assert.match(text, /开发者后台/);
+      assert.match(text, /不要重建 Agent/);
+      assert.doesNotMatch(text, /身份授权\/评论订阅核验失败/);
+      assert.equal(fs.existsSync(resultFile), false);
+      assert.equal(fs.existsSync(bindMarker), true);
+      assert.equal(fs.existsSync(path.join(root, "bots", `${APP}.json`)), true);
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });
 }

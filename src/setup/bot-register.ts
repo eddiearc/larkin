@@ -857,8 +857,11 @@ try {
   try { scopePayload = JSON.parse(scopeResult.stdout || ""); } catch { scopePayload = null; }
   const missing = missingGrantedTenantScopes(scopePayload);
   if (scopeResult.status !== 0 || missing.length > 0) {
+    const reason = scopeResult.status !== 0
+      ? `scopes API 失败 status=${scopeResult.status}`
+      : `缺 ${missing.join(", ")}`;
     throw new Error(
-      `Bot tenant scope 未就绪，缺 ${missing.join(", ") || "im:message.group_msg"}；+chat-list 成功不能当作可发群消息。请在开发者后台开通后重跑 setup，不要重建 Agent。`,
+      `Bot tenant scope 未就绪，${reason}；+chat-list 成功不能当作可发群消息。请在开发者后台开通后重跑 setup，不要重建 Agent。`,
     );
   }
   if (commentSubscription !== "preserve") {
@@ -908,6 +911,7 @@ try {
   }
 } catch (error) {
   const diagnostic = errorMessage(error);
+  if (diagnostic.startsWith("Bot tenant scope 未就绪")) die(diagnostic);
   if (diagnostic.startsWith("document comment application subscription")
       || diagnostic.startsWith("document comment local verified-state persistence")) say(`! ${diagnostic}`);
   die("Agent lark-channel binding/凭证校验失败或评论订阅核验失败；安全本地状态与权威 bot 凭证已保留，请检查身份授权后重跑 larkin setup");

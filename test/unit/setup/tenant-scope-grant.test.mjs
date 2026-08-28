@@ -13,4 +13,10 @@ test("missingGrantedTenantScopes requires grant_status 1 for group_msg", () => {
       { scope_name: "im:message.group_msg", grant_status: 1 },
     ] },
   }), []);
+  assert.deepEqual(missingGrantedTenantScopes(null), ["im:message.group_msg"]);
+  assert.deepEqual(missingGrantedTenantScopes("{not-json"), ["im:message.group_msg"]);
+  assert.deepEqual(missingGrantedTenantScopes({ data: {} }), ["im:message.group_msg"]);
+  assert.deepEqual(missingGrantedTenantScopes({
+    data: { scopes: [{ grant_status: 1 }] },
+  }), ["im:message.group_msg"]);
 });

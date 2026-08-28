@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 import { PiRpcClient } from "../../../dist/runtime/pi-rpc-client.mjs";
+import { stageBuiltinPiProvider } from "../../../dist/runtime/pi-provider-config.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const ENABLED = process.env.LARKIN_RUN_SUPERVISED_STANDALONE_BINARY === "1";
@@ -14,7 +16,19 @@ function checked(result, label) {
   return result;
 }
 
-test.skipIf(!ENABLED)("compiled standalone binary embeds supervised tools and starts", {
+function sse(payloads) {
+  return payloads.map((payload) => `data: ${JSON.stringify(payload)}\n\n`).join("") + "data: [DONE]\n\n";
+}
+
+function toolCall(name, args) {
+  return sse([
+    { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: `call_${name}`, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }] },
+    { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify(args) } }] }, finish_reason: null }] },
+    { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+}
+
+test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel", {
   timeout: 240_000,
 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-sa-bin-"));
@@ -32,30 +46,93 @@ test.skipIf(!ENABLED)("compiled standalone binary embeds supervised tools and st
     const manifest = JSON.parse(fs.readFileSync(path.join(release, "release-manifest.json"), "utf8"));
     const artifact = path.join(release, manifest.artifacts[0].file);
     assert.equal(fs.existsSync(artifact), true, "standalone artifact missing");
-    const bytes = fs.readFileSync(artifact);
-    assert.ok(bytes.includes(Buffer.from("supervised_start")), "compiled binary must embed supervised_start");
-    assert.ok(bytes.includes(Buffer.from("supervised_wait")), "compiled binary must embed supervised_wait");
-    assert.ok(bytes.includes(Buffer.from("supervised_cancel")), "compiled binary must embed supervised_cancel");
-    const help = spawnSync(artifact, ["--help"], { encoding: "utf8", timeout: 30_000 });
-    assert.equal(help.error, undefined, String(help.error));
+
     const rpcHome = fs.mkdtempSync(path.join(ROOT, ".tmp-sa-rpc-"));
-    const child = spawn(artifact, ["__internal", "pi-rpc", "--mode", "rpc", "--no-session"], {
+    const agentId = "cli_saSupervisedA1";
+    let parentAgent = false;
+    const server = http.createServer((request, response) => {
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        const body = Buffer.concat(chunks).toString();
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        const child = body.includes("sub_agent_context") || body.includes("supervised_start");
+        if (!child && !parentAgent) {
+          parentAgent = true;
+          response.end(toolCall("Agent", {
+            prompt: "run supervised command",
+            description: "sa-bin",
+            subagent_type: "general-purpose",
+            run_in_background: true,
+          }));
+          return;
+        }
+        if (child && /"status"\s*:\s*"running"/.test(body)) {
+          const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+          response.end(toolCall("supervised_cancel", { handle }));
+          return;
+        }
+        if (child && /"handle"\s*:\s*"[0-9a-f]+"/i.test(body)) {
+          const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+          response.end(toolCall("supervised_wait", { handle, timeout: 1 }));
+          return;
+        }
+        if (child) {
+          response.end(toolCall("supervised_start", {
+            executable: process.execPath,
+            args: ["-e", "setTimeout(() => {}, 8000)"],
+          }));
+          return;
+        }
+        response.end(sse([
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: { role: "assistant", content: "done" }, finish_reason: null }] },
+          { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+        ]));
+      });
+    });
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+    const port = server.address().port;
+    const transaction = stageBuiltinPiProvider(rpcHome, agentId, {
+      distribution: "builtin", preset: "custom", baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "fixture-key", model: "fixture-model",
+    });
+    transaction.commit();
+    const child = spawn(artifact, ["__internal", "pi-rpc", "--mode", "rpc", "--no-session", "--model", "larkin-custom/fixture-model"], {
       cwd: rpcHome,
       env: {
         ...process.env,
         LARKIN_CONFIG_DIR: rpcHome,
         LARKIN_HOME: rpcHome,
         HOME: rpcHome,
+        PI_CODING_AGENT_DIR: path.join(rpcHome, "providers", "pi", agentId),
         PI_TELEMETRY: "0",
+        LARKIN_PI_SUPERVISED_WAIT_SECONDS: "1",
+        LARKIN_PI_SUPERVISED_LIFE_SECONDS: "8",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const client = new PiRpcClient(child, { requestTimeoutMs: 20_000 });
+    const client = new PiRpcClient(child, { requestTimeoutMs: 30_000 });
+    const tools = [];
+    client.subscribe((event) => {
+      if (event?.type === "tool_execution_start" || event?.type === "tool_execution_end") {
+        tools.push(`${event.type}:${event.toolName || event.name || JSON.stringify(event)}`);
+      }
+    });
     try {
-      const state = await client.request("get_state");
-      assert.match(JSON.stringify(state), /"Agent"/);
+      await client.request("prompt", { message: "Spawn a background agent that starts, waits, and cancels a supervised process." });
+      const deadline = Date.now() + 45_000;
+      while (Date.now() < deadline) {
+        const joined = tools.join("\n");
+        if (/supervised_start/.test(joined) && /supervised_wait/.test(joined) && /supervised_cancel/.test(joined)) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const joined = tools.join("\n");
+      assert.match(joined, /supervised_start/);
+      assert.match(joined, /supervised_wait/);
+      assert.match(joined, /supervised_cancel/);
     } finally {
       await client.close();
+      await new Promise((resolve) => server.close(resolve));
       fs.rmSync(rpcHome, { recursive: true, force: true });
     }
   } finally {

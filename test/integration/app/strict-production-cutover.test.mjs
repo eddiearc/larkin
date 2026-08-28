@@ -335,6 +335,10 @@ for (const [mode, needle] of [
       assert.match(text, /开发者后台/);
       assert.match(text, /不要重建 Agent/);
       assert.doesNotMatch(text, /身份授权\/评论订阅核验失败/);
+      assert.doesNotMatch(text, /canary-secret/);
+      assert.doesNotMatch(text, /grant_status/);
+      assert.doesNotMatch(text, /fetch failed/);
+      assert.doesNotMatch(text, /"scopes"/);
       assert.equal(fs.existsSync(resultFile), false);
       assert.equal(fs.existsSync(bindMarker), true);
       assert.equal(fs.existsSync(path.join(root, "bots", `${APP}.json`)), true);
@@ -348,6 +352,9 @@ test("scope failure keeps canonical config and retry succeeds after grant", { ti
     const root = path.join(temp, "root");
     const resultFile = path.join(root, ".setup-result-123.json");
     fs.mkdirSync(root, { recursive: true });
+    const configFile = path.join(root, "config.json");
+    const priorConfig = Buffer.from(`${JSON.stringify(storedConfig())}\n`);
+    fs.writeFileSync(configFile, priorConfig, { mode: 0o600 });
     const denied = registerPreload(temp, "scope-denied");
     const first = spawnSync(process.execPath, ["--preload", denied.loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
       cwd: ROOT,
@@ -365,12 +372,18 @@ test("scope failure keeps canonical config and retry succeeds after grant", { ti
       },
     });
     assert.notEqual(first.status, 0, first.stderr || first.stdout);
+    const firstText = `${first.stderr || ""}\n${first.stdout || ""}`;
+    assert.doesNotMatch(firstText, /canary-secret/);
+    assert.doesNotMatch(firstText, /grant_status/);
+    assert.doesNotMatch(firstText, /"scopes"/);
     assert.equal(fs.existsSync(resultFile), false);
-    const configAfterFail = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-    assert.equal(configAfterFail.activeAgent, APP);
-    assert.equal(configAfterFail.agents[APP].runtime, "codex");
-    assert.equal(configAfterFail.agents[APP].model, "gpt");
-    assert.equal(configAfterFail.mentionPolicy, "require");
+    const expectedFailedConfig = Buffer.from(JSON.stringify({
+      version: 4, serverId: "strict-register", activeAgent: APP, mentionPolicy: "require",
+      agents: { [APP]: { runtime: "codex", model: "gpt" } },
+    }));
+    const configAfterFail = fs.readFileSync(configFile);
+    assert.notEqual(Buffer.compare(configAfterFail, priorConfig), 0);
+    assert.equal(Buffer.compare(configAfterFail, expectedFailedConfig), 0);
     const credential = JSON.parse(fs.readFileSync(path.join(root, "bots", `${APP}.json`), "utf8"));
     assert.equal(credential.appId, APP);
     assert.equal(credential.appSecret, "canary-secret");
@@ -394,9 +407,7 @@ test("scope failure keeps canonical config and retry succeeds after grant", { ti
     });
     assert.equal(second.status, 0, second.stderr || second.stdout);
     assert.equal(fs.existsSync(resultFile), true);
-    const configAfterRetry = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-    assert.equal(configAfterRetry.activeAgent, APP);
-    assert.equal(configAfterRetry.agents[APP].runtime, "codex");
+    assert.equal(Buffer.compare(fs.readFileSync(configFile), expectedFailedConfig), 0);
     const runSource = fs.readFileSync(path.join(ROOT, "src/app/run.ts"), "utf8");
     const runtimeSource = fs.readFileSync(path.join(ROOT, "src/app/runtime-process.ts"), "utf8");
     const attachSource = fs.readFileSync(path.join(ROOT, "src/app/runtime-agent-config.ts"), "utf8");

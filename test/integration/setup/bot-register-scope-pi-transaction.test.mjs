@@ -140,6 +140,9 @@ test("injected agent-choice enters Pi transaction and rolls back on scope failur
     const text = `${result.stderr || ""}\n${result.stdout || ""}`;
     assert.notEqual(result.status, 0, text);
     assert.match(text, /缺 im:message\.group_msg/);
+    assert.doesNotMatch(text, /canary-secret/);
+    assert.doesNotMatch(text, /grant_status/);
+    assert.doesNotMatch(text, /"scopes"/);
     assert.equal(fs.existsSync(resultFile), false);
     assert.deepEqual(fs.readFileSync(path.join(root, "providers", "pi", APP, "auth.json")), authBefore);
     assert.deepEqual(fs.readFileSync(path.join(root, "providers", "pi", APP, "models.json")), modelsBefore);

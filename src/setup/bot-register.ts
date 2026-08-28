@@ -44,6 +44,7 @@ import {
   type LarkinTenant,
 } from "../feishu/platform-hosts.js";
 import { authorizationUrlFailureMessage, presentAuthorizationUrl } from "./setup-authorization-url.js";
+import { missingGrantedTenantScopes } from "./tenant-scope-grant.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -847,6 +848,19 @@ try {
     await wait(delay);
   }
   if (!verified) throw new Error("Bot identity verification failed");
+  const scopeResult = await runIdentityProcess(
+    official.command,
+    [...official.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes"],
+    cliEnv,
+  );
+  let scopePayload: unknown;
+  try { scopePayload = JSON.parse(scopeResult.stdout || ""); } catch { scopePayload = null; }
+  const missing = missingGrantedTenantScopes(scopePayload);
+  if (scopeResult.status !== 0 || missing.length > 0) {
+    throw new Error(
+      `Bot tenant scope 未就绪，缺 ${missing.join(", ") || "im:message.group_msg"}；+chat-list 成功不能当作可发群消息。请在开发者后台开通后重跑 setup，不要重建 Agent。`,
+    );
+  }
   if (commentSubscription !== "preserve") {
     const reconciled = await applyDocumentCommentSubscription({
       mode: commentSubscription as "none" | DocumentCommentSubscriptionDimension,

@@ -56,10 +56,12 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
       const chunks = [];
       request.on("data", (chunk) => chunks.push(chunk));
       request.on("end", () => {
-        const body = Buffer.concat(chunks).toString();
+        const raw = Buffer.concat(chunks).toString();
+        const body = raw.replaceAll("\\", "");
         bodies.push(body.slice(0, 2_000));
         response.writeHead(200, { "content-type": "text/event-stream" });
         const child = /"name"\s*:\s*"supervised_start"/.test(body);
+        const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
         if (!child && !parentAgent) {
           parentAgent = true;
           served.push("Agent");
@@ -71,19 +73,17 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
           }));
           return;
         }
-        if (child && /"status"\s*:\s*"running"/.test(body)) {
-          const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+        if (child && handle && /"status"\s*:\s*"running"/.test(body)) {
           served.push("supervised_cancel");
           response.end(toolCall("supervised_cancel", { handle }));
           return;
         }
-        if (child && /"handle"\s*:\s*"[0-9a-f]+"/i.test(body)) {
-          const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+        if (child && handle && served.includes("supervised_start")) {
           served.push("supervised_wait");
           response.end(toolCall("supervised_wait", { handle, timeout: 1 }));
           return;
         }
-        if (child) {
+        if (child && !served.includes("supervised_start")) {
           served.push("supervised_start");
           response.end(toolCall("supervised_start", {
             executable: process.execPath,

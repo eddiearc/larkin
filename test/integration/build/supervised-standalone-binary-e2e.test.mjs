@@ -49,16 +49,20 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
 
     const rpcHome = fs.mkdtempSync(path.join(ROOT, ".tmp-sa-rpc-"));
     const agentId = "cli_saSupervisedA1";
+    const served = [];
+    const bodies = [];
     let parentAgent = false;
     const server = http.createServer((request, response) => {
       const chunks = [];
       request.on("data", (chunk) => chunks.push(chunk));
       request.on("end", () => {
         const body = Buffer.concat(chunks).toString();
+        bodies.push(body.slice(0, 2_000));
         response.writeHead(200, { "content-type": "text/event-stream" });
-        const child = body.includes("sub_agent_context") || body.includes("supervised_start");
+        const child = /"name"\s*:\s*"supervised_start"/.test(body);
         if (!child && !parentAgent) {
           parentAgent = true;
+          served.push("Agent");
           response.end(toolCall("Agent", {
             prompt: "run supervised command",
             description: "sa-bin",
@@ -69,21 +73,25 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
         }
         if (child && /"status"\s*:\s*"running"/.test(body)) {
           const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+          served.push("supervised_cancel");
           response.end(toolCall("supervised_cancel", { handle }));
           return;
         }
         if (child && /"handle"\s*:\s*"[0-9a-f]+"/i.test(body)) {
           const handle = body.match(/"handle"\s*:\s*"([0-9a-f]+)"/i)?.[1];
+          served.push("supervised_wait");
           response.end(toolCall("supervised_wait", { handle, timeout: 1 }));
           return;
         }
         if (child) {
+          served.push("supervised_start");
           response.end(toolCall("supervised_start", {
             executable: process.execPath,
             args: ["-e", "setTimeout(() => {}, 8000)"],
           }));
           return;
         }
+        served.push("stop");
         response.end(sse([
           { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: { role: "assistant", content: "done" }, finish_reason: null }] },
           { id: "f", object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
@@ -122,14 +130,13 @@ test.skipIf(!ENABLED)("compiled standalone binary public Agent start/wait/cancel
       await client.request("prompt", { message: "Spawn a background agent that starts, waits, and cancels a supervised process." });
       const deadline = Date.now() + 45_000;
       while (Date.now() < deadline) {
-        const joined = tools.join("\n");
-        if (/supervised_start/.test(joined) && /supervised_wait/.test(joined) && /supervised_cancel/.test(joined)) break;
+        if (served.includes("supervised_start") && served.includes("supervised_wait") && served.includes("supervised_cancel")) break;
         await new Promise((r) => setTimeout(r, 100));
       }
-      const joined = tools.join("\n");
-      assert.match(joined, /supervised_start/);
-      assert.match(joined, /supervised_wait/);
-      assert.match(joined, /supervised_cancel/);
+      assert.match(tools.join("\n"), /Agent/);
+      assert.ok(served.includes("supervised_start"), `missing start: ${served.join(",")} bodies=${bodies.length}`);
+      assert.ok(served.includes("supervised_wait"), `missing wait: ${served.join(",")}`);
+      assert.ok(served.includes("supervised_cancel"), `missing cancel: ${served.join(",")}`);
     } finally {
       await client.close();
       await new Promise((resolve) => server.close(resolve));

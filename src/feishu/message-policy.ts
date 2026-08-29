@@ -26,6 +26,8 @@ export interface FeishuInboundEvent {
   _mentioned_bot: boolean;
   _mention_all: boolean;
   _sender_is_bot: boolean;
+  /** True only when raw senderIsBot is boolean and chatType=group or topic mode. */
+  _scan_authority: boolean;
 }
 
 export interface WakePolicyInput {
@@ -105,6 +107,8 @@ export function normalizeChannelMessage(message: ChannelMessage): FeishuInboundE
     _mentioned_bot: Boolean(message.mentionedBot || message.mentionAll),
     _mention_all: Boolean(message.mentionAll),
     _sender_is_bot: message.senderIsBot === true,
+    _scan_authority: typeof message.senderIsBot === "boolean"
+      && (message.chatType === "group" || message.chatMode === "topic"),
   };
 }
 

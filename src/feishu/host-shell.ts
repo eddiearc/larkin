@@ -19,6 +19,7 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
+import { persistInboundScanTarget } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -448,6 +449,13 @@ export function createHostShell({
         // An event becomes permanently transport-seen only after the canonical
         // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
+        if (!event._sender_is_bot && event._scan_authority) {
+          try {
+            persistInboundScanTarget(agent.stateDir, event, agent.agentId);
+          } catch (error) {
+            log(`inbound scan target 未持久化: ${(error as Error).message}`);
+          }
+        }
         if (append.status === "duplicate_consumed") return null;
         const inboxEnvelope = append.envelope;
         if (append.status === "appended") hostState.appendConversation(agent, {

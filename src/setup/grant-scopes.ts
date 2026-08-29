@@ -11,6 +11,7 @@ import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { loadValidatedBotCredential } from "./run-credential-preflight.js";
 import { parseLarkinTenant, registerAppAccountsHost, type LarkinTenant } from "../feishu/platform-hosts.js";
+import { presentAuthorizationUrl } from "./setup-authorization-url.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -132,14 +133,22 @@ export async function main(): Promise<void> {
     },
     onQRCodeReady: (info) => {
       const minutes = Math.max(1, Math.round(info.expireIn / 60));
+      const official = resolveManagedOfficialCli(selected, process.env);
+      const presented = presentAuthorizationUrl(info.url, {
+        tenant: TENANT,
+        larkCliVersion: official.command.version,
+      });
+      if (TENANT === "lark" && /\/page\/launcher(?:\?|$)/.test(presented)) {
+        throw new Error("Lark 租户拒绝把 /page/launcher 交给浏览器");
+      }
       log("\n请用飞书（Lark）扫码或打开链接，确认给应用增补权限：\n");
-      qrcode.generate(info.url, { small: true });
-      log(`\n链接: ${info.url}\n有效期约 ${minutes} 分钟（⚠️ 需本进程保持轮询，否则 user_code 立即失效）\n`);
+      qrcode.generate(presented, { small: true });
+      log(`\n链接: ${presented}\n有效期约 ${minutes} 分钟（⚠️ 需本进程保持轮询，否则 user_code 立即失效）\n`);
       if (URL_FILE) {
-        try { fs.writeFileSync(URL_FILE, info.url); }
+        try { fs.writeFileSync(URL_FILE, presented); }
         catch (error) { log(`[grant] 写 url-file 失败: ${error instanceof Error ? error.message : String(error)}`); }
       }
-      sendUrlToChat(info.url, minutes);
+      sendUrlToChat(presented, minutes);
     },
     onStatusChange: (info) => log(`[grant] 状态: ${info.status}`),
     domain: registerAppAccountsHost(TENANT),

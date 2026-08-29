@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const APP = "cli_strictA1";
+const GRANTED_SCOPES_STDOUT = JSON.stringify({ data: { scopes: [{ scope_name: "im:message.group_msg", grant_status: 1 }] } });
 const TRANSIENT_VERIFY_CHILD_TIMEOUT_MS = 10_000;
 const TRANSIENT_VERIFY_TEST_TIMEOUT_MS = 15_000;
 
@@ -33,7 +34,7 @@ function writeCredential(root, value, mode = 0o600) {
 
 function successfulRunPreload(temp) {
   const preload = path.join(temp, "successful-run.cjs");
-  fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),original=cp.spawnSync,originalLstat=fs.lstatSync,{EventEmitter}=require("node:events"); fs.lstatSync=function(file,...args){const stat=originalLstat.call(this,file,...args);if(process.env.FAKE_UID_PATH&&String(file)===process.env.FAKE_UID_PATH)return new Proxy(stat,{get(target,prop){if(prop==="uid")return target.uid+1;const value=Reflect.get(target,prop,target);return typeof value==="function"?value.bind(target):value}});return stat};cp.spawnSync=(command,args,options)=>{if(command!=="lark-cli")return original(command,args,options);if(args.includes("+chat-list"))return {status:0,stdout:JSON.stringify({ok:true,identity:"bot"}),stderr:""};return {status:0,stdout:"",stderr:""}};cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");const child=new EventEmitter();child.pid=process.pid+1000;child.kill=()=>true;queueMicrotask(()=>child.emit("exit",0));return child};require("node:module").syncBuiltinESMExports();`);
+  fs.writeFileSync(preload, `const cp=require("node:child_process"),fs=require("node:fs"),original=cp.spawnSync,originalLstat=fs.lstatSync,{EventEmitter}=require("node:events"); fs.lstatSync=function(file,...args){const stat=originalLstat.call(this,file,...args);if(process.env.FAKE_UID_PATH&&String(file)===process.env.FAKE_UID_PATH)return new Proxy(stat,{get(target,prop){if(prop==="uid")return target.uid+1;const value=Reflect.get(target,prop,target);return typeof value==="function"?value.bind(target):value}});return stat};cp.spawnSync=(command,args,options)=>{if(command!=="lark-cli")return original(command,args,options);if(args.includes("+chat-list"))return {status:0,stdout:JSON.stringify({ok:true,identity:"bot"}),stderr:""};if(args.some((a)=>String(a).includes("application/v6/scopes")))return {status:0,stdout:${JSON.stringify(GRANTED_SCOPES_STDOUT)},stderr:""};return {status:0,stdout:"",stderr:""}};cp.spawn=()=>{fs.writeFileSync(process.env.SPAWN_MARKER,"yes");const child=new EventEmitter();child.pid=process.pid+1000;child.kill=()=>true;queueMicrotask(()=>child.emit("exit",0));return child};require("node:module").syncBuiltinESMExports();`);
   return preload;
 }
 
@@ -62,6 +63,7 @@ test("bot credential verification pins lark-cli identity explicitly to bot", () 
   const register = fs.readFileSync(path.join(ROOT, "src/setup/bot-register.ts"), "utf8");
   const bind = fs.readFileSync(path.join(ROOT, "src/setup/setup-bind.ts"), "utf8");
   assert.match(register, /\[\.\.\.official\.argsPrefix, "im", "\+chat-list", "--as", "bot"\]/);
+  assert.match(register, /application\/v6\/scopes/);
   assert.match(register, /synchronizeAgentProfile\(agent/);
   assert.match(bind, /\["--profile", profile\.name, "im", "\+chat-list", "--as", "bot", "--json"\]/);
   assert.match(bind, /不要求名字等于 App ID/);
@@ -77,7 +79,7 @@ test("run fails closed for missing or malformed App-ID bot credentials before da
     fs.writeFileSync(preload, `
 const cp = require("node:child_process"); const {EventEmitter}=require("node:events"); const fs=require("node:fs");
 cp.spawn = function(){ fs.writeFileSync(process.env.SPAWN_MARKER,"spawned"); const c=new EventEmitter(); c.pid=424242; c.kill=()=>{}; process.nextTick(()=>c.emit("exit",0)); return c; };
-cp.spawnSync = function(command,args){ if(command==="lark-cli" && args.includes("+chat-list")) return {status:0,stdout:JSON.stringify({ok:true,identity:"bot"}),stderr:""}; return {status:0,stdout:"",stderr:""}; };
+cp.spawnSync = function(command,args){ if(command==="lark-cli" && args.includes("+chat-list")) return {status:0,stdout:JSON.stringify({ok:true,identity:"bot"}),stderr:""}; if(command==="lark-cli" && args.some((a)=>String(a).includes("application/v6/scopes"))) return {status:0,stdout:${JSON.stringify(GRANTED_SCOPES_STDOUT)},stderr:""}; return {status:0,stdout:"",stderr:""}; };
 require("node:module").syncBuiltinESMExports();
 module.exports={
   channelPackage:{createLarkChannel(){ return {on(){},dispatcher:{register(){}},connect(){return Promise.reject(new Error("unauthorized secret"));},disconnect(){return new Promise(()=>{});},rawClient:null,botIdentity:null}; }},
@@ -210,8 +212,15 @@ function registerPreload(temp, mode, returnedId = APP, returnedSecret = "canary-
   fs.writeFileSync(qrcodeMock, `export default {generate(){}};`);
   fs.writeFileSync(preload, `
 const cp=require("node:child_process"); const fs=require("node:fs"),path=require("node:path"); let verifyCalls=0;
+globalThis.fetch=async()=>{throw new Error("blocked test fetch")};
 cp.spawnSync=function(command,args,options={}){
   fs.appendFileSync(process.env.CALL_MARKER,JSON.stringify({command,args,larkConfigDir:options.env?.LARKSUITE_CLI_CONFIG_DIR,hasHermesHome:Object.hasOwn(options.env||{},"HERMES_HOME"),hasOpenClawHome:Object.hasOwn(options.env||{},"OPENCLAW_HOME"),hasLarkChannel:Object.keys(options.env||{}).some(key=>key==="LARK_CHANNEL"||key.startsWith("LARK_CHANNEL_")),secretViaStdin:options.input==="canary-secret"})+"\\n");
+  if(command==="lark-cli" && args.some((a)=>String(a).includes("application/v6/scopes"))) {
+    if(${JSON.stringify(mode)}==="scope-denied") return {status:0,stdout:JSON.stringify({data:{scopes:[{scope_name:"im:message.group_msg",grant_status:0}]}}),stderr:""};
+    if(${JSON.stringify(mode)}==="scope-network") return {status:1,stdout:"",stderr:"fetch failed"};
+    if(${JSON.stringify(mode)}==="scope-malformed") return {status:0,stdout:"{",stderr:""};
+    return {status:0,stdout:${JSON.stringify(GRANTED_SCOPES_STDOUT)},stderr:""};
+  }
   if(command==="lark-cli" && args.includes("+chat-list")) { verifyCalls++; if((${JSON.stringify(mode)}==="sync-transient"&&verifyCalls<3)||${JSON.stringify(mode)}==="sync-transient-exhaust")return {status:3,stdout:"",stderr:JSON.stringify({ok:false,error:{subtype:"invalid_client",code:20048,message:"canary-secret must never be printed"}})};if(${JSON.stringify(mode)}==="sync-network"&&verifyCalls<2)return {status:1,stdout:"",stderr:"TypeError: fetch failed; cause: EAI_AGAIN canary-secret"};if(${JSON.stringify(mode)}==="sync-agent-context")return {status:1,stdout:"",stderr:JSON.stringify({ok:false,error:{subtype:"not_configured",message:"workspace is not configured canary-secret"}})};return {status:0,stdout:${JSON.stringify(mode === "verify-fail" ? JSON.stringify({ ok: false, identity: "bot" }) : JSON.stringify({ ok: true, identity: "bot", data: { chats: [] } }))},stderr:""}; }
   if(command===process.execPath){ fs.writeFileSync(process.env.BIND_MARKER,"bound"); if(${JSON.stringify(mode)}!=="bind-fail"){const root=process.env.LARKIN_CONFIG_DIR;fs.writeFileSync(path.join(root,"config.json"),JSON.stringify({version:4,serverId:"strict-register",activeAgent:${JSON.stringify(returnedId)},mentionPolicy:"require",agents:{[${JSON.stringify(returnedId)}]:{runtime:"codex",model:"gpt"}}}),{mode:0o600});} return {status:${mode === "bind-fail" ? 1 : 0},stdout:"",stderr:"bind failed"}; }
   return {status:0,stdout:"",stderr:""};
@@ -291,7 +300,122 @@ for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["s
   });
 }
 
-test("bot-register bounds transient Bot verification retries and preserves authoritative binding state", { timeout: 10_000 }, () => {
+for (const [mode, needle] of [
+  ["scope-denied", /缺 im:message\.group_msg/],
+  ["scope-network", /scopes API 失败/],
+  ["scope-malformed", /缺 im:message\.group_msg/],
+]) {
+  test(`bot-register fail-closes ${mode} and keeps the actionable scope diagnostic`, { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-register-${mode}-`));
+    try {
+      const root = path.join(temp, "root");
+      const callMarker = path.join(temp, "calls.ndjson");
+      const bindMarker = path.join(temp, "bound");
+      const resultFile = path.join(root, ".setup-result-123.json");
+      fs.mkdirSync(root, { recursive: true });
+      const { preload, loader } = registerPreload(temp, mode);
+      const result = spawnSync(process.execPath, ["--preload", loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
+        env: {
+          ...process.env,
+          HOME: path.join(temp, "home"),
+          LARKIN_CONFIG_DIR: root,
+          CALL_MARKER: callMarker,
+          BIND_MARKER: bindMarker,
+          FAST_RETRY_TIMER: "1",
+          LARKIN_TEST_BOT_REGISTER_MODULE: preload,
+          BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${preload}`].filter(Boolean).join(" "),
+        },
+      });
+      const text = `${result.stderr || ""}\n${result.stdout || ""}`;
+      assert.notEqual(result.status, 0, text);
+      assert.match(text, needle);
+      assert.match(text, /开发者后台/);
+      assert.match(text, /不要重建 Agent/);
+      assert.doesNotMatch(text, /身份授权\/评论订阅核验失败/);
+      assert.doesNotMatch(text, /canary-secret/);
+      assert.doesNotMatch(text, /grant_status/);
+      assert.doesNotMatch(text, /fetch failed/);
+      assert.doesNotMatch(text, /"scopes"/);
+      assert.equal(fs.existsSync(resultFile), false);
+      assert.equal(fs.existsSync(bindMarker), true);
+      assert.equal(fs.existsSync(path.join(root, "bots", `${APP}.json`)), true);
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  });
+}
+
+test("scope failure keeps canonical config and retry succeeds after grant", { timeout: 25_000 }, () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-scope-retry-"));
+  try {
+    const root = path.join(temp, "root");
+    const resultFile = path.join(root, ".setup-result-123.json");
+    fs.mkdirSync(root, { recursive: true });
+    const configFile = path.join(root, "config.json");
+    const priorConfig = Buffer.from(`${JSON.stringify(storedConfig())}\n`);
+    fs.writeFileSync(configFile, priorConfig, { mode: 0o600 });
+    const denied = registerPreload(temp, "scope-denied");
+    const first = spawnSync(process.execPath, ["--preload", denied.loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
+      env: {
+        ...process.env,
+        HOME: path.join(temp, "home"),
+        LARKIN_CONFIG_DIR: root,
+        CALL_MARKER: path.join(temp, "calls-denied.ndjson"),
+        BIND_MARKER: path.join(temp, "bound-denied"),
+        FAST_RETRY_TIMER: "1",
+        LARKIN_TEST_BOT_REGISTER_MODULE: denied.preload,
+        BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${denied.preload}`].filter(Boolean).join(" "),
+      },
+    });
+    assert.notEqual(first.status, 0, first.stderr || first.stdout);
+    const firstText = `${first.stderr || ""}\n${first.stdout || ""}`;
+    assert.doesNotMatch(firstText, /canary-secret/);
+    assert.doesNotMatch(firstText, /grant_status/);
+    assert.doesNotMatch(firstText, /"scopes"/);
+    assert.equal(fs.existsSync(resultFile), false);
+    const expectedFailedConfig = Buffer.from(JSON.stringify({
+      version: 4, serverId: "strict-register", activeAgent: APP, mentionPolicy: "require",
+      agents: { [APP]: { runtime: "codex", model: "gpt" } },
+    }));
+    const configAfterFail = fs.readFileSync(configFile);
+    assert.notEqual(Buffer.compare(configAfterFail, priorConfig), 0);
+    assert.equal(Buffer.compare(configAfterFail, expectedFailedConfig), 0);
+    const credential = JSON.parse(fs.readFileSync(path.join(root, "bots", `${APP}.json`), "utf8"));
+    assert.equal(credential.appId, APP);
+    assert.equal(credential.appSecret, "canary-secret");
+    const workspace = path.join(root, "lark-cli-config");
+    assert.equal(fs.existsSync(`${workspace}.quarantine`), false);
+    const granted = registerPreload(temp, "ok");
+    const second = spawnSync(process.execPath, ["--preload", granted.loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
+      env: {
+        ...process.env,
+        HOME: path.join(temp, "home"),
+        LARKIN_CONFIG_DIR: root,
+        CALL_MARKER: path.join(temp, "calls-granted.ndjson"),
+        BIND_MARKER: path.join(temp, "bound-granted"),
+        FAST_RETRY_TIMER: "1",
+        LARKIN_TEST_BOT_REGISTER_MODULE: granted.preload,
+        BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${granted.preload}`].filter(Boolean).join(" "),
+      },
+    });
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.equal(fs.existsSync(resultFile), true);
+    assert.equal(Buffer.compare(fs.readFileSync(configFile), expectedFailedConfig), 0);
+    const runSource = fs.readFileSync(path.join(ROOT, "src/app/run.ts"), "utf8");
+    const runtimeSource = fs.readFileSync(path.join(ROOT, "src/app/runtime-process.ts"), "utf8");
+    const attachSource = fs.readFileSync(path.join(ROOT, "src/app/runtime-agent-config.ts"), "utf8");
+    assert.doesNotMatch(attachSource + runSource + runtimeSource, /\.lark-cli-config\.quarantine-/);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("bot-register bounds transient Bot verification retries and preserves authoritative binding state", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-transient-exhaust-"));
   try {
     const root = path.join(temp, "root");
@@ -306,7 +430,7 @@ test("bot-register bounds transient Bot verification retries and preserves autho
     const result = spawnSync(process.execPath, ["--preload", loader, path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
       cwd: ROOT,
       encoding: "utf8",
-      timeout: 5_000,
+      timeout: TRANSIENT_VERIFY_CHILD_TIMEOUT_MS,
       env: {
         ...process.env,
         HOME: path.join(temp, "home"),
@@ -335,7 +459,7 @@ test("bot-register bounds transient Bot verification retries and preserves autho
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("bot-register rejects an unsafe returned App ID before any local or lark-cli write", () => {
+test("bot-register rejects an unsafe returned App ID before any local or lark-cli write", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-app-id-"));
   try {
     const root = path.join(temp, "root");
@@ -353,7 +477,7 @@ test("bot-register rejects an unsafe returned App ID before any local or lark-cl
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("bot-register rejects a non-string returned secret before lark-cli or local writes", () => {
+test("bot-register rejects a non-string returned secret before lark-cli or local writes", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-secret-type-"));
   try {
     const root = path.join(temp, "root");
@@ -370,7 +494,7 @@ test("bot-register rejects a non-string returned secret before lark-cli or local
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("bot-register rejects the removed explicit App ID option before registration or local writes", () => {
+test("bot-register rejects the removed explicit App ID option before registration or local writes", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-target-"));
   try {
     const root = path.join(temp, "root");
@@ -390,7 +514,7 @@ test("bot-register rejects the removed explicit App ID option before registratio
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("bot-register rejects result-file paths outside the config root before registration", () => {
+test("bot-register rejects result-file paths outside the config root before registration", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-result-path-"));
   try {
     const root = path.join(temp, "root");
@@ -462,7 +586,7 @@ for (const existing of [false, true]) {
   });
 }
 
-test("bot-register result publication failure preserves successful binding and authoritative credential", () => {
+test("bot-register result publication failure preserves successful binding and authoritative credential", { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-strict-register-result-"));
   try {
     const root = path.join(temp, "root");
@@ -488,7 +612,7 @@ test("bot-register result publication failure preserves successful binding and a
 });
 
 for (const mode of ["sync-fail", "verify-fail"]) {
-  test(`bot-register ${mode} preserves the authoritative credential and Agent binding for recovery`, { timeout: 10_000 }, () => {
+  test(`bot-register ${mode} preserves the authoritative credential and Agent binding for recovery`, { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-register-${mode}-`));
     try {
       const root = path.join(temp, "root");

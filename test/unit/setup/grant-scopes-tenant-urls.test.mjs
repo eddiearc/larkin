@@ -9,7 +9,7 @@ import { test } from "bun:test";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const ENTRY = path.join(ROOT, "dist/setup/grant-scopes.mjs");
 
-function runGrant({ tenant = "feishu", extraArgs = [] } = {}) {
+function runGrant({ tenant = "feishu", extraArgs = [], extraEnv = {} } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-grant-tenant-"));
   const root = path.join(temp, "root");
   const app = "cli_grantTenantA1";
@@ -31,7 +31,7 @@ module.exports = {
       appId: opts.appId,
       domain: opts.domain,
     }));
-    opts.onQRCodeReady({ url: "https://" + opts.domain + "/oauth/grant", expireIn: 60 });
+    opts.onQRCodeReady({ url: process.env.GRANT_READY_URL || ("https://" + opts.domain + "/oauth/grant"), expireIn: 60 });
     return { client_id: opts.appId };
   },
   qrcode: { generate() {} },
@@ -51,6 +51,7 @@ module.exports = {
       LARKIN_TEST_GRANT_SCOPES_MODULE: fixture,
       REGISTER_MARKER: marker,
       LARKIN_AGENT_ID: undefined,
+      ...extraEnv,
     },
   });
   return { temp, marker, result };
@@ -76,6 +77,28 @@ test("explicit --tenant lark uses the official Lark accounts host", () => {
     assert.equal(opts.domain, "accounts.larksuite.com");
     assert.doesNotMatch(JSON.stringify(opts), /feishu\.cn/);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("--tenant lark rewrites launcher to /page/cli and keeps addons", () => {
+  const urlFile = path.join(os.tmpdir(), `larkin-grant-url-${process.pid}.txt`);
+  const { temp, result } = runGrant({
+    tenant: "lark",
+    extraArgs: ["--tenant", "lark", "--url-file", urlFile],
+    extraEnv: {
+      GRANT_READY_URL: "https://open.larksuite.com/page/launcher?user_code=YKDY-TZ7Q&from=sdk&addons=H4sI",
+    },
+  });
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    const presented = fs.readFileSync(urlFile, "utf8");
+    assert.match(presented, /^https:\/\/open\.larksuite\.com\/page\/cli\?/);
+    assert.match(presented, /user_code=YKDY-TZ7Q/);
+    assert.match(presented, /[?&]addons=H4sI/);
+    assert.doesNotMatch(presented, /\/page\/launcher/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+    try { fs.rmSync(urlFile, { force: true }); } catch { /* ignore */ }
+  }
 });
 
 test("Feishu credential / default still uses accounts.feishu.cn", () => {

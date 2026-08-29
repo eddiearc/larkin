@@ -15,7 +15,7 @@ function assertLarkinRegisterAddons(addons) {
   assert.equal(addons == null, false);
   assert.deepEqual(addons.events.items.tenant, EXPECTED_TENANT_EVENTS);
   assert.deepEqual(addons.callbacks.items, EXPECTED_CALLBACKS);
-  for (const scope of ["im:message", "im:message:send_as_bot", "drive:drive", "docs:document.comment:create", "docs:document.comment:read"]) {
+  for (const scope of ["im:message", "im:message:send_as_bot", "im:message.group_msg", "drive:drive", "docs:document.comment:create", "docs:document.comment:read"]) {
     assert.equal(addons.scopes.tenant.includes(scope), true, `missing tenant scope ${scope}`);
   }
 }

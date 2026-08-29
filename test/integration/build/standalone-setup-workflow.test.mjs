@@ -83,6 +83,8 @@ elif printf '%s\n' "$*" | grep -q '+chat-list'; then
       exit 1
     fi
     printf '%s\n' '{"ok":true,"identity":"bot","data":{"chats":[]}}'
+elif printf '%s\n' "$*" | grep -q 'application/v6/scopes'; then
+  printf '%s\n' '{"data":{"scopes":[{"scope_name":"im:message.group_msg","grant_status":1}]}}'
 else
   printf '%s\n' '{"ok":true}'
 fi

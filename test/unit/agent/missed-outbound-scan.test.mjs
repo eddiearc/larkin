@@ -9,8 +9,6 @@ import {
   parseScanDeliveryTarget,
   persistInboundScanTarget,
 } from "../../../src/agent/missed-outbound-scan.ts";
-import { planSingleRootBinding } from "../../../src/setup/setup-binding.ts";
-
 test("parseScanDeliveryTarget fail-closes without target, DM, or thread om_ anchor", () => {
   assert.throws(() => parseScanDeliveryTarget(""), /必须显式指定 delivery target/);
   assert.throws(() => parseScanDeliveryTarget("dm:ou_someone"), /禁止推断 DM/);
@@ -24,16 +22,19 @@ test("per-target reminders coexist and duplicate inbound is idempotent", () => {
   try {
     const chat = persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      chat_type: "group",
       thread_id: null,
       message_id: "om_chat1",
     }, "cli_a1", file);
     const again = persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      chat_type: "group",
       thread_id: null,
       message_id: "om_chat1",
     }, "cli_a1", file);
     const thread = persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      chat_type: "group",
       thread_id: "omt_19f44e32c00f1c85",
       message_id: "om_thread1",
     }, "cli_a1", file);
@@ -48,9 +49,15 @@ test("per-target reminders coexist and duplicate inbound is idempotent", () => {
     assert.equal(live.every((reminder) => Array.isArray(reminder.events)), true);
     assert.throws(() => persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      chat_type: "group",
       _sender_is_bot: true,
       message_id: "om_bot1",
     }, "cli_a1", file), /只接受 human inbound/);
+    assert.throws(() => persistInboundScanTarget(dir, {
+      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      chat_type: "p2p",
+      message_id: "om_dm1",
+    }, "cli_a1", file), /禁止 DM/);
     fs.writeFileSync(file, JSON.stringify({
       reminders: [{ ...live[0], status: "canceled", reminderId: "canceled1", deliveryTarget: "chat:oc_canceledaaaaaaaaaaaaaaaaaaaaaaa" }],
     }), { mode: 0o600 });
@@ -78,29 +85,3 @@ test("ensureDefaultMissedOutboundScanReminder fail-closes without target", () =>
   }
 });
 
-test("planSingleRootBinding preserves scan target across rebind", () => {
-  const next = planSingleRootBinding({
-    config: {
-      version: 4,
-      serverId: "srv",
-      mentionPolicy: "require",
-      activeAgent: "cli_keep1",
-      agents: {
-        cli_keep1: {
-          runtime: "pi",
-          model: "default",
-          createdAt: "2026-07-01T00:00:00.000Z",
-          defaultScanDeliveryTarget: "chat:oc_7961b9d7be893b46520a926b90cf46eb",
-          defaultScanDeliveryAnchor: "om_anchor1",
-        },
-      },
-    },
-    profile: { appId: "cli_keep1" },
-    requestedAgent: "cli_keep1",
-    runtime: "pi",
-    defaultModel: "default",
-    supportedReasoningEfforts: [],
-    now: "2026-07-15T00:00:00.000Z",
-  });
-  assert.equal(next.agents.cli_keep1.defaultScanDeliveryTarget, "chat:oc_7961b9d7be893b46520a926b90cf46eb");
-});

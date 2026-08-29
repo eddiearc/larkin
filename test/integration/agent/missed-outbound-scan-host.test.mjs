@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 import { createAgentStateStore } from "../../../dist/agent/agent-state-store.mjs";
-import { HostReminderOrchestrator } from "../../../dist/agent/host-reminder-orchestrator.mjs";
 import { DEFAULT_MISSED_OUTBOUND_TITLE, persistInboundScanTarget } from "../../../dist/agent/missed-outbound-scan.mjs";
 import { ContextPromptBuilder } from "../../../dist/agent/context-prompt.mjs";
 import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
@@ -68,8 +67,9 @@ test("HostShell human inbound registers per-target reminders and fire keeps exac
   });
   const host = makeHost();
   await host.ingest(AGENT, humanEvent({ _sender_is_bot: true, sender_id: "ou_other_bot", message_id: "om_bot1", event_id: "evt_bot" }), { wake: false });
+  await host.ingest(AGENT, humanEvent({ chat_type: "p2p", event_id: "evt_dm", message_id: "om_dm1" }), { wake: false });
   const reminderFile = path.join(stateDir, "reminders.json");
-  assert.equal(fs.existsSync(reminderFile), false, "bot inbound must not create reminders");
+  assert.equal(fs.existsSync(reminderFile), false, "bot/DM inbound must not create reminders");
 
   await host.ingest(AGENT, humanEvent({ event_id: "evt_chat", message_id: "om_human1" }), { wake: false });
   await host.ingest(AGENT, humanEvent({ event_id: "evt_chat2", message_id: "om_human1" }), { wake: false });
@@ -78,31 +78,28 @@ test("HostShell human inbound registers per-target reminders and fire keeps exac
   let reminders = JSON.parse(fs.readFileSync(reminderFile, "utf8")).reminders;
   assert.equal(reminders.filter((reminder) => reminder.status === "scheduled").length, 3);
 
+  const due = new Date(Date.now() - 1_000).toISOString();
+  fs.writeFileSync(reminderFile, JSON.stringify({
+    reminders: reminders.map((reminder) => ({ ...reminder, fireAt: due })),
+  }, null, 2));
   const restarted = makeHost();
-  reminders = JSON.parse(fs.readFileSync(reminderFile, "utf8")).reminders;
-  assert.equal(reminders.filter((reminder) => reminder.status === "scheduled").length, 3, "restart keeps per-target reminders");
-  assert.ok(restarted);
-
-  const chatReminder = reminders.find((reminder) => reminder.deliveryTarget === `chat:${CHAT}`);
-  const orchestrator = new HostReminderOrchestrator({
-    agents: [{ agentId: AGENT, name: AGENT, stateDir }],
-    stateStore: () => store,
-    envelopeProjector: {
-      createReminderEnvelope(_id, value) {
-        return { kind: "reminder", message_id: `rem_${value.reminderId}`, seq: 1, wake: true, target: "runtime:reminder",
-          deliveryTarget: value.deliveryTarget, deliveryAnchor: value.deliveryAnchor, title: value.title };
-      },
-      createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }; },
-    },
-    now: () => Date.parse(chatReminder.fireAt) + 1,
-    deliveryTarget: { deliver() {} },
-  });
-  orchestrator.handleFire({ agentId: AGENT, reminderId: chatReminder.reminderId });
-  const inbox = store.readNdjson("inbox");
-  const fired = inbox.find((row) => row.message_id === `rem_${chatReminder.reminderId}`);
-  assert.ok(fired, "fire must append a reminder envelope");
-  assert.equal(fired.deliveryTarget, `chat:${CHAT}`);
-  assert.equal(fired.deliveryAnchor, "om_human1");
-  assert.equal(fired.title, DEFAULT_MISSED_OUTBOUND_TITLE);
-  assert.throws(() => persistInboundScanTarget(stateDir, { chat_id: "", message_id: "om_x" }, AGENT), /必须显式指定 delivery target/);
+  try {
+    await restarted.start();
+    reminders = JSON.parse(fs.readFileSync(reminderFile, "utf8")).reminders;
+    assert.equal(reminders.filter((reminder) => reminder.title === DEFAULT_MISSED_OUTBOUND_TITLE).length, 3, "restart keeps per-target reminders");
+    const deadline = Date.now() + 2_000;
+    let fired;
+    while (Date.now() < deadline) {
+      fired = store.readNdjson("inbox").find((row) => String(row.message_id || "").startsWith("rem_") && row.deliveryTarget === `chat:${CHAT}`);
+      if (fired) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(fired, "production Host due fire must append a reminder envelope");
+    assert.equal(fired.deliveryTarget, `chat:${CHAT}`);
+    assert.equal(fired.deliveryAnchor, "om_human1");
+    assert.match(String(fired.content || fired.title || ""), /persisted deliveryTarget/);
+    assert.throws(() => persistInboundScanTarget(stateDir, { chat_id: "", chat_type: "group", message_id: "om_x" }, AGENT), /必须显式指定 delivery target/);
+  } finally {
+    await restarted.shutdown?.();
+  }
 });

@@ -75,21 +75,20 @@ export function ensureDefaultMissedOutboundScanReminder(input: {
   const now = input.nowMs ?? Date.now();
   const wantedAnchor = parsed.deliveryAnchor;
   return mutate(input.storeFile, (store) => {
-    const existing = store.reminders.find((reminder) => reminder.ownerAgentId === input.agentId
+    const sameIdentity = (reminder: ReminderRecord): boolean => reminder.ownerAgentId === input.agentId
       && reminder.title === DEFAULT_MISSED_OUTBOUND_TITLE
       && reminder.repeat === DEFAULT_MISSED_OUTBOUND_REPEAT
       && reminder.deliveryMode === "user"
-      && reminder.deliveryTarget === parsed.deliveryTarget) as ReminderRecord | undefined;
-    if (existing && existing.status === "canceled") {
-      return { created: false, reminderId: existing.reminderId, rebuilt: false };
+      && reminder.deliveryTarget === parsed.deliveryTarget;
+    const scheduled = store.reminders.find((reminder) => sameIdentity(reminder) && reminder.status === "scheduled");
+    if (scheduled) {
+      if ((scheduled.deliveryAnchor || null) !== wantedAnchor) scheduled.deliveryAnchor = wantedAnchor;
+      return { created: false, reminderId: scheduled.reminderId, rebuilt: false };
     }
-    if (existing && existing.status === "scheduled") {
-      const sameAnchor = (existing.deliveryAnchor || null) === wantedAnchor;
-      if (sameAnchor) return { created: false, reminderId: existing.reminderId, rebuilt: false };
-      existing.deliveryAnchor = wantedAnchor;
-      return { created: false, reminderId: existing.reminderId, rebuilt: false };
-    }
-    if (existing && existing.status === "fired") existing.status = "canceled";
+    const canceled = store.reminders.find((reminder) => sameIdentity(reminder) && reminder.status === "canceled");
+    if (canceled) return { created: false, reminderId: canceled.reminderId, rebuilt: false };
+    const hadFired = store.reminders.some((reminder) => sameIdentity(reminder) && reminder.status === "fired");
+    store.reminders = store.reminders.filter((reminder) => !(sameIdentity(reminder) && reminder.status === "fired"));
     const reminderId = newId();
     store.reminders.push({
       reminderId,
@@ -106,17 +105,19 @@ export function ensureDefaultMissedOutboundScanReminder(input: {
       deliveryMode: "user",
       repeat: DEFAULT_MISSED_OUTBOUND_REPEAT,
     });
-    return { created: true, reminderId, rebuilt: Boolean(existing) };
+    return { created: true, reminderId, rebuilt: hadFired };
   });
 }
 
 export function persistInboundScanTarget(stateDir: string, event: {
   chat_id?: string;
+  chat_type?: string;
   thread_id?: string | null;
   message_id?: string;
   _sender_is_bot?: boolean;
 }, agentId: string, storeFile = path.join(stateDir, "reminders.json")): ParsedScanTarget {
   if (event._sender_is_bot) throw new Error("scan reminder 只接受 human inbound");
+  if (event.chat_type !== "group") throw new Error("scan reminder 只接受 group/thread，禁止 DM");
   const chatId = String(event.chat_id || "");
   if (!/^oc_[A-Za-z0-9]+$/.test(chatId)) {
     throw new Error("user-facing reminder 必须显式指定 delivery target，不得从标题推断收件人");

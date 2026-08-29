@@ -31,8 +31,6 @@ export interface StoredAgent {
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
   createdAt?: string;
-  defaultScanDeliveryTarget?: string;
-  defaultScanDeliveryAnchor?: string;
 }
 
 export interface HydratedAgent extends StoredAgent {
@@ -86,7 +84,7 @@ interface ConfigApplyFile { version: 1; persistedRevision: string; agents: Recor
 const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt", "defaultScanDeliveryTarget", "defaultScanDeliveryAnchor"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -217,8 +215,6 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
     ...(typeof agent.createdAt === "string" ? { createdAt: agent.createdAt } : {}),
-    ...(typeof agent.defaultScanDeliveryTarget === "string" ? { defaultScanDeliveryTarget: agent.defaultScanDeliveryTarget } : {}),
-    ...(typeof agent.defaultScanDeliveryAnchor === "string" ? { defaultScanDeliveryAnchor: agent.defaultScanDeliveryAnchor } : {}),
   };
 }
 
@@ -235,8 +231,6 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
     ...(agent.chatMentionPolicies ? { chatMentionPolicies: { ...agent.chatMentionPolicies } } : {}),
     ...(agent.noMentionChats ? { noMentionChats: [...agent.noMentionChats] } : {}),
     ...(agent.createdAt ? { createdAt: agent.createdAt } : {}),
-    ...(agent.defaultScanDeliveryTarget ? { defaultScanDeliveryTarget: agent.defaultScanDeliveryTarget } : {}),
-    ...(agent.defaultScanDeliveryAnchor ? { defaultScanDeliveryAnchor: agent.defaultScanDeliveryAnchor } : {}),
   };
 }
 
@@ -351,8 +345,6 @@ export function toStored(config: HydratedConfig): { version: 4; serverId: string
     if (agent.mentionPolicy) stored.mentionPolicy = agent.mentionPolicy;
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
     if (typeof agent.createdAt === "string" && agent.createdAt) stored.createdAt = agent.createdAt;
-    if (typeof agent.defaultScanDeliveryTarget === "string" && agent.defaultScanDeliveryTarget) stored.defaultScanDeliveryTarget = agent.defaultScanDeliveryTarget;
-    if (typeof agent.defaultScanDeliveryAnchor === "string" && agent.defaultScanDeliveryAnchor) stored.defaultScanDeliveryAnchor = agent.defaultScanDeliveryAnchor;
     out.agents[key] = stored;
   }
   return out;

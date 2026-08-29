@@ -19,10 +19,7 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
-import {
-  ensureDefaultMissedOutboundScanReminder,
-  persistInboundScanTarget,
-} from "../agent/missed-outbound-scan.js";
+import { persistInboundScanTarget } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -62,8 +59,6 @@ interface ConfiguredAgent {
   noMentionChats?: string[];
   botOpenId?: string | null;
   botName?: string | null;
-  defaultScanDeliveryTarget?: string | null;
-  defaultScanDeliveryAnchor?: string | null;
 }
 
 interface AgentState { agentId?: string; sessions: Record<string, string> }
@@ -195,8 +190,6 @@ function agentConfigSignature(agent: ConfiguredAgent): string {
     larkConfigDir: agent.larkConfigDir, feishuDomain: agent.feishuDomain,
     feishuAppSecret: agent.feishuAppSecret, workspaceDir: agent.workspaceDir, stateDir: agent.stateDir,
     noMentionChats: agent.noMentionChats || [],
-    defaultScanDeliveryTarget: agent.defaultScanDeliveryTarget || null,
-    defaultScanDeliveryAnchor: agent.defaultScanDeliveryAnchor || null,
   });
 }
 
@@ -412,18 +405,6 @@ export function createHostShell({
   };
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
-    if (agent.defaultScanDeliveryTarget) {
-      try {
-        ensureDefaultMissedOutboundScanReminder({
-          storeFile: path.join(agent.stateDir, "reminders.json"),
-          agentId: agent.agentId,
-          deliveryTarget: agent.defaultScanDeliveryTarget,
-          deliveryAnchor: agent.defaultScanDeliveryAnchor || null,
-        });
-      } catch (error) {
-        log(`default missed-outbound scan 未创建: ${(error as Error).message}`);
-      }
-    }
     hydrateBotIdentity(agent);
     processingEyes.restoreAndClear(agent);
     try {
@@ -441,13 +422,6 @@ export function createHostShell({
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
     if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
-    if (!event._sender_is_bot) {
-      try {
-        persistInboundScanTarget(agent.stateDir, event, agent.agentId);
-      } catch (error) {
-        log(`inbound scan target 未持久化: ${(error as Error).message}`);
-      }
-    }
     const telemetryMessageId = String(event.message_id || event.event_id || eventKey);
     let canonicalInboxDurable = false;
     if (wake) telemetry?.beginMessage(agent.agentId, telemetryMessageId);
@@ -475,6 +449,13 @@ export function createHostShell({
         // An event becomes permanently transport-seen only after the canonical
         // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
+        if (!event._sender_is_bot) {
+          try {
+            persistInboundScanTarget(agent.stateDir, event, agent.agentId);
+          } catch (error) {
+            log(`inbound scan target 未持久化: ${(error as Error).message}`);
+          }
+        }
         if (append.status === "duplicate_consumed") return null;
         const inboxEnvelope = append.envelope;
         if (append.status === "appended") hostState.appendConversation(agent, {

@@ -19,6 +19,7 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
+import { ensureDefaultMissedOutboundScanReminder } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -404,6 +405,19 @@ export function createHostShell({
   };
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
+    const scanTarget = process.env.LARKIN_DEFAULT_SCAN_TARGET;
+    if (scanTarget) {
+      try {
+        ensureDefaultMissedOutboundScanReminder({
+          storeFile: path.join(agent.stateDir, "reminders.json"),
+          agentId: agent.agentId,
+          deliveryTarget: scanTarget,
+          deliveryAnchor: process.env.LARKIN_DEFAULT_SCAN_ANCHOR || null,
+        });
+      } catch (error) {
+        log(`default missed-outbound scan 未创建: ${(error as Error).message}`);
+      }
+    }
     hydrateBotIdentity(agent);
     processingEyes.restoreAndClear(agent);
     try {

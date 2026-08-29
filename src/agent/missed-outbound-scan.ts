@@ -20,6 +20,50 @@ export interface ScanMessage {
   sender_type?: string;
   sender?: { sender_type?: string; id?: string };
   create_time?: string;
+  content?: string;
+}
+
+export type MissedOutboundKind = "unanswered-human" | "unfulfilled-follow-up" | "stalled-work";
+
+export interface MissedOutboundHit {
+  kind: MissedOutboundKind;
+  messageId: string;
+  summary: string;
+}
+
+const FOLLOW_UP = /下一步|我会|稍后|等你|待你确认/;
+const STALL = /CI 还在跑|仍在跑|后台.*跑|等 CI/;
+const DONE = /已推|已完成|全绿|已 merge|已发布/;
+
+function isBot(message: ScanMessage, botIds: ReadonlySet<string>): boolean {
+  const type = message.sender?.sender_type || message.sender_type;
+  const id = String(message.sender?.id || "");
+  return type === "app" || botIds.has(id);
+}
+
+function isHuman(message: ScanMessage): boolean {
+  return (message.sender?.sender_type || message.sender_type) === "user";
+}
+
+export function classifyMissedOutbound(messages: ScanMessage[], botIds: ReadonlySet<string>): MissedOutboundHit | null {
+  const unanswered = unansweredHumanAfterBot(messages, botIds);
+  if (unanswered) {
+    return { kind: "unanswered-human", messageId: unanswered, summary: "有真人消息尚未回复" };
+  }
+  const ordered = [...messages].sort((a, b) => String(a.create_time || "").localeCompare(String(b.create_time || "")));
+  const lastBot = [...ordered].reverse().find((message) => isBot(message, botIds));
+  if (!lastBot?.message_id) return null;
+  const text = String(lastBot.content || "");
+  const later = ordered.filter((message) => String(message.create_time || "") > String(lastBot.create_time || ""));
+  const laterDone = later.some((message) => isBot(message, botIds) && DONE.test(String(message.content || "")));
+  if (laterDone) return null;
+  if (FOLLOW_UP.test(text)) {
+    return { kind: "unfulfilled-follow-up", messageId: lastBot.message_id, summary: "有承诺的下一步尚未兑现" };
+  }
+  if (STALL.test(text)) {
+    return { kind: "stalled-work", messageId: lastBot.message_id, summary: "工作停滞且无新的状态更新" };
+  }
+  return null;
 }
 
 export function unansweredHumanAfterBot(messages: ScanMessage[], botIds: ReadonlySet<string>): string | null {
@@ -68,4 +112,33 @@ export function ensureDefaultMissedOutboundScanReminder(input: {
     });
     return { created: true, reminderId };
   });
+}
+
+export function scopedHistoryKind(deliveryTarget: string): "chat" | "thread" {
+  if (deliveryTarget.startsWith("thread:")) return "thread";
+  if (deliveryTarget.startsWith("chat:")) return "chat";
+  throw new Error("delivery target 必须是 chat: 或 thread:，禁止推断 DM");
+}
+
+export async function executeMissedOutboundScan(input: {
+  deliveryTarget?: string | null;
+  deliveryAnchor?: string | null;
+  botIds: ReadonlySet<string>;
+  listChat(chatId: string): Promise<ScanMessage[]>;
+  listThread(threadId: string): Promise<ScanMessage[]>;
+  reply(post: { deliveryTarget: string; messageId: string | null; text: string }): Promise<void>;
+}): Promise<{ posted: boolean; hit: MissedOutboundHit | null; scope: "chat" | "thread" }> {
+  const deliveryTarget = requireScanDeliveryTarget(input.deliveryTarget, input.deliveryAnchor);
+  const scope = scopedHistoryKind(deliveryTarget);
+  const messages = scope === "thread"
+    ? await input.listThread(deliveryTarget.split(":")[2] || "")
+    : await input.listChat(deliveryTarget.slice("chat:".length));
+  const hit = classifyMissedOutbound(messages, input.botIds);
+  if (!hit) return { posted: false, hit: null, scope };
+  await input.reply({
+    deliveryTarget,
+    messageId: hit.messageId,
+    text: `巡检：${hit.summary}。`,
+  });
+  return { posted: true, hit, scope };
 }

@@ -23,18 +23,21 @@ test("per-target reminders coexist and duplicate inbound is idempotent", () => {
     const chat = persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
       chat_type: "group",
+      _scan_authority: true,
       thread_id: null,
       message_id: "om_chat1",
     }, "cli_a1", file);
     const again = persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
       chat_type: "group",
+      _scan_authority: true,
       thread_id: null,
       message_id: "om_chat1",
     }, "cli_a1", file);
     const thread = persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
       chat_type: "group",
+      _scan_authority: true,
       thread_id: "omt_19f44e32c00f1c85",
       message_id: "om_thread1",
     }, "cli_a1", file);
@@ -55,7 +58,13 @@ test("per-target reminders coexist and duplicate inbound is idempotent", () => {
     }, "cli_a1", file), /只接受 human inbound/);
     assert.throws(() => persistInboundScanTarget(dir, {
       chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      chat_type: "group",
+      message_id: "om_noauth",
+    }, "cli_a1", file), /权威/);
+    assert.throws(() => persistInboundScanTarget(dir, {
+      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
       chat_type: "p2p",
+      _scan_authority: true,
       message_id: "om_dm1",
     }, "cli_a1", file), /禁止 DM/);
     fs.writeFileSync(file, JSON.stringify({
@@ -84,4 +93,3 @@ test("ensureDefaultMissedOutboundScanReminder fail-closes without target", () =>
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-

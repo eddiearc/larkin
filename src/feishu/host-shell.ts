@@ -449,7 +449,7 @@ export function createHostShell({
         // An event becomes permanently transport-seen only after the canonical
         // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
-        if (!event._sender_is_bot) {
+        if (!event._sender_is_bot && event._scan_authority) {
           try {
             persistInboundScanTarget(agent.stateDir, event, agent.agentId);
           } catch (error) {

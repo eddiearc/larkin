@@ -24,6 +24,7 @@ function humanEvent(overrides = {}) {
     _mentioned_bot: false,
     _mention_all: false,
     _sender_is_bot: false,
+    _scan_authority: true,
     ...overrides,
   };
 }
@@ -68,8 +69,9 @@ test("HostShell human inbound registers per-target reminders and fire keeps exac
   const host = makeHost();
   await host.ingest(AGENT, humanEvent({ _sender_is_bot: true, sender_id: "ou_other_bot", message_id: "om_bot1", event_id: "evt_bot" }), { wake: false });
   await host.ingest(AGENT, humanEvent({ chat_type: "p2p", event_id: "evt_dm", message_id: "om_dm1" }), { wake: false });
+  await host.ingest(AGENT, humanEvent({ event_id: "evt_noauth", _scan_authority: false }), { wake: false });
   const reminderFile = path.join(stateDir, "reminders.json");
-  assert.equal(fs.existsSync(reminderFile), false, "bot/DM inbound must not create reminders");
+  assert.equal(fs.existsSync(reminderFile), false, "bot/DM/unauthoritative inbound must not create reminders");
 
   await host.ingest(AGENT, humanEvent({ event_id: "evt_chat", message_id: "om_human1" }), { wake: false });
   await host.ingest(AGENT, humanEvent({ event_id: "evt_chat2", message_id: "om_human1" }), { wake: false });
@@ -98,7 +100,7 @@ test("HostShell human inbound registers per-target reminders and fire keeps exac
     assert.equal(fired.deliveryTarget, `chat:${CHAT}`);
     assert.equal(fired.deliveryAnchor, "om_human1");
     assert.match(String(fired.content || fired.title || ""), /persisted deliveryTarget/);
-    assert.throws(() => persistInboundScanTarget(stateDir, { chat_id: "", chat_type: "group", message_id: "om_x" }, AGENT), /必须显式指定 delivery target/);
+    assert.throws(() => persistInboundScanTarget(stateDir, { chat_id: "", chat_type: "group", _scan_authority: true, message_id: "om_x" }, AGENT), /必须显式指定 delivery target/);
   } finally {
     await restarted.shutdown?.();
   }

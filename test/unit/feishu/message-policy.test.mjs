@@ -57,7 +57,15 @@ test("channel normalization preserves topic, mention, and bot identity inputs", 
     _mentioned_bot: true,
     _mention_all: true,
     _sender_is_bot: true,
+    _scan_authority: true,
   });
+});
+
+test("scan authority requires raw boolean senderIsBot and group or topic", () => {
+  assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", chatType: "group", senderIsBot: false, messageId: "om_a" })._scan_authority, true);
+  assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", senderIsBot: false, messageId: "om_a" })._scan_authority, false);
+  assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", chatType: "group", messageId: "om_a" })._scan_authority, false);
+  assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", messageId: "om_a" })._scan_authority, false);
 });
 
 test("targets keep DM, channel, and topic aliases stable", () => {

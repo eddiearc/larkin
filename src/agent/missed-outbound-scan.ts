@@ -115,8 +115,10 @@ export function persistInboundScanTarget(stateDir: string, event: {
   thread_id?: string | null;
   message_id?: string;
   _sender_is_bot?: boolean;
+  _scan_authority?: boolean;
 }, agentId: string, storeFile = path.join(stateDir, "reminders.json")): ParsedScanTarget {
   if (event._sender_is_bot) throw new Error("scan reminder 只接受 human inbound");
+  if (event._scan_authority !== true) throw new Error("scan reminder 需要权威 chatType/senderIsBot");
   if (event.chat_type !== "group") throw new Error("scan reminder 只接受 group/thread，禁止 DM");
   const chatId = String(event.chat_id || "");
   if (!/^oc_[A-Za-z0-9]+$/.test(chatId)) {

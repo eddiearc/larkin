@@ -58,11 +58,14 @@ test("default scan fire reads scoped chat history and replies in the same conver
         botIds: new Set(["ou_bot", "cli_scan"]),
         listChat: async (chatId) => {
           reads.push(`chat:${chatId}`);
-          return [{ message_id: "om_ask", sender: { sender_type: "user", id: "ou_human" }, create_time: "2", content: "帮看 CI？" }];
+          return {
+            ok: true,
+            data: { messages: [{ message_id: "om_ask", sender: { sender_type: "user", id: "ou_human" }, create_time: "2", content: "帮看 CI？" }] },
+          };
         },
         listThread: async () => { throw new Error("must not read thread"); },
-        reply: async (post) => {
-          posts.push(post);
+        post: async (item) => {
+          posts.push(item);
           return { ok: true, data: { message_id: "om_committed1" } };
         },
       }),

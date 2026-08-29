@@ -22,7 +22,8 @@ import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js
 import {
   ensureDefaultMissedOutboundScanReminder,
   executeMissedOutboundScan,
-  type ScanMessage,
+  loadPersistedScanTarget,
+  persistInboundScanTarget,
 } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
@@ -413,13 +414,16 @@ export function createHostShell({
   };
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
-    if (agent.defaultScanDeliveryTarget) {
+    const persisted = loadPersistedScanTarget(agent.stateDir);
+    const scanTarget = agent.defaultScanDeliveryTarget || persisted?.deliveryTarget;
+    const scanAnchor = agent.defaultScanDeliveryAnchor || persisted?.deliveryAnchor || null;
+    if (scanTarget) {
       try {
         ensureDefaultMissedOutboundScanReminder({
           storeFile: path.join(agent.stateDir, "reminders.json"),
           agentId: agent.agentId,
-          deliveryTarget: agent.defaultScanDeliveryTarget,
-          deliveryAnchor: agent.defaultScanDeliveryAnchor || null,
+          deliveryTarget: scanTarget,
+          deliveryAnchor: scanAnchor,
         });
       } catch (error) {
         log(`default missed-outbound scan 未创建: ${(error as Error).message}`);
@@ -449,10 +453,6 @@ export function createHostShell({
       catch { reject(new Error("missed-outbound scan CLI JSON 无效")); }
     });
   });
-  const scanMessages = (payload: unknown): ScanMessage[] => {
-    const messages = (payload as { data?: { messages?: ScanMessage[] } } | null)?.data?.messages;
-    return Array.isArray(messages) ? messages : [];
-  };
   const reminder = new HostReminderOrchestrator({
     agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log,
     missedOutboundScan: {
@@ -463,16 +463,19 @@ export function createHostShell({
         postedOccurrenceIds: new Set((record.events || [])
           .filter((event) => event.eventType === "scan_succeeded" && typeof event.metadata?.occurrenceId === "string")
           .map((event) => String(event.metadata?.occurrenceId))),
-        listChat: async (chatId) => scanMessages(await runImJson(agent as ConfiguredAgent, [
+        listChat: async (chatId) => runImJson(agent as ConfiguredAgent, [
           "+chat-messages-list", "--chat-id", chatId, "--order", "desc", "--page-size", "20", "--no-reactions",
-        ])),
-        listThread: async (threadId) => scanMessages(await runImJson(agent as ConfiguredAgent, [
+        ]),
+        listThread: async (threadId) => runImJson(agent as ConfiguredAgent, [
           "+threads-messages-list", "--thread", threadId, "--order", "desc", "--page-size", "20", "--no-reactions",
-        ])),
-        reply: async (post) => {
-          const args = ["+messages-reply", "--message-id", String(post.messageId || ""), "--text", post.text];
-          if (post.scope === "thread") args.push("--reply-in-thread");
-          return runImJson(agent as ConfiguredAgent, args);
+        ]),
+        post: async ({ route, text }) => {
+          if (route.kind === "chat-send") {
+            return runImJson(agent as ConfiguredAgent, ["+messages-send", "--chat-id", route.chatId, "--text", text]);
+          }
+          return runImJson(agent as ConfiguredAgent, [
+            "+messages-reply", "--message-id", route.messageId, "--reply-in-thread", "--text", text,
+          ]);
         },
       }),
     },
@@ -484,6 +487,19 @@ export function createHostShell({
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
     if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
+    try {
+      const persisted = persistInboundScanTarget(agent.stateDir, event);
+      if (persisted) {
+        ensureDefaultMissedOutboundScanReminder({
+          storeFile: path.join(agent.stateDir, "reminders.json"),
+          agentId: agent.agentId,
+          deliveryTarget: persisted.deliveryTarget,
+          deliveryAnchor: persisted.deliveryAnchor,
+        });
+      }
+    } catch (error) {
+      log(`inbound scan target 未持久化: ${(error as Error).message}`);
+    }
     const telemetryMessageId = String(event.message_id || event.event_id || eventKey);
     let canonicalInboxDurable = false;
     if (wake) telemetry?.beginMessage(agent.agentId, telemetryMessageId);

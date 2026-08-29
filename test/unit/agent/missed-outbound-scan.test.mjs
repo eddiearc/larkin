@@ -44,6 +44,24 @@ test("per-target reminders coexist and duplicate inbound is idempotent", () => {
     assert.equal(live.length, 2);
     assert.equal(live.every((reminder) => reminder.title === DEFAULT_MISSED_OUTBOUND_TITLE), true);
     assert.equal(live.every((reminder) => reminder.repeat === "every:15m"), true);
+    assert.equal(live.every((reminder) => reminder.version === 1), true);
+    assert.equal(live.every((reminder) => Array.isArray(reminder.events)), true);
+    assert.throws(() => persistInboundScanTarget(dir, {
+      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
+      _sender_is_bot: true,
+      message_id: "om_bot1",
+    }, "cli_a1", file), /只接受 human inbound/);
+    fs.writeFileSync(file, JSON.stringify({
+      reminders: [{ ...live[0], status: "canceled", reminderId: "canceled1", deliveryTarget: "chat:oc_canceledaaaaaaaaaaaaaaaaaaaaaaa" }],
+    }), { mode: 0o600 });
+    const blocked = ensureDefaultMissedOutboundScanReminder({
+      storeFile: file,
+      agentId: "cli_a1",
+      deliveryTarget: "chat:oc_canceledaaaaaaaaaaaaaaaaaaaaaaa",
+      deliveryAnchor: "om_chat1",
+    });
+    assert.equal(blocked.created, false);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).reminders.filter((reminder) => reminder.status === "scheduled").length, 0);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

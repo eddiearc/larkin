@@ -441,10 +441,12 @@ export function createHostShell({
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
     if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
-    try {
-      persistInboundScanTarget(agent.stateDir, event, agent.agentId);
-    } catch (error) {
-      log(`inbound scan target 未持久化: ${(error as Error).message}`);
+    if (!event._sender_is_bot) {
+      try {
+        persistInboundScanTarget(agent.stateDir, event, agent.agentId);
+      } catch (error) {
+        log(`inbound scan target 未持久化: ${(error as Error).message}`);
+      }
     }
     const telemetryMessageId = String(event.message_id || event.event_id || eventKey);
     let canonicalInboxDurable = false;

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { mutate, newId, nowIso, parseRepeat, type ReminderRecord } from "./reminder-store.js";
 
-export const DEFAULT_MISSED_OUTBOUND_TITLE = "Scan this conversation for unanswered asks, undelivered follow-ups, or stalled work; post a short status here only on a hit.";
+export const DEFAULT_MISSED_OUTBOUND_TITLE = "Read scoped history from this reminder envelope's persisted deliveryTarget (chat: +chat-messages-list; thread: +threads-messages-list). Judge unanswered asks, undelivered follow-ups, and stalled work. On a hit, post a short status in the same conversation using that persisted deliveryTarget/anchor; otherwise stay silent. Never infer recipients from the title.";
 export const DEFAULT_MISSED_OUTBOUND_REPEAT = "every:15m";
 
 const CHAT_TARGET = /^chat:(oc_[A-Za-z0-9]+)$/;
@@ -80,6 +80,9 @@ export function ensureDefaultMissedOutboundScanReminder(input: {
       && reminder.repeat === DEFAULT_MISSED_OUTBOUND_REPEAT
       && reminder.deliveryMode === "user"
       && reminder.deliveryTarget === parsed.deliveryTarget) as ReminderRecord | undefined;
+    if (existing && existing.status === "canceled") {
+      return { created: false, reminderId: existing.reminderId, rebuilt: false };
+    }
     if (existing && existing.status === "scheduled") {
       const sameAnchor = (existing.deliveryAnchor || null) === wantedAnchor;
       if (sameAnchor) return { created: false, reminderId: existing.reminderId, rebuilt: false };
@@ -96,6 +99,8 @@ export function ensureDefaultMissedOutboundScanReminder(input: {
       firedAt: null,
       createdAt: nowIso(now),
       status: "scheduled",
+      version: 1,
+      events: [],
       deliveryTarget: parsed.deliveryTarget,
       deliveryAnchor: wantedAnchor,
       deliveryMode: "user",
@@ -109,7 +114,9 @@ export function persistInboundScanTarget(stateDir: string, event: {
   chat_id?: string;
   thread_id?: string | null;
   message_id?: string;
+  _sender_is_bot?: boolean;
 }, agentId: string, storeFile = path.join(stateDir, "reminders.json")): ParsedScanTarget {
+  if (event._sender_is_bot) throw new Error("scan reminder 只接受 human inbound");
   const chatId = String(event.chat_id || "");
   if (!/^oc_[A-Za-z0-9]+$/.test(chatId)) {
     throw new Error("user-facing reminder 必须显式指定 delivery target，不得从标题推断收件人");

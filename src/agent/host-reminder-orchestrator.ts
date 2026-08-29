@@ -235,7 +235,7 @@ export class HostReminderOrchestrator {
           ? (occurrenceEvents?.at(-1) ?? (hasOccurrenceMetadata && reminder.events?.at(-1)?.eventType !== "fired"
             ? undefined : reminder.events?.at(-1)))
           : reminder.events?.at(-1);
-        if (!last || !["fired", "delivery_pending", "delivery_failed", "scan_succeeded", "scan_failed"].includes(last.eventType)) return false;
+        if (!last || !["fired", "delivery_pending", "delivery_failed"].includes(last.eventType)) return false;
         // A late Runtime receipt must not resurrect an occurrence finalized as failed.
         if (eventType === "delivery_pending" && last.eventType === "delivery_failed") return false;
         // A synchronous outbound can finish inside deliveryTarget.deliver().

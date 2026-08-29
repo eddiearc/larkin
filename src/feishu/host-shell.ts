@@ -19,7 +19,11 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
-import { ensureDefaultMissedOutboundScanReminder } from "../agent/missed-outbound-scan.js";
+import {
+  ensureDefaultMissedOutboundScanReminder,
+  executeMissedOutboundScan,
+  type ScanMessage,
+} from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -59,6 +63,8 @@ interface ConfiguredAgent {
   noMentionChats?: string[];
   botOpenId?: string | null;
   botName?: string | null;
+  defaultScanDeliveryTarget?: string | null;
+  defaultScanDeliveryAnchor?: string | null;
 }
 
 interface AgentState { agentId?: string; sessions: Record<string, string> }
@@ -190,6 +196,8 @@ function agentConfigSignature(agent: ConfiguredAgent): string {
     larkConfigDir: agent.larkConfigDir, feishuDomain: agent.feishuDomain,
     feishuAppSecret: agent.feishuAppSecret, workspaceDir: agent.workspaceDir, stateDir: agent.stateDir,
     noMentionChats: agent.noMentionChats || [],
+    defaultScanDeliveryTarget: agent.defaultScanDeliveryTarget || null,
+    defaultScanDeliveryAnchor: agent.defaultScanDeliveryAnchor || null,
   });
 }
 
@@ -405,14 +413,13 @@ export function createHostShell({
   };
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
-    const scanTarget = process.env.LARKIN_DEFAULT_SCAN_TARGET;
-    if (scanTarget) {
+    if (agent.defaultScanDeliveryTarget) {
       try {
         ensureDefaultMissedOutboundScanReminder({
           storeFile: path.join(agent.stateDir, "reminders.json"),
           agentId: agent.agentId,
-          deliveryTarget: scanTarget,
-          deliveryAnchor: process.env.LARKIN_DEFAULT_SCAN_ANCHOR || null,
+          deliveryTarget: agent.defaultScanDeliveryTarget,
+          deliveryAnchor: agent.defaultScanDeliveryAnchor || null,
         });
       } catch (error) {
         log(`default missed-outbound scan 未创建: ${(error as Error).message}`);
@@ -427,7 +434,47 @@ export function createHostShell({
     senderIdentity.warmSenderProfiles(agent);
   };
   for (const agent of agents) prepareAgentState(agent);
-  const reminder = new HostReminderOrchestrator({ agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log });
+  const runImJson = (agent: ConfiguredAgent, args: string[]): Promise<unknown> => new Promise((resolve) => {
+    const managed = managedCliForAgent(agent);
+    execFileImpl(managed.command.command, [...managed.command.argsPrefix, "im", ...args, "--json"], {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: managed.env,
+    }, (error, stdout) => {
+      if (error) {
+        log(`missed-outbound scan CLI 失败 agent=${agent.name}: ${errorMessage(error).slice(0, 100)}`);
+        resolve(null);
+        return;
+      }
+      try { resolve(JSON.parse(String(stdout))); }
+      catch { resolve(null); }
+    });
+  });
+  const scanMessages = (payload: unknown): ScanMessage[] => {
+    const messages = (payload as { data?: { messages?: ScanMessage[] } } | null)?.data?.messages;
+    return Array.isArray(messages) ? messages : [];
+  };
+  const reminder = new HostReminderOrchestrator({
+    agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log,
+    missedOutboundScan: {
+      execute: ({ agent, reminder: record }) => executeMissedOutboundScan({
+        deliveryTarget: typeof record.deliveryTarget === "string" ? record.deliveryTarget : null,
+        deliveryAnchor: typeof record.deliveryAnchor === "string" ? record.deliveryAnchor : null,
+        botIds: new Set([agent.botOpenId, agent.feishuAppId].filter((id): id is string => Boolean(id))),
+        listChat: async (chatId) => scanMessages(await runImJson(agent as ConfiguredAgent, [
+          "+chat-messages-list", "--chat-id", chatId, "--order", "desc", "--page-size", "20", "--no-reactions",
+        ])),
+        listThread: async (threadId) => scanMessages(await runImJson(agent as ConfiguredAgent, [
+          "+threads-messages-list", "--thread", threadId, "--order", "desc", "--page-size", "20", "--no-reactions",
+        ])),
+        reply: async (post) => {
+          const args = ["+messages-reply", "--message-id", String(post.messageId || ""), "--text", post.text];
+          if (post.scope === "thread") args.push("--reply-in-thread");
+          await runImJson(agent as ConfiguredAgent, args);
+        },
+      }),
+    },
+  });
   const seenEventIds = new Set<string>();
   const inFlightEventIds = new Set<string>();
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {

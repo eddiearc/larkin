@@ -5,8 +5,15 @@ import { countWakeEnvelopes } from "../feishu/host-business-state.js";
 import * as defaultReminderStore from "./reminder-store.js";
 import type { ReminderRecord, ReminderStore } from "./reminder-store.js";
 import { targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
+import { isDefaultMissedOutboundReminder } from "./missed-outbound-scan.js";
 
-interface ReminderAgent extends HostAgent { stateDir?: string | null }
+interface ReminderAgent extends HostAgent {
+  stateDir?: string | null;
+  botOpenId?: string | null;
+  feishuAppId?: string;
+  defaultScanDeliveryTarget?: string | null;
+  defaultScanDeliveryAnchor?: string | null;
+}
 interface ReminderDeliveryTarget {
   deliver(agentId: string, envelope: ReminderEnvelope | object): Promise<unknown> | unknown;
 }
@@ -49,6 +56,9 @@ export interface ReminderOrchestratorOptions {
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
   setInterval?: typeof globalThis.setInterval;
+  missedOutboundScan?: {
+    execute(input: { agent: ReminderAgent; reminder: ReminderRecord }): Promise<unknown> | unknown;
+  };
 }
 
 export class HostReminderOrchestrator {
@@ -110,6 +120,23 @@ export class HostReminderOrchestrator {
   }
 
   private deliver(agent: ReminderAgent, reminder: ReminderRecord, overdueMs: number): void {
+    if (isDefaultMissedOutboundReminder(reminder)) {
+      if (!this.options.missedOutboundScan) {
+        this.log(`default missed-outbound scan 缺少 Host 实现，fail-closed 不唤醒 Runtime id=#${reminder.reminderId.slice(0, 8)}`);
+        return;
+      }
+      try {
+        const result = this.options.missedOutboundScan.execute({ agent, reminder });
+        if (result && typeof (result as Promise<unknown>).then === "function") {
+          void Promise.resolve(result).catch((error) => this.log(
+            `default missed-outbound scan 失败 id=#${reminder.reminderId.slice(0, 8)}: ${String((error as Error).message || error)}`,
+          ));
+        }
+      } catch (error) {
+        this.log(`default missed-outbound scan 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
+      }
+      return;
+    }
     const recurrence = reminder.repeat ? this.store.parseRepeat(reminder.repeat, reminder.tz) : null;
     const projected = this.options.envelopeProjector.createReminderEnvelope(
       agent.agentId,

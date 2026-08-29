@@ -7,6 +7,8 @@ export type StoredAgent = {
   mentionPolicy?: "require" | "free";
   chatMentionPolicies?: Record<string, "require" | "free">;
   createdAt?: string;
+  defaultScanDeliveryTarget?: string;
+  defaultScanDeliveryAnchor?: string;
 };
 
 export type StoredConfig = {
@@ -30,6 +32,8 @@ function cloneAgent(agent: StoredAgent): StoredAgent {
     ...(agent.mentionPolicy ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies } : {}),
     ...(agent.createdAt ? { createdAt: agent.createdAt } : {}),
+    ...(agent.defaultScanDeliveryTarget ? { defaultScanDeliveryTarget: agent.defaultScanDeliveryTarget } : {}),
+    ...(agent.defaultScanDeliveryAnchor ? { defaultScanDeliveryAnchor: agent.defaultScanDeliveryAnchor } : {}),
   };
 }
 
@@ -43,6 +47,8 @@ export function planSingleRootBinding({
   defaultModel,
   supportedReasoningEfforts,
   now,
+  defaultScanDeliveryTarget,
+  defaultScanDeliveryAnchor,
 }: {
   config: StoredConfig;
   profile: BindingProfile;
@@ -53,6 +59,8 @@ export function planSingleRootBinding({
   defaultModel: string;
   supportedReasoningEfforts: readonly string[];
   now: string;
+  defaultScanDeliveryTarget?: string;
+  defaultScanDeliveryAnchor?: string;
 }): StoredConfig {
   if (!/^cli_[A-Za-z0-9]+$/.test(profile.appId)) throw new Error(`profile.appId 不是合法飞书 App ID：${profile.appId}`);
   if (typeof defaultModel !== "string" || !defaultModel) throw new Error("defaultModel 必须由 runtime 模型目录显式提供");
@@ -76,9 +84,18 @@ export function planSingleRootBinding({
       model: model || (prior.runtime === nextRuntime ? prior.model : defaultModel),
       ...(nextPiDistribution ? { piDistribution: nextPiDistribution } : {}),
       ...(effort && supportedReasoningEfforts.includes(effort) ? { effort } : {}),
+      ...(defaultScanDeliveryTarget ? { defaultScanDeliveryTarget } : {}),
+      ...(defaultScanDeliveryAnchor ? { defaultScanDeliveryAnchor } : {}),
     };
   } else {
-    agents[profile.appId] = { runtime: nextRuntime, model: model || "default", ...(nextPiDistribution ? { piDistribution: nextPiDistribution } : {}), createdAt: now };
+    agents[profile.appId] = {
+      runtime: nextRuntime,
+      model: model || "default",
+      ...(nextPiDistribution ? { piDistribution: nextPiDistribution } : {}),
+      createdAt: now,
+      ...(defaultScanDeliveryTarget ? { defaultScanDeliveryTarget } : {}),
+      ...(defaultScanDeliveryAnchor ? { defaultScanDeliveryAnchor } : {}),
+    };
   }
   return {
     version: 4,

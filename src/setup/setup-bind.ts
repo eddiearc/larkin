@@ -433,6 +433,8 @@ export async function main(): Promise<void> {
       defaultModel,
       supportedReasoningEfforts: targetModel!.supportedReasoningEfforts || [],
       now: new Date().toISOString(),
+      ...(typeof prior?.defaultScanDeliveryTarget === "string" ? { defaultScanDeliveryTarget: prior.defaultScanDeliveryTarget } : {}),
+      ...(typeof prior?.defaultScanDeliveryAnchor === "string" ? { defaultScanDeliveryAnchor: prior.defaultScanDeliveryAnchor } : {}),
     });
     const bound = stored.agents[profile.appId];
 

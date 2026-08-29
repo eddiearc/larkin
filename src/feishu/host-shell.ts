@@ -434,7 +434,7 @@ export function createHostShell({
     senderIdentity.warmSenderProfiles(agent);
   };
   for (const agent of agents) prepareAgentState(agent);
-  const runImJson = (agent: ConfiguredAgent, args: string[]): Promise<unknown> => new Promise((resolve) => {
+  const runImJson = (agent: ConfiguredAgent, args: string[]): Promise<unknown> => new Promise((resolve, reject) => {
     const managed = managedCliForAgent(agent);
     execFileImpl(managed.command.command, [...managed.command.argsPrefix, "im", ...args, "--json"], {
       encoding: "utf8",
@@ -442,12 +442,11 @@ export function createHostShell({
       env: managed.env,
     }, (error, stdout) => {
       if (error) {
-        log(`missed-outbound scan CLI 失败 agent=${agent.name}: ${errorMessage(error).slice(0, 100)}`);
-        resolve(null);
+        reject(new Error(`missed-outbound scan CLI 失败: ${errorMessage(error).slice(0, 100)}`));
         return;
       }
       try { resolve(JSON.parse(String(stdout))); }
-      catch { resolve(null); }
+      catch { reject(new Error("missed-outbound scan CLI JSON 无效")); }
     });
   });
   const scanMessages = (payload: unknown): ScanMessage[] => {
@@ -461,6 +460,9 @@ export function createHostShell({
         deliveryTarget: typeof record.deliveryTarget === "string" ? record.deliveryTarget : null,
         deliveryAnchor: typeof record.deliveryAnchor === "string" ? record.deliveryAnchor : null,
         botIds: new Set([agent.botOpenId, agent.feishuAppId].filter((id): id is string => Boolean(id))),
+        postedOccurrenceIds: new Set((record.events || [])
+          .filter((event) => event.eventType === "scan_succeeded" && typeof event.metadata?.occurrenceId === "string")
+          .map((event) => String(event.metadata?.occurrenceId))),
         listChat: async (chatId) => scanMessages(await runImJson(agent as ConfiguredAgent, [
           "+chat-messages-list", "--chat-id", chatId, "--order", "desc", "--page-size", "20", "--no-reactions",
         ])),
@@ -470,7 +472,7 @@ export function createHostShell({
         reply: async (post) => {
           const args = ["+messages-reply", "--message-id", String(post.messageId || ""), "--text", post.text];
           if (post.scope === "thread") args.push("--reply-in-thread");
-          await runImJson(agent as ConfiguredAgent, args);
+          return runImJson(agent as ConfiguredAgent, args);
         },
       }),
     },

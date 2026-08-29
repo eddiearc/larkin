@@ -17,6 +17,8 @@ test("default scan fire reads scoped chat history and replies in the same conver
     status: "scheduled",
     deliveryTarget: "chat:oc_7961b9d7be893b46520a926b90cf46eb",
     deliveryAnchor: null,
+    deliveryMode: "user",
+    repeat: "every:15m",
     events: [],
   };
   const reads = [];
@@ -59,7 +61,10 @@ test("default scan fire reads scoped chat history and replies in the same conver
           return [{ message_id: "om_ask", sender: { sender_type: "user", id: "ou_human" }, create_time: "2", content: "帮看 CI？" }];
         },
         listThread: async () => { throw new Error("must not read thread"); },
-        reply: async (post) => { posts.push(post); },
+        reply: async (post) => {
+          posts.push(post);
+          return { ok: true, data: { message_id: "om_committed1" } };
+        },
       }),
     },
   });

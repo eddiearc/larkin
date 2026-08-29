@@ -127,12 +127,30 @@ export class HostReminderOrchestrator {
       }
       try {
         const result = this.options.missedOutboundScan.execute({ agent, reminder });
+        const finish = (value: unknown): void => {
+          const posted = value && typeof value === "object" ? value as { posted?: boolean; hit?: { occurrenceId?: string }; committedMessageId?: string } : null;
+          if (posted?.posted && posted.hit?.occurrenceId && posted.committedMessageId) {
+            this.recordDeliveryOutcome(agent, reminder.reminderId, "scan_succeeded", {
+              outcome: "committed", occurrenceId: posted.hit.occurrenceId,
+              committedMessageId: posted.committedMessageId, deliveryTarget: reminder.deliveryTarget,
+            });
+          }
+        };
+        const fail = (error: unknown): void => {
+          this.recordDeliveryOutcome(agent, reminder.reminderId, "scan_failed", {
+            outcome: "error", reason: String((error as Error)?.message || error), deliveryTarget: reminder.deliveryTarget,
+          });
+          this.log(`default missed-outbound scan 失败 id=#${reminder.reminderId.slice(0, 8)}: ${String((error as Error)?.message || error)}`);
+        };
         if (result && typeof (result as Promise<unknown>).then === "function") {
-          void Promise.resolve(result).catch((error) => this.log(
-            `default missed-outbound scan 失败 id=#${reminder.reminderId.slice(0, 8)}: ${String((error as Error).message || error)}`,
-          ));
+          void Promise.resolve(result).then(finish, fail);
+        } else {
+          finish(result);
         }
       } catch (error) {
+        this.recordDeliveryOutcome(agent, reminder.reminderId, "scan_failed", {
+          outcome: "error", reason: String((error as Error).message || error), deliveryTarget: reminder.deliveryTarget,
+        });
         this.log(`default missed-outbound scan 失败 id=#${reminder.reminderId.slice(0, 8)}: ${(error as Error).message}`);
       }
       return;
@@ -262,7 +280,7 @@ export class HostReminderOrchestrator {
           ? (occurrenceEvents?.at(-1) ?? (hasOccurrenceMetadata && reminder.events?.at(-1)?.eventType !== "fired"
             ? undefined : reminder.events?.at(-1)))
           : reminder.events?.at(-1);
-        if (!last || !["fired", "delivery_pending", "delivery_failed"].includes(last.eventType)) return false;
+        if (!last || !["fired", "delivery_pending", "delivery_failed", "scan_succeeded", "scan_failed"].includes(last.eventType)) return false;
         // A late Runtime receipt must not resurrect an occurrence finalized as failed.
         if (eventType === "delivery_pending" && last.eventType === "delivery_failed") return false;
         // A synchronous outbound can finish inside deliveryTarget.deliver().

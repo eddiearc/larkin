@@ -21,8 +21,6 @@ import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-p
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
 import {
   ensureDefaultMissedOutboundScanReminder,
-  executeMissedOutboundScan,
-  loadPersistedScanTarget,
   persistInboundScanTarget,
 } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
@@ -414,16 +412,13 @@ export function createHostShell({
   };
   const prepareAgentState = (agent: ConfiguredAgent): void => {
     fs.mkdirSync(agent.stateDir, { recursive: true });
-    const persisted = loadPersistedScanTarget(agent.stateDir);
-    const scanTarget = agent.defaultScanDeliveryTarget || persisted?.deliveryTarget;
-    const scanAnchor = agent.defaultScanDeliveryAnchor || persisted?.deliveryAnchor || null;
-    if (scanTarget) {
+    if (agent.defaultScanDeliveryTarget) {
       try {
         ensureDefaultMissedOutboundScanReminder({
           storeFile: path.join(agent.stateDir, "reminders.json"),
           agentId: agent.agentId,
-          deliveryTarget: scanTarget,
-          deliveryAnchor: scanAnchor,
+          deliveryTarget: agent.defaultScanDeliveryTarget,
+          deliveryAnchor: agent.defaultScanDeliveryAnchor || null,
         });
       } catch (error) {
         log(`default missed-outbound scan 未创建: ${(error as Error).message}`);
@@ -438,48 +433,7 @@ export function createHostShell({
     senderIdentity.warmSenderProfiles(agent);
   };
   for (const agent of agents) prepareAgentState(agent);
-  const runImJson = (agent: ConfiguredAgent, args: string[]): Promise<unknown> => new Promise((resolve, reject) => {
-    const managed = managedCliForAgent(agent);
-    execFileImpl(managed.command.command, [...managed.command.argsPrefix, "im", ...args, "--json"], {
-      encoding: "utf8",
-      timeout: 10_000,
-      env: managed.env,
-    }, (error, stdout) => {
-      if (error) {
-        reject(new Error(`missed-outbound scan CLI 失败: ${errorMessage(error).slice(0, 100)}`));
-        return;
-      }
-      try { resolve(JSON.parse(String(stdout))); }
-      catch { reject(new Error("missed-outbound scan CLI JSON 无效")); }
-    });
-  });
-  const reminder = new HostReminderOrchestrator({
-    agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log,
-    missedOutboundScan: {
-      execute: ({ agent, reminder: record }) => executeMissedOutboundScan({
-        deliveryTarget: typeof record.deliveryTarget === "string" ? record.deliveryTarget : null,
-        deliveryAnchor: typeof record.deliveryAnchor === "string" ? record.deliveryAnchor : null,
-        botIds: new Set([agent.botOpenId, agent.feishuAppId].filter((id): id is string => Boolean(id))),
-        postedOccurrenceIds: new Set((record.events || [])
-          .filter((event) => event.eventType === "scan_succeeded" && typeof event.metadata?.occurrenceId === "string")
-          .map((event) => String(event.metadata?.occurrenceId))),
-        listChat: async (chatId) => runImJson(agent as ConfiguredAgent, [
-          "+chat-messages-list", "--chat-id", chatId, "--order", "desc", "--page-size", "20", "--no-reactions",
-        ]),
-        listThread: async (threadId) => runImJson(agent as ConfiguredAgent, [
-          "+threads-messages-list", "--thread", threadId, "--order", "desc", "--page-size", "20", "--no-reactions",
-        ]),
-        post: async ({ route, text }) => {
-          if (route.kind === "chat-send") {
-            return runImJson(agent as ConfiguredAgent, ["+messages-send", "--chat-id", route.chatId, "--text", text]);
-          }
-          return runImJson(agent as ConfiguredAgent, [
-            "+messages-reply", "--message-id", route.messageId, "--reply-in-thread", "--text", text,
-          ]);
-        },
-      }),
-    },
-  });
+  const reminder = new HostReminderOrchestrator({ agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log });
   const seenEventIds = new Set<string>();
   const inFlightEventIds = new Set<string>();
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
@@ -488,15 +442,7 @@ export function createHostShell({
     if (event.event_id && (seenEventIds.has(eventKey) || inFlightEventIds.has(eventKey))) return;
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
     try {
-      const persisted = persistInboundScanTarget(agent.stateDir, event);
-      if (persisted) {
-        ensureDefaultMissedOutboundScanReminder({
-          storeFile: path.join(agent.stateDir, "reminders.json"),
-          agentId: agent.agentId,
-          deliveryTarget: persisted.deliveryTarget,
-          deliveryAnchor: persisted.deliveryAnchor,
-        });
-      }
+      persistInboundScanTarget(agent.stateDir, event, agent.agentId);
     } catch (error) {
       log(`inbound scan target 未持久化: ${(error as Error).message}`);
     }

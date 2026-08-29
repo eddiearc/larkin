@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { HostReminderOrchestrator } from "../../../src/agent/host-reminder-orchestrator.ts";
-import {
-  DEFAULT_MISSED_OUTBOUND_TITLE,
-  executeMissedOutboundScan,
-} from "../../../src/agent/missed-outbound-scan.ts";
+import { DEFAULT_MISSED_OUTBOUND_TITLE } from "../../../src/agent/missed-outbound-scan.ts";
 
-test("default scan fire reads scoped chat history and replies in the same conversation", async () => {
+test("scan reminder fire produces a canonical envelope bound to the exact target", () => {
   const reminder = {
     reminderId: "scan123456",
     version: 1,
@@ -16,14 +13,13 @@ test("default scan fire reads scoped chat history and replies in the same conver
     title: DEFAULT_MISSED_OUTBOUND_TITLE,
     status: "scheduled",
     deliveryTarget: "chat:oc_7961b9d7be893b46520a926b90cf46eb",
-    deliveryAnchor: null,
+    deliveryAnchor: "om_anchor1",
     deliveryMode: "user",
     repeat: "every:15m",
     events: [],
   };
-  const reads = [];
-  const posts = [];
   const inbox = [];
+  const deliveries = [];
   const state = {
     paths: { reminders: "/state/reminders.json", inbox: "/state/inbox.ndjson" },
     bindInboxDeliveryAnchor() {},
@@ -41,41 +37,32 @@ test("default scan fire reads scoped chat history and replies in the same conver
     },
   };
   const projector = {
-    createReminderEnvelope() { return { kind: "reminder", message_id: "rem_scan", seq: 1, wake: true, target: "runtime:reminder" }; },
+    createReminderEnvelope(_agentId, value) {
+      return {
+        kind: "reminder",
+        message_id: `rem_${value.reminderId}`,
+        seq: 1,
+        wake: true,
+        target: "runtime:reminder",
+        deliveryTarget: value.deliveryTarget,
+        deliveryAnchor: value.deliveryAnchor,
+        title: value.title,
+      };
+    },
     createRedeliveryEnvelope() { return { kind: "redelivery", message_id: "redeliver_1", seq: 2, target: "runtime:redelivery" }; },
   };
-  const agent = { agentId: "cli_scan", name: "cli_scan", feishuAppId: "cli_scan", botOpenId: "ou_bot" };
   const orchestrator = new HostReminderOrchestrator({
-    agents: [agent],
+    agents: [{ agentId: "cli_scan", name: "cli_scan" }],
     stateStore: () => state,
     envelopeProjector: projector,
     reminderStore: api,
     now: () => Date.parse("2026-07-16T03:00:00Z"),
-    missedOutboundScan: {
-      execute: ({ reminder: record }) => executeMissedOutboundScan({
-        deliveryTarget: record.deliveryTarget,
-        deliveryAnchor: record.deliveryAnchor,
-        botIds: new Set(["ou_bot", "cli_scan"]),
-        listChat: async (chatId) => {
-          reads.push(`chat:${chatId}`);
-          return {
-            ok: true,
-            data: { messages: [{ message_id: "om_ask", sender: { sender_type: "user", id: "ou_human" }, create_time: "2", content: "帮看 CI？" }] },
-          };
-        },
-        listThread: async () => { throw new Error("must not read thread"); },
-        post: async (item) => {
-          posts.push(item);
-          return { ok: true, data: { message_id: "om_committed1" } };
-        },
-      }),
-    },
+    deliveryTarget: { deliver(_agentId, envelope) { deliveries.push(envelope); } },
   });
   orchestrator.handleFire({ agentId: "cli_scan", reminderId: reminder.reminderId });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(reads, ["chat:oc_7961b9d7be893b46520a926b90cf46eb"]);
-  assert.equal(inbox.length, 0, "scan fire must not wake Runtime via inbox");
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].deliveryTarget, "chat:oc_7961b9d7be893b46520a926b90cf46eb");
-  assert.notEqual(posts[0].deliveryTarget.startsWith("dm:"), true);
+  assert.equal(inbox.length, 1);
+  assert.equal(inbox[0].deliveryTarget, "chat:oc_7961b9d7be893b46520a926b90cf46eb");
+  assert.equal(inbox[0].deliveryAnchor, "om_anchor1");
+  assert.equal(inbox[0].title, DEFAULT_MISSED_OUTBOUND_TITLE);
+  assert.equal(deliveries.length, 1);
 });

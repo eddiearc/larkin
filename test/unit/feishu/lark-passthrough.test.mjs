@@ -406,7 +406,7 @@ test("external Agent CLI exposes only Larkin-owned commands and migrates IM to n
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
     const helpPayload = JSON.parse(help.stdout);
-    assert.deepEqual(helpPayload.capabilities.commands.inbox, ["check", "poll"]);
+    assert.deepEqual(helpPayload.capabilities.commands.inbox, ["check", "poll", "audit"]);
     assert.equal("im" in helpPayload.capabilities.commands, false);
     assert.doesNotMatch(help.stdout, /im\/docs\/wiki\/drive|docx/);
     assert.equal(fs.existsSync(marker), false, "help must not touch lark-cli");

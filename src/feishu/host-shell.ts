@@ -19,7 +19,8 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
-import { persistInboundScanTarget } from "../agent/missed-outbound-scan.js";
+import { InboxAuditHeartbeat } from "../agent/inbox-audit-heartbeat.js";
+import { inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -415,6 +416,13 @@ export function createHostShell({
   };
   for (const agent of agents) prepareAgentState(agent);
   const reminder = new HostReminderOrchestrator({ agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log });
+  const inboxAudit = new InboxAuditHeartbeat({
+    agents,
+    stateStore,
+    runtimeHost,
+    log,
+  });
+  const auditRegistry = inboxAuditRegistryFile(larkinHome);
   const seenEventIds = new Set<string>();
   const inFlightEventIds = new Set<string>();
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
@@ -449,12 +457,10 @@ export function createHostShell({
         // An event becomes permanently transport-seen only after the canonical
         // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
-        if (!event._sender_is_bot && event._scan_authority) {
-          try {
-            persistInboundScanTarget(agent.stateDir, event, agent.agentId);
-          } catch (error) {
-            log(`inbound scan target 未持久化: ${(error as Error).message}`);
-          }
+        try {
+          observeInboxAuditTarget(auditRegistry, agent.agentId, event);
+        } catch (error) {
+          log(`inbox audit target 未持久化: ${(error as Error).message}`);
         }
         if (append.status === "duplicate_consumed") return null;
         const inboxEnvelope = append.envelope;
@@ -1316,6 +1322,7 @@ export function createHostShell({
       eventSourceStartTimer = null;
       await Promise.resolve(eventSourceStop());
       reminder.stopSync();
+      inboxAudit.stop();
       interaction.stopSync();
       await runtimeHost.shutdown(reason);
     })();
@@ -1519,6 +1526,7 @@ export function createHostShell({
           sessionId: agentStates.get(agent.agentId)?.state.sessions[agent.runtime] || null,
         })));
         reminder.startSync();
+        inboxAudit.start();
         interaction.startSync();
         eventSourceStartTimer = setTimeout(() => { eventSourceStartTimer = null; startEventSource(); }, eventSourceStartDelayMs);
       } catch (error) {

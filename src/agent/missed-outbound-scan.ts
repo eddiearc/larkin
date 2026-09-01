@@ -1,61 +1,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { mutate, type ReminderRecord } from "./reminder-store.js";
 
-/** Exact v0.4.21 helper payload; never use the title by itself as ownership evidence. */
-export const DEFAULT_MISSED_OUTBOUND_TITLE = "Read scoped history from this reminder envelope's persisted deliveryTarget (chat: +chat-messages-list; thread: +threads-messages-list). Judge unanswered asks, undelivered follow-ups, and stalled work. On a hit, post a short status in the same conversation using that persisted deliveryTarget/anchor; otherwise stay silent. Never infer recipients from the title.";
-export const DEFAULT_MISSED_OUTBOUND_REPEAT = "every:15m";
+/**
+ * #169's host-owned heartbeat no longer creates per-target missed-outbound loops.
+ * Pre-v0.4.21 records have no unique ownership marker and can collide exactly
+ * with user reminders, so existing indistinguishable loops are never migrated
+ * or deleted automatically.
+ */
+export const INBOX_AUDIT_LEGACY_MIGRATION_NON_GOAL = "New versions no longer create missed-outbound loops; existing indistinguishable historical loops are not migrated or deleted automatically.";
 export const MAX_INBOX_AUDIT_TARGETS = 24;
 const MAX_STORED_TARGETS = 96;
 const CHAT = /^oc_[A-Za-z0-9]+$/;
 const THREAD = /^omt_[A-Za-z0-9]+$/;
 const ANCHOR = /^om_[A-Za-z0-9_-]+$/;
-const LEGACY_CHAT_TARGET = /^chat:oc_[A-Za-z0-9]+$/;
-const LEGACY_THREAD_TARGET = /^thread:oc_[A-Za-z0-9]+:omt_[A-Za-z0-9]+$/;
-
-/**
- * The v0.4.21 helper created this exact per-target recurring record shape.
- * All fields are required so a title, cadence, or target alone can never
- * identify an ordinary user reminder as Host-managed legacy state.
- */
-export function isLegacyV0421PerTargetMissedOutboundLoop(reminder: {
-  ownerAgentId?: unknown;
-  title?: unknown;
-  repeat?: unknown;
-  deliveryMode?: unknown;
-  deliveryTarget?: unknown;
-  managedOrigin?: unknown;
-  managedKey?: unknown;
-} | null | undefined, agentId: string): boolean {
-  if (!reminder || reminder.ownerAgentId !== agentId) return false;
-  if (reminder.managedOrigin || reminder.managedKey) return false;
-  if (reminder.title !== DEFAULT_MISSED_OUTBOUND_TITLE
-    || reminder.repeat !== DEFAULT_MISSED_OUTBOUND_REPEAT
-    || reminder.deliveryMode !== "user") return false;
-  const target = typeof reminder.deliveryTarget === "string" ? reminder.deliveryTarget : "";
-  return LEGACY_CHAT_TARGET.test(target) || LEGACY_THREAD_TARGET.test(target);
-}
-
-/** Remove only v0.4.21 helper-owned per-target scan loops, never cancel them. */
-export function deleteLegacyV0421PerTargetMissedOutboundLoops(input: {
-  storeFile: string;
-  agentId: string;
-}): { removed: number; preserved: number } {
-  if (!fs.existsSync(input.storeFile)) return { removed: 0, preserved: 0 };
-  return mutate(input.storeFile, (store) => {
-    let removed = 0;
-    const reminders: ReminderRecord[] = [];
-    for (const reminder of store.reminders) {
-      if (isLegacyV0421PerTargetMissedOutboundLoop(reminder, input.agentId)) {
-        removed += 1;
-        continue;
-      }
-      reminders.push(reminder);
-    }
-    store.reminders = reminders;
-    return { removed, preserved: reminders.length };
-  });
-}
 
 export interface InboxAuditTarget {
   target: string;

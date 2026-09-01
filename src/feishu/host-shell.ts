@@ -20,7 +20,7 @@ import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
 import { InboxAuditHeartbeat } from "../agent/inbox-audit-heartbeat.js";
-import { deleteLegacyV0421PerTargetMissedOutboundLoops, inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed-outbound-scan.js";
+import { inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -1525,16 +1525,6 @@ export function createHostShell({
           ...agent,
           sessionId: agentStates.get(agent.agentId)?.state.sessions[agent.runtime] || null,
         })));
-        // v0.4.21 created one managed missed-outbound timer per observed target.
-        // Delete only that exact helper shape before HostReminderOrchestrator reads
-        // reminders.json, so startup cannot resurrect N legacy local timers.
-        for (const agent of agents) {
-          const migration = deleteLegacyV0421PerTargetMissedOutboundLoops({
-            storeFile: stateStore(agent).paths.reminders,
-            agentId: agent.agentId,
-          });
-          if (migration.removed) log(`legacy missed-outbound scan reminders deleted agent=${agent.name} n=${migration.removed}`);
-        }
         reminder.startSync();
         inboxAudit.start();
         interaction.startSync();

@@ -4,34 +4,33 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
-import {
-  DEFAULT_MISSED_OUTBOUND_REPEAT,
-  DEFAULT_MISSED_OUTBOUND_TITLE,
-} from "../../../dist/agent/missed-outbound-scan.mjs";
 
-const AGENT = "cli_legacyMigrationA1";
+const AGENT = "cli_legacyCollisionA1";
 const CHAT = "oc_7961b9d7be893b46520a926b90cf46eb";
+// Exact payload used by the former per-target helper. Historical records do
+// not carry a managed-origin marker, so this can also be a user reminder.
+const FORMER_SCAN_TITLE = "Read scoped history from this reminder envelope's persisted deliveryTarget (chat: +chat-messages-list; thread: +threads-messages-list). Judge unanswered asks, undelivered follow-ups, and stalled work. On a hit, post a short status in the same conversation using that persisted deliveryTarget/anchor; otherwise stay silent. Never infer recipients from the title.";
 
-function reminder(overrides = {}) {
+function samePayloadUserReminder() {
   return {
-    reminderId: "legacy-scan-loop",
+    reminderId: "user-reminder-with-former-scan-payload",
     ownerAgentId: AGENT,
-    title: DEFAULT_MISSED_OUTBOUND_TITLE,
-    fireAt: "2020-01-01T00:00:00.000Z",
+    title: FORMER_SCAN_TITLE,
+    fireAt: "2030-01-01T00:00:00.000Z",
+    firedAt: null,
     createdAt: "2019-12-31T00:00:00.000Z",
     status: "scheduled",
     version: 1,
     events: [],
     deliveryMode: "user",
     deliveryTarget: `chat:${CHAT}`,
-    deliveryAnchor: "om_legacyScan1",
-    repeat: DEFAULT_MISSED_OUTBOUND_REPEAT,
-    ...overrides,
+    deliveryAnchor: "om_samePayloadUser1",
+    repeat: "every:15m",
   };
 }
 
-test("Host startup deletes exact v0.4.21 scan loops before reminder orchestration and retains user reminders", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-scan-migration-"));
+test("Host startup retains a same-payload user reminder because historical scan loops have no unique marker", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-scan-collision-"));
   const stateDir = path.join(root, "state", "agents", AGENT);
   const workspaceDir = path.join(root, "agents", AGENT);
   const deliveries = [];
@@ -50,26 +49,14 @@ test("Host startup deletes exact v0.4.21 scan loops before reminder orchestratio
   const env = {
     LARKIN_HOME: root,
     LARKIN_CONFIG_DIR: root,
-    LARKIN_SERVER_ID: "server-legacy-migration",
+    LARKIN_SERVER_ID: "server-legacy-collision",
     LARKIN_AGENTS_CONFIG: JSON.stringify([agent]),
   };
   fs.mkdirSync(stateDir, { recursive: true });
   fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.writeFileSync(path.join(stateDir, "reminders.json"), JSON.stringify({ reminders: [
-    reminder(),
-    reminder({
-      reminderId: "same-title-user-reminder",
-      fireAt: "2030-01-01T00:00:00.000Z",
-      deliveryAnchor: "om_sameTitleUser1",
-      repeat: "every:1h",
-    }),
-    reminder({
-      reminderId: "user-reminder",
-      title: "User's 15-minute status reminder",
-      fireAt: "2030-01-01T00:00:00.000Z",
-      deliveryAnchor: "om_userReminder1",
-    }),
-  ] }, null, 2));
+  const expected = samePayloadUserReminder();
+  const reminderFile = path.join(stateDir, "reminders.json");
+  fs.writeFileSync(reminderFile, JSON.stringify({ reminders: [expected] }, null, 2));
   const host = createHostShell({
     env,
     runtimeHost,
@@ -80,12 +67,11 @@ test("Host startup deletes exact v0.4.21 scan loops before reminder orchestratio
   try {
     await host.start();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const reminders = JSON.parse(fs.readFileSync(path.join(stateDir, "reminders.json"), "utf8")).reminders;
-    assert.deepEqual(reminders.map((entry) => entry.reminderId), ["same-title-user-reminder", "user-reminder"]);
-    assert.equal(reminders.every((entry) => entry.status === "scheduled"), true);
-    assert.equal(deliveries.length, 0, "the past-due legacy loop must be gone before HostReminderOrchestrator can arm it");
+    const reminders = JSON.parse(fs.readFileSync(reminderFile, "utf8")).reminders;
+    assert.deepEqual(reminders, [expected]);
+    assert.equal(deliveries.length, 0);
   } finally {
-    await host.shutdown("legacy scan migration integration test complete");
+    await host.shutdown("legacy scan collision retention test complete");
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

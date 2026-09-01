@@ -8,8 +8,10 @@ import * as path from "node:path";
  * or deleted automatically.
  */
 export const INBOX_AUDIT_LEGACY_MIGRATION_NON_GOAL = "New versions no longer create missed-outbound loops; existing indistinguishable historical loops are not migrated or deleted automatically.";
-export const MAX_INBOX_AUDIT_TARGETS = 24;
-const MAX_STORED_TARGETS = 96;
+// Audits return every retained target. Storage remains bounded so a heartbeat
+// cannot accumulate an unbounded work list.
+export const MAX_INBOX_AUDIT_TARGETS = 96;
+const MAX_STORED_TARGETS = MAX_INBOX_AUDIT_TARGETS;
 const CHAT = /^oc_[A-Za-z0-9]+$/;
 const THREAD = /^omt_[A-Za-z0-9]+$/;
 const ANCHOR = /^om_[A-Za-z0-9_-]+$/;

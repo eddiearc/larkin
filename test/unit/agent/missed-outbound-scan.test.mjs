@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import {
   inboxAuditRegistryFile,
@@ -12,6 +13,19 @@ import {
 import { InboxAuditHeartbeat } from "../../../src/agent/inbox-audit-heartbeat.ts";
 
 const CHAT = "oc_7961b9d7be893b46520a926b90cf46eb";
+const ROUTING_SINK = path.resolve(import.meta.dirname, "../../support/inbox-audit-routing-sink.mjs");
+
+function reportFindingToControlledSink(audit, finding, traceFile) {
+  const source = finding && audit.targets.find((row) => row.target === finding.target && row.anchor === finding.anchor);
+  if (!source) return null;
+  return spawnSync(process.execPath, [ROUTING_SINK,
+    "im", "+messages-reply", "--message-id", source.anchor,
+    ...(source.target.startsWith("thread:") ? ["--reply-in-thread"] : []),
+    "--markdown", "Audit finding: follow-up is needed.", "--json"], {
+    encoding: "utf8",
+    env: { ...process.env, INBOX_AUDIT_ROUTING_TRACE_FILE: traceFile, INBOX_AUDIT_ROUTING_ANCHOR: source.anchor },
+  });
+}
 
 test("audit registry retains only authoritative human group/topic targets with their om_ anchor", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-"));
@@ -31,7 +45,43 @@ test("audit registry retains only authoritative human group/topic targets with t
     for (let index = 0; index < MAX_INBOX_AUDIT_TARGETS + 2; index += 1) {
       observeInboxAuditTarget(file, "cli_other", { ...common, chat_id: `oc_${index}a`, message_id: `om_other${index}` });
     }
-    assert.equal(readInboxAuditTargets(file, "cli_other").targets.length, MAX_INBOX_AUDIT_TARGETS);
+    const retained = readInboxAuditTargets(file, "cli_other");
+    assert.equal(retained.targets.length, MAX_INBOX_AUDIT_TARGETS);
+    assert.equal(retained.has_more, false, "all 96 retained audit targets are returned in one bounded result");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("controlled audit sink routes only a concrete thread finding to its om_ anchor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-route-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    const traceFile = path.join(root, "provider-writes.ndjson");
+    fs.writeFileSync(traceFile, "", { mode: 0o600 });
+    const common = { chat_id: CHAT, chat_type: "group", _scan_authority: true, _sender_is_bot: false };
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", {
+      ...common, thread_id: "omt_auditthread", message_id: "om_audit_thread_anchor",
+    }), true);
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", {
+      ...common, chat_type: "p2p", message_id: "om_dm_anchor",
+    }), false, "DM sources must not enter audit routing");
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", {
+      ...common, message_id: "rem_invalid_anchor",
+    }), false, "non-om_ anchors must not enter audit routing");
+
+    const audit = readInboxAuditTargets(file, "cli_audit");
+    const finding = { target: `thread:${CHAT}:omt_auditthread`, anchor: "om_audit_thread_anchor" };
+    const positive = reportFindingToControlledSink(audit, finding, traceFile);
+    assert.equal(positive.status, 0, positive.stderr);
+    const writes = fs.readFileSync(traceFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].target, finding.anchor);
+    assert.ok(writes[0].argv.includes("--reply-in-thread"));
+
+    fs.truncateSync(traceFile, 0);
+    assert.equal(reportFindingToControlledSink(audit, { target: `chat:${CHAT}`, anchor: "om_dm_anchor" }, traceFile), null);
+    assert.equal(reportFindingToControlledSink(audit, { target: `chat:${CHAT}`, anchor: "rem_invalid_anchor" }, traceFile), null);
+    assert.equal(reportFindingToControlledSink(audit, null, traceFile), null, "no finding must not write");
+    assert.equal(fs.readFileSync(traceFile, "utf8"), "", "DM, invalid anchor, and no finding produce zero provider writes");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -49,6 +49,10 @@ async function exerciseBuiltinPiTurn(binaryEntryPath, prefix, compiled = false) 
       LARKIN_HOME: temp,
       LARKIN_PI_DISTRIBUTION: "builtin",
       LARKIN_BINARY_ENTRY_PATH: binaryEntryPath,
+      // This source-tree harness must launch the entry module and its installed Pi assets,
+      // not inherit a standalone parent dispatch or package directory.
+      LARKIN_STANDALONE: "0",
+      PI_PACKAGE_DIR: undefined,
     };
     if (compiled) {
       const child = spawn(binaryEntryPath, ["__internal", "pi-rpc", "--mode", "rpc", "--no-session",
@@ -206,7 +210,8 @@ child.stdout.on("data", (chunk) => {
 child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 `, { mode: 0o700 });
     fs.chmodSync(wrapper, 0o700);
-    const baseEnv = { PATH: "/usr/bin:/bin", LARKIN_CONFIG_DIR: temp, LARKIN_HOME: temp, LARKIN_BINARY_ENTRY_PATH: entry };
+    const baseEnv = { PATH: "/usr/bin:/bin", LARKIN_CONFIG_DIR: temp, LARKIN_HOME: temp,
+      LARKIN_BINARY_ENTRY_PATH: entry, LARKIN_STANDALONE: "0", PI_PACKAGE_DIR: undefined };
     const standingPrompt = { version: "cross-distribution-fixture", content: "Reply concisely.", hash: "cross-distribution-fixture" };
     const external = createNativeRuntimeAdapter("pi", { piCommand: wrapper, env: baseEnv });
     const externalReadiness = await external.probe({ agentId, workspaceDir, stateDir, env: baseEnv });

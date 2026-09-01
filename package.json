@@ -73,6 +73,7 @@
     "test:eval:pi-bash-timeout": "bun run build && bun test --max-concurrency 1 test/live/pi-bash-timeout-live.test.mjs",
     "test:eval:runtime-agent-interface-v2": "bun test --max-concurrency 1 test/unit/evals/runtime-agent-interface-v2.test.mjs",
     "test:eval:authoritative-freshness-gate": "bun test --max-concurrency 1 test/unit/evals/authoritative-freshness-gate.test.mjs",
+    "test:eval:protected-message-recall": "bun run build && bun test --max-concurrency 1 test/unit/evals/protected-message-recall.test.mjs test/unit/app/lark-cli-launcher.test.mjs",
     "test:eval:agent-experience-v6": "bun test --max-concurrency 1 test/unit/evals/agent-experience-v6.test.mjs",
     "test:eval:mention-construction": "bun run build && LARKIN_RUN_MENTION_CONSTRUCTION_EVAL=1 bun test --max-concurrency 1 test/live/mention-construction-agent-eval.test.mjs",
     "test:eval:clickable-link-delivery": "bun run build && bun test --max-concurrency 1 test/unit/evals/clickable-link-delivery.test.mjs",

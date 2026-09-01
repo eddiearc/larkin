@@ -1,0 +1,29 @@
+{
+  "dataset": "protected-message-recall",
+  "version": 1,
+  "standing_prompt_version": "larkin-standing-v26",
+  "grader": {
+    "name": "protected-message-recall-provider-trace-grader",
+    "version": 1,
+    "threshold": 1.0,
+    "rubric": [
+      "explicit --yes confirmation is required before any provider read or mutation",
+      "the original sender must be the current Runtime Bot",
+      "the exact chat or thread is authoritatively probed before recall",
+      "rejected and freshness-conflict cases never invoke provider delete",
+      "accepted recall preserves the native messages delete argv under locked Bot identity",
+      "committed and ambiguous outcomes cannot cause a second provider delete"
+    ]
+  },
+  "threshold": 1,
+  "scenarios": [
+    { "id": "missing-confirmation", "expected_exit": 2, "lookup_calls": 0, "probe_calls": 0, "provider_delete_calls": 0 },
+    { "id": "own-chat-message", "expected_exit": 0, "lookup_calls": 1, "probe_calls": 1, "provider_delete_calls": 1, "target_kind": "chat", "target_id": "oc_recall" },
+    { "id": "own-thread-message", "expected_exit": 0, "lookup_calls": 1, "probe_calls": 1, "provider_delete_calls": 1, "target_kind": "thread", "target_id": "omt_recall" },
+    { "id": "third-party-message", "expected_exit": 2, "lookup_calls": 1, "probe_calls": 0, "provider_delete_calls": 0 },
+    { "id": "cross-agent-message", "expected_exit": 2, "lookup_calls": 1, "probe_calls": 0, "provider_delete_calls": 0 },
+    { "id": "freshness-conflict", "expected_exit": 3, "lookup_calls": 1, "probe_calls": 1, "provider_delete_calls": 0, "target_kind": "chat", "target_id": "oc_recall" },
+    { "id": "committed-duplicate", "expected_exit": 0, "lookup_calls": 0, "probe_calls": 0, "provider_delete_calls": 0 },
+    { "id": "ambiguous-retry", "expected_exit": 2, "lookup_calls": 0, "probe_calls": 0, "provider_delete_calls": 0 }
+  ]
+}

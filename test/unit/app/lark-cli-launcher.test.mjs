@@ -5,10 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "bun:test";
+import { gradeProtectedRecallTrace, loadProtectedMessageRecallEval } from "../../support/protected-message-recall-grader.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const launcher = await import(pathToFileURL(path.join(ROOT, "dist/app/lark-cli.mjs")).href);
 const stateModule = await import(pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href);
+const recallEval = loadProtectedMessageRecallEval(path.join(ROOT, "evals/protected-message-recall/scenarios.json"));
+const recallScenario = (id) => recallEval.scenarios.find((scenario) => scenario.id === id);
 
 function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-native-lark-cli-"));
@@ -60,6 +63,8 @@ function fixture(history = { ok: true, identity: "bot", data: { messages: [] } }
 test("launcher classifies protected writes, removed drafts, bypasses, and observational help", () => {
   assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-send", "--chat-id", "oc_x", "--text", "hi"]).kind, "guarded");
   assert.equal(launcher.classifyLarkCliCommand(["im", "+messages-reply", "--message-id", "om_x", "--text", "hi"]).kind, "guarded");
+  assert.deepEqual(launcher.classifyLarkCliCommand(["im", "messages", "delete", "--message-id", "om_x", "--yes", "--json"]),
+    { kind: "guarded", operation: "recall" });
   assert.equal(launcher.classifyLarkCliCommand(["larkin-draft", "list"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["im", "messages", "create", "--data", "{}"]).kind, "denied");
   assert.equal(launcher.classifyLarkCliCommand(["api", "POST", "/open-apis/im/v1/messages"]).kind, "denied");
@@ -373,6 +378,143 @@ test("forward merge urgent and raw/API write surfaces remain denied before spawn
     ]) assert.equal(f.run(argv).code, 2, argv.join(" "));
     assert.equal(f.calls.length, 0);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+function ownRecallMessage(overrides = {}) {
+  return {
+    message_id: "om_recall",
+    chat_id: "oc_recall",
+    create_time: "1786957010773",
+    sender: { id: "cli_nativeLarkA1", id_type: "app_id", sender_type: "app" },
+    ...overrides,
+  };
+}
+
+function recallArgv(messageId = "om_recall", extra = []) {
+  return ["im", "messages", "delete", "--message-id", messageId, "--yes", "--json", ...extra];
+}
+
+function seedRecallCursor(store, target = "feishu.im/chat/oc_recall", revisionTime = "1786957010773", messageIds = ["om_recall"]) {
+  store.mergeFreshnessCursor(target, { schema: 1, revisionTime, messageIds }, (seen, current) => current ?? seen);
+}
+
+function nativeTrace(calls) {
+  return calls.map((call) => call.args.slice(1));
+}
+
+test("protected recall requires explicit confirmation before provider access", () => {
+  const f = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage()] } });
+  try {
+    const result = f.run(["im", "messages", "delete", "--message-id", "om_recall", "--json"]);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /--yes/);
+    assert.equal(f.calls.length, 0);
+    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls: [] },
+      recallScenario("missing-confirmation")), { passed: true, failures: [] });
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected recall verifies own sender, probes exact chat, and preserves native delete argv", () => {
+  const f = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage()] } });
+  try {
+    seedRecallCursor(f.store);
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: `${JSON.stringify({ ok: true, identity: "bot", data: {} })}\n`, stderr: "", error: undefined });
+    const result = f.run(recallArgv());
+    assert.equal(result.code, 0, result.stderr);
+    const calls = nativeTrace(f.calls);
+    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls },
+      recallScenario("own-chat-message")), { passed: true, failures: [] });
+    const deletion = calls.find((call) => call[0] === "im" && call[1] === "messages" && call[2] === "delete");
+    assert.deepEqual(deletion, ["im", "messages", "delete", "--message-id", "om_recall", "--yes", "--json", "--as", "bot"]);
+    assert.equal(f.store.readJson("freshnessState", {}).message_recalls.om_recall.status, "deleted");
+    assert.equal(f.store.readFreshnessCursor("feishu.im/chat/oc_recall"), null,
+      "deleting the only observed head clears the stale cursor atomically with the recall ledger");
+
+    const beforeDuplicate = f.calls.length;
+    const duplicate = f.run(recallArgv());
+    assert.equal(duplicate.code, 0, duplicate.stderr);
+    assert.equal(JSON.parse(duplicate.stdout).duplicate, true);
+    const duplicateCalls = nativeTrace(f.calls.slice(beforeDuplicate));
+    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: duplicate.code, messageId: "om_recall", calls: duplicateCalls },
+      recallScenario("committed-duplicate")), { passed: true, failures: [] });
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected recall derives and probes a thread target instead of falling back to chat", () => {
+  const message = ownRecallMessage({ thread_id: "omt_recall" });
+  const f = fixture({ ok: true, identity: "bot", data: { messages: [message] } });
+  try {
+    seedRecallCursor(f.store, "feishu.im/thread/oc_recall/omt_recall");
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: `${JSON.stringify({ ok: true, identity: "bot", data: {} })}\n`, stderr: "", error: undefined });
+    const result = f.run(recallArgv());
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls: nativeTrace(f.calls) },
+      recallScenario("own-thread-message")), { passed: true, failures: [] });
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected recall rejects human and cross-agent senders without freshness probe or provider delete", () => {
+  for (const [scenarioId, sender] of [
+    ["third-party-message", { id: "ou_human", id_type: "open_id", sender_type: "user" }],
+    ["cross-agent-message", { id: "cli_otherAppA1", id_type: "app_id", sender_type: "app" }],
+  ]) {
+    const f = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage({ sender })] } });
+    try {
+      seedRecallCursor(f.store);
+      const result = f.run(recallArgv());
+      assert.equal(result.code, 2);
+      assert.match(result.stderr, /跨 Agent|第三方/);
+      assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls: nativeTrace(f.calls) },
+        recallScenario(scenarioId)), { passed: true, failures: [] });
+      assert.equal(f.store.readJson("freshnessState", {}).message_recalls, undefined);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("protected recall stops on freshness conflict before provider mutation", () => {
+  const f = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage({ create_time: "1786957010774" })] } });
+  try {
+    seedRecallCursor(f.store, "feishu.im/chat/oc_recall", "1786957010773", ["om_seen"]);
+    const result = f.run(recallArgv());
+    assert.equal(result.code, 3, result.stderr);
+    assert.match(result.stderr, /freshness_conflict/);
+    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls: nativeTrace(f.calls) },
+      recallScenario("freshness-conflict")), { passed: true, failures: [] });
+    assert.equal(f.store.readJson("freshnessState", {}).message_recalls, undefined,
+      "a pre-commit conflict must not claim the destructive recall ledger");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("protected recall fails closed after ambiguous provider termination and retries definitive rejection", () => {
+  const ambiguous = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage()] } });
+  try {
+    seedRecallCursor(ambiguous.store);
+    ambiguous.setWriteResult({ status: null, signal: "SIGKILL", output: [], pid: 1, stdout: "", stderr: "", error: undefined });
+    assert.equal(ambiguous.run(recallArgv()).code, 137);
+    const deletesBefore = ambiguous.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "delete").length;
+    const retryBefore = ambiguous.calls.length;
+    const retry = ambiguous.run(recallArgv());
+    assert.equal(retry.code, 2);
+    assert.match(retry.stderr, /结果不明确/);
+    assert.equal(ambiguous.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "delete").length, deletesBefore);
+    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: retry.code, messageId: "om_recall", calls: nativeTrace(ambiguous.calls.slice(retryBefore)) },
+      recallScenario("ambiguous-retry")), { passed: true, failures: [] });
+  } finally { fs.rmSync(ambiguous.root, { recursive: true, force: true }); }
+
+  const rejected = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage()] } });
+  try {
+    seedRecallCursor(rejected.store);
+    rejected.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: JSON.stringify({
+      ok: false, error: { code: 230011, message: "provider rejected" },
+    }), error: undefined });
+    assert.equal(rejected.run(recallArgv()).code, 7);
+    assert.equal(rejected.store.readJson("freshnessState", {}).message_recalls.om_recall.status, "failed");
+    assert.equal(rejected.run(recallArgv()).code, 7);
+    assert.equal(rejected.calls.filter((call) => call.args[2] === "messages" && call.args[3] === "delete").length, 2,
+      "a definitive provider rejection may be retried after a new ownership and freshness check");
+  } finally { fs.rmSync(rejected.root, { recursive: true, force: true }); }
 });
 
 function ownBotMessage(overrides = {}) {

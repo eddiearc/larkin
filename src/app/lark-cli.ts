@@ -45,7 +45,7 @@ function portableSignalCode(signal: NodeJS.Signals): number {
 
 export type LarkCliCommandDecision =
   | { kind: "passthrough" }
-  | { kind: "guarded"; operation: "send" | "reply" | "card" | "urgent-app" }
+  | { kind: "guarded"; operation: "send" | "reply" | "card" | "urgent-app" | "recall" }
   | { kind: "comment-reply" }
   | { kind: "denied"; reason: string };
 
@@ -229,6 +229,11 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
       ? (parsed.commandArgv.includes("--dry-run") || parsed.help ? { kind: "passthrough" } : { kind: "guarded", operation: "urgent-app" })
       : noncanonicalProtectedDecision();
   }
+  if (exactPath(parsed.commandArgv, ["im", "messages", "delete"])) {
+    return uniqueProtectedOperation(protectedPaths, "raw-delete")
+      ? (parsed.commandArgv.includes("--dry-run") || parsed.help ? { kind: "passthrough" } : { kind: "guarded", operation: "recall" })
+      : noncanonicalProtectedDecision();
+  }
   if (exactPath(parsed.commandArgv, ["im", "messages", "patch"]) || exactPath(parsed.commandArgv, ["im", "messages", "update"])) {
     const expected = parsed.commandArgv[2] === "patch" ? "card-patch" : "card-update";
     return uniqueProtectedOperation(protectedPaths, expected)
@@ -241,7 +246,7 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
       ? { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" }
       : noncanonicalProtectedDecision();
   }
-  if (["forward", "merge_forward", "delete", "urgent_phone", "urgent_sms"]
+  if (["forward", "merge_forward", "urgent_phone", "urgent_sms"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "messages", operation]))) {
     const expected = `raw-${parsed.commandArgv[2]}` as ProtectedOperation;
     return uniqueProtectedOperation(protectedPaths, expected)
@@ -512,6 +517,59 @@ function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarde
   return feishuImTarget(target);
 }
 
+type RecallLedgerEntry = {
+  status: "deleting" | "deleted" | "failed";
+  target: string;
+  updated_at: string;
+};
+type RecallLedgerState = {
+  version: 1;
+  cursors?: Record<string, { generation: string; cursor: FeishuImCursor }>;
+  message_recalls?: Record<string, RecallLedgerEntry>;
+};
+
+function recallLedgerEntry(store: AgentStateStore, messageId: string): RecallLedgerEntry | null {
+  const state = store.readJson<RecallLedgerState>("freshnessState", { version: 1, cursors: {} });
+  const entry = state.message_recalls?.[messageId];
+  return entry && typeof entry === "object" ? entry : null;
+}
+
+function claimRecall(store: AgentStateStore, messageId: string, target: string): "ready" | "deleted" | "ambiguous" {
+  return store.mutateJson<RecallLedgerState, "ready" | "deleted" | "ambiguous">(
+    "freshnessState", { version: 1, cursors: {} }, (state) => {
+      state.message_recalls ??= {};
+      const prior = state.message_recalls[messageId];
+      if (prior?.status === "deleted") return "deleted";
+      if (prior?.status === "deleting") return "ambiguous";
+      state.message_recalls[messageId] = { status: "deleting", target, updated_at: new Date().toISOString() };
+      return "ready";
+    },
+  );
+}
+
+function finalizeFailedRecall(store: AgentStateStore, messageId: string, target: string): void {
+  store.mutateJson<RecallLedgerState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
+    state.message_recalls ??= {};
+    state.message_recalls[messageId] = { status: "failed", target, updated_at: new Date().toISOString() };
+  });
+}
+
+function finalizeSuccessfulRecall(
+  store: AgentStateStore,
+  messageId: string,
+  target: string,
+  cursor: FeishuImCursor | null,
+  generation: string,
+): void {
+  store.mutateJson<RecallLedgerState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
+    state.cursors ??= {};
+    if (cursor) state.cursors[target] = { generation, cursor };
+    else delete state.cursors[target];
+    state.message_recalls ??= {};
+    state.message_recalls[messageId] = { status: "deleted", target, updated_at: new Date().toISOString() };
+  });
+}
+
 function uniqueRawFlagValue(argv: readonly string[], flag: string): string | null {
   const nativeArgv = nativeArgvBeforeBoundary(argv);
   const values: string[] = [];
@@ -526,6 +584,53 @@ function uniqueRawFlagValue(argv: readonly string[], flag: string): string | nul
   }
   if (values.length > 1) throw new Error(`Runtime im messages urgent_app 不允许重复 ${flag}；官方 CLI 会采用最后一次赋值`);
   return values[0] || null;
+}
+
+function assertRecallSyntax(argv: readonly string[]): string {
+  const messageId = policyFlagValue(argv, "--message-id");
+  if (!messageId || !/^om_[A-Za-z0-9_-]+$/.test(messageId)) {
+    throw new Error("Runtime im messages delete 只接受真实 Feishu om_ message_id");
+  }
+  const yesCount = nativeArgvBeforeBoundary(argv).filter((argument) => argument === "--yes").length;
+  if (yesCount !== 1) throw new Error("Runtime im messages delete 必须且只能指定一次 --yes 显式确认");
+  if (policyFlagValue(argv, "--idempotency-key")) {
+    throw new Error("Runtime im messages delete 不接受 provider idempotency key；Runtime 使用本地 recall ledger 防止重复提交");
+  }
+  return messageId;
+}
+
+function resolveOwnedRecallTarget(
+  messageId: string,
+  feishuAppId: string,
+  env: Env,
+  io: LarkCliIo,
+  dependencies: LarkCliLauncherDependencies,
+): { target: FreshnessTarget; message: FeishuImMessage } {
+  const result = callNative([
+    "im", "+messages-mget", "--message-ids", messageId, "--no-reactions", "--json", "--as", "bot",
+  ], env, io, dependencies);
+  if (result.error) throw new Error(`recall message lookup failed: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`recall message lookup exited ${result.status ?? "without status"}: ${result.stderr || "no details"}`);
+  let value: unknown;
+  try { value = JSON.parse(result.stdout || ""); } catch { throw new Error("recall message lookup returned non-JSON output"); }
+  const root = value as { ok?: unknown; identity?: unknown; data?: { messages?: unknown } } | null;
+  if (!root || root.ok !== true || !root.data) throw new Error("recall message lookup returned an unsuccessful payload");
+  if (root.identity !== "bot") throw new Error("recall message lookup did not confirm Bot identity");
+  if (!Array.isArray(root.data.messages)) throw new Error("recall message lookup omitted messages");
+  const matches = root.data.messages.filter((row) => row && typeof row === "object" && !Array.isArray(row)
+    && (row as { message_id?: unknown }).message_id === messageId) as FeishuImMessage[];
+  if (matches.length !== 1) throw new Error(`无法唯一确认 ${messageId} 的原始消息；禁止旁路 recall ownership`);
+  const message = matches[0]!;
+  if (typeof message.chat_id !== "string" || !message.chat_id) {
+    throw new Error(`无法从官方 +messages-mget 确认 ${messageId} 的 chat；禁止旁路 recall freshness`);
+  }
+  if (!isOwnBotMessage(message, feishuAppId)) {
+    throw new Error("Runtime im messages delete 只能撤回当前 Runtime Bot 自己发出的消息；拒绝跨 Agent 或第三方消息");
+  }
+  const target = typeof message.thread_id === "string" && message.thread_id
+    ? feishuImTarget(`thread:${message.chat_id}:${message.thread_id}`)
+    : feishuImTarget(`chat:${message.chat_id}`);
+  return { target, message };
 }
 
 function resolveUrgentAppTarget(
@@ -569,9 +674,10 @@ function botArgv(argv: readonly string[], intentId: string, decision?: Extract<L
   const insertion = boundary < 0 ? next.length : boundary;
   const injected: string[] = [];
   if (!parsed.flags.has("--as")) injected.push("--as", "bot");
-  if (decision?.operation !== "urgent-app" && !parsed.flags.has("--idempotency-key")) injected.push("--idempotency-key", intentId);
+  const supportsProviderIdempotency = decision?.operation !== "urgent-app" && decision?.operation !== "recall";
+  if (supportsProviderIdempotency && !parsed.flags.has("--idempotency-key")) injected.push("--idempotency-key", intentId);
   next.splice(insertion, 0, ...injected);
-  if (decision?.operation !== "urgent-app") return next;
+  if (supportsProviderIdempotency) return next;
   const rewritten: string[] = [];
   for (let index = 0; index < next.length; index += 1) {
     const argument = next[index];
@@ -765,7 +871,7 @@ function emitFreshnessError(io: LarkCliIo, input: {
     target: input.target,
     ...(input.current ? { current_cursor: input.current } : {}),
     ...(input.messages ? { unseen_messages: input.messages } : {}),
-    next: "Reconsider the returned context, then retry the ordinary send/reply/card command; history is probed again before every write.",
+    next: "Reconsider the returned context, then retry the ordinary send/reply/card/recall command; history is probed again before every write.",
   })}\n`);
 }
 
@@ -964,6 +1070,18 @@ function emitDuplicatedWrite(
   return 0;
 }
 
+function emitDuplicatedRecall(io: LarkCliIo, messageId: string, target: string): number {
+  io.stdout(`${JSON.stringify({
+    ok: true,
+    identity: "bot",
+    committed: true,
+    duplicate: true,
+    message_id: messageId,
+    target,
+  })}\n`);
+  return 0;
+}
+
 function emitCommittedUnverified(
   result: SpawnSyncReturns<string>,
   io: LarkCliIo,
@@ -1053,10 +1171,19 @@ export function runLarkCli(
   }
   if (decision.kind === "passthrough") return passthroughWithObservation(effectiveArgv, privateEnv, io, nativeDependencies, store);
   try {
+    const recallMessageId = decision.operation === "recall" ? assertRecallSyntax(effectiveArgv) : null;
+    const priorRecall = recallMessageId ? recallLedgerEntry(store, recallMessageId) : null;
+    if (priorRecall?.status === "deleted") return emitDuplicatedRecall(io, recallMessageId!, priorRecall.target);
+    if (priorRecall?.status === "deleting") {
+      throw new Error("message recall 上次 provider 结果不明确，已 fail-closed 以避免重复撤回；请由用户检查原会话");
+    }
+    const recall = recallMessageId
+      ? resolveOwnedRecallTarget(recallMessageId, agent.feishuAppId, privateEnv, io, nativeDependencies)
+      : null;
     const urgent = decision.operation === "urgent-app"
       ? resolveUrgentAppTarget(effectiveArgv, privateEnv, io, nativeDependencies)
       : null;
-    const target = urgent?.target ?? guardedTarget(decision, effectiveArgv, store);
+    const target = recall?.target ?? urgent?.target ?? guardedTarget(decision, effectiveArgv, store);
     const targetKey = serializeFeishuImTarget(target);
     const generation = freshnessGeneration(privateEnv);
     const seen = store.readFreshnessCursor<FeishuImCursor>(targetKey, generation);
@@ -1073,6 +1200,24 @@ export function runLarkCli(
       emitFreshnessError(io, { subtype: "freshness_conflict", target: targetKey, current: gated.current, messages: gated.context });
       store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, generation);
       return 3;
+    }
+    if (decision.operation === "recall") {
+      const claim = claimRecall(store, recallMessageId!, targetKey);
+      if (claim === "deleted") return emitDuplicatedRecall(io, recallMessageId!, targetKey);
+      if (claim === "ambiguous") {
+        throw new Error("message recall 上次 provider 结果不明确，已 fail-closed 以避免重复撤回；请由用户检查原会话");
+      }
+      const recallWrite = callNative(botArgv(effectiveArgv, "", decision), privateEnv, io, nativeDependencies);
+      if (!recallWrite.error && recallWrite.status === 0) {
+        const predictedSnapshot = {
+          messages: gated.snapshot.messages.filter((message) => message.message_id !== recallMessageId),
+        };
+        const predictedCursor = feishuImFreshnessAdapter.cursor(predictedSnapshot);
+        finalizeSuccessfulRecall(store, recallMessageId!, targetKey, predictedCursor, generation);
+      } else if (definitiveProviderRejection(recallWrite)) {
+        finalizeFailedRecall(store, recallMessageId!, targetKey);
+      }
+      return emitNativeResult(recallWrite, io);
     }
     if (decision.operation === "urgent-app") {
       const userIds = assertUrgentAppPreconditions(effectiveArgv, urgent!.message, target, agent.feishuAppId);

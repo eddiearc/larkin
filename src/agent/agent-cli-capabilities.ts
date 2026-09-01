@@ -6,7 +6,7 @@ import { INTERNAL_AGENT_CLI, internalCommandShell } from "../app/internal-comman
 export const AGENT_CLI_CAPABILITIES = Object.freeze({
   version: 1,
   commands: Object.freeze({
-    inbox: Object.freeze(["check", "poll"]),
+    inbox: Object.freeze(["check", "poll", "audit"]),
     comment: Object.freeze(["reply"]),
     reminder: Object.freeze(["schedule", "list", "snooze", "update", "cancel", "log"]),
     interaction: Object.freeze(["callback-status", "callback-probe", "create", "get", "resolve"]),
@@ -31,7 +31,9 @@ export function agentCliPromptCapabilities(executable = "larkin"): AgentCliCapab
   const commands = Object.entries(AGENT_CLI_CAPABILITIES.commands).flatMap(([group, operations]) =>
     operations.map((operation) => ({
       command: `${group} ${operation}`,
-      purpose: group === "inbox" ? (operation === "check" ? "Read pending target summaries without consuming messages." : "Poll full messages and direct-ack the returned batch.") :
+      purpose: group === "inbox" ? (operation === "check" ? "Read pending target summaries without consuming messages."
+        : operation === "audit" ? "Read bounded observed group/topic audit targets and instructions."
+          : "Poll full messages and direct-ack the returned batch.") :
         group === "comment" ? "Reply once to the exact cloud-document comment bound by a polled Inbox message id." :
         group === "reminder" ? "Manage this Agent's durable reminders." :
           group === "interaction" ? "Create, inspect, or resolve a durable interactive card run." :

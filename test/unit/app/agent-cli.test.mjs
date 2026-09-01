@@ -40,7 +40,7 @@ function fixture() {
 }
 
 test("Agent CLI manifest is the single machine-readable public command inventory", () => {
-  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.inbox, ["check", "poll"]);
+  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.inbox, ["check", "poll", "audit"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.comment, ["reply"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.reminder, ["schedule", "list", "snooze", "update", "cancel", "log"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.interaction, ["callback-status", "callback-probe", "create", "get", "resolve"]);
@@ -282,6 +282,21 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
       );
     }
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("inbox audit returns bounded group/topic instructions without a delivery side effect", () => {
+  const f = fixture();
+  try {
+    fs.writeFileSync(path.join(f.root, "inbox-audit.json"), JSON.stringify({ version: 1, targets: [{
+      agent_id: f.agentId, target: "thread:oc_audit:omt_audit", anchor: "om_audit", observed_at: "2026-07-20T00:00:00.000Z",
+    }] }), { mode: 0o600 });
+    const result = f.run(["inbox", "audit", "--json"]);
+    assert.equal(result.code, 0, result.stderr);
+    const body = JSON.parse(result.stdout);
+    assert.deepEqual(body.targets.map((row) => ({ target: row.target, anchor: row.anchor })), [{ target: "thread:oc_audit:omt_audit", anchor: "om_audit" }]);
+    assert.match(body.targets[0].instruction, /threads-messages-list/);
+    assert.equal(body.no_finding, "stay_silent");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("inbox check is repeatable and content-light while poll direct-acks a bounded target batch", async () => {

@@ -2,94 +2,109 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import {
-  DEFAULT_MISSED_OUTBOUND_TITLE,
-  ensureDefaultMissedOutboundScanReminder,
-  parseScanDeliveryTarget,
-  persistInboundScanTarget,
+  inboxAuditRegistryFile,
+  MAX_INBOX_AUDIT_TARGETS,
+  observeInboxAuditTarget,
+  readInboxAuditTargets,
 } from "../../../src/agent/missed-outbound-scan.ts";
-test("parseScanDeliveryTarget fail-closes without target, DM, or thread om_ anchor", () => {
-  assert.throws(() => parseScanDeliveryTarget(""), /必须显式指定 delivery target/);
-  assert.throws(() => parseScanDeliveryTarget("dm:ou_someone"), /禁止推断 DM/);
-  assert.throws(() => parseScanDeliveryTarget("thread:oc_abc:omt_def"), /必须是严格 om_/);
+import { InboxAuditHeartbeat } from "../../../src/agent/inbox-audit-heartbeat.ts";
+
+const CHAT = "oc_7961b9d7be893b46520a926b90cf46eb";
+const ROUTING_SINK = path.resolve(import.meta.dirname, "../../support/inbox-audit-routing-sink.mjs");
+
+function reportFindingToControlledSink(audit, finding, traceFile) {
+  const source = finding && audit.targets.find((row) => row.target === finding.target && row.anchor === finding.anchor);
+  if (!source) return null;
+  return spawnSync(process.execPath, [ROUTING_SINK,
+    "im", "+messages-reply", "--message-id", source.anchor,
+    ...(source.target.startsWith("thread:") ? ["--reply-in-thread"] : []),
+    "--markdown", "Audit finding: follow-up is needed.", "--json"], {
+    encoding: "utf8",
+    env: { ...process.env, INBOX_AUDIT_ROUTING_TRACE_FILE: traceFile, INBOX_AUDIT_ROUTING_ANCHOR: source.anchor },
+  });
+}
+
+test("audit registry retains only authoritative human group/topic targets with their om_ anchor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    const common = { chat_id: CHAT, chat_type: "group", _scan_authority: true, _sender_is_bot: false };
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, message_id: "om_chat" }), true);
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, thread_id: "omt_topic", message_id: "om_topic" }), true);
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, chat_type: "p2p", message_id: "om_dm" }), false);
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, _sender_is_bot: true, message_id: "om_bot" }), false);
+    const audit = readInboxAuditTargets(file, "cli_audit");
+    assert.equal(audit.targets.length, 2);
+    assert.equal(audit.targets.every((row) => row.target.startsWith("chat:") || row.target.startsWith("thread:")), true);
+    assert.equal(audit.targets.some((row) => row.target === `thread:${CHAT}:omt_topic` && row.anchor === "om_topic"), true);
+    assert.equal(audit.targets.every((row) => /existing guarded larkin im reply/.test(row.instruction)), true);
+    assert.equal(audit.no_finding, "stay_silent");
+    for (let index = 0; index < MAX_INBOX_AUDIT_TARGETS + 2; index += 1) {
+      observeInboxAuditTarget(file, "cli_other", { ...common, chat_id: `oc_${index}a`, message_id: `om_other${index}` });
+    }
+    const retained = readInboxAuditTargets(file, "cli_other");
+    assert.equal(retained.targets.length, MAX_INBOX_AUDIT_TARGETS);
+    assert.equal(retained.has_more, false, "all 96 retained audit targets are returned in one bounded result");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("per-target reminders coexist and duplicate inbound is idempotent", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-scan-rem-"));
-  const file = path.join(dir, "reminders.json");
-  fs.writeFileSync(file, JSON.stringify({ reminders: [] }), { mode: 0o600 });
+test("controlled audit sink routes only a concrete thread finding to its om_ anchor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-route-"));
   try {
-    const chat = persistInboundScanTarget(dir, {
-      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
-      chat_type: "group",
-      _scan_authority: true,
-      thread_id: null,
-      message_id: "om_chat1",
-    }, "cli_a1", file);
-    const again = persistInboundScanTarget(dir, {
-      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
-      chat_type: "group",
-      _scan_authority: true,
-      thread_id: null,
-      message_id: "om_chat1",
-    }, "cli_a1", file);
-    const thread = persistInboundScanTarget(dir, {
-      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
-      chat_type: "group",
-      _scan_authority: true,
-      thread_id: "omt_19f44e32c00f1c85",
-      message_id: "om_thread1",
-    }, "cli_a1", file);
-    assert.equal(chat.scope, "chat");
-    assert.equal(again.deliveryTarget, chat.deliveryTarget);
-    assert.equal(thread.scope, "thread");
-    const live = JSON.parse(fs.readFileSync(file, "utf8")).reminders.filter((reminder) => reminder.status === "scheduled");
-    assert.equal(live.length, 2);
-    assert.equal(live.every((reminder) => reminder.title === DEFAULT_MISSED_OUTBOUND_TITLE), true);
-    assert.equal(live.every((reminder) => reminder.repeat === "every:15m"), true);
-    assert.equal(live.every((reminder) => reminder.version === 1), true);
-    assert.equal(live.every((reminder) => Array.isArray(reminder.events)), true);
-    assert.throws(() => persistInboundScanTarget(dir, {
-      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
-      chat_type: "group",
-      _sender_is_bot: true,
-      message_id: "om_bot1",
-    }, "cli_a1", file), /只接受 human inbound/);
-    assert.throws(() => persistInboundScanTarget(dir, {
-      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
-      chat_type: "group",
-      message_id: "om_noauth",
-    }, "cli_a1", file), /权威/);
-    assert.throws(() => persistInboundScanTarget(dir, {
-      chat_id: "oc_7961b9d7be893b46520a926b90cf46eb",
-      chat_type: "p2p",
-      _scan_authority: true,
-      message_id: "om_dm1",
-    }, "cli_a1", file), /禁止 DM/);
-    fs.writeFileSync(file, JSON.stringify({
-      reminders: [{ ...live[0], status: "canceled", reminderId: "canceled1", deliveryTarget: "chat:oc_canceledaaaaaaaaaaaaaaaaaaaaaaa" }],
-    }), { mode: 0o600 });
-    const blocked = ensureDefaultMissedOutboundScanReminder({
-      storeFile: file,
-      agentId: "cli_a1",
-      deliveryTarget: "chat:oc_canceledaaaaaaaaaaaaaaaaaaaaaaa",
-      deliveryAnchor: "om_chat1",
-    });
-    assert.equal(blocked.created, false);
-    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).reminders.filter((reminder) => reminder.status === "scheduled").length, 0);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+    const file = inboxAuditRegistryFile(root);
+    const traceFile = path.join(root, "provider-writes.ndjson");
+    fs.writeFileSync(traceFile, "", { mode: 0o600 });
+    const common = { chat_id: CHAT, chat_type: "group", _scan_authority: true, _sender_is_bot: false };
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", {
+      ...common, thread_id: "omt_auditthread", message_id: "om_audit_thread_anchor",
+    }), true);
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", {
+      ...common, chat_type: "p2p", message_id: "om_dm_anchor",
+    }), false, "DM sources must not enter audit routing");
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", {
+      ...common, message_id: "rem_invalid_anchor",
+    }), false, "non-om_ anchors must not enter audit routing");
+
+    const audit = readInboxAuditTargets(file, "cli_audit");
+    const finding = { target: `thread:${CHAT}:omt_auditthread`, anchor: "om_audit_thread_anchor" };
+    const positive = reportFindingToControlledSink(audit, finding, traceFile);
+    assert.equal(positive.status, 0, positive.stderr);
+    const writes = fs.readFileSync(traceFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].target, finding.anchor);
+    assert.ok(writes[0].argv.includes("--reply-in-thread"));
+
+    fs.truncateSync(traceFile, 0);
+    assert.equal(reportFindingToControlledSink(audit, { target: `chat:${CHAT}`, anchor: "om_dm_anchor" }, traceFile), null);
+    assert.equal(reportFindingToControlledSink(audit, { target: `chat:${CHAT}`, anchor: "rem_invalid_anchor" }, traceFile), null);
+    assert.equal(reportFindingToControlledSink(audit, null, traceFile), null, "no finding must not write");
+    assert.equal(fs.readFileSync(traceFile, "utf8"), "", "DM, invalid anchor, and no finding produce zero provider writes");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("ensureDefaultMissedOutboundScanReminder fail-closes without target", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-scan-empty-"));
-  const file = path.join(dir, "reminders.json");
-  fs.writeFileSync(file, JSON.stringify({ reminders: [] }), { mode: 0o600 });
-  try {
-    assert.throws(() => ensureDefaultMissedOutboundScanReminder({ storeFile: file, agentId: "cli_a1" }), /必须显式指定 delivery target/);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test("one Host timer callback delivers targetless runtime audit wakes to multiple agents", async () => {
+  const timers = [];
+  const inbox = [];
+  const deliveries = [];
+  const heartbeat = new InboxAuditHeartbeat({
+    agents: [{ agentId: "cli_auditOne" }, { agentId: "cli_auditTwo" }],
+    stateStore: () => ({ appendCanonicalInboxOnce(envelope) { inbox.push(envelope); return { status: "appended", envelope }; } }),
+    runtimeHost: { async deliver(agentId, envelope) { deliveries.push({ agentId, envelope }); } },
+    now: () => 1234,
+    setTimer(callback, delay) { timers.push({ callback, delay }); return { unref() {} }; },
+    clearTimer() {},
+  });
+  heartbeat.start();
+  heartbeat.start();
+  assert.equal(timers.length, 1, "multiple agents still share one Host timer");
+  assert.equal(timers[0].delay, 15 * 60_000);
+  await timers[0].callback();
+  assert.equal(timers.length, 2, "callback re-arms one successor timer");
+  assert.equal(deliveries.length, 2);
+  assert.equal(inbox.every((row) => row.target === "runtime:reminder" && row.kind === "reminder"), true);
+  assert.equal(inbox.every((row) => !Object.hasOwn(row, "deliveryTarget") && !Object.hasOwn(row, "deliveryAnchor")), true);
+  heartbeat.stop();
 });

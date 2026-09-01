@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
 import * as larkinConfig from "../platform/config.js";
 import { projectInboxCheck, projectInboxEvents, type InboxEnvelope } from "../agent/inbox-projection.js";
+import { inboxAuditRegistryFile, readInboxAuditTargets } from "../agent/missed-outbound-scan.js";
 import { createReminderRoutes } from "../agent/reminder-routes.js";
 import { InteractionStateMachine } from "../agent/interaction-state-machine.js";
 import { issueCallbackProbe, readCallbackCapability } from "../platform/callback-capability.js";
@@ -484,10 +485,17 @@ export function runAgentCli(
     const { config, agent } = requireAgent(env);
     const stateStore = dependencies.stateStore ?? createAgentStateStore(config.larkinHome, agent.agentId);
     if (group === "inbox") {
-      if (!["check", "poll"].includes(subcommand || "")) {
-        throw new Error("inbox 只支持 `larkin inbox check` 与 `larkin inbox poll`");
+      if (!["check", "poll", "audit"].includes(subcommand || "")) {
+        throw new Error("inbox 只支持 `larkin inbox check`、`larkin inbox poll` 与 `larkin inbox audit`");
       }
       const options = parseOptions(rest, new Set(["--json"]));
+      if (subcommand === "audit") {
+        if (options.positionals.length || options.values.size || options.booleans.size > 1) {
+          throw new Error("inbox audit 只接受 --json");
+        }
+        emitJson(io, readInboxAuditTargets(inboxAuditRegistryFile(config.larkinHome), agent.agentId));
+        return 0;
+      }
       if (options.positionals.length || [...options.values.keys()].some((flag) => !["--target", "--limit"].includes(flag))) {
         throw new Error(`inbox ${subcommand} 只接受 --target、${subcommand === "poll" ? "--limit、" : ""}--json`);
       }

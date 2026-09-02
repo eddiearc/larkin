@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.4.22",
+  "version": "0.4.23",
   "private": false,
   "larkinPackageRole": "npm-published",
   "files": [
@@ -77,6 +77,8 @@
     "test:eval:agent-experience-v6": "bun test --max-concurrency 1 test/unit/evals/agent-experience-v6.test.mjs",
     "test:eval:mention-construction": "bun run build && LARKIN_RUN_MENTION_CONSTRUCTION_EVAL=1 bun test --max-concurrency 1 test/live/mention-construction-agent-eval.test.mjs",
     "test:eval:clickable-link-delivery": "bun run build && bun test --max-concurrency 1 test/unit/evals/clickable-link-delivery.test.mjs",
+    "test:eval:im-body-mode": "bun run build && bun test --max-concurrency 1 test/unit/evals/im-body-mode.test.mjs",
+    "test:eval:im-body-mode:native": "bun run build && LARKIN_RUN_IM_BODY_MODE_EVAL=1 bun test --max-concurrency 1 test/live/im-body-mode-agent-eval.test.mjs",
     "test:eval:clickable-link-delivery:native": "bun run build && LARKIN_RUN_CLICKABLE_LINK_DELIVERY_EVAL=1 bun test --max-concurrency 1 test/live/clickable-link-delivery-agent-eval.test.mjs",
     "test:eval:public-contribution-governance": "bun test --max-concurrency 1 test/unit/evals/public-contribution-governance.test.mjs",
     "test:live:public-contribution-governance": "bun test --max-concurrency 1 test/live/public-contribution-governance-live.test.mjs",

@@ -8,7 +8,7 @@ const dataset = loadProtectedMessageRecallEval(path.join(ROOT, "evals/protected-
 
 test("protected recall eval is versioned and covers positive, negative, conflict, and recovery contracts", () => {
   assert.equal(dataset.dataset, "protected-message-recall");
-  assert.equal(dataset.standing_prompt_version, "larkin-standing-v26");
+  assert.equal(dataset.standing_prompt_version, "larkin-standing-v27");
   assert.deepEqual(dataset.scenarios.map((scenario) => scenario.id), [
     "missing-confirmation", "own-chat-message", "own-thread-message", "third-party-message",
     "cross-agent-message", "freshness-conflict", "committed-duplicate", "ambiguous-retry",

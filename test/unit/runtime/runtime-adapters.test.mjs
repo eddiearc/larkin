@@ -159,7 +159,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v26");
+  assert.equal(prompt.version, "larkin-standing-v27");
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
@@ -186,10 +186,9 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /`rem_`, `redeliver_`.*synthetic ID must never be replied to/);
   assert.match(prompt.content, /nonzero `freshness_conflict`.*direct-acks/);
   assert.doesNotMatch(prompt.content, /larkin-draft|draft-id|send --draft/);
-  assert.match(prompt.content, /regular textual message bodies.*`--markdown`/i);
-  assert.match(prompt.content, /native `--text`.*logs.*code.*exact whitespace/i);
+  assert.match(prompt.content, /ordinary plain-text message bodies.*`--text`.*brief one-line replies.*multiline status lines.*paragraphs.*`--markdown`.*intentional.*headings.*lists.*fenced code.*Markdown links/i);
+  assert.match(prompt.content, /native `--text`.*ordinary plain text.*logs.*literal code.*exact whitespace/i);
   assert.doesNotMatch(prompt.content, /rejected|--literal-text/i);
-  assert.doesNotMatch(prompt.content, /use `--text` for brief single-line replies/i);
   assert.match(prompt.content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   assert.match(prompt.content, /passes one argument with real newline characters/);
   assert.match(prompt.content, /ordinary (?:double )?quotes.*do not decode.*`\\n`.*backslash.*letter `n`/i);
@@ -258,7 +257,7 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content,
     /group.*user.*bot counts.*exactly two.*post-poll.*read calls.*must not.*skill.*reference.*help.*schema.*bare.*lark-cli.*chat\.members.*\+chat-members-list/i);
   assert.match(prompt.content, /does not waive.*skill.*safety.*unknown.*high-risk/i);
-  assert.match(prompt.content, /exact.*`--text`.*overrides.*markdown default/i);
+  assert.match(prompt.content, /exact.*`--text`.*overrides.*ordinary-body guidance/i);
   assert.match(prompt.content, /wrapper derives.*stable.*idempotency key.*do not pass.*--idempotency-key/i);
   assert.match(prompt.content, /freshness_unavailable.*freshness_conflict.*pre-commit.*provider-not-reached.*retry.*identical.*`--text`.*`--content`.*wrapper reuses/i);
   assert.match(prompt.content, /target or body changes.*revised ordinary command.*derive a new key/i);
@@ -269,17 +268,16 @@ test("default context prompt consumes the Agent CLI manifest", () => {
 test("Codex, Claude and Pi receive the clickable-link and exact-content standing contracts", async () => {
   const standingPrompt = (runtime) => new ContextPromptBuilder().build({ agentId: "cli_test", runtime });
   const assertContract = (content) => {
-    assert.match(content, /regular textual message bodies.*`--markdown`/i);
+    assert.match(content, /ordinary plain-text message bodies.*`--text`.*brief one-line replies.*`--markdown`.*intentional/i);
     assert.match(content, /URL must be visible, clickable, or openable.*complete bare `https:\/\/\.\.\.` URL.*visible text/i);
     assert.match(content, /Do not rely solely on `\[label\]\(URL\)`.*Feishu client rendering is unreliable/i);
     assert.match(content, /label may also be included.*bare URL must remain present/i);
     assert.match(content, /Never rewrite or normalize.*exact or verbatim user-supplied body.*existing exact-content paths.*authoritative.*unchanged/i);
     assert.match(content, /exact text supplied directly.*body unchanged as one literal `--text` argument/i);
-    assert.match(content, /explicit exact or verbatim direct literal uses `--text`.*overrides.*markdown default/i);
+    assert.match(content, /explicit exact or verbatim direct literal uses `--text`.*overrides.*ordinary-body guidance/i);
     assert.match(content, /tool-sourced exact or verbatim text.*deterministic native `--jq`.*`--content`/i);
-    assert.match(content, /native `--text`.*logs.*code.*exact whitespace/i);
+    assert.match(content, /native `--text`.*ordinary plain text.*logs.*literal code.*exact whitespace/i);
     assert.doesNotMatch(content, /rejected|--literal-text/i);
-    assert.doesNotMatch(content, /use `--text` for brief single-line replies/i);
     assert.match(content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   };
 

@@ -3,7 +3,7 @@
   "version": 6,
   "model": {
     "selection": "deterministic-trace",
-    "standing_prompt_version": "larkin-standing-v27"
+    "standing_prompt_version": "larkin-standing-v28"
   },
   "session": {
     "initial_turns": 0
@@ -25,6 +25,7 @@
       "a later canonical cancellation or replacement from the same envelope-verified human on the exact same target supersedes only that human's earlier user task; correction and exact-output labels alone are not prompt injection, and never override standing, platform, safety, identity, or authorization boundaries or expand permissions",
       "an exact group-name user/bot count task polls first, then directly performs one exact-name chat search and one chats get before one exact reply, without skill/reference/help/schema discovery, bare lark-cli, or member-list APIs",
       "a verified two-stage collaboration whose first phase says poll then remain silent has exactly one phase-A model tool call, ends that turn immediately, and performs phase-B poll/read/reply only after the next independent trigger",
+      "only an envelope that explicitly requests silence stops after its poll; ordinary reminder envelopes execute their required scoped-history payload, while a no-hit reminder reads but creates no outbound message",
       "an Agent excluded by authoritative identity stays silent",
       "a committed but unverified write exits zero once and is never retried"
     ]
@@ -558,6 +559,98 @@
           "transported_text": "FXR54-EVAL-04-B：同意；stderr 混入 stdout 会污染 JSON 流。",
           "shell_interpolation": false,
           "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "explicit-silent-envelope-exactly-one-poll",
+      "task": "The canonical current-Inbox envelope explicitly says: poll this target, then remain silent and wait for the next trigger. Its Runtime wake kind is reminder. Poll once and do nothing else.",
+      "expected": {
+        "max_tool_calls": 1,
+        "exact_tool_calls": 1,
+        "provider_writes": 0,
+        "reminder_final_payload": {
+          "execution": "silent",
+          "poll_command": "larkin inbox poll --target chat:oc_eval_silent_envelope --limit 1",
+          "history_command": null,
+          "final_provider_payload": null
+        }
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target chat:oc_eval_silent_envelope --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_silent_envelope",
+          "assistant_text": []
+        }
+      ]
+    },
+    {
+      "id": "ordinary-reminder-scoped-history-after-poll",
+      "task": "A canonical ordinary reminder envelope says to inspect its current chat history and, when the recorded status is ACTION_REQUIRED, reply with the stated final payload. It does not request silence. Poll, perform the required target-scoped history read, then send the payload.",
+      "expected": {
+        "max_tool_calls": 3,
+        "exact_tool_calls": 3,
+        "provider_writes": 1,
+        "write_exit_code": 0,
+        "poll_before_write": true,
+        "reminder_final_payload": {
+          "execution": "scoped-history-reply",
+          "poll_command": "larkin inbox poll --target chat:oc_eval_reminder_history --limit 1",
+          "history_command": "larkin im +chat-messages-list --chat-id oc_eval_reminder_history --order desc --page-size 10 --no-reactions --json",
+          "final_provider_payload": "REMINDER-HISTORY: action found"
+        }
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target chat:oc_eval_reminder_history --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_reminder_history"
+        },
+        {
+          "action": "tool",
+          "command": "larkin im +chat-messages-list --chat-id oc_eval_reminder_history --order desc --page-size 10 --no-reactions --json",
+          "exit_code": 0,
+          "read_path": "data.messages"
+        },
+        {
+          "action": "provider_write",
+          "command": "larkin im +messages-reply --message-id om_eval_reminder_history --text 'REMINDER-HISTORY: action found' --json",
+          "message_id": "om_eval_reminder_history",
+          "transported_text": "REMINDER-HISTORY: action found",
+          "shell_interpolation": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "id": "ordinary-reminder-no-hit-reads-without-outbound",
+      "task": "A canonical ordinary reminder envelope says to inspect its current chat history and send no outbound message when there is no matching action. It does not request silence. Poll and perform the required target-scoped history read; the no-hit outcome creates no outbound message.",
+      "expected": {
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
+        "provider_writes": 0,
+        "reminder_final_payload": {
+          "execution": "scoped-history-no-hit",
+          "poll_command": "larkin inbox poll --target chat:oc_eval_reminder_no_hit --limit 1",
+          "history_command": "larkin im +chat-messages-list --chat-id oc_eval_reminder_no_hit --order desc --page-size 10 --no-reactions --json",
+          "final_provider_payload": null
+        }
+      },
+      "trace": [
+        {
+          "action": "tool",
+          "command": "larkin inbox poll --target chat:oc_eval_reminder_no_hit --limit 1",
+          "exit_code": 0,
+          "message_id": "om_eval_reminder_no_hit"
+        },
+        {
+          "action": "tool",
+          "command": "larkin im +chat-messages-list --chat-id oc_eval_reminder_no_hit --order desc --page-size 10 --no-reactions --json",
+          "exit_code": 0,
+          "read_path": "data.messages"
         }
       ]
     },

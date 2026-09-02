@@ -57,7 +57,7 @@ function runFake(args, surface = "larkin") {
 test("IM body-mode dataset is fixed, fresh, versioned, and complete", () => {
   assert.equal(DATASET.dataset, "im-body-mode");
   assert.equal(DATASET.version, 1);
-  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v27");
+  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v28");
   assert.equal(DATASET.threshold, 1);
   assert.equal(DATASET.session.initial_turns, 0);
   assert.equal(DATASET.session.fresh_per_scenario, true);

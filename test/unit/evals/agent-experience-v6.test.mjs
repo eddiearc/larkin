@@ -16,7 +16,7 @@ const DATASET = loadAgentExperienceV6Eval(path.join(ROOT, "evals/agent-experienc
 
 test("fixed Agent Experience v6 eval starts every selected scenario from an empty session", () => {
   assert.equal(DATASET.session.initial_turns, 0);
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v27");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v28");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",
@@ -30,6 +30,9 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "tool-sourced-verbatim-message-reply",
     "known-group-user-bot-counts",
     "poll-only-silent-phase-then-next-trigger-work",
+    "explicit-silent-envelope-exactly-one-poll",
+    "ordinary-reminder-scoped-history-after-poll",
+    "ordinary-reminder-no-hit-reads-without-outbound",
     "exclusive-other-agent-silence",
     "committed-unverified-no-retry",
   ]);
@@ -88,16 +91,19 @@ test("standing prompt deletion counterfactual protects the explicitly requested 
     /without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
 });
 
-test("standing prompt deletion counterfactual protects poll-only silence until the next independent trigger", () => {
+test("standing prompt makes silence envelope-specific and preserves ordinary reminder payload execution", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
   assert.match(prompt,
-    /verified.*instruction.*poll.*remain silent.*wait.*next trigger.*poll.*only model tool call.*immediately stop/i);
+    /silent-poll rule only.*envelope returned.*canonical poll itself explicitly says.*poll.*remain silent.*wait.*next trigger/i);
+  assert.match(prompt, /Do not infer silence.*Runtime wake kind.*reminder.*mere fact.*poll succeeded/i);
   assert.match(prompt,
-    /must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool/i);
+    /verified current Inbox instruction.*polled envelope.*explicit silent\/wait.*poll.*only model tool call.*immediately stop/i);
   assert.match(prompt,
-    /next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
+    /explicitly silent envelope only.*poll succeeds.*end.*model turn.*do not (?:emit|output).*assistant text.*bash.*shell.*echo.*no-op placeholder.*zero.*post-poll.*(?:calls|tool calls)/i);
   assert.match(prompt,
-    /poll succeeds.*end.*model turn.*do not (?:emit|output).*assistant text.*bash.*shell.*echo.*no-op placeholder.*zero.*post-poll.*(?:calls|tool calls)/i);
+    /explicitly silent envelope only.*must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool.*next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
+  assert.match(prompt,
+    /Every other successfully polled envelope.*ordinary reminder envelope.*execute.*stated payload.*target-scoped history read.*perform.*no-hit.*required read.*must not create.*outbound/i);
 });
 
 test("eval loader rejects drift in the fixed authoritative group-count dataflow contract", () => {
@@ -152,6 +158,24 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
   const apostrophePrefix = DATASET.scenarios.find((scenario) => scenario.id === "tool-sourced-verbatim-message-reply");
   const shellSyntax = spawnSync("sh", ["-n", "-c", apostrophePrefix.trace[1].command], { encoding: "utf8" });
   assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
+});
+
+test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v28 contract passes all three", () => {
+  const ids = [
+    "explicit-silent-envelope-exactly-one-poll",
+    "ordinary-reminder-scoped-history-after-poll",
+    "ordinary-reminder-no-hit-reads-without-outbound",
+  ];
+  const scenarios = ids.map((id) => DATASET.scenarios.find((scenario) => scenario.id === id));
+  const oldGeneralizedSilence = scenarios.map((scenario) => gradeAgentExperienceV6Trace(scenario, [scenario.trace[0]]));
+  assert.deepEqual(oldGeneralizedSilence.map((result) => result.passed), [true, false, false]);
+  assert.equal(oldGeneralizedSilence.filter((result) => result.passed).length / oldGeneralizedSilence.length, 1 / 3);
+  assert.equal(oldGeneralizedSilence[1].failures.some((failure) => failure.rule === "reminder_final_payload"), true);
+  assert.equal(oldGeneralizedSilence[2].failures.some((failure) => failure.rule === "reminder_final_payload"), true);
+
+  const v28EnvelopeSpecific = scenarios.map((scenario) => gradeAgentExperienceV6Trace(scenario, scenario.trace));
+  assert.deepEqual(v28EnvelopeSpecific.map((result) => result.passed), [true, true, true]);
+  assert.equal(v28EnvelopeSpecific.filter((result) => result.passed).length / v28EnvelopeSpecific.length, 1);
 });
 
 test("grader rejects fallback, false success, text mutation, redundant discovery, unsafe retry, and duplicate writes", () => {

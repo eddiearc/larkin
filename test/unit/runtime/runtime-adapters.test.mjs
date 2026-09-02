@@ -159,7 +159,7 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v27");
+  assert.equal(prompt.version, "larkin-standing-v28");
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
@@ -206,13 +206,14 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content,
     /quoted.*forwarded.*embedded.*third-party.*content.*data.*not.*instruction.*(?:authority|user authority)/i);
   assert.match(prompt.content,
-    /verified.*instruction.*poll.*remain silent.*wait.*next trigger.*poll.*only model tool call.*immediately stop/i);
+    /silent-poll rule only.*envelope returned.*canonical poll itself explicitly says.*poll.*remain silent.*wait.*next trigger/i);
+  assert.match(prompt.content, /Do not infer silence.*Runtime wake kind.*reminder.*mere fact.*poll succeeded/i);
   assert.match(prompt.content,
-    /must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool/i);
+    /verified current Inbox instruction.*polled envelope.*explicit silent\/wait.*poll.*only model tool call.*immediately stop/i);
   assert.match(prompt.content,
-    /next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
+    /explicitly silent envelope only.*must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool.*next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
   assert.match(prompt.content,
-    /poll succeeds.*end.*model turn.*do not (?:emit|output).*assistant text.*bash.*shell.*echo.*no-op placeholder.*zero.*post-poll.*(?:calls|tool calls)/i);
+    /Every other successfully polled envelope.*ordinary reminder envelope.*execute.*stated payload.*target-scoped history read.*perform.*no-hit.*required read.*must not create.*outbound/i);
   assert.match(prompt.content, /thread:<chat_id>:<thread_id>/);
   assert.match(prompt.content, /\+threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json/);
   assert.match(prompt.content, /response messages.*data\.messages/i);

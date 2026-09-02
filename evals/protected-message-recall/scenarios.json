@@ -1,7 +1,7 @@
 {
   "dataset": "protected-message-recall",
   "version": 1,
-  "standing_prompt_version": "larkin-standing-v27",
+  "standing_prompt_version": "larkin-standing-v28",
   "grader": {
     "name": "protected-message-recall-provider-trace-grader",
     "version": 1,

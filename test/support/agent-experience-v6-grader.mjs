@@ -41,7 +41,7 @@ function correctionBoundaryIssue(scenario) {
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "agent-experience-v6" || value.version !== 6) throw new Error("eval dataset/version mismatch");
-  if (value.model?.standing_prompt_version !== "larkin-standing-v27") throw new Error("standing prompt version mismatch");
+  if (value.model?.standing_prompt_version !== "larkin-standing-v28") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
   if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 6 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");
@@ -87,6 +87,21 @@ export function loadAgentExperienceV6Eval(file) {
           twoStage.phase_b_write_command].some((command) => typeof command !== "string" || !command)
         || twoStage.allow_identical_precommit_freshness_conflict_retry !== true)) {
       throw new Error(`${label}.expected.two_stage_poll_silence contract is invalid`);
+    }
+    const reminderPayload = scenario.expected.reminder_final_payload;
+    if (["explicit-silent-envelope-exactly-one-poll", "ordinary-reminder-scoped-history-after-poll",
+      "ordinary-reminder-no-hit-reads-without-outbound"].includes(scenario.id)
+      && (!reminderPayload || typeof reminderPayload !== "object" || Array.isArray(reminderPayload)
+        || Object.keys(reminderPayload).length !== 4
+        || !["silent", "scoped-history-reply", "scoped-history-no-hit"].includes(reminderPayload.execution)
+        || typeof reminderPayload.poll_command !== "string" || !reminderPayload.poll_command
+        || (reminderPayload.execution === "silent"
+          ? reminderPayload.history_command !== null || reminderPayload.final_provider_payload !== null
+          : typeof reminderPayload.history_command !== "string" || !reminderPayload.history_command
+            || (reminderPayload.execution === "scoped-history-reply"
+              ? typeof reminderPayload.final_provider_payload !== "string" || !reminderPayload.final_provider_payload
+              : reminderPayload.final_provider_payload !== null)))) {
+      throw new Error(`${label}.expected.reminder_final_payload contract is invalid`);
     }
   }
   return value;
@@ -220,6 +235,32 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
         && retry.subtype === "freshness_conflict" && retry.provider_reached === false;
     if (!commonShape || !retryShape) {
       fail("two_stage_poll_silence", "phase A did not stop immediately after its sole poll, or phase B did not begin with a fresh poll before its bounded read/reply work");
+    }
+  }
+  if (scenario.expected.reminder_final_payload) {
+    const expected = scenario.expected.reminder_final_payload;
+    const poll = events[0];
+    const history = events[1];
+    const write = writes[0];
+    const pollMessageId = poll?.message_id;
+    const validPoll = poll?.action === "tool" && poll.command === expected.poll_command && poll.exit_code === 0
+      && typeof pollMessageId === "string" && /^om_[A-Za-z0-9_]+$/.test(pollMessageId);
+    const expectedWriteCommand = expected.final_provider_payload === null ? null
+      : `larkin im +messages-reply --message-id ${pollMessageId} --text '${expected.final_provider_payload}' --json`;
+    const validHistory = expected.history_command === null
+      ? history === undefined
+      : history?.action === "tool" && history.command === expected.history_command && history.exit_code === 0
+        && history.read_path === "data.messages";
+    const validSilent = expected.execution !== "silent"
+      || events.length === 1 && Array.isArray(poll?.assistant_text) && poll.assistant_text.length === 0 && writes.length === 0;
+    const validNoHit = expected.execution !== "scoped-history-no-hit"
+      || events.length === 2 && writes.length === 0;
+    const validReply = expected.execution !== "scoped-history-reply"
+      || events.length === 3 && write?.action === "provider_write" && write.command === expectedWriteCommand
+        && write.message_id === pollMessageId && write.transported_text === expected.final_provider_payload
+        && write.shell_interpolation === false && write.exit_code === 0;
+    if (!validPoll || !validHistory || !validSilent || !validNoHit || !validReply) {
+      fail("reminder_final_payload", "the envelope-specific silent or ordinary reminder final payload was not executed exactly");
     }
   }
   for (const fragment of scenario.expected.forbidden_command_fragments || []) {

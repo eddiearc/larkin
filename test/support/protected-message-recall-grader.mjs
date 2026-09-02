@@ -3,7 +3,7 @@ import fs from "node:fs";
 export function loadProtectedMessageRecallEval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "protected-message-recall" || value.version !== 1) throw new Error("eval dataset/version mismatch");
-  if (value.standing_prompt_version !== "larkin-standing-v27") throw new Error("standing prompt version mismatch");
+  if (value.standing_prompt_version !== "larkin-standing-v28") throw new Error("standing prompt version mismatch");
   if (value.grader?.name !== "protected-message-recall-provider-trace-grader" || value.grader.version !== 1) {
     throw new Error("grader metadata mismatch");
   }

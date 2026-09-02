@@ -107,7 +107,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
   });
   const calls = () => fs.readFileSync(callsFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
   const appendInbox = (envelope) => fs.appendFileSync(inboxFile, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
-  return { root, agentId, stateDir, inboxFile, history, lark, agent, calls, appendInbox };
+  return { root, agentId, stateDir, inboxFile, env, history, lark, agent, calls, appendInbox };
 }
 
 test("provider history missing from Inbox blocks stale send before provider write", () => {
@@ -175,6 +175,42 @@ test("same-millisecond IDs and edits inside the bounded head window each conflic
     assert.equal(third.status, 3);
     assert.deepEqual(JSON.parse(third.stderr).current_cursor, { schema: 1, revisionTime: "200", messageIds: ["om_a"] });
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("direct multiline reply shell arguments reach the provider with real newlines", () => {
+  const body = "第一行：Eddie's 更新\n第二行：继续跟进";
+  for (const flag of ["--text", "--markdown"]) {
+    const f = fixture();
+    try {
+      const messageId = `om_multiline_${flag.slice(2)}`;
+      f.appendInbox({ message_id: messageId, chat_id: "oc_multiline", thread_id: "omt_multiline", content: "anchor" });
+      // The body deliberately crosses a shell newline. The apostrophe uses the
+      // POSIX single-quote splice, so this command has neither indentation nor a
+      // backslash-n sequence to normalize before it reaches larkin-cli.
+      const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(LARK_CLI)} im +messages-reply --message-id ${messageId} --reply-in-thread ${flag} '第一行：Eddie'\\''s 更新
+第二行：继续跟进' --json`;
+      const result = spawnSync("sh", ["-c", command], {
+        cwd: f.root,
+        env: {
+          ...f.env,
+          LARKIN_TEST_PROVIDER_HISTORY: f.history([]),
+          LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+            message_id: `om_written_${flag.slice(2)}`, chat_id: "oc_multiline", thread_id: "omt_multiline", create_time: "1",
+          } }),
+        },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      assert.equal(result.status, 0, `${flag}: ${result.stderr}`);
+      const writes = f.calls().filter((call) => call.argv[1] === "+messages-reply");
+      assert.equal(writes.length, 1, `${flag}: expected one final provider reply`);
+      const argv = writes[0].argv;
+      assert.equal(argv[argv.indexOf(flag) + 1], body, `${flag}: final provider body`);
+      assert.equal(argv.includes("--reply-in-thread"), true);
+      assert.equal(body.includes("\\n"), false, "body must not contain a literal backslash-n artifact");
+      assert.deepEqual(body.split("\n"), ["第一行：Eddie's 更新", "第二行：继续跟进"], "body must have no leading indentation");
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
 });
 
 test("chat and thread cursors are isolated and thread probes use the exact locator", () => {

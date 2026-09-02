@@ -179,7 +179,11 @@ test("persistence rejects legacy and malformed targets and leaves durable old ro
   }
 });
 
-test("issue 124 former split envelope fails while the exact persisted canonical object reaches Runtime", async () => {
+test("issue 124 former split envelope fails while the exact persisted canonical object reaches Runtime", {
+  // Native Windows measured 4.1–7.4s for this real RuntimeHost startup/delivery/shutdown
+  // path in the focused serial gate. The timeout is a runner budget, not behavior polling.
+  timeout: 30_000,
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue124-envelope-counterfactual-"));
   const agentId = "cli_issue124CounterfactualA1";
   const store = createAgentStateStore(root, agentId);

@@ -1,0 +1,85 @@
+{
+  "dataset": "im-body-mode",
+  "version": 1,
+  "standing_prompt_version": "larkin-standing-v27",
+  "runtime": { "adapter": "codex", "selection": "runtime-default" },
+  "threshold": 1,
+  "grader": {
+    "name": "im-body-mode-final-payload-grader",
+    "version": 1,
+    "threshold": 1,
+    "rubric": [
+      "exactly one successful fake provider write reaches the fixed synthetic target",
+      "ordinary plain line and paragraph status updates use --text",
+      "intentional headings, lists, fenced code, and Markdown links use --markdown",
+      "exact/verbatim literals use --text and preserve the supplied body byte-for-byte",
+      "assistant prose, prompt text, malformed traces, missing writes, and duplicate writes never count"
+    ]
+  },
+  "session": { "initial_turns": 0, "fresh_per_scenario": true },
+  "scenarios": [
+    {
+      "id": "ordinary-plain-lines",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_im_plain_lines",
+      "expected_body_flag": "--text",
+      "body": "Build finished.\nDeploying to staging.",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Send exactly one ordinary, non-verbatim status update to oc_eval_im_plain_lines. State Build finished. on the first line, then Deploying to staging. on the second line. Do not describe the command, and stop after the fake success result."
+    },
+    {
+      "id": "ordinary-plain-paragraphs",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_im_plain_paragraphs",
+      "expected_body_flag": "--text",
+      "body": "Build finished.\n\nStaging deployment is queued.",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Send exactly one ordinary, non-verbatim status update to oc_eval_im_plain_paragraphs. Use a first paragraph saying Build finished. and a second paragraph saying Staging deployment is queued. Do not describe the command, and stop after the fake success result."
+    },
+    {
+      "id": "intentional-markdown-heading",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_im_heading",
+      "expected_body_flag": "--markdown",
+      "body": "## Deployment\n\nBuild finished.",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Send exactly one intentionally Markdown-formatted update to oc_eval_im_heading using this heading and body: ## Deployment, then Build finished. This is intentionally rendered Markdown, not an exact/verbatim body. Do not describe the command, and stop after the fake success result."
+    },
+    {
+      "id": "intentional-markdown-list",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_im_list",
+      "expected_body_flag": "--markdown",
+      "body": "- Build finished\n- Deploying to staging",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Send exactly one intentionally Markdown-formatted update to oc_eval_im_list using this bullet list: - Build finished and - Deploying to staging. This is intentionally rendered Markdown, not an exact/verbatim body. Do not describe the command, and stop after the fake success result."
+    },
+    {
+      "id": "intentional-markdown-code",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_im_code",
+      "expected_body_flag": "--markdown",
+      "body": "```sh\nbun run test\n```",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Send exactly one intentionally Markdown-formatted update to oc_eval_im_code containing the fenced shell code block ```sh, bun run test, ```. This is intentionally rendered Markdown, not an exact/verbatim body. Do not describe the command, and stop after the fake success result."
+    },
+    {
+      "id": "intentional-markdown-link",
+      "operation": "send",
+      "target_flag": "--chat-id",
+      "target": "oc_eval_im_link",
+      "expected_body_flag": "--markdown",
+      "body": "[Open Issue 176](https://github.com/eddiearc/larkin/issues/176)\n\nhttps://github.com/eddiearc/larkin/issues/176",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Send exactly one intentionally Markdown-formatted update to oc_eval_im_link with the Markdown link [Open Issue 176](https://github.com/eddiearc/larkin/issues/176), followed by a blank line and the complete bare URL https://github.com/eddiearc/larkin/issues/176. This is intentionally rendered Markdown, not an exact/verbatim body. Do not describe the command, and stop after the fake success result."
+    },
+    {
+      "id": "exact-verbatim-literal",
+      "operation": "reply",
+      "target_flag": "--message-id",
+      "target": "om_eval_im_exact",
+      "expected_body_flag": "--text",
+      "body": "# literal heading\n- literal list item\n[Literal link](https://github.com/eddiearc/larkin/issues/176)",
+      "prompt": "This is a controlled payload eval with a fake sink and synthetic target. Reply exactly once to om_eval_im_exact with this exact and verbatim three-line body: # literal heading, then - literal list item, then [Literal link](https://github.com/eddiearc/larkin/issues/176). Preserve it byte-for-byte; do not format it as Markdown, add text, or describe the command. Stop after the fake success result."
+    }
+  ]
+}

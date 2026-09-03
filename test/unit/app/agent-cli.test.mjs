@@ -45,7 +45,7 @@ test("Agent CLI manifest is the single machine-readable public command inventory
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.reminder, ["schedule", "list", "snooze", "update", "cancel", "log"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.interaction, ["callback-status", "callback-probe", "create", "get", "resolve"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.profile, ["show"]);
-  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "apply"]);
+  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "inbox-audit", "apply"]);
   const f = fixture();
   try {
     const help = JSON.parse(f.run(["--help"]).stdout);
@@ -133,6 +133,9 @@ test("Agent config commands reject extra positionals and operation-inapplicable 
       ["mention", "chat", "oc_self", "free", "--json"],
       ["apply", "extra"],
       ["apply", "--chat", "oc_irrelevant"],
+      ["inbox-audit", "global", "on", "extra"],
+      ["inbox-audit", "global", "on", "--agent", f.agentId],
+      ["inbox-audit", "agent", "on", "--chat", "oc_irrelevant"],
     ];
     for (const args of invalidCases) {
       const rejected = f.run(["config", ...args]);
@@ -287,8 +290,8 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
 test("inbox audit returns bounded group/topic instructions without a delivery side effect", () => {
   const f = fixture();
   try {
-    fs.writeFileSync(path.join(f.root, "inbox-audit.json"), JSON.stringify({ version: 1, targets: [{
-      agent_id: f.agentId, target: "thread:oc_audit:omt_audit", anchor: "om_audit", observed_at: "2026-07-20T00:00:00.000Z",
+    fs.writeFileSync(path.join(f.root, "inbox-audit.json"), JSON.stringify({ version: 2, targets: [{
+      agent_id: f.agentId, target: "thread:oc_audit:omt_audit", anchor: "om_audit", observed_at: "2026-07-20T00:00:00.000Z", status: "pending",
     }] }), { mode: 0o600 });
     const result = f.run(["inbox", "audit", "--json"]);
     assert.equal(result.code, 0, result.stderr);
@@ -296,6 +299,9 @@ test("inbox audit returns bounded group/topic instructions without a delivery si
     assert.deepEqual(body.targets.map((row) => ({ target: row.target, anchor: row.anchor })), [{ target: "thread:oc_audit:omt_audit", anchor: "om_audit" }]);
     assert.match(body.targets[0].instruction, /threads-messages-list/);
     assert.equal(body.no_finding, "stay_silent");
+    const second = f.run(["inbox", "audit", "--json"]);
+    assert.equal(second.code, 0, second.stderr);
+    assert.deepEqual(JSON.parse(second.stdout).targets, [], "reported targets must not be scanned again");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

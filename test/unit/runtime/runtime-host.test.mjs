@@ -229,15 +229,17 @@ test("RuntimeHost bounds proactive compact failure without retry or session rese
     await host.start([{ agentId: "cli_piProactiveFailureA1", name: "failure", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
     session.emit({ type: "turn-end" });
     session.emit({ type: "turn-end" });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    const compactDeadline = Date.now() + 1_000;
+    while (session.compactCalls < 1 && Date.now() < compactDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(session.compactCalls, 1);
     assert.equal(session.closes.length, 0, "proactive failure must not reset the session");
     const receipt = await host.deliver("cli_piProactiveFailureA1", {
       message_id: "om_pi_proactive_failure", chat_id: "oc_pi_proactive_failure", content: "pending",
     });
-    assert.equal(receipt.status, "deferred");
-    assert.equal(session.prompts.length, 0, "degraded generation must not submit pending work");
-    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "pending");
+    assert.equal(receipt.status, "accepted");
+    assert.ok(session.prompts.length >= 1, "idle compact failure must still submit pending work");
+    assert.equal(session.compactCalls, 1, "failed generation must not retry compact");
+    assert.equal(session.closes.length, 0, "later deliveries must keep the same session");
   } finally {
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });
@@ -916,6 +918,7 @@ test("RuntimeHost context-overflow recovery stages no-resume, rearms exact recor
     assert.equal(result.rearmedCount, 4);
     assert.equal(result.replayStatus, "pending", "the Inbox remains durable until the normal Runtime poll consumes it");
     assert.equal(sessions[1].input.resumeSessionId, null);
+    assert.match(sessions[1].input.standingPrompt.content, /## Previous session archive[\s\S]*session id `old-context-session`/);
     assert.deepEqual(sessions[0].session.closes, ["context-window recovery committed"]);
     await new Promise((resolve) => setTimeout(resolve, 10));
     const ledger = store.readJson("runtimeDeliveries", { records: [] });
@@ -3171,6 +3174,110 @@ test("RuntimeHost keeps exhausted terminal wakes pending so a restart can requeu
     assert.equal(host2.getDispatchedSubagent("cli_piExhaustedDropA1", "task-exhausted-drop-1")?.wakeState, "pending");
   } finally {
     await host2.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost overflow replacement references only the immediately previous archive (depth=1)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-depth1-overflow-"));
+  const agentId = "cli_depth1OverflowA1";
+  const raw = createAgentStateStore(root, agentId);
+  const overflowRecord = (deliveryId, messageId) => ({
+    deliveryId, messageId, status: "error", retryable: false,
+    reason: "Your input exceeds the context window of this model. Please adjust your input and try again.",
+    errorCategory: "context_window",
+    input: { inputId: `input-${deliveryId}`, deliveryId, kind: "wake", text: "redacted", attempt: 0 },
+    updatedAt: "before",
+  });
+  raw.appendNdjson("inbox", { message_id: "om_depth1_1", chat_id: "oc_depth1", content: "first" });
+  raw.writeJson("runtimeDeliveries", { version: 1, records: [overflowRecord("d-depth1-1", "om_depth1_1")] });
+  const sessions = [];
+  let compactCalls = 0;
+  const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+    const session = new FakeSession();
+    session.sessionId = input.resumeSessionId || `gen-${sessions.length}`;
+    session.sessionFile = `/tmp/pi-sessions/${session.sessionId}.jsonl`;
+    session.compact = async () => { compactCalls += 1; };
+    sessions.push({ session, input });
+    return session;
+  } };
+  const startHost = () => createRuntimeHost({
+    adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => raw,
+  });
+  const hostA = startHost();
+  try {
+    await hostA.start([{ agentId, name: "depth1", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    assert.doesNotMatch(sessions[0].input.standingPrompt.content, /Previous session archive/, "gen-0 has no predecessor");
+    await hostA.recoverContextOverflow(agentId, "d-depth1-1", "overflow 1");
+    const prompt1 = sessions[1].input.standingPrompt.content;
+    assert.match(prompt1, /## Previous session archive/);
+    assert.match(prompt1, /`\/tmp\/pi-sessions\/gen-0\.jsonl`/);
+    assert.match(prompt1, /Do not load it whole/);
+    assert.equal(sessions[1].input.resumeSessionId, null);
+    assert.equal(raw.readJson("agentState", {}).previousSessions.pi.file, "/tmp/pi-sessions/gen-0.jsonl");
+  } finally {
+    await hostA.shutdown("done");
+  }
+
+  fs.writeFileSync(raw.paths.inbox, `${JSON.stringify({ message_id: "om_depth1_2", chat_id: "oc_depth1", content: "second" })}\n`);
+  raw.writeJson("runtimeDeliveries", { version: 1, records: [overflowRecord("d-depth1-2", "om_depth1_2")] });
+  const hostB = startHost();
+  try {
+    await hostB.start([{ agentId, name: "depth1", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root, sessionId: "gen-1" }]);
+    await hostB.recoverContextOverflow(agentId, "d-depth1-2", "overflow 2");
+    const prompt2 = sessions.at(-1).input.standingPrompt.content;
+    assert.match(prompt2, /`\/tmp\/pi-sessions\/gen-1\.jsonl`/, "second overflow points at gen-1");
+    assert.doesNotMatch(prompt2, /gen-0\.jsonl/, "second overflow must not reference gen-0");
+    assert.equal((prompt2.match(/## Previous session archive/g) ?? []).length, 1);
+    assert.equal(compactCalls, 0, "replacement itself must not compact");
+  } finally {
+    await hostB.shutdown("done");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeHost persists the depth-1 previous archive across reset and start() rebuild", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-depth1-persist-"));
+  const agentId = "cli_depth1PersistA1";
+  const store = createAgentStateStore(root, agentId);
+  const sessions = [];
+  let compactCalls = 0;
+  const adapter = { id: "pi", capabilities: {}, async createSession(input) {
+    const index = sessions.length;
+    const session = new FakeSession();
+    session.sessionId = `gen-${index}`;
+    session.sessionFile = `/tmp/pi-sessions/gen-${index}.jsonl`;
+    session.compact = async () => { compactCalls += 1; };
+    sessions.push({ session, input });
+    return session;
+  } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await host.start([{ agentId, name: "persist", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
+    await host.resetSession(agentId);
+    await host.resetSession(agentId);
+    const prompt2 = sessions[2].input.standingPrompt.content;
+    assert.match(prompt2, /`\/tmp\/pi-sessions\/gen-1\.jsonl`/);
+    assert.doesNotMatch(prompt2, /gen-0\.jsonl/);
+    assert.equal((prompt2.match(/## Previous session archive/g) ?? []).length, 1);
+    assert.equal(compactCalls, 0);
+    const persisted = store.readJson("agentState", {});
+    assert.equal(persisted.previousSessions.pi.file, "/tmp/pi-sessions/gen-1.jsonl");
+    assert.equal(persisted.previousSessions.pi.sessionId, "gen-1");
+  } finally {
+    await host.shutdown("done");
+  }
+
+  const restarted = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store });
+  try {
+    await restarted.start([{ agentId, name: "persist", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root, sessionId: "gen-2" }]);
+    const rebuilt = sessions[3].input.standingPrompt.content;
+    assert.match(rebuilt, /`\/tmp\/pi-sessions\/gen-1\.jsonl`/, "start() rebuild must reload previousSession from agent-state");
+    assert.doesNotMatch(rebuilt, /gen-0\.jsonl/);
+    assert.equal((rebuilt.match(/## Previous session archive/g) ?? []).length, 1);
+    assert.equal(sessions[3].input.resumeSessionId, "gen-2");
+  } finally {
+    await restarted.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

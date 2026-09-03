@@ -6,7 +6,7 @@ import { auditReminderDelivery } from "../agent/reminder-delivery-audit.js";
 import { isCanonicalInboxTarget, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import type { ContextOverflowRearmResult, InboxDeliverySourceResolution } from "../agent/agent-state-store.js";
 import { SpanKind } from "@opentelemetry/api";
-import type { ContextPromptBuilder } from "../agent/context-prompt.js";
+import type { ContextPromptBuilder, PreviousSessionRef } from "../agent/context-prompt.js";
 import type {
   NormalizedRuntimeEvent, RuntimeAdapter, RuntimeInput, RuntimeInputResult, RuntimeSession,
 } from "./runtime-contracts.js";
@@ -51,6 +51,7 @@ export interface AgentRuntimeConfig {
   runtime: string; model: string; effort?: string | null; workspaceDir: string;
   piDistribution?: "external" | "builtin";
   stateDir?: string; sessionId?: string | null;
+  previousSession?: PreviousSessionRef | null;
   larkConfigDir?: string;
   feishuAppId?: string;
 }
@@ -65,9 +66,9 @@ export interface DeliveryRecord {
 }
 interface DeliveryFile { version: 1; records: DeliveryRecord[] }
 interface DeliveryStateStore {
-  readJson<T>(key: "runtimeDeliveries", fallback: T): T;
+  readJson<T>(key: "runtimeDeliveries" | "agentState", fallback: T): T;
   readNdjson?<T>(key: "inbox"): T[];
-  writeJson(key: "runtimeDeliveries", value: unknown): void;
+  writeJson(key: "runtimeDeliveries" | "agentState", value: unknown): void;
   withInboxTransaction<T>(operation: () => T): T;
   resolveInboxDeliverySource?(messageId: string): InboxDeliverySourceResolution;
   paths?: { reminders: string };
@@ -85,7 +86,8 @@ interface DeliveryStateStore {
 
 export type RuntimeHostEvent =
   | { type: "agent-status"; agentId: string; status: "active" | "inactive" | "error"; error?: string; readiness?: RuntimeReadiness }
-  | { type: "session"; agentId: string; runtime: string; sessionId: string | null; launchId: string; model?: string; reasoningEffort?: string }
+  | { type: "session"; agentId: string; runtime: string; sessionId: string | null; launchId: string; model?: string; reasoningEffort?: string;
+    previousSession?: PreviousSessionRef | null }
   | { type: "activity"; agentId: string; activity: string; activityKind?: string; detailKind?: string; isHeartbeat?: boolean }
   | { type: "delivery"; agentId: string; deliveryId: string; messageId: string; status: "accepted" | "consumed" | "deferred" | "error"; reason?: string }
   | { type: "runtime"; agentId: string; event: NormalizedRuntimeEvent };
@@ -113,6 +115,7 @@ interface ManagedAgent {
   piProactiveCompactionGeneration: number | null;
   piProactiveCompactionSession: RuntimeSession | null;
   piProactiveCompactionFailedGeneration: number | null;
+  previousSession: PreviousSessionRef | null;
   readiness: RuntimeReadiness | null;
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
   /** Delivery ids already promoted from accepted inbox_update to a wake while idle. */
@@ -189,6 +192,56 @@ const BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT = 5;
 const DEFAULT_SUBAGENT_RECONCILE_INTERVAL_MS = 15_000;
 const now = (): string => new Date().toISOString();
 const isActiveDelivery = (status: DeliveryStatus): boolean => ["pending", "submitting", "accepted"].includes(status);
+
+const previousSessionRefFor = (session: RuntimeSession, reason: string): PreviousSessionRef | null => session.sessionId
+  ? { sessionId: session.sessionId, file: session.sessionFile ?? null, closedAt: new Date().toISOString(), reason }
+  : null;
+
+function parsePreviousSessionRef(value: unknown): PreviousSessionRef | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.sessionId !== "string" || !record.sessionId) return null;
+  if (typeof record.closedAt !== "string" || typeof record.reason !== "string") return null;
+  return {
+    sessionId: record.sessionId,
+    file: typeof record.file === "string" && record.file ? record.file : null,
+    closedAt: record.closedAt,
+    reason: record.reason,
+  };
+}
+
+function loadPersistedPreviousSession(config: AgentRuntimeConfig, store?: DeliveryStateStore): PreviousSessionRef | null {
+  const fromConfig = parsePreviousSessionRef(config.previousSession);
+  if (fromConfig) return fromConfig;
+  if (!store) return null;
+  try {
+    const state = store.readJson<{ previousSessions?: Record<string, unknown> }>("agentState", {});
+    return parsePreviousSessionRef(state.previousSessions?.[config.runtime]);
+  } catch {
+    return null;
+  }
+}
+
+function persistPreviousSession(agent: ManagedAgent, previous: PreviousSessionRef | null): void {
+  agent.previousSession = previous;
+  agent.config.previousSession = previous;
+  const store = agent.stateStore;
+  if (!store) return;
+  try {
+    const current = store.readJson<Record<string, unknown>>("agentState", { sessions: {} });
+    // Delivery-ledger mocks ignore the JSON key and would be clobbered by this write.
+    if (Array.isArray((current as { records?: unknown }).records) && !("sessions" in current)) return;
+    const previousSessions = current.previousSessions && typeof current.previousSessions === "object"
+      && !Array.isArray(current.previousSessions)
+      ? { ...(current.previousSessions as Record<string, unknown>) }
+      : {};
+    if (previous) previousSessions[agent.adapter.id] = previous;
+    else delete previousSessions[agent.adapter.id];
+    store.writeJson("agentState", { ...current, previousSessions });
+  } catch {
+    // In-memory ref still holds for this process; restart will miss it only if this write failed.
+  }
+}
 type ReplayFailureCode = "canonical_inbox_row_missing" | "canonical_inbox_malformed" | "duplicate_message_id"
   | "inbox_state_conflict" | "delivery_target_conflict" | "structured_target_invalid"
   | "structured_target_missing" | "wake_reason_conflict";
@@ -595,17 +648,10 @@ export function createRuntimeHost(options: {
       && agent.piProactiveCompactionGeneration === agent.generation
       && agent.piProactiveCompactionSession === agent.session
       ? agent.piProactiveCompaction : null;
-    if (proactive && await proactive === "failed") {
-      return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
-    }
-    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) {
-      return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
-    }
+    if (proactive) await proactive;
     if (agent.adapter.id === "pi" && !busy && !agent.busy && !agent.turnInProgress && agent.session) {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate && await idleGate === "failed") {
-        return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
-      }
+      if (idleGate) await idleGate;
     }
     agent.submitting = true;
     if (!busy) agent.busy = true; // Reserve the turn before prompt() can yield.
@@ -670,13 +716,12 @@ export function createRuntimeHost(options: {
       && agent.piProactiveCompactionGeneration === agent.generation
       && agent.piProactiveCompactionSession === agent.session
       ? agent.piProactiveCompaction : null;
-    if (proactive && await proactive === "failed") return;
+    if (proactive) await proactive;
     if (agent.submitting || agent.starting) { agent.retryAfterSubmit = true; return; }
-    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) return;
     if (agent.busy || agent.turnInProgress || !agent.session) return;
     if (agent.adapter.id === "pi") {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate && await idleGate === "failed") return;
+      if (idleGate) await idleGate;
     }
     const record = [...agent.records.values()].find((candidate) => candidate.status === "pending" || candidate.status === "submitting");
     if (record) await submit(agent, record, false);
@@ -867,11 +912,10 @@ export function createRuntimeHost(options: {
       && agent.piProactiveCompactionGeneration === agent.generation
       && agent.piProactiveCompactionSession === agent.session
       ? agent.piProactiveCompaction : null;
-    if (proactive && await proactive === "failed") return;
-    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) return;
+    if (proactive) await proactive;
     if (agent.adapter.id === "pi" && !agent.busy && !agent.turnInProgress && agent.session) {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate && await idleGate === "failed") return;
+      if (idleGate) await idleGate;
     }
     if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
     if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
@@ -1046,7 +1090,7 @@ export function createRuntimeHost(options: {
       void ensureSession(agent).then(async () => {
         const session = agent.session;
         const proactive = session ? proactivelyCompactPiAtIdle(agent, session) : null;
-        if (proactive && await proactive === "failed") return;
+        if (proactive) await proactive;
         reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
         enqueueUndeliveredTerminalWakes(agent);
         await retryPending(agent);
@@ -1253,8 +1297,6 @@ export function createRuntimeHost(options: {
     })();
     const tracked = task.catch((error): "failed" => {
       agent.piProactiveCompactionFailedGeneration = generation;
-      emit({ type: "agent-status", agentId: agent.config.agentId, status: "error",
-        error: "Pi proactive compaction failed; the current session generation is degraded" });
       log("Pi proactive compaction failed", String(error));
       return "failed";
     }).finally(() => {
@@ -1376,9 +1418,7 @@ export function createRuntimeHost(options: {
         emit({ type: "agent-status", agentId: agent.config.agentId, status: "active", readiness: agent.readiness });
       }
       const proactive = proactivelyCompactPiAtIdle(agent, session);
-      void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-        if (outcome !== "failed") return retryPending(agent);
-      });
+      void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
     } else if (event.type === "runtime-observation") {
       if (event.phase === "background_dispatched" && typeof event.taskId === "string" && event.taskId) {
@@ -1489,7 +1529,7 @@ export function createRuntimeHost(options: {
     const standingPrompt = options.promptBuilder.build({
       agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
       description: agent.config.description || "", runtime: agent.adapter.id,
-      cli: agentCliPromptCapabilities("larkin"),
+      cli: agentCliPromptCapabilities("larkin"), previousSession: agent.previousSession,
     });
     const generation = ++agent.generation;
     let completedSession: RuntimeSession | null = null;
@@ -1543,9 +1583,11 @@ export function createRuntimeHost(options: {
     const readiness = agent.adapter.probe ? await agent.adapter.probe({ agentId: agent.config.agentId,
       workspaceDir: agent.config.workspaceDir, stateDir: agent.config.stateDir, env: probeEnv }) : { runtime: "pi" as const, state: "ready" as const };
     if (readiness.state !== "ready") throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "Pi context fallback readiness failed");
+    const previousRef = previousSessionRefFor(oldSession, "context-window overflow");
     const standingPrompt = options.promptBuilder.build({
       agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
       description: agent.config.description || "", runtime: agent.adapter.id, cli: agentCliPromptCapabilities("larkin"),
+      previousSession: previousRef,
     });
     let fresh: RuntimeSession;
     try {
@@ -1571,6 +1613,7 @@ export function createRuntimeHost(options: {
     const oldConfigSessionId = agent.config.sessionId;
     const oldReadiness = agent.readiness;
     const oldDisabledReason = agent.disabledReason;
+    const oldPreviousSession = agent.previousSession;
     const oldRecord = { ...record, input: { ...record.input } };
     let durableRollback: (() => void) | null = null;
     let rearmedCount = 1;
@@ -1585,6 +1628,7 @@ export function createRuntimeHost(options: {
       agent.launchId = crypto.randomUUID();
       agent.config.sessionId = null;
       agent.session = fresh;
+      persistPreviousSession(agent, previousRef);
       agent.readiness = readiness;
       agent.disabledReason = null;
       for (const candidate of agent.records.values()) {
@@ -1609,6 +1653,7 @@ export function createRuntimeHost(options: {
       agent.launchId = oldLaunchId;
       agent.config.sessionId = oldConfigSessionId;
       agent.session = oldSession;
+      persistPreviousSession(agent, oldPreviousSession);
       agent.readiness = oldReadiness;
       agent.disabledReason = oldDisabledReason;
       Object.assign(record, oldRecord);
@@ -1620,16 +1665,15 @@ export function createRuntimeHost(options: {
       agent.config.sessionId = fresh.sessionId;
       emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: fresh.sessionId, launchId: agent.launchId,
         ...(fresh.effectiveModel ? { model: fresh.effectiveModel } : {}),
-        ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
+        ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}),
+        ...(agent.previousSession ? { previousSession: agent.previousSession } : {}) });
     }
     emit({ type: "agent-status", agentId, status: "active", readiness });
     agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
     await oldSession.close("Pi context fallback committed").catch((error) => log("previous Pi session close after fallback failed", String(error)));
     reconcileAfterSessionSwap(agent);
     const proactive = proactivelyCompactPiAtIdle(agent, fresh);
-    void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-      if (outcome !== "failed") return retryPending(agent);
-    });
+    void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
     return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
       runtimeReady: true, pendingCount: remainingPendingCount, rearmedCount,
       replayStatus: remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
@@ -1662,7 +1706,7 @@ export function createRuntimeHost(options: {
       const standingPrompt = options.promptBuilder.build({
         agentId: config.agentId, name: config.displayName || config.name,
         description: config.description || "", runtime: adapter.id,
-        cli: agentCliPromptCapabilities("larkin"),
+        cli: agentCliPromptCapabilities("larkin"), previousSession: previous.previousSession,
       });
       const session = await adapter.createSession({
         agentId: config.agentId, model: config.model, reasoningEffort: config.effort || null,
@@ -1756,10 +1800,11 @@ export function createRuntimeHost(options: {
           LARKIN_CLAUDE_COMMAND: process.env.LARKIN_CLAUDE_COMMAND, ...probeEnv } })
         : { runtime: agent.adapter.id, state: "ready" as const };
       if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
+      const previousRef = previousSessionRefFor(oldSession, "operator reset");
       const standingPrompt = options.promptBuilder.build({
         agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
         description: agent.config.description || "", runtime: agent.adapter.id,
-        cli: agentCliPromptCapabilities("larkin"),
+        cli: agentCliPromptCapabilities("larkin"), previousSession: previousRef,
       });
       const create = agent.adapter.createSession({
         agentId: agent.config.agentId, model: agent.config.model, reasoningEffort: agent.config.effort || null,
@@ -1783,6 +1828,7 @@ export function createRuntimeHost(options: {
         agent.launchId = crypto.randomUUID();
         agent.config.sessionId = null;
         agent.session = fresh;
+        persistPreviousSession(agent, previousRef);
         agent.readiness = readiness;
         agent.disabledReason = null;
       };
@@ -1798,7 +1844,8 @@ export function createRuntimeHost(options: {
         agent.config.sessionId = fresh.sessionId;
         emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: fresh.sessionId, launchId: agent.launchId,
           ...(fresh.effectiveModel ? { model: fresh.effectiveModel } : {}),
-          ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
+          ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}),
+          ...(agent.previousSession ? { previousSession: agent.previousSession } : {}) });
       }
       emit({ type: "agent-status", agentId, status: "active", readiness });
       agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
@@ -1851,10 +1898,12 @@ export function createRuntimeHost(options: {
         throw new RuntimeSessionRecoveryError("recovery_staged_not_committed", "Runtime readiness probe failed");
       }
       if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
+      const previousRef = previousSessionRefFor(oldSession, "context-window recovery");
+      const oldPreviousSession = agent.previousSession;
       const standingPrompt = options.promptBuilder.build({
         agentId: agent.config.agentId, name: agent.config.displayName || agent.config.name,
         description: agent.config.description || "", runtime: agent.adapter.id,
-        cli: agentCliPromptCapabilities("larkin"),
+        cli: agentCliPromptCapabilities("larkin"), previousSession: previousRef,
       });
       let fresh: RuntimeSession;
       try {
@@ -1889,6 +1938,7 @@ export function createRuntimeHost(options: {
         agent.generation = oldGeneration;
         agent.launchId = oldLaunchId;
         agent.config.sessionId = oldConfigSessionId;
+        persistPreviousSession(agent, oldPreviousSession);
         agent.readiness = oldReadiness;
         agent.disabledReason = oldDisabledReason;
         agent.records = new Map(oldRecords);
@@ -1916,6 +1966,7 @@ export function createRuntimeHost(options: {
           agent.launchId = crypto.randomUUID();
           agent.config.sessionId = null;
           agent.session = fresh;
+          persistPreviousSession(agent, previousRef);
           agent.readiness = readiness;
           agent.disabledReason = null;
           for (const record of agent.records.values()) {
@@ -1930,7 +1981,8 @@ export function createRuntimeHost(options: {
           agent.config.sessionId = fresh.sessionId;
           emit({ type: "session", agentId, runtime: agent.adapter.id, sessionId: fresh.sessionId, launchId: agent.launchId,
             ...(fresh.effectiveModel ? { model: fresh.effectiveModel } : {}),
-            ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}) });
+            ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}),
+            ...(agent.previousSession ? { previousSession: agent.previousSession } : {}) });
         }
         emit({ type: "agent-status", agentId, status: "active", readiness });
         durableRollback = null;
@@ -1939,9 +1991,7 @@ export function createRuntimeHost(options: {
           .catch((error) => log("previous runtime close after context-window recovery failed", String(error)));
         reconcileAfterSessionSwap(agent);
         const proactive = proactivelyCompactPiAtIdle(agent, fresh);
-        void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-          if (outcome !== "failed") return retryPending(agent);
-        });
+        void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
         return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
           runtimeReady: true, pendingCount: rearmed.remainingPendingCount, rearmedCount: rearmed.rearmedCount,
           replayStatus: rearmed.remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
@@ -2005,7 +2055,8 @@ export function createRuntimeHost(options: {
             }) : undefined,
           compactionMachines: new Map(), compactionRecoveryInFlight: new Set(), piOverflowCompactionFailed: new Set(),
           piProactiveCompaction: null, piProactiveCompactionGeneration: null, piProactiveCompactionSession: null,
-          piProactiveCompactionFailedGeneration: null, readiness: null,
+          piProactiveCompactionFailedGeneration: null,
+          previousSession: loadPersistedPreviousSession(config, stateStore), readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false,
           promotedInboxUpdateIds: new Set(),
           backgroundCompletionQueue: [], backgroundCompletionKeys: new Set(),
@@ -2045,9 +2096,9 @@ export function createRuntimeHost(options: {
           await recoverStalePiCompaction(agent);
           const startupSession = agent.session;
           const proactive = startupSession ? proactivelyCompactPiAtIdle(agent, startupSession) : null;
-          const proactiveOutcome = proactive ? await proactive : "noop" as const;
+          if (proactive) await proactive;
           activeCount += 1;
-          if (proactiveOutcome !== "failed") await retryPending(agent);
+          await retryPending(agent);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           const transient = error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable";

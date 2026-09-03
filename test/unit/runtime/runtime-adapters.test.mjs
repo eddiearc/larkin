@@ -157,9 +157,26 @@ test("context prompt is capability-driven, versioned and produces bounded notifi
   assert.equal(update.deliveryId, "delivery-1");
 });
 
+test("context prompt references only the supplied previous session archive", () => {
+  const prompt = new ContextPromptBuilder().build({
+    agentId: "cli_test", runtime: "pi",
+    previousSession: {
+      sessionId: "gen-1", file: "/tmp/pi-sessions/gen-1.jsonl",
+      closedAt: "2026-09-03T00:00:00.000Z", reason: "context-window overflow",
+    },
+  });
+  assert.match(prompt.content, /## Previous session archive/);
+  assert.match(prompt.content, /`\/tmp\/pi-sessions\/gen-1\.jsonl`/);
+  assert.match(prompt.content, /Do not load it whole: use `tail` or `rg`/);
+  assert.match(prompt.content, /Older archives are kept on disk and are intentionally not referenced here/);
+  assert.doesNotMatch(prompt.content, /gen-0/);
+  assert.equal((prompt.content.match(/## Previous session archive/g) ?? []).length, 1);
+});
+
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
   assert.equal(prompt.version, "larkin-standing-v28");
+  assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
@@ -1086,7 +1103,7 @@ test.each(["context-revalidate", "model-revalidate", "auto-revalidate"])("produc
   }
 });
 
-test.each(["reserveTokens", "keepRecentTokens"])("production Pi backend rejects owned %s drift before prompt or compact submission", async (field) => {
+test.each(["reserveTokens", "keepRecentTokens"])("production Pi backend accepts prompt when owned %s drifts after startup", async (field) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-owned-${field}-`));
   const { command, commandArgs, log } = makeProductionPiCommand(root);
   const input = create({
@@ -1106,11 +1123,10 @@ test.each(["reserveTokens", "keepRecentTokens"])("production Pi backend rejects 
     settings.compaction[field] = field === "reserveTokens" ? 49_999 : 19_999;
     fs.writeFileSync(settingsFile, JSON.stringify(settings));
     const promptResult = await session.prompt({ inputId: `owned-${field}-prompt`, kind: "user", text: "prompt", attempt: 0 });
-    assert.equal(promptResult.status, "rejected");
-    assert.match(promptResult.reason, /must be exactly/);
-    await assert.rejects(session.compact(), /must be exactly/);
+    assert.equal(promptResult.status, "accepted", "disk settings drift must not reject prompt");
+    await session.compact();
     const rows = readProductionPiLog(log);
-    assert.equal(rows.some((row) => row.kind === "request" && !row.probe && ["prompt", "compact", "steer"].includes(row.type)), false);
+    assert.equal(rows.some((row) => row.kind === "request" && !row.probe && row.type === "prompt"), true);
   } finally {
     await session.close("production owned settings test complete").catch(() => {});
   }

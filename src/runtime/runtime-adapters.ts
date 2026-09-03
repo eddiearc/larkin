@@ -72,6 +72,7 @@ interface ProcessLike {
 export interface PiSessionProcessLike {
   readonly policyManaged?: boolean;
   readonly sessionId?: string | null;
+  readonly sessionFile?: string | null;
   readonly model?: { provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> };
   readonly thinkingLevel?: string;
   prompt(text: string): Promise<unknown>;
@@ -549,6 +550,7 @@ class PiSession extends EventSession {
     }));
   }
   get sessionId(): string | null { return this.sdk.sessionId ?? null; }
+  get sessionFile(): string | null { return this.sdk.sessionFile ?? null; }
   get effectiveModel(): string | null { return this.sdk.model ? `${this.sdk.model.provider}/${this.sdk.model.id}` : null; }
   get effectiveReasoningEffort(): string | null { return this.sdk.thinkingLevel ?? null; }
   async prompt(input: RuntimeInput): Promise<RuntimeInputResult> { return this.enqueue(input, () => this.sdk.prompt(input.text)); }
@@ -991,12 +993,14 @@ function writePrivateAtomic(file: string, content: string): void {
 class PiRpcBackend implements PiSessionProcessLike {
   readonly policyManaged: boolean;
   sessionId: string | null;
+  sessionFile: string | null;
   model?: { provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> };
   thinkingLevel?: string;
   constructor(private readonly client: PiRpcClient, state: PiRpcState,
     private readonly policy?: { model: string; contextWindow: number; ownedPiDirectory: string }) {
     this.policyManaged = Boolean(policy);
     this.sessionId = state.sessionId ?? null;
+    this.sessionFile = typeof state.sessionFile === "string" && state.sessionFile ? state.sessionFile : null;
     if (state.model?.provider && state.model.id) this.model = {
       provider: state.model.provider, id: state.model.id,
       ...(state.model.reasoning !== undefined ? { reasoning: state.model.reasoning } : {}),
@@ -1016,12 +1020,20 @@ class PiRpcBackend implements PiSessionProcessLike {
     if (effectiveModel !== this.policy.model || state.model?.contextWindow !== this.policy.contextWindow) {
       throw new Error("Pi model or context window changed after startup; compaction policy is no longer safe");
     }
-    const ownedSettings = readOwnedPiSettings(this.policy.ownedPiDirectory);
-    assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
-      enabled: state.autoCompactionEnabled,
-      reserveTokens: ownedSettings.compaction?.reserveTokens,
-      keepRecentTokens: ownedSettings.compaction?.keepRecentTokens,
-    } });
+    if (typeof state.sessionFile === "string" && state.sessionFile) this.sessionFile = state.sessionFile;
+    if (typeof state.sessionId === "string" && state.sessionId) this.sessionId = state.sessionId;
+    // Use the live process handshake, not a disk re-read of owned settings.json.
+    // Disk reserveTokens can drift after startup; that must not reject prompt.
+    const handshake = state.compactionCapabilities;
+    if (typeof handshake?.reserveTokens === "number" && typeof handshake?.keepRecentTokens === "number") {
+      assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
+        enabled: state.autoCompactionEnabled,
+        reserveTokens: handshake.reserveTokens,
+        keepRecentTokens: handshake.keepRecentTokens,
+      } });
+      return;
+    }
+    if (state.autoCompactionEnabled !== true) throw new Error("Pi native compaction must be enabled");
   }
   getState(): Promise<Record<string, unknown>> { return this.client.request("get_state"); }
   dispose(): Promise<void> { return this.client.close(); }

@@ -35,10 +35,19 @@ const FEISHU_IM_COMMAND_GROUPS = [
   ["Chats", ["im +chat-list", "im +chat-search", "im chats get"]],
 ] as const;
 
+/** Depth-1 archive of the session closed by the latest replacement. Older archives stay on disk. */
+export interface PreviousSessionRef {
+  sessionId: string;
+  file: string | null;
+  closedAt: string;
+  reason: string;
+}
+
 export interface ContextPromptInput {
   agent: { id: string; name?: string; description?: string };
   runtime: RuntimeId;
   cli: AgentCliCapabilities;
+  previousSession?: PreviousSessionRef | null;
 }
 
 function clean(value: string): string {
@@ -46,12 +55,30 @@ function clean(value: string): string {
 }
 
 export class ContextPromptBuilder {
-  build(input: { agentId: string; name?: string; description?: string; runtime: RuntimeId; cli?: AgentCliCapabilities }): StandingPrompt {
+  build(input: { agentId: string; name?: string; description?: string; runtime: RuntimeId; cli?: AgentCliCapabilities;
+    previousSession?: PreviousSessionRef | null }): StandingPrompt {
     return this.buildStandingPrompt({
       agent: { id: input.agentId, name: input.name, description: input.description },
       runtime: input.runtime,
       cli: input.cli ?? agentCliPromptCapabilities(),
+      previousSession: input.previousSession ?? null,
     });
+  }
+
+  /** Rendered only for the single most recent predecessor; never a chain. */
+  private previousSessionSection(previous: PreviousSessionRef | null | undefined): string[] {
+    if (!previous) return [];
+    const location = previous.file
+      ? `\`${clean(previous.file)}\``
+      : `session id \`${clean(previous.sessionId)}\` in the Runtime session directory`;
+    return [
+      "",
+      "## Previous session archive",
+      "",
+      `The session before this one was closed (${clean(previous.reason)}, ${clean(previous.closedAt)}). Its archive is ${location}.`,
+      "Consult it only when the user refers to earlier context. Do not load it whole: use `tail` or `rg` on the file for the relevant part.",
+      "Older archives are kept on disk and are intentionally not referenced here.",
+    ];
   }
 
   buildInboxNotice(input: { busy: boolean; count?: number; deliveryId?: string; target?: string; wakeReason?: string }): string {
@@ -71,6 +98,7 @@ export class ContextPromptBuilder {
       `You are the persistent Larkin agent **${identity}** (agent id: \`${input.agent.id}\`) running on ${input.runtime}.`,
       `Your authoritative self identity is **${identity}** (agent id: \`${input.agent.id}\`). Do not call \`${command("profile show")}\` merely to learn your identity.`,
       input.agent.description ? `Identity context: ${clean(input.agent.description)}` : "",
+      ...this.previousSessionSection(input.previousSession),
       "",
       "## Message handling",
       "",

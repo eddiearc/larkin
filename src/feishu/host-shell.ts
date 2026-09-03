@@ -24,6 +24,7 @@ import { inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
+import type { PreviousSessionRef } from "../agent/context-prompt.js";
 import type { RuntimeHost, RuntimeHostEvent, RuntimeSessionRecoveryResult } from "../runtime/runtime-host.js";
 import { providerAuthenticationFailureReadiness, RuntimePrerequisiteError } from "../runtime/runtime-readiness.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
@@ -62,7 +63,11 @@ interface ConfiguredAgent {
   botName?: string | null;
 }
 
-interface AgentState { agentId?: string; sessions: Record<string, string> }
+interface AgentState {
+  agentId?: string;
+  sessions: Record<string, string>;
+  previousSessions?: Record<string, PreviousSessionRef>;
+}
 interface PendingDocumentComment {
   messageId: string;
   fileToken: string;
@@ -309,7 +314,16 @@ export function createHostShell({
   };
   const agentStates = new Map<string, AgentStateRecord>();
   const saveAgentState = (record: AgentStateRecord): void => {
-    try { record.store.writeJson("agentState", record.state); }
+    try {
+      const latest = record.store.readJson<Partial<AgentState>>("agentState", {});
+      if (isRecord(latest.previousSessions)) {
+        record.state.previousSessions = {
+          ...latest.previousSessions,
+          ...(record.state.previousSessions ?? {}),
+        };
+      }
+      record.store.writeJson("agentState", record.state);
+    }
     catch (error) { log(`agent-state 写失败: ${errorMessage(error)}`); }
   };
   const initializeAgentState = (agent: ConfiguredAgent): AgentStateRecord => {
@@ -319,7 +333,11 @@ export function createHostShell({
     let state: AgentState;
     try {
       const loaded = store.readJson<Partial<AgentState>>("agentState", {});
-      state = { ...loaded, sessions: isRecord(loaded.sessions) ? loaded.sessions as Record<string, string> : {} };
+      state = {
+        ...loaded,
+        sessions: isRecord(loaded.sessions) ? loaded.sessions as Record<string, string> : {},
+        ...(isRecord(loaded.previousSessions) ? { previousSessions: loaded.previousSessions as AgentState["previousSessions"] } : {}),
+      };
     } catch { state = { sessions: {} }; }
     state.agentId = agent.agentId;
     const record = { store, state };
@@ -1285,11 +1303,19 @@ export function createHostShell({
     }
     if (message.type === "session") {
       const record = agentStates.get(agent.agentId);
-      if (record && record.state.sessions[message.runtime] !== message.sessionId) {
-        if (message.sessionId) record.state.sessions[message.runtime] = message.sessionId;
-        else delete record.state.sessions[message.runtime];
-        saveAgentState(record);
-        log(`持久化 agent=${agent.name} runtime=${message.runtime} sessionId=${message.sessionId}`);
+      if (record) {
+        const sessionChanged = record.state.sessions[message.runtime] !== message.sessionId;
+        if (sessionChanged) {
+          if (message.sessionId) record.state.sessions[message.runtime] = message.sessionId;
+          else delete record.state.sessions[message.runtime];
+        }
+        if (message.previousSession) {
+          record.state.previousSessions = { ...(record.state.previousSessions ?? {}), [message.runtime]: message.previousSession };
+        }
+        if (sessionChanged || message.previousSession) {
+          saveAgentState(record);
+          log(`持久化 agent=${agent.name} runtime=${message.runtime} sessionId=${message.sessionId}`);
+        }
       }
       hostState.updateStatus(agent, projectSessionStatus(hostState.readStatus(agent), message.runtime, message.sessionId, message.launchId, new Date(), {
         ...(message.model ? { model: message.model } : {}),
@@ -1524,6 +1550,7 @@ export function createHostShell({
         await runtimeHost.start(agents.map((agent) => ({
           ...agent,
           sessionId: agentStates.get(agent.agentId)?.state.sessions[agent.runtime] || null,
+          previousSession: agentStates.get(agent.agentId)?.state.previousSessions?.[agent.runtime] ?? null,
         })));
         reminder.startSync();
         inboxAudit.start();

@@ -3,9 +3,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadConfig, resolveConfigDir } from "../platform/config.js";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
-import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
+import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
+import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -20,7 +22,7 @@ export interface RuntimeModelDirectoryInput {
   runtime: string;
   cwd: string;
   env?: Env;
-  agentDir?: string;
+  agentId?: string;
 }
 
 function readTestModelDirectory(env: Env | undefined): RuntimeDirectoryModel[] | undefined {
@@ -51,7 +53,21 @@ export async function discoverRuntimeModelDirectory(input: RuntimeModelDirectory
     ];
   }
   if (input.runtime === "pi") {
-    const catalog = await discoverPiModelCatalog({ cwd: input.cwd, ...(input.agentDir ? { agentDir: input.agentDir } : {}) });
+    const env = input.env ?? process.env;
+    const agentId = input.agentId || "";
+    if (!agentId) throw new Error("runtime model directory requires agentId for Pi");
+    const configDir = resolveConfigDir(env);
+    const { config } = loadConfig(env);
+    const agent = config.agents[agentId];
+    if (!agent) throw new Error(`unknown agent: ${agentId}`);
+    const catalogCommand = piCatalogCommandSpec(agent.piDistribution, env);
+    const catalog = await discoverPiModelCatalog({
+      cwd: input.cwd,
+      agentDir: ownedPiCatalogAgentDir(configDir, agentId),
+      command: catalogCommand.command,
+      commandArgs: catalogCommand.commandArgs,
+      env,
+    });
     if (!catalog.effectiveModel) throw new Error("Pi 模型目录未解析出默认模型");
     return [
       { id: "default", label: `default: ${catalog.effectiveModel}` },
@@ -72,12 +88,13 @@ function isMainEntry(argvPath = process.argv[1]): boolean {
 export async function main(): Promise<void> {
   const runtime = process.argv[2] || "";
   const cwd = process.argv[3] || "";
+  const agentId = process.argv[4] || "";
   if (!runtime || !cwd) throw new Error("runtime model directory requires runtime and cwd");
   const models = await discoverRuntimeModelDirectory({
     runtime,
     cwd,
     env: process.env,
-    ...(process.env.PI_CODING_AGENT_DIR ? { agentDir: process.env.PI_CODING_AGENT_DIR } : {}),
+    ...(agentId ? { agentId } : {}),
   });
   process.stdout.write(`${JSON.stringify({ models })}\n`);
 }

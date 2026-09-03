@@ -52,7 +52,7 @@ function discoverRuntimeModelDirectorySync(
   input: { agentId: string; cwd: string; runtime: string },
   env: Env,
 ): RuntimeDirectoryModel[] {
-  const childSpec = internalCommandSpec("runtime-model-directory", [input.runtime, input.cwd], env);
+  const childSpec = internalCommandSpec("runtime-model-directory", [input.runtime, input.cwd, input.agentId], env);
   const result = spawnSync(childSpec.command, childSpec.args, {
     encoding: "utf8", env: { ...process.env, ...env }, timeout: 20_000, maxBuffer: 1024 * 1024,
   });

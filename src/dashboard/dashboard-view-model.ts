@@ -13,6 +13,7 @@ import { isAllowedDashboardAvatarUrl } from "./dashboard-avatar.js";
 import { collectWorkspaceEntry as collectTypedWorkspaceEntry } from "./dashboard-workspace.js";
 import { buildFingerprint, packageVersion } from "../platform/build-info.js";
 import * as larkinConfig from "../platform/config.js";
+import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
 
 export interface JsonRecord {
   [key: string]: unknown;
@@ -89,6 +90,7 @@ export interface DashboardAgent {
   workspaceDir: string;
   feishuProfile: string;
   effort?: string;
+  piDistribution?: "external" | "builtin";
   noMentionChats?: string[];
 }
 export interface DashboardConfig {
@@ -483,7 +485,13 @@ export function projectStatusTimeline(status: JsonRecord) {
 }
 
 export type PiStatusModelResolver = {
-  resolve(input: { agentDir?: string; agentId: string; cwd: string }): Promise<PiContextCatalogModel[]>;
+  resolve(input: {
+    agentDir: string;
+    agentId: string;
+    cwd: string;
+    command?: string;
+    commandArgs?: readonly string[];
+  }): Promise<PiContextCatalogModel[]>;
 };
 
 async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonStartedAt: unknown, piModelResolver?: PiStatusModelResolver) {
@@ -498,10 +506,13 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
   let piCatalog: readonly PiContextCatalogModel[] = [];
   if (a.runtime === "pi" && piModelResolver) {
     try {
+      const catalogCommand = piCatalogCommandSpec(a.piDistribution, process.env);
       piCatalog = await piModelResolver.resolve({
         agentId: a.agentId,
         cwd: a.workspaceDir,
-        ...(process.env.PI_CODING_AGENT_DIR ? { agentDir: process.env.PI_CODING_AGENT_DIR } : {}),
+        agentDir: ownedPiCatalogAgentDir(configDir, a.agentId),
+        command: catalogCommand.command,
+        commandArgs: catalogCommand.commandArgs,
       });
     } catch { /* unknown or unavailable catalog keeps the explicit turns fallback */ }
   }

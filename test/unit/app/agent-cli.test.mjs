@@ -258,7 +258,7 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
         LARKIN_TEST_RUNTIME_MODEL_DIRECTORY_FILE: modelDirectoryFixture,
       };
       const run = (...args) => spawnSync(process.execPath, [entry, ...args], { cwd: ROOT, encoding: "utf8", env, timeout: 30_000 });
-      const directory = spawnSync(process.execPath, [path.join(ROOT, "dist/app/runtime-model-directory.mjs"), runtimeCase.runtime, path.join(root, "agents", agentId)], {
+      const directory = spawnSync(process.execPath, [path.join(ROOT, "dist/app/runtime-model-directory.mjs"), runtimeCase.runtime, path.join(root, "agents", agentId), agentId], {
         cwd: ROOT, encoding: "utf8", env, timeout: 30_000,
       });
       assert.equal(directory.status, 0, `${runtimeCase.runtime}: ${directory.stderr}`);
@@ -280,6 +280,54 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
         { model: JSON.parse(shown.stdout).agents[0].model, effort: JSON.parse(shown.stdout).agents[0].effort },
         { model: runtimeCase.model, effort: "high" },
       );
+    }
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("Runtime session querying another Pi Agent uses the target owned dir and ignores host decoy", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-agent-cli-pi-isolation-"));
+  const session = "cli_piCatalogSessionA1";
+  const target = "cli_piCatalogTargetB2";
+  const decoy = path.join(temp, "decoy-host-pi");
+  const logFile = path.join(temp, "fake-pi.log");
+  const bin = path.join(temp, "bin");
+  const entry = path.join(ROOT, "dist", "app", "agent-cli.mjs");
+  try {
+    fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(bin, "pi"), `#!${process.execPath}
+import fs from "node:fs";
+fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify({
+  agentDir: process.env.PI_CODING_AGENT_DIR || null,
+}) + "\\n");
+process.exit(1);
+`, { mode: 0o755 });
+    fs.writeFileSync(logFile, "");
+    fs.mkdirSync(path.join(temp, "agents", session), { recursive: true });
+    fs.mkdirSync(path.join(temp, "agents", target), { recursive: true });
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-agent-cli-pi-isolation", mentionPolicy: "require", activeAgent: session,
+      agents: {
+        [session]: { runtime: "pi", model: "default", piDistribution: "builtin" },
+        [target]: { runtime: "pi", model: "default", piDistribution: "external" },
+      },
+    })}\n`, { mode: 0o600 });
+    const env = {
+      ...process.env,
+      HOME: temp,
+      PATH: `${bin}:/usr/bin:/bin`,
+      LARKIN_CONFIG_DIR: temp,
+      LARKIN_AGENT_ID: session,
+      PI_CODING_AGENT_DIR: decoy,
+    };
+    const result = spawnSync(process.execPath, [entry, "config", "model", "owned/model", "--agent", target], {
+      cwd: ROOT, encoding: "utf8", env, timeout: 30_000,
+    });
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(decoy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    const recorded = fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(recorded.length >= 1, "cross-agent catalog must spawn host pi for the external target");
+    for (const row of recorded) {
+      assert.equal(row.agentDir, path.join(temp, "providers", "pi", target));
     }
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

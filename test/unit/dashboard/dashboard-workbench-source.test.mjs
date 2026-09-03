@@ -88,3 +88,26 @@ test("dashboard Pi model directory is wired to the official catalog authority", 
   assert.match(controller, /createPiModelDirectoryResolver/);
   assert.match(controller, /\/api\/models\/pi/);
 });
+
+test("Pi catalog isolation deletes host-dir fallbacks and labels builtin versus user Pi", () => {
+  const controller = read("src/dashboard/dashboard-config-controller.ts");
+  const viewModel = read("src/dashboard/dashboard-view-model.ts");
+  const agentConfig = read("src/app/agent-config.ts");
+  const runtimeDirectory = read("src/app/runtime-model-directory.ts");
+  const types = read("src/dashboard/web/types.ts");
+  const app = read("src/dashboard/web/app.tsx");
+  for (const [name, source] of [
+    ["controller", controller],
+    ["view-model", viewModel],
+    ["agent-config", agentConfig],
+    ["runtime-model-directory", runtimeDirectory],
+  ]) {
+    assert.doesNotMatch(source, /PI_CODING_AGENT_DIR\s*\?\s*\{\s*agentDir/, `${name} must not omit agentDir when PI_CODING_AGENT_DIR is unset`);
+  }
+  assert.match(types, /piDistribution:\s*"builtin"\s*\|\s*"external"\s*\|\s*null/);
+  assert.match(app, /piDistributionLabel/);
+  assert.match(app, /内置 Pi|用户安装的 Pi|piDistributionLabel/);
+  assert.match(agentConfig, /piDistributionLabel/);
+  assert.match(runtimeDirectory, /ownedPiCatalogAgentDir/);
+  assert.match(runtimeDirectory, /piCatalogCommandSpec/);
+});

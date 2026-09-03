@@ -83,7 +83,9 @@ test("collectStatus projects a known Pi catalog window using the latest assistan
     { type: "message", timestamp: "2026-07-25T00:00:03.000Z", message: { role: "assistant", provider: "mock", model: "known", usage: { totalTokens: 10_000 } } },
   ].map((row) => JSON.stringify(row)).join("\n")}\n`);
   const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.LARKIN_CONFIG_DIR = root;
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "decoy-host-pi");
   try {
     const calls = [];
     const projected = await collectStatus({ piModelResolver: { async resolve(input) {
@@ -92,6 +94,10 @@ test("collectStatus projects a known Pi catalog window using the latest assistan
     } } });
     const usage = projected.agents[0].session.usage;
     assert.equal(calls.length, 1);
+    assert.equal(calls[0].agentId, agentId);
+    assert.equal(calls[0].agentDir, path.join(root, "providers", "pi", agentId));
+    assert.notEqual(calls[0].agentDir, process.env.PI_CODING_AGENT_DIR);
+    assert.equal(calls[0].commandArgs?.includes("pi-rpc") ?? false, false);
     assert.equal(usage.cumulativeTokens, 90_000);
     assert.equal(usage.latestTokens, 10_000);
     assert.equal(usage.contextWindow, 200_000);
@@ -106,6 +112,43 @@ test("collectStatus projects a known Pi catalog window using the latest assistan
   } finally {
     if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
     else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("collectStatus builtin Pi catalog uses owned dir and pi-rpc even when host PI_CODING_AGENT_DIR is a decoy", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-status-builtin-"));
+  fs.chmodSync(root, 0o700);
+  const agentId = "cli_PiContextBuiltinA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 4,
+    serverId: "server-pi-context-builtin",
+    mentionPolicy: "require",
+    activeAgent: agentId,
+    agents: { [agentId]: { runtime: "pi", model: "default", piDistribution: "builtin", createdAt: "2026-07-25T00:00:00.000Z" } },
+  })}\n`, { mode: 0o600 });
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "decoy-host-pi");
+  try {
+    const calls = [];
+    await collectStatus({ piModelResolver: { async resolve(input) {
+      calls.push(input);
+      return [];
+    } } });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].agentDir, path.join(root, "providers", "pi", agentId));
+    assert.equal(calls[0].commandArgs.includes("pi-rpc"), true);
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

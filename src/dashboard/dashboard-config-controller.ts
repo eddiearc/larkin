@@ -8,13 +8,20 @@ import { discoverClaudeModelCatalog, type DiscoverClaudeCatalogOptions } from ".
 import { discoverCodexModelCatalog, type DiscoverCodexCatalogOptions } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtime/pi-model-catalog.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
+import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
 
 type Env = Record<string, string | undefined>;
 type LarkJsonCall = { command: string; args: string[]; env: Env; maxBuffer: number; timeout: number };
 type ChatDirectoryInput = { agentId: string; chatIds: string[]; configDir: string; profile: string };
 type ClaudeModelDirectoryInput = { agentId: string; cwd: string; env: Env };
 type CodexModelDirectoryInput = { agentId: string; cwd: string; env: Env };
-type PiModelDirectoryInput = { agentDir?: string; agentId: string; cwd: string };
+type PiModelDirectoryInput = {
+  agentDir: string;
+  agentId: string;
+  cwd: string;
+  command?: string;
+  commandArgs?: readonly string[];
+};
 
 export type ChatDirectoryResolver = { resolve(input: ChatDirectoryInput): Promise<Record<string, string>> };
 export type ClaudeModelDirectoryResolver = { resolve(input: ClaudeModelDirectoryInput): Promise<Array<Record<string, unknown> & { id: string; label: string }>> };
@@ -177,7 +184,7 @@ export function createPiModelDirectoryResolver(options: {
   const inFlight = new Map<string, Promise<Array<Record<string, unknown> & { id: string; label: string }>>>();
   return {
     async resolve(input) {
-      const key = [input.agentId, input.cwd, input.agentDir ?? ""].join("\u0000");
+      const key = [input.agentId, input.cwd, input.agentDir, input.command ?? "", ...(input.commandArgs ?? [])].join("\u0000");
       pruneCache(cache, (entry) => now() >= entry.expiresAt, 64);
       pruneCache(failures, (entry) => now() >= entry.expiresAt, 64);
       const cached = cache.get(key);
@@ -187,7 +194,12 @@ export function createPiModelDirectoryResolver(options: {
       if (!pending) {
         pending = (async () => {
           try {
-            const catalog = await discover({ cwd: input.cwd, ...(input.agentDir ? { agentDir: input.agentDir } : {}) });
+            const catalog = await discover({
+              cwd: input.cwd,
+              agentDir: input.agentDir,
+              ...(input.command ? { command: input.command } : {}),
+              ...(input.commandArgs ? { commandArgs: input.commandArgs } : {}),
+            });
             const models = [
               { id: "default", label: `default: ${catalog.effectiveModel}` },
               ...catalog.models.map(({ id, label, contextWindow, supportedReasoningEfforts, defaultReasoningEffort }) => ({
@@ -393,13 +405,24 @@ export function createDashboardConfigController({
   codexModelDirectoryResolver?: CodexModelDirectoryResolver;
   piModelDirectoryResolver?: PiModelDirectoryResolver;
 }) {
+  const resolvePiModelDirectory = async (agentId: string) => {
+    const { config, configDir } = loadConfig(env);
+    const agent = config.agents[agentId];
+    if (!agent) throw new Error("unknown agent");
+    const catalogCommand = piCatalogCommandSpec(agent.piDistribution, env);
+    return await piModelDirectoryResolver.resolve({
+      agentId,
+      cwd: agent.workspaceDir,
+      agentDir: ownedPiCatalogAgentDir(configDir, agentId),
+      command: catalogCommand.command,
+      commandArgs: catalogCommand.commandArgs,
+    });
+  };
   const resolveModelDirectory = async (runtime: string, agentId: string) => {
     const { config } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    if (runtime === "pi") return await piModelDirectoryResolver.resolve({
-      agentId, cwd: agent.workspaceDir, ...(env.PI_CODING_AGENT_DIR ? { agentDir: env.PI_CODING_AGENT_DIR } : {}),
-    });
+    if (runtime === "pi") return await resolvePiModelDirectory(agentId);
     if (runtime === "codex") return await codexModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     if (runtime === "claude") return await claudeModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     const authored = loadRuntimeModels()[runtime];
@@ -438,14 +461,7 @@ export function createDashboardConfigController({
         try {
           assertPrivateReadRequest(req, csrfCapability);
           const agentId = requestUrl.searchParams.get("agent") || "";
-          const { config } = loadConfig(env);
-          const agent = config.agents[agentId];
-          if (!agent) throw new Error("unknown agent");
-          const models = await piModelDirectoryResolver.resolve({
-            agentId,
-            cwd: agent.workspaceDir,
-            ...(env.PI_CODING_AGENT_DIR ? { agentDir: env.PI_CODING_AGENT_DIR } : {}),
-          });
+          const models = await resolvePiModelDirectory(agentId);
           json(res, 200, { models });
         } catch (error) {
           json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "Pi model directory unavailable" });

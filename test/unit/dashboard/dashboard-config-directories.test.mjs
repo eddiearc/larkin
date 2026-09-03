@@ -372,6 +372,87 @@ test("GET /api/models/pi returns default plus authenticated models through the i
   assert.deepEqual(response.body.models, models);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].agentId, APP);
+  assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", APP));
+  assert.equal(calls[0].commandArgs?.includes("pi-rpc") ?? false, false);
+});
+
+function writePiAgents(root, agents) {
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 4,
+    serverId: "server-dashboard-directory",
+    mentionPolicy: "require",
+    activeAgent: Object.keys(agents)[0],
+    agents,
+  })}\n`, { mode: 0o600 });
+}
+
+test("GET /api/models/pi and directory mutation ignore decoy or unset PI_CODING_AGENT_DIR and use owned dir plus engine", async () => {
+  const { createDashboardConfigController } = await import(`${CONTROLLER}?pi-owned=${Date.now()}`);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const builtin = "cli_dashboardBuiltinA1";
+  const external = "cli_dashboardExternalB2";
+  writePiAgents(f.root, {
+    [builtin]: { runtime: "pi", model: "default", piDistribution: "builtin", createdAt: "2026-07-24T00:00:00.000Z" },
+    [external]: { runtime: "pi", model: "default", piDistribution: "external", createdAt: "2026-07-24T00:00:00.000Z" },
+  });
+  const decoy = path.join(f.root, "decoy-host-pi");
+  const calls = [];
+  const models = [
+    { id: "default", label: "default: owned/model" },
+    { id: "owned/model", label: "Owned", supportedReasoningEfforts: ["off"] },
+  ];
+  const piModelDirectoryResolver = { async resolve(input) { calls.push(input); return models; } };
+
+  for (const decoyDir of [decoy, undefined]) {
+    const env = { ...f.env };
+    if (decoyDir) env.PI_CODING_AGENT_DIR = decoyDir;
+    else delete env.PI_CODING_AGENT_DIR;
+    const controller = createDashboardConfigController({ csrfCapability: "test", env, piModelDirectoryResolver });
+    calls.length = 0;
+    const listed = await get(controller, `/api/models/pi?agent=${builtin}`);
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", builtin));
+    assert.notEqual(calls[0].agentDir, decoy);
+    assert.equal(calls[0].commandArgs.includes("pi-rpc"), true, "builtin catalog must use internal pi-rpc");
+
+    calls.length = 0;
+    const externalListed = await get(controller, `/api/models/pi?agent=${external}`);
+    assert.equal(externalListed.status, 200);
+    assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", external));
+    assert.equal(calls[0].commandArgs.includes("pi-rpc"), false, "external catalog must use host pi");
+
+    calls.length = 0;
+    const saved = await patch(controller, { operation: "set-agent-model", agentId: external, model: "owned/model" });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", external));
+
+    const rejected = await patch(controller, { operation: "set-agent-model", agentId: external, model: "host-only/decoy" });
+    assert.equal(rejected.status, 400);
+  }
+});
+
+test("Pi model directory cache key isolates builtin and external engines", async () => {
+  const module = await import(`${CONTROLLER}?pi-engine-cache=${Date.now()}`);
+  const calls = [];
+  const resolver = module.createPiModelDirectoryResolver({
+    async discoverPiModelCatalog(options) {
+      calls.push(options);
+      return {
+        models: [{ id: "owned/model", label: "Owned", supportedReasoningEfforts: ["off"], verified: "launchable" }],
+        effectiveModel: "owned/model",
+        effectiveThinkingLevel: "off",
+        defaultSource: "settings",
+        diagnostics: [],
+      };
+    },
+  });
+  const shared = { agentId: APP, cwd: "/tmp/pi-workspace", agentDir: "/tmp/owned-pi" };
+  await resolver.resolve({ ...shared, command: "/bin/bun", commandArgs: ["entry", "__internal", "pi-rpc"] });
+  await resolver.resolve({ ...shared, command: "pi", commandArgs: [] });
+  assert.equal(calls.length, 2, "builtin and external engines must not share a cache entry");
+  assert.deepEqual(calls[0].commandArgs, ["entry", "__internal", "pi-rpc"]);
+  assert.deepEqual(calls[1].commandArgs, []);
 });
 
 test("Codex model directory reuses app-server model/list with five-minute caching and dedupe", async () => {

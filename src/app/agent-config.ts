@@ -20,7 +20,7 @@ import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
-import { assertBuiltinPiAgentDirectory, piAgentDirectory } from "../runtime/pi-provider-config.js";
+import { assertBuiltinPiAgentDirectory, ownedPiCatalogAgentDir, piAgentDirectory, piCatalogCommandSpec, piDistributionLabel } from "../runtime/pi-provider-config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 interface RuntimeModel {
@@ -35,6 +35,7 @@ interface AgentConfig {
   name: string;
   runtime: string;
   model: string;
+  piDistribution?: "external" | "builtin";
   effort?: string;
   stateDir: string;
   feishuProfile: string;
@@ -501,13 +502,18 @@ if ((["model", "effort"].includes(kind || "") && agent.runtime === "claude") || 
 }
 let piCatalog: PiModelCatalog | null = null;
 if (agent.runtime === "pi" || (kind === "runtime" && value === "pi")) {
+  if (kind === "model" && !value) say(`发行版: ${piDistributionLabel(agent.piDistribution)}`);
   try {
+    const catalogCommand = piCatalogCommandSpec(agent.piDistribution, process.env);
     piCatalog = await discoverPiModelCatalog({
       cwd: String(agent.workspaceDir),
-      ...(process.env.PI_CODING_AGENT_DIR ? { agentDir: process.env.PI_CODING_AGENT_DIR } : {}),
+      agentDir: ownedPiCatalogAgentDir(configDir, selectedKey),
+      command: catalogCommand.command,
+      commandArgs: catalogCommand.commandArgs,
+      env: process.env,
     });
   } catch (error) {
-    die(`Pi 模型目录加载失败：${error instanceof Error ? error.message : String(error)}。请先用官方 pi 登录或检查 PI_CODING_AGENT_DIR。`);
+    die(`Pi 模型目录加载失败：${error instanceof Error ? error.message : String(error)}。请先用官方 pi 登录或检查该 Agent 的隔离 provider 目录。`);
   }
   if (!piCatalog) die("Pi 模型目录加载失败");
   const loadedPiCatalog = piCatalog as PiModelCatalog;

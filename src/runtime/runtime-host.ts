@@ -595,17 +595,10 @@ export function createRuntimeHost(options: {
       && agent.piProactiveCompactionGeneration === agent.generation
       && agent.piProactiveCompactionSession === agent.session
       ? agent.piProactiveCompaction : null;
-    if (proactive && await proactive === "failed") {
-      return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
-    }
-    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) {
-      return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
-    }
+    if (proactive) await proactive;
     if (agent.adapter.id === "pi" && !busy && !agent.busy && !agent.turnInProgress && agent.session) {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate && await idleGate === "failed") {
-        return { status: "deferred", deliveryId: record.deliveryId, reason: "Pi proactive compaction failed for the current session generation" };
-      }
+      if (idleGate) await idleGate;
     }
     agent.submitting = true;
     if (!busy) agent.busy = true; // Reserve the turn before prompt() can yield.
@@ -670,13 +663,12 @@ export function createRuntimeHost(options: {
       && agent.piProactiveCompactionGeneration === agent.generation
       && agent.piProactiveCompactionSession === agent.session
       ? agent.piProactiveCompaction : null;
-    if (proactive && await proactive === "failed") return;
+    if (proactive) await proactive;
     if (agent.submitting || agent.starting) { agent.retryAfterSubmit = true; return; }
-    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) return;
     if (agent.busy || agent.turnInProgress || !agent.session) return;
     if (agent.adapter.id === "pi") {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate && await idleGate === "failed") return;
+      if (idleGate) await idleGate;
     }
     const record = [...agent.records.values()].find((candidate) => candidate.status === "pending" || candidate.status === "submitting");
     if (record) await submit(agent, record, false);
@@ -867,11 +859,10 @@ export function createRuntimeHost(options: {
       && agent.piProactiveCompactionGeneration === agent.generation
       && agent.piProactiveCompactionSession === agent.session
       ? agent.piProactiveCompaction : null;
-    if (proactive && await proactive === "failed") return;
-    if (agent.adapter.id === "pi" && agent.piProactiveCompactionFailedGeneration === agent.generation) return;
+    if (proactive) await proactive;
     if (agent.adapter.id === "pi" && !agent.busy && !agent.turnInProgress && agent.session) {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate && await idleGate === "failed") return;
+      if (idleGate) await idleGate;
     }
     if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
     if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
@@ -1046,7 +1037,7 @@ export function createRuntimeHost(options: {
       void ensureSession(agent).then(async () => {
         const session = agent.session;
         const proactive = session ? proactivelyCompactPiAtIdle(agent, session) : null;
-        if (proactive && await proactive === "failed") return;
+        if (proactive) await proactive;
         reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
         enqueueUndeliveredTerminalWakes(agent);
         await retryPending(agent);
@@ -1253,8 +1244,6 @@ export function createRuntimeHost(options: {
     })();
     const tracked = task.catch((error): "failed" => {
       agent.piProactiveCompactionFailedGeneration = generation;
-      emit({ type: "agent-status", agentId: agent.config.agentId, status: "error",
-        error: "Pi proactive compaction failed; the current session generation is degraded" });
       log("Pi proactive compaction failed", String(error));
       return "failed";
     }).finally(() => {
@@ -1376,9 +1365,7 @@ export function createRuntimeHost(options: {
         emit({ type: "agent-status", agentId: agent.config.agentId, status: "active", readiness: agent.readiness });
       }
       const proactive = proactivelyCompactPiAtIdle(agent, session);
-      void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-        if (outcome !== "failed") return retryPending(agent);
-      });
+      void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
     } else if (event.type === "runtime-observation") {
       if (event.phase === "background_dispatched" && typeof event.taskId === "string" && event.taskId) {
@@ -1627,9 +1614,7 @@ export function createRuntimeHost(options: {
     await oldSession.close("Pi context fallback committed").catch((error) => log("previous Pi session close after fallback failed", String(error)));
     reconcileAfterSessionSwap(agent);
     const proactive = proactivelyCompactPiAtIdle(agent, fresh);
-    void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-      if (outcome !== "failed") return retryPending(agent);
-    });
+    void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
     return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
       runtimeReady: true, pendingCount: remainingPendingCount, rearmedCount,
       replayStatus: remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
@@ -1939,9 +1924,7 @@ export function createRuntimeHost(options: {
           .catch((error) => log("previous runtime close after context-window recovery failed", String(error)));
         reconcileAfterSessionSwap(agent);
         const proactive = proactivelyCompactPiAtIdle(agent, fresh);
-        void (proactive ?? Promise.resolve("noop" as const)).then((outcome) => {
-          if (outcome !== "failed") return retryPending(agent);
-        });
+        void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
         return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
           runtimeReady: true, pendingCount: rearmed.remainingPendingCount, rearmedCount: rearmed.rearmedCount,
           replayStatus: rearmed.remainingPendingCount > 0 ? "pending" : "consumed", sessionId: fresh.sessionId };
@@ -2045,9 +2028,9 @@ export function createRuntimeHost(options: {
           await recoverStalePiCompaction(agent);
           const startupSession = agent.session;
           const proactive = startupSession ? proactivelyCompactPiAtIdle(agent, startupSession) : null;
-          const proactiveOutcome = proactive ? await proactive : "noop" as const;
+          if (proactive) await proactive;
           activeCount += 1;
-          if (proactiveOutcome !== "failed") await retryPending(agent);
+          await retryPending(agent);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           const transient = error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable";

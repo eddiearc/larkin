@@ -229,15 +229,17 @@ test("RuntimeHost bounds proactive compact failure without retry or session rese
     await host.start([{ agentId: "cli_piProactiveFailureA1", name: "failure", runtime: "pi", model: "model", workspaceDir: "/tmp", stateDir: root }]);
     session.emit({ type: "turn-end" });
     session.emit({ type: "turn-end" });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    const compactDeadline = Date.now() + 1_000;
+    while (session.compactCalls < 1 && Date.now() < compactDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(session.compactCalls, 1);
     assert.equal(session.closes.length, 0, "proactive failure must not reset the session");
     const receipt = await host.deliver("cli_piProactiveFailureA1", {
       message_id: "om_pi_proactive_failure", chat_id: "oc_pi_proactive_failure", content: "pending",
     });
-    assert.equal(receipt.status, "deferred");
-    assert.equal(session.prompts.length, 0, "degraded generation must not submit pending work");
-    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "pending");
+    assert.equal(receipt.status, "accepted");
+    assert.ok(session.prompts.length >= 1, "idle compact failure must still submit pending work");
+    assert.equal(session.compactCalls, 1, "failed generation must not retry compact");
+    assert.equal(session.closes.length, 0, "later deliveries must keep the same session");
   } finally {
     await host.shutdown("done");
     fs.rmSync(root, { recursive: true, force: true });

@@ -75,6 +75,8 @@ export interface RuntimeSessionCreate {
 
 export interface RuntimeSession {
   readonly sessionId: string | null;
+  /** On-disk archive of this session when the Runtime exposes one (Pi jsonl). */
+  readonly sessionFile?: string | null;
   readonly effectiveModel?: string | null;
   readonly effectiveReasoningEffort?: string | null;
   prompt(input: RuntimeInput): Promise<RuntimeInputResult>;

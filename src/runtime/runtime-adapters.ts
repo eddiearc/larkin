@@ -31,7 +31,10 @@ import { resolvePiSubagentRecordWatchdogExtensionArg } from "./pi-subagent-recor
 import { effectivePiStateDir, extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
+  classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
+  isBuiltinPiDistribution,
+  missingProviderCredentialReadiness,
   probeNativeRuntimeReadiness,
   providerAuthenticationFailureReadiness,
   RuntimePrerequisiteError,
@@ -604,7 +607,23 @@ class PiSession extends EventSession {
       this.awaitingAcknowledgement.delete(input.inputId);
       this.ownedInputIds.delete(input.inputId);
       this.inputEpochs.delete(input.inputId);
-      return { status: "rejected", inputId: input.inputId, retryable: true, reason: (error as Error).message };
+      const rawReason = error instanceof Error ? error.message : String(error);
+      const missing = isBuiltinPiDistribution(this.distribution)
+        ? classifyPiMissingCredentialRejection(rawReason)
+        : null;
+      if (missing) {
+        const classified = classifyPiProviderError(
+          { provider: missing.provider, message: missing.diagnostic },
+          { distribution: this.distribution },
+        );
+        this.emit({
+          type: "input-error", inputId: input.inputId, retryable: false, willRetry: false,
+          message: classified.reason, errorCategory: classified.category, nextAction: classified.nextAction,
+          upstream: { provider: missing.provider, message: missing.diagnostic },
+        });
+        return { status: "rejected", inputId: input.inputId, retryable: false, reason: classified.reason };
+      }
+      return { status: "rejected", inputId: input.inputId, retryable: true, reason: rawReason };
     }
   }
 
@@ -723,7 +742,7 @@ class PiSession extends EventSession {
       this.emitObservation("settled");
       const owned = [...this.ownedInputIds].filter((inputId) => this.inputEpochs.get(inputId) === epoch);
       if (error) {
-        const classified = classifyPiProviderError(error);
+        const classified = classifyPiProviderError(error, { distribution: this.distribution });
         const retryable = classified.category === "rate_limit" || isRetryablePiProviderError(error.upstream.message);
         for (const inputId of owned) this.emit({
           type: "input-error", inputId, retryable, willRetry: false, message: classified.reason,
@@ -858,7 +877,10 @@ function piAssistantProviderError(message: Record<string, any>): PiProviderError
   };
 }
 
-export function classifyPiProviderError(error: PiProviderErrorDetails | UpstreamProviderError): {
+export function classifyPiProviderError(
+  error: PiProviderErrorDetails | UpstreamProviderError,
+  scope?: { distribution?: "builtin" | "external" },
+): {
   category: "billing" | "quota" | "rate_limit" | "auth" | "context_window" | "provider"; reason: string; nextAction: string;
 } {
   const upstream = "upstream" in error ? error.upstream : error;
@@ -880,6 +902,13 @@ export function classifyPiProviderError(error: PiProviderErrorDetails | Upstream
   if (upstream.status === 429 || [...signal].some((value) => ["rate_limit", "rate_limit_exceeded", "too_many_requests"].includes(value))) return {
     category: "rate_limit", reason, nextAction: "Wait for the provider rate-limit window, then retry.",
   };
+  const missing = isBuiltinPiDistribution(scope?.distribution)
+    ? classifyPiMissingCredentialRejection(reason)
+    : null;
+  if (missing) {
+    const readiness = missingProviderCredentialReadiness("pi", missing.provider);
+    return { category: "auth", reason: readiness.reason!, nextAction: readiness.nextAction! };
+  }
   if (upstream.status === 401
       || [...signal].some((value) => ["authentication_error", "invalid_api_key", "invalid_token", "token_expired", "unauthorized", "provider_auth_error"].includes(value))
       || /\bAPI key auth failed\b|\bFailed to resolve API key\b/i.test(reason)) {

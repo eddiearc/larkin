@@ -334,3 +334,85 @@ test("external Pi production-order preflight timeout stays bounded, pending, obs
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("real Pi adapter missing-key RPC rejection terminals the ledger and projects unauthenticated", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-missing-key-e2e-"));
+  const agentId = "cli_piMissingKeyA1";
+  const messageId = "om_missing_key_rpc";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const workspaceDir = path.join(root, "workspace");
+  const store = createAgentStateStore(root, agentId);
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const configDir = path.join(root, "config");
+  const writeOwned = (providers) => {
+    const directory = path.join(configDir, "providers", "pi", agentId);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify(Object.fromEntries(
+      providers.map((id) => [id, { type: "api_key", key: `fixture-${id}` }]),
+    ))}\n`, { mode: 0o600 });
+  };
+  let rejectMissing = true;
+  let sdkListener;
+  const sdk = {
+    sessionId: "pi-missing-key-session",
+    prompt() {
+      if (rejectMissing) throw new Error("Pi RPC prompt failed: No API key found for zai-coding-cn");
+    },
+    steer() {},
+    abort() {},
+    subscribe(next) { sdkListener = next; return () => { sdkListener = undefined; }; },
+  };
+  process.env.LARKIN_CONFIG_DIR = configDir;
+  process.env.HOME = path.join(root, "decoy-home");
+  writeOwned(["openai-codex"]);
+  const native = createNativeRuntimeAdapter("pi", {
+    env: { LARKIN_PI_DISTRIBUTION: "builtin", LARKIN_CONFIG_DIR: configDir },
+    createPiSession: async () => sdk,
+  });
+  const adapter = { id: native.id, capabilities: native.capabilities,
+    probe: async () => ({ runtime: "pi", state: "ready" }), createSession: (input) => native.createSession(input) };
+  const events = [];
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store, assertOfficialCliReady: () => {},
+    retryPolicy: { baseDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 0 } });
+  host.subscribe((event) => events.push(event));
+  const target = "chat:oc_missing_key_rpc";
+  try {
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    await host.start([{ agentId, name: agentId, runtime: "pi", model: "zai-coding-cn/glm-5.2", piDistribution: "builtin",
+      workspaceDir, stateDir, env: { LARKIN_PI_DISTRIBUTION: "builtin", LARKIN_CONFIG_DIR: configDir } }]);
+    store.prepareInboxDelivery({ message_id: messageId, target, content: "missing key", wake: true });
+    const receipt = await host.deliver(agentId, { message_id: messageId, target, content: "missing key", wake: true });
+    assert.equal(receipt.status, "error");
+    assert.equal(receipt.retryable, false);
+    assert.match(receipt.reason, /zai-coding-cn.*missing/i);
+    const record = store.readJson("runtimeDeliveries", { records: [] }).records[0];
+    assert.equal(record.status, "error");
+    assert.equal(record.retryable, false);
+    assert.equal(record.errorCategory, "auth");
+    const status = events.filter((event) => event.type === "agent-status").at(-1);
+    assert.equal(status.readiness.state, "unauthenticated");
+    assert.match(status.readiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.equal(events.filter((event) => event.type === "delivery" && event.status === "deferred").length, 0);
+
+    rejectMissing = false;
+    writeOwned(["openai-codex", "zai-coding-cn"]);
+    const retry = await host.deliver(agentId, { message_id: messageId, target, content: "missing key", wake: true });
+    assert.equal(retry.status, "accepted");
+    sdkListener({ type: "turn_start", turnIndex: 0 });
+    sdkListener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "authenticated fixture output" } });
+    sdkListener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", provider: "zai-coding-cn", stopReason: "stop" }] });
+    sdkListener({ type: "agent_settled" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.filter((event) => event.type === "agent-status").at(-1).readiness.state, "ready");
+  } finally {
+    await host.shutdown("missing-key adapter e2e complete").catch(() => {});
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

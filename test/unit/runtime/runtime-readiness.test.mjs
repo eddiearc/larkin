@@ -3,7 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
-import { classifyRuntimePrerequisite, probeNativeRuntimeReadiness } from "../../../dist/runtime/runtime-readiness.mjs";
+import {
+  authFailureAppliesTo,
+  classifyPiMissingCredentialRejection,
+  classifyRuntimePrerequisite,
+  missingProviderCredentialReadiness,
+  parsePersistedAuthFailure,
+  probeNativeRuntimeReadiness,
+  readinessForPersistedAuthFailure,
+} from "../../../dist/runtime/runtime-readiness.mjs";
 
 for (const runtime of ["codex", "claude", "pi"]) {
   test(`${runtime} readiness classifies an unresolved configured command as missing`, async () => {
@@ -28,6 +36,68 @@ for (const message of ["get_state timeout after 5000ms", "unexpected EOF", "TLS 
 test("readiness keeps unknown failures unavailable and reserves incompatible for proven protocol failures", () => {
   assert.equal(classifyRuntimePrerequisite("pi", new Error("opaque probe failure")).state, "unavailable");
   assert.equal(classifyRuntimePrerequisite("pi", new Error("RPC protocol version mismatch")).state, "incompatible");
+});
+
+test("missing-credential classifier matches only the explicit absent-key or absent-login shape", () => {
+  for (const message of [
+    "No API key found for zai-coding-cn",
+    "No login found for zai-coding-cn",
+    "Pi RPC prompt failed: No API key found for zai-coding-cn",
+    "Pi RPC steer failed: No login found for zai-coding-cn",
+  ]) {
+    assert.deepEqual(classifyPiMissingCredentialRejection(message), {
+      provider: "zai-coding-cn",
+      diagnostic: message.includes("login") ? "No login found for zai-coding-cn" : "No API key found for zai-coding-cn",
+    });
+  }
+  for (const message of [
+    "No API key found for zai-coding-cn and extra text",
+    "provider reported no API key found for zai-coding-cn",
+    "No API key found for ../secret",
+    "fetch failed: provider overloaded",
+    "API key auth failed for zai-coding-cn",
+  ]) {
+    assert.equal(classifyPiMissingCredentialRejection(message), null);
+  }
+  const readiness = missingProviderCredentialReadiness("pi", "zai-coding-cn");
+  assert.equal(readiness.state, "unauthenticated");
+  assert.match(readiness.reason, /zai-coding-cn/);
+  assert.match(readiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+  assert.doesNotMatch(readiness.nextAction, /larkin setup|profile import|pi-auth login|Dashboard/);
+});
+
+test("scoped auth persistence prefers current generic over a legacy missing-provider string", () => {
+  const missing = parsePersistedAuthFailure({
+    authFailure: { kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+  });
+  const generic = parsePersistedAuthFailure({
+    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin" },
+    authFailureProvider: "zai-coding-cn",
+  });
+  const legacy = parsePersistedAuthFailure({ authFailureProvider: "zai-coding-cn" });
+  assert.deepEqual(missing, {
+    kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn",
+  });
+  assert.equal(generic?.kind, "generic");
+  assert.equal(legacy?.kind, "missing-provider");
+  const builtinZai = { runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2", adapterId: "pi" };
+  assert.equal(authFailureAppliesTo(builtinZai, missing), true);
+  assert.equal(authFailureAppliesTo({ ...builtinZai, piDistribution: "external" }, missing), false);
+  assert.equal(authFailureAppliesTo({ ...builtinZai, runtime: "codex", adapterId: "codex", model: "codex" }, missing), false);
+  assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, missing), false);
+  assert.equal(authFailureAppliesTo(builtinZai, generic), true);
+  const genericZai = parsePersistedAuthFailure({
+    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+  });
+  assert.deepEqual(genericZai, {
+    kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn",
+  });
+  assert.equal(authFailureAppliesTo(builtinZai, genericZai), true);
+  assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, genericZai), false);
+  assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, generic), true,
+    "unbound generic is conservative fallback only when the upstream provider was unavailable");
+  assert.match(readinessForPersistedAuthFailure(generic).nextAction, /login|API-key resolver/);
+  assert.doesNotMatch(readinessForPersistedAuthFailure(generic).nextAction, /official store/);
 });
 
 function writeReadinessPi(root, { failIfDirty = false } = {}) {

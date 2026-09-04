@@ -172,6 +172,47 @@ function readCredentialData(authPath: string): Record<string, Credential> {
   return parsed as Record<string, Credential>;
 }
 
+/** 只读校验 Agent 凭证路径：每级必须是当前用户拥有的非 symlink 目录，不创建、不改权限。 */
+function officialPiOwnedAuthPath(configDir: string, agentId: string): string | null {
+  if (!/^cli_[A-Za-z0-9]+$/.test(agentId)) return null;
+  const root = path.resolve(configDir);
+  const expected = path.join(root, "providers", "pi", agentId, "auth.json");
+  const segments = ["providers", "pi", agentId] as const;
+  let current = root;
+  try {
+    const rootStat = fs.lstatSync(current);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return null;
+    if (typeof process.getuid === "function" && rootStat.uid !== process.getuid()) return null;
+  } catch {
+    return null;
+  }
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index]!);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(current); }
+    catch { return null; }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return null;
+    if (index === segments.length - 1 && !isWindows && (stat.mode & 0o777) !== 0o700) return null;
+  }
+  const authPath = path.join(current, "auth.json");
+  return authPath === expected ? authPath : null;
+}
+
+/** Presence-only check against the Agent-owned official store. Never returns credential bytes. */
+export function officialPiHasStoredProvider(configDir: string, agentId: string, providerId: string): boolean {
+  const provider = typeof providerId === "string" ? providerId.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(provider)) return false;
+  try {
+    const authPath = officialPiOwnedAuthPath(configDir, agentId);
+    if (!authPath) return false;
+    const credential = readCredentialData(authPath)[provider];
+    return credential?.type === "api_key" || credential?.type === "oauth";
+  } catch {
+    return false;
+  }
+}
+
 function writeCredentialData(authPath: string, data: Record<string, Credential>): void {
   ensurePrivateDirectory(path.dirname(authPath));
   const temporary = `${authPath}.${process.pid}.${crypto.randomUUID()}.tmp`;

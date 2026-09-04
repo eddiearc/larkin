@@ -825,3 +825,103 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
     }
   });
 }
+
+test("missing-key prompt rejection terminals the HostShell ledger and projects unauthenticated", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-missing-key-"));
+  const agentId = "cli_mockMissingKeyA1";
+  const otherId = "cli_mockMissingKeyB2";
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const writeOwned = (id, providers) => {
+    const directory = path.join(root, "providers", "pi", id);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify(Object.fromEntries(
+      providers.map((provider) => [provider, { type: "api_key", key: `fixture-${provider}` }]),
+    ))}\n`, { mode: 0o600 });
+  };
+  const session = new FakeNativeSession("pi");
+  let rejectMissing = true;
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    if (rejectMissing) {
+      return { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" };
+    }
+    return { status: "accepted", inputId: input.inputId };
+  };
+  const otherSession = new FakeNativeSession("pi");
+  const store = createAgentStateStore(root, agentId);
+  const otherStore = createAgentStateStore(root, otherId);
+  const runtimeHost = createRuntimeHost({
+    adapterFor: (runtime) => ({
+      id: runtime, capabilities: {},
+      async createSession(input) { return input.agentId === otherId ? otherSession : session; },
+    }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: (id) => id === otherId ? otherStore : store,
+    assertOfficialCliReady: () => {},
+    retryPolicy: { baseDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 0 },
+  });
+  const agents = [agentId, otherId].map((id) => ({
+    agentId: id, name: id, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2", feishuAppId: id, feishuProfile: id,
+    feishuAppSecret: "fixture-secret", feishuDomain: "https://open.feishu.cn",
+    larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir: path.join(root, "agents", id),
+    stateDir: path.join(root, "state", "agents", id),
+  }));
+  fs.mkdirSync(root, { recursive: true });
+  writeOwned(agentId, ["openai-codex"]);
+  writeOwned(otherId, ["openai-codex"]);
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 3, serverId: "server-missing-key", activeAgent: agentId,
+    agents: Object.fromEntries([agentId, otherId].map((id) => [id, { runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2" }])),
+  })}\n`, { mode: 0o600 });
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.HOME = path.join(root, "decoy-home");
+  const hostShell = createHostShell({
+    env: { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-missing-key",
+      LARKIN_AGENTS_CONFIG: JSON.stringify(agents), LARKIN_FEISHU_DRYRUN: "1", LARKIN_INBOUND_DROUGHT_SEC: "0" },
+    runtimeHost,
+    stateStoreForImpl: (_root, id) => id === otherId ? otherStore : store,
+    managedCliForAgent: testManagedCli,
+    eventSourceStartDelayMs: 60_000,
+    channelPackage: { createLarkChannel() { throw new Error("event source must not start in missing-key fixture"); } },
+  });
+  try {
+    await hostShell.start();
+    await hostShell.ingest(agentId, { chat_id: "oc_missing_key", chat_type: "p2p", sender_id: "ou_sender",
+      message_id: "om_missing_key", event_id: "evt_missing_key", content: "auth retry",
+      create_time: "1784160002000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    const failed = store.readJson("runtimeDeliveries", { records: [] }).records[0];
+    assert.equal(failed.status, "error");
+    assert.equal(failed.retryable, false);
+    assert.equal(failed.errorCategory, "auth");
+    assert.equal(session.prompts.length, 1);
+    const failedStatus = store.readJson("status", {});
+    assert.equal(failedStatus.runtimeReadiness.state, "unauthenticated");
+    assert.match(failedStatus.runtimeReadiness.reason, /zai-coding-cn.*missing/i);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.doesNotMatch(JSON.stringify(failedStatus.runtimeReadiness), /fixture-openai-codex|larkin setup|profile import/);
+    await hostShell.ingest(otherId, { chat_id: "oc_missing_other", chat_type: "p2p", sender_id: "ou_sender",
+      message_id: "om_missing_other", event_id: "evt_missing_other", content: "other",
+      create_time: "1784160003000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
+    assert.equal((otherStore.readJson("runtimeDeliveries", { records: [] }).records[0] || {}).status, "accepted");
+
+    rejectMissing = false;
+    writeOwned(agentId, ["openai-codex", "zai-coding-cn"]);
+    const retry = await runtimeHost.deliver(agentId, { message_id: "om_missing_key", chat_id: "oc_missing_key" });
+    assert.equal(retry.status, "accepted");
+    session.emit({ type: "turn-start", turnId: "pi-missing-recovered" });
+    session.emit({ type: "activity", activity: "text" });
+    session.emit({ type: "turn-end", turnId: "pi-missing-recovered" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+  } finally {
+    await hostShell.shutdown("missing-key mock e2e complete");
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

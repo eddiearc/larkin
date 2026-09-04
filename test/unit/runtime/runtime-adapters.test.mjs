@@ -16,6 +16,7 @@ import {
   requirePiResumeSessionFile,
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
+import { classifyPiMissingCredentialRejection } from "../../../dist/runtime/runtime-readiness.mjs";
 import {
   buildCanonicalPiSubagentAssistantMessage,
   buildCanonicalPiSubagentNotificationContent,
@@ -1381,16 +1382,18 @@ test("strict classifier accepts only the exact categorized Pi context projection
 });
 
 test("Pi provider failures preserve safe actionable categories", () => {
-  for (const [upstream, category] of [
+  for (const [upstream, category, scope] of [
     [{ provider: "openai-codex", message: "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again." }, "context_window"],
     [{ status: 402, message: "payment required" }, "billing"],
     [{ status: 429, code: "insufficient_quota", message: "monthly allowance exhausted" }, "quota"],
     [{ status: 429, message: "too many requests" }, "rate_limit"],
     [{ status: 401, message: "credentials rejected Bearer fixture-secret" }, "auth"],
     [{ provider: "bigmodel-anthropic", code: "key_command_failed", message: "API key auth failed: resolver command exited nonzero at /Users/example/cc-switch-token" }, "auth"],
+    [{ provider: "zai-coding-cn", message: "No API key found for zai-coding-cn" }, "auth", { distribution: "builtin" }],
+    [{ message: "Pi RPC prompt failed: No login found for zai-coding-cn" }, "auth", { distribution: "builtin" }],
     [{ status: 403, message: "billing policy review" }, "provider"],
   ]) {
-    const result = classifyPiProviderError(upstream);
+    const result = classifyPiProviderError(upstream, scope);
     assert.equal(result.category, category);
     assert.ok(result.nextAction.length > 10);
     assert.doesNotMatch(result.reason, /fixture-secret/);
@@ -1399,9 +1402,18 @@ test("Pi provider failures preserve safe actionable categories", () => {
     { provider: "policy-gateway", message: "Authorization metadata documents the API key policy for this workspace" },
     { provider: "openai-codex", message: "The context policy token limit may apply" },
     { provider: "policy-gateway", code: "policy_error", message: "API key authorization requirements are controlled by tenant policy" },
+    { provider: "zai-coding-cn", message: "provider overloaded; retry later" },
+    { message: "No API key found for ../etc/passwd" },
+    { message: "No API key found for zai-coding-cn and extra diagnostic" },
   ]) {
     assert.equal(classifyPiProviderError(upstream).category, "provider");
   }
+  const missing = classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "builtin" });
+  assert.match(missing.reason, /zai-coding-cn.*missing/i);
+  assert.match(missing.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+  assert.doesNotMatch(missing.reason + missing.nextAction, /larkin setup|profile import|pi-auth login|Dashboard|fixture-secret/i);
+  assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }).category, "provider");
+  assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "external" }).category, "provider");
   const unknown = classifyPiProviderError({ provider: "gateway", code: "server_error", status: 502,
     message: "unusual failure Authorization: Bearer auth-secret Cookie=session-secret request body: {\"description\":\"useful detail\",\"api_key\":\"private\"}" });
   assert.equal(unknown.category, "provider");
@@ -1436,6 +1448,52 @@ test("Pi carries the structured 0.82 provider fixture without flattening fields 
       assert.doesNotMatch(failure.message + failure.nextAction, /Users\/example|cc-switch-token|fixture-secret/);
     }
   }
+});
+
+test("Pi prompt rejection of an explicit missing credential is terminal auth", async () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "../../fixtures/runtime/pi-missing-credential.json"), "utf8"));
+  for (const message of [fixture.absentKey, fixture.rpcWrappedAbsentKey, fixture.absentLogin]) {
+    const sdk = { sessionId: "pi-missing-key", prompt() { throw new Error(message); }, steer() {}, abort() {},
+      subscribe() { return () => {}; } };
+    const session = await createNativeRuntimeAdapter("pi", {
+      createPiSession: async () => sdk, env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+    }).createSession(create({ env: { LARKIN_PI_DISTRIBUTION: "builtin" } }));
+    const events = [];
+    session.subscribe((event) => events.push(event));
+    const result = await session.prompt({ inputId: "pi-missing-a", kind: "user", text: "work", attempt: 0 });
+    assert.deepEqual(result, {
+      status: "rejected", inputId: "pi-missing-a", retryable: false,
+      reason: "Provider zai-coding-cn is missing from this Agent's official credential store.",
+    });
+    const failure = events.find((event) => event.type === "input-error");
+    assert.equal(failure.errorCategory, "auth");
+    assert.equal(failure.retryable, false);
+    assert.equal(failure.willRetry, false);
+    assert.equal(failure.upstream.provider, "zai-coding-cn");
+    assert.match(failure.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.doesNotMatch(JSON.stringify(failure), /fixture-secret|larkin setup|profile import|pi-auth login/i);
+    assert.equal(classifyPiMissingCredentialRejection(message)?.provider, "zai-coding-cn");
+  }
+  const transientSdk = { sessionId: "pi-transient", prompt() { throw new Error("fetch failed: provider overloaded"); },
+    steer() {}, abort() {}, subscribe() { return () => {}; } };
+  const transient = await createNativeRuntimeAdapter("pi", { createPiSession: async () => transientSdk }).createSession(create());
+  assert.deepEqual(await transient.prompt({ inputId: "pi-transient-a", kind: "user", text: "work", attempt: 0 }), {
+    status: "rejected", inputId: "pi-transient-a", retryable: true, reason: "fetch failed: provider overloaded",
+  });
+});
+
+test("external Pi keeps a matching missing-key prompt rejection retryable", async () => {
+  const sdk = { sessionId: "pi-external-missing-key", prompt() { throw new Error("No API key found for zai-coding-cn"); },
+    steer() {}, abort() {}, subscribe() { return () => {}; } };
+  const session = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk, env: { LARKIN_PI_DISTRIBUTION: "external" },
+  }).createSession(create({ env: { LARKIN_PI_DISTRIBUTION: "external" } }));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  assert.deepEqual(await session.prompt({ inputId: "pi-external-a", kind: "user", text: "work", attempt: 0 }), {
+    status: "rejected", inputId: "pi-external-a", retryable: true, reason: "No API key found for zai-coding-cn",
+  });
+  assert.equal(events.some((event) => event.type === "input-error"), false);
 });
 
 test("Pi exposes terminal provider errors without resubmitting them", async () => {

@@ -26,7 +26,14 @@ import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
 import type { PreviousSessionRef } from "../agent/context-prompt.js";
 import type { RuntimeHost, RuntimeHostEvent, RuntimeSessionRecoveryResult } from "../runtime/runtime-host.js";
-import { providerAuthenticationFailureReadiness, RuntimePrerequisiteError } from "../runtime/runtime-readiness.js";
+import {
+  authFailureAppliesTo,
+  parsePersistedAuthFailure,
+  providerAuthenticationFailureReadiness,
+  readinessForPersistedAuthFailure,
+  RuntimePrerequisiteError,
+  type PersistedAuthFailure,
+} from "../runtime/runtime-readiness.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
 import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
@@ -67,6 +74,8 @@ interface AgentState {
   agentId?: string;
   sessions: Record<string, string>;
   previousSessions?: Record<string, PreviousSessionRef>;
+  authFailureProvider?: string;
+  authFailure?: PersistedAuthFailure;
 }
 interface PendingDocumentComment {
   messageId: string;
@@ -299,6 +308,30 @@ export function createHostShell({
       runtimeReadiness: { runtime: agent.runtime, state: "unavailable", reason, nextAction: "Wait for the current daemon epoch to publish Runtime readiness.", observedAt: new Date().toISOString() },
     });
   };
+  const unresolvedCurrentAuth = (agent: ConfiguredAgent): PersistedAuthFailure | null => {
+    try {
+      const persisted = parsePersistedAuthFailure(stateStore(agent).readJson<Partial<AgentState>>("agentState", {}));
+      if (!persisted) return null;
+      // 只使用当前 agentState 作用域标记，不扫描历史 delivery 的 authProvider。
+      return authFailureAppliesTo({
+        runtime: agent.runtime,
+        model: agent.model,
+        piDistribution: agent.piDistribution,
+      }, persisted) ? persisted : null;
+    } catch {
+      return null;
+    }
+  };
+  const projectReadyUnlessUnresolvedAuth = (agent: ConfiguredAgent, observedAt: string): void => {
+    const failure = unresolvedCurrentAuth(agent);
+    if (failure) {
+      hostState.updateStatus(agent, {
+        runtimeReadiness: { ...readinessForPersistedAuthFailure(failure), observedAt },
+      });
+      return;
+    }
+    hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt } });
+  };
   const recordInboundDeliveryFailure = (
     agent: ConfiguredAgent,
     code: "non_retryable_receipt" | "runtime_delivery_exception" | "runtime_delivery_event",
@@ -306,22 +339,40 @@ export function createHostShell({
     const at = new Date().toISOString();
     const reason = "Inbound Runtime delivery failed non-retryably; durable Inbox/ledger state is retained for recovery.";
     const nextAction = "Inspect the delivery/status error, correct the Runtime or canonical Inbox state, then restart to replay safely.";
+    const currentReadiness = hostState.readStatus(agent).runtimeReadiness as { state?: string } | undefined;
     hostState.updateStatus(agent, {
       inboundDeliveryHealth: { state: "error", code, at, reason, nextAction },
-      runtimeReadiness: { runtime: agent.runtime, state: "incompatible", reason, nextAction },
+      ...(currentReadiness?.state === "unauthenticated" ? {} : {
+        runtimeReadiness: { runtime: agent.runtime, state: "incompatible" as const, reason, nextAction },
+      }),
     });
     hostState.recordStatusError(agent, `${reason} ${nextAction} code=${code}`);
   };
   const agentStates = new Map<string, AgentStateRecord>();
+  const mergePersistedAgentState = (record: AgentStateRecord): void => {
+    const latest = record.store.readJson<Partial<AgentState>>("agentState", {});
+    if (isRecord(latest.previousSessions)) {
+      record.state.previousSessions = {
+        ...latest.previousSessions,
+        ...(record.state.previousSessions ?? {}),
+      };
+    }
+    const persisted = parsePersistedAuthFailure(latest);
+    if (persisted) {
+      record.state.authFailure = persisted;
+      if (persisted.kind === "missing-provider" && persisted.provider) {
+        record.state.authFailureProvider = persisted.provider;
+      } else {
+        delete record.state.authFailureProvider;
+      }
+    } else {
+      delete record.state.authFailure;
+      delete record.state.authFailureProvider;
+    }
+  };
   const saveAgentState = (record: AgentStateRecord): void => {
     try {
-      const latest = record.store.readJson<Partial<AgentState>>("agentState", {});
-      if (isRecord(latest.previousSessions)) {
-        record.state.previousSessions = {
-          ...latest.previousSessions,
-          ...(record.state.previousSessions ?? {}),
-        };
-      }
+      mergePersistedAgentState(record);
       record.store.writeJson("agentState", record.state);
     }
     catch (error) { log(`agent-state 写失败: ${errorMessage(error)}`); }
@@ -1264,10 +1315,14 @@ export function createHostShell({
           observedAt,
         },
       });
-      else if (message.readiness) hostState.updateStatus(agent, { runtimeReadiness: { ...message.readiness, observedAt } });
-      else if (message.status === "active") hostState.updateStatus(agent, { runtimeReadiness: {
-        runtime: agent.runtime, state: "ready", observedAt,
-      } });
+      else if (message.readiness) {
+        if (message.readiness.state === "ready" && unresolvedCurrentAuth(agent)) {
+          projectReadyUnlessUnresolvedAuth(agent, observedAt);
+        } else {
+          hostState.updateStatus(agent, { runtimeReadiness: { ...message.readiness, observedAt } });
+        }
+      }
+      else if (message.status === "active") projectReadyUnlessUnresolvedAuth(agent, observedAt);
       if (message.status === "active") {
         const redeliveryTimer = setTimeout(() => {
           void reminder.redeliverUnread(agent).catch((error) => log("启动补投失败", errorMessage(error)));
@@ -1425,6 +1480,7 @@ export function createHostShell({
         if (record) {
           if (reset.sessionId) record.state.sessions[agent.runtime] = reset.sessionId;
           else delete record.state.sessions[agent.runtime];
+          mergePersistedAgentState(record);
           record.store.writeJson("agentState", record.state);
         }
         if (!reset.sessionId) {
@@ -1432,10 +1488,10 @@ export function createHostShell({
           hostState.updateStatus(agent, {
             session: { runtime: agent.runtime, id: null, launchId: null, startedAt: observedAt,
               lastSeenAt: null, lastTurnAt: null, turns: 0 },
-            runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt },
           });
+          projectReadyUnlessUnresolvedAuth(agent, observedAt);
         } else if (reset.runtimeReady) {
-          hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt: new Date().toISOString() } });
+          projectReadyUnlessUnresolvedAuth(agent, new Date().toISOString());
         }
       } catch (error) {
         const projection = readinessProjection();
@@ -1503,13 +1559,14 @@ export function createHostShell({
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), readinessProjection());
       }
       if (recovery.runtimeReady) {
-        hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt: new Date().toISOString() } });
+        projectReadyUnlessUnresolvedAuth(agent, new Date().toISOString());
       }
       const record = agentStates.get(agentId);
       try {
         if (record) {
           if (recovery.sessionId) record.state.sessions[agent.runtime] = recovery.sessionId;
           else delete record.state.sessions[agent.runtime];
+          mergePersistedAgentState(record);
           record.store.writeJson("agentState", record.state);
         }
       } catch (error) {

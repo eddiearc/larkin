@@ -12,11 +12,22 @@ import type {
 } from "./runtime-contracts.js";
 import { buildStrictProviderErrorInput, classifyStrictProviderError } from "./provider-error-classifier.js";
 import {
+  authFailureAppliesTo,
+  classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
+  configuredProviderId,
+  isBuiltinPiDistribution,
+  missingProviderCredentialReadiness,
+  parsePersistedAuthFailure,
   providerAuthenticationFailureReadiness,
+  readinessForPersistedAuthFailure,
+  safeProviderId,
   RuntimePrerequisiteError,
+  type AuthFailureScope,
+  type PersistedAuthFailure,
   type RuntimeReadiness,
 } from "./runtime-readiness.js";
+import { officialPiHasStoredProvider } from "./pi-official-auth.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
@@ -63,6 +74,8 @@ export interface DeliveryRecord {
   target?: string;
   wakeReason?: string;
   reason?: string; retryable?: boolean; errorCategory?: string;
+  /** Bounded missing-provider identity for builtin-Pi terminal auth; never a secret. */
+  authProvider?: string;
 }
 interface DeliveryFile { version: 1; records: DeliveryRecord[] }
 interface DeliveryStateStore {
@@ -118,6 +131,8 @@ interface ManagedAgent {
   previousSession: PreviousSessionRef | null;
   readiness: RuntimeReadiness | null;
   turnInProgress: boolean; turnHadFailure: boolean; turnHadAuthenticatedOutput: boolean; authFailureActive: boolean;
+  authFailureKind: PersistedAuthFailure["kind"] | null;
+  authFailureProvider: string | null;
   /** Delivery ids already promoted from accepted inbox_update to a wake while idle. */
   promotedInboxUpdateIds: Set<string>;
   backgroundCompletionQueue: string[]; backgroundCompletionKeys: Set<string>;
@@ -241,6 +256,116 @@ function persistPreviousSession(agent: ManagedAgent, previous: PreviousSessionRe
   } catch {
     // In-memory ref still holds for this process; restart will miss it only if this write failed.
   }
+}
+
+function isBuiltinPiAgent(agent: Pick<ManagedAgent, "adapter" | "config">): boolean {
+  return agent.adapter.id === "pi"
+    && (isBuiltinPiDistribution(agent.config.piDistribution) || agent.config.runtime === "builtin-pi");
+}
+
+function authFailureScopeOf(agent: Pick<ManagedAgent, "adapter" | "config">): AuthFailureScope {
+  return {
+    runtime: agent.config.runtime,
+    model: agent.config.model,
+    piDistribution: agent.config.piDistribution,
+    adapterId: agent.adapter.id,
+  };
+}
+
+function currentAuthFailure(agent: ManagedAgent): PersistedAuthFailure | null {
+  if (!agent.authFailureActive) return null;
+  const kind = agent.authFailureKind
+    ?? (agent.authFailureProvider ? "missing-provider" : "generic");
+  if (kind === "missing-provider") {
+    if (!agent.authFailureProvider) return null;
+    return { kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: agent.authFailureProvider };
+  }
+  const runtime = agent.adapter.id === "codex" || agent.adapter.id === "claude" || agent.adapter.id === "pi"
+    ? agent.adapter.id : null;
+  if (!runtime) return null;
+  return {
+    kind: "generic",
+    runtime,
+    ...(runtime === "pi" && (agent.config.piDistribution === "builtin" || agent.config.piDistribution === "external")
+      ? { piDistribution: agent.config.piDistribution } : {}),
+    provider: agent.authFailureProvider,
+  };
+}
+
+function genericAuthProvider(agent: Pick<ManagedAgent, "config">, upstream?: { provider?: unknown }): string | null {
+  return safeProviderId(upstream?.provider) ?? configuredProviderId(agent.config.model);
+}
+
+function persistAuthFailure(agent: ManagedAgent): void {
+  const store = agent.stateStore;
+  if (!store) return;
+  try {
+    const write = (): void => {
+      const current = store.readJson<Record<string, unknown>>("agentState", { sessions: {} });
+      if (Array.isArray((current as { records?: unknown }).records) && !("sessions" in current)) return;
+      const { authFailureProvider: _legacy, authFailure: _scoped, ...rest } = current;
+      const failure = currentAuthFailure(agent);
+      if (!failure) {
+        if (!("authFailureProvider" in current) && !("authFailure" in current)) return;
+        store.writeJson("agentState", rest);
+        return;
+      }
+      store.writeJson("agentState", {
+        ...rest,
+        authFailure: failure,
+        ...(failure.kind === "missing-provider" && failure.provider
+          ? { authFailureProvider: failure.provider } : {}),
+      });
+    };
+    if (store.withInboxTransaction) store.withInboxTransaction(write);
+    else write();
+  } catch {
+    // In-memory flags and the delivery ledger still hold for this process.
+  }
+}
+
+function loadPersistedAuthFailure(store?: DeliveryStateStore): PersistedAuthFailure | null {
+  if (!store) return null;
+  try {
+    return parsePersistedAuthFailure(store.readJson<Record<string, unknown>>("agentState", {}));
+  } catch {
+    return null;
+  }
+}
+
+function applyAuthFailure(agent: ManagedAgent, failure: PersistedAuthFailure): void {
+  agent.authFailureActive = true;
+  agent.authFailureKind = failure.kind;
+  agent.authFailureProvider = failure.provider ?? null;
+  agent.readiness = readinessForPersistedAuthFailure(failure);
+}
+
+function clearAuthFailure(agent: ManagedAgent, persist = true): void {
+  agent.authFailureActive = false;
+  agent.authFailureKind = null;
+  agent.authFailureProvider = null;
+  if (persist) persistAuthFailure(agent);
+}
+
+function restoreAuthFailure(agent: ManagedAgent): void {
+  const persisted = loadPersistedAuthFailure(agent.stateStore);
+  if (!persisted) return;
+  // 只恢复仍绑定当前 candidate 的当前作用域 auth；不从历史 delivery 回灌。
+  if (!authFailureAppliesTo(authFailureScopeOf(agent), persisted)) {
+    clearAuthFailure(agent);
+    return;
+  }
+  applyAuthFailure(agent, persisted);
+}
+
+function clearLedgerAuthProviders(agent: ManagedAgent): void {
+  let changed = false;
+  for (const record of agent.records.values()) {
+    if (!record.authProvider) continue;
+    delete record.authProvider;
+    changed = true;
+  }
+  if (changed) persist(agent);
 }
 type ReplayFailureCode = "canonical_inbox_row_missing" | "canonical_inbox_malformed" | "duplicate_message_id"
   | "inbox_state_conflict" | "delivery_target_conflict" | "structured_target_invalid"
@@ -618,6 +743,38 @@ export function createRuntimeHost(options: {
     }
   };
 
+  const ownedConfigDir = (): string | null => {
+    const value = process.env.LARKIN_CONFIG_DIR?.trim();
+    return value || null;
+  };
+
+  const projectAuthFailure = (
+    agent: ManagedAgent,
+    readiness: RuntimeReadiness,
+    failure: { kind: PersistedAuthFailure["kind"]; provider: string | null },
+  ): void => {
+    agent.authFailureActive = true;
+    agent.authFailureKind = failure.kind;
+    agent.authFailureProvider = failure.provider;
+    agent.readiness = {
+      ...readiness,
+      ...(agent.readiness?.executable ? { executable: agent.readiness.executable } : {}),
+      ...(agent.readiness?.version ? { version: agent.readiness.version } : {}),
+    };
+    persistAuthFailure(agent);
+    emit({ type: "agent-status", agentId: agent.config.agentId, status: "error",
+      error: `${agent.readiness.reason} ${agent.readiness.nextAction}`, readiness: agent.readiness });
+  };
+
+  const namedAuthProviderPresent = (agent: ManagedAgent): boolean => {
+    if (agent.authFailureKind !== "missing-provider" || !agent.authFailureProvider) return true;
+    const failure = currentAuthFailure(agent);
+    if (!failure || !authFailureAppliesTo(authFailureScopeOf(agent), failure)) return false;
+    const configDir = ownedConfigDir();
+    if (!configDir) return false;
+    return officialPiHasStoredProvider(configDir, agent.config.agentId, agent.authFailureProvider);
+  };
+
   const resultFor = (agent: ManagedAgent, record: DeliveryRecord, result: RuntimeInputResult): DeliveryReceipt => {
     if (result.status === "accepted") {
       if (record.errorCategory !== "context_window") {
@@ -629,6 +786,27 @@ export function createRuntimeHost(options: {
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId, status: "accepted" });
       return { status: "accepted", deliveryId: record.deliveryId };
+    }
+    const missing = result.status === "rejected" && isBuiltinPiAgent(agent)
+      ? classifyPiMissingCredentialRejection(result.reason)
+      : null;
+    if (missing) {
+      const readiness = missingProviderCredentialReadiness(agent.adapter.id, missing.provider);
+      const reason = readiness.reason ?? `Provider ${missing.provider} is missing from this Agent's official credential store.`;
+      if (record.status !== "error") {
+        record.reason = reason;
+        record.retryable = false;
+        record.errorCategory = "auth";
+        record.authProvider = missing.provider;
+        const finalRecord = setRecord(agent, record, "error");
+        if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
+          deliveryId: record.deliveryId, messageId: record.messageId, status: "error", reason });
+        projectAuthFailure(agent, readiness, { kind: "missing-provider", provider: missing.provider });
+      }
+      return { status: "error", deliveryId: record.deliveryId, reason: record.reason ?? reason, retryable: false };
+    }
+    if (record.status === "error") {
+      return { status: "error", deliveryId: record.deliveryId, reason: record.reason ?? result.reason, retryable: false };
     }
     if (record.errorCategory !== "context_window") delete record.errorCategory;
     const retryable = result.status === "deferred" || result.retryable;
@@ -1387,7 +1565,7 @@ export function createRuntimeHost(options: {
         if (["closed", "fallback_committed"].includes(machine.state)) agent.compactionMachines.delete(inputId);
       }
       const recoveredAuthentication = agent.authFailureActive && agent.turnInProgress
-        && agent.turnHadAuthenticatedOutput && !agent.turnHadFailure;
+        && agent.turnHadAuthenticatedOutput && !agent.turnHadFailure && namedAuthProviderPresent(agent);
       agent.turnInProgress = false;
       agent.busy = false;
       emit({ type: "activity", agentId: agent.config.agentId, activity: "idle", activityKind: "idle", detailKind: "turn_ended" });
@@ -1407,7 +1585,8 @@ export function createRuntimeHost(options: {
       reconcileSubagentLedger(agent);
       telemetry?.runtimeEvent(agent.config.agentId, event);
       if (recoveredAuthentication) {
-        agent.authFailureActive = false;
+        clearAuthFailure(agent);
+        clearLedgerAuthProviders(agent);
         const prior = agent.readiness;
         agent.readiness = {
           runtime: agent.adapter.id,
@@ -1490,20 +1669,22 @@ export function createRuntimeHost(options: {
       }));
       if (classifiedCategory) record.errorCategory = classifiedCategory;
       else delete record.errorCategory;
+      const missing = event.errorCategory === "auth" && !event.retryable && isBuiltinPiAgent(agent)
+        ? classifyPiMissingCredentialRejection(event.upstream?.message)
+          ?? classifyPiMissingCredentialRejection(event.message)
+        : null;
+      if (missing) record.authProvider = missing.provider;
       const finalRecord = setRecord(agent, record, event.retryable ? "pending" : "error");
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId,
         status: event.retryable ? "deferred" : "error", reason: event.message });
       if (event.errorCategory === "auth" && !event.retryable) {
-        const readiness = providerAuthenticationFailureReadiness(agent.adapter.id, event.upstream?.provider);
-        agent.authFailureActive = true;
-        agent.readiness = {
-          ...readiness,
-          ...(agent.readiness?.executable ? { executable: agent.readiness.executable } : {}),
-          ...(agent.readiness?.version ? { version: agent.readiness.version } : {}),
-        };
-        emit({ type: "agent-status", agentId: agent.config.agentId, status: "error",
-          error: `${agent.readiness.reason} ${agent.readiness.nextAction}`, readiness: agent.readiness });
+        const readiness = missing
+          ? missingProviderCredentialReadiness(agent.adapter.id, missing.provider)
+          : providerAuthenticationFailureReadiness(agent.adapter.id, event.upstream?.provider);
+        projectAuthFailure(agent, readiness, missing
+          ? { kind: "missing-provider", provider: missing.provider }
+          : { kind: "generic", provider: genericAuthProvider(agent, event.upstream) });
       }
       if (event.retryable && !agent.busy && !agent.turnInProgress) void retryPending(agent);
     } else if (event.type === "configuration-error") {
@@ -1737,14 +1918,26 @@ export function createRuntimeHost(options: {
           if (previous.stabilityTimer) clearTimeout(previous.stabilityTimer);
           if (previous.backgroundCompletionRetryTimer) clearTimeout(previous.backgroundCompletionRetryTimer);
           if (previous.subagentReconcileTimer) clearInterval(previous.subagentReconcileTimer);
+          const previousFailure = currentAuthFailure(previous);
+          const scoped = Boolean(previousFailure
+            && authFailureAppliesTo({
+              runtime: config.runtime,
+              model: config.model,
+              piDistribution: config.piDistribution,
+              adapterId: adapter.id,
+            }, previousFailure));
           const candidate: ManagedAgent = {
             ...previous, config, adapter, session, launchId: crypto.randomUUID(), busy: false, submitting: false,
             starting: null, retryAfterSubmit: false, generation: 0, poller: null, retryTimer: null,
             recreateAttempts: 0, stabilityTimer: null, recreateReason: null, stopped: false,
             backgroundCompletionRetryTimer: null, subagentReconcileTimer: null,
             disabledReason: null, configurationRecovery: null,
-            readiness: previous.authFailureActive ? previous.readiness : readiness,
+            authFailureActive: scoped && previous.authFailureActive,
+            authFailureKind: scoped ? previous.authFailureKind : null,
+            authFailureProvider: scoped ? previous.authFailureProvider : null,
+            readiness: scoped && previous.authFailureActive ? previous.readiness : readiness,
           };
+          if (previous.authFailureActive && !candidate.authFailureActive) clearAuthFailure(candidate);
           managed.set(config.agentId, candidate);
           session.subscribe((event) => observe(candidate, session, event));
           if (session.sessionId) {
@@ -1829,7 +2022,7 @@ export function createRuntimeHost(options: {
         agent.config.sessionId = null;
         agent.session = fresh;
         persistPreviousSession(agent, previousRef);
-        agent.readiness = readiness;
+        if (!agent.authFailureActive) agent.readiness = readiness;
         agent.disabledReason = null;
       };
       try {
@@ -1847,7 +2040,13 @@ export function createRuntimeHost(options: {
           ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}),
           ...(agent.previousSession ? { previousSession: agent.previousSession } : {}) });
       }
-      emit({ type: "agent-status", agentId, status: "active", readiness });
+      emit({
+        type: "agent-status",
+        agentId,
+        status: agent.authFailureActive ? "error" : "active",
+        ...(agent.authFailureActive ? { error: `${agent.readiness?.reason} ${agent.readiness?.nextAction}` } : {}),
+        readiness: agent.authFailureActive ? agent.readiness ?? readiness : readiness,
+      });
       agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
       await oldSession.close("fresh session reset committed")
         .catch((error) => log("previous runtime close after fresh reset failed", String(error)));
@@ -1967,7 +2166,7 @@ export function createRuntimeHost(options: {
           agent.config.sessionId = null;
           agent.session = fresh;
           persistPreviousSession(agent, previousRef);
-          agent.readiness = readiness;
+          if (!agent.authFailureActive) agent.readiness = readiness;
           agent.disabledReason = null;
           for (const record of agent.records.values()) {
             if (!messageIds.includes(record.messageId)) continue;
@@ -1984,7 +2183,13 @@ export function createRuntimeHost(options: {
             ...(fresh.effectiveReasoningEffort ? { reasoningEffort: fresh.effectiveReasoningEffort } : {}),
             ...(agent.previousSession ? { previousSession: agent.previousSession } : {}) });
         }
-        emit({ type: "agent-status", agentId, status: "active", readiness });
+        emit({
+          type: "agent-status",
+          agentId,
+          status: agent.authFailureActive ? "error" : "active",
+          ...(agent.authFailureActive ? { error: `${agent.readiness?.reason} ${agent.readiness?.nextAction}` } : {}),
+          readiness: agent.authFailureActive ? agent.readiness ?? readiness : readiness,
+        });
         durableRollback = null;
         agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
         await oldSession.close("context-window recovery committed")
@@ -2058,11 +2263,13 @@ export function createRuntimeHost(options: {
           piProactiveCompactionFailedGeneration: null,
           previousSession: loadPersistedPreviousSession(config, stateStore), readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false,
+          authFailureKind: null, authFailureProvider: null,
           promotedInboxUpdateIds: new Set(),
           backgroundCompletionQueue: [], backgroundCompletionKeys: new Set(),
           backgroundCompletionInFlight: null, backgroundCompletionWakeInputId: null,
           backgroundCompletionRejectStreak: 0, backgroundCompletionRetryTimer: null,
           subagentLedger: loadSubagentLedger(config), subagentReconcileTimer: null };
+        restoreAuthFailure(agent);
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
         for (const record of agent.records.values()) {

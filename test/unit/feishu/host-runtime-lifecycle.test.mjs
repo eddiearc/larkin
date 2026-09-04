@@ -215,6 +215,234 @@ test("HostShell reset publishes a current readiness observation and rejects stal
   }
 });
 
+test("HostShell keeps durable missing-key auth across ready status and reset", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-missing-key-persist-"));
+  const agentId = "cli_hostMissingKeyA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const store = createAgentStateStore(root, agentId);
+  store.writeJson("agentState", { sessions: {}, authFailureProvider: "zai-coding-cn" });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{
+    deliveryId: "d-missing-key", messageId: "om_host_missing_key", status: "error", retryable: false,
+    errorCategory: "auth", authProvider: "zai-coding-cn",
+    reason: "Provider zai-coding-cn is missing from this Agent's official credential store.",
+    input: { inputId: "i-missing-key", deliveryId: "d-missing-key", kind: "wake", text: "redacted", attempt: 0 },
+    updatedAt: "2026-09-04T00:00:00.000Z",
+  }] });
+  let listener = () => {};
+  let channelCreated = false;
+  const runtimeHost = {
+    subscribe(next) { listener = next; return () => {}; },
+    async start() {
+      listener({ type: "agent-status", agentId, status: "active", readiness: { runtime: "pi", state: "ready" } });
+    },
+    async resetSession() {
+      return { generationChanged: true, sessionChanged: true, turns: 0, runtimeReady: true, pendingCount: 0, sessionId: "fresh-session" };
+    },
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2",
+    feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId), stateDir };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-missing-key-persist",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const channelPackage = { createLarkChannel() { channelCreated = true; return {
+    botIdentity: { openId: "ou_missing_key", name: "Missing Key" }, rawClient: null, dispatcher: { register() {} }, on() {},
+    async connect() {}, async disconnect() {},
+  }; } };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0, stateStoreForImpl: () => store });
+  try {
+    await host.start();
+    const statusFile = path.join(stateDir, "status.json");
+    const deadline = Date.now() + 1_000;
+    while ((!channelCreated || !fs.existsSync(statusFile) || JSON.parse(fs.readFileSync(statusFile, "utf8")).connectedVia !== "channel")
+      && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /official store/);
+    const reset = await host.resetSession(agentId, 0);
+    assert.equal(reset.resetCommitted, true);
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
+    assert.doesNotMatch(JSON.stringify(store.readJson("status", {}).runtimeReadiness), /pi-auth login|larkin setup|profile import/);
+  } finally {
+    await host.shutdown("missing-key persist test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("HostShell does not rehydrate missing-key auth from historical delivery rows", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-ledger-auth-stale-"));
+  const agentId = "cli_hostLedgerAuthA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const store = createAgentStateStore(root, agentId);
+  store.writeJson("agentState", { sessions: {} });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{
+    deliveryId: "d-stale-missing", messageId: "om_host_stale_missing", status: "error", retryable: false,
+    errorCategory: "auth", authProvider: "zai-coding-cn",
+    reason: "Provider zai-coding-cn is missing from this Agent's official credential store.",
+    input: { inputId: "i-stale-missing", deliveryId: "d-stale-missing", kind: "wake", text: "redacted", attempt: 0 },
+    updatedAt: "2026-09-04T00:00:00.000Z",
+  }] });
+  let listener = () => {};
+  const runtimeHost = {
+    subscribe(next) { listener = next; return () => {}; },
+    async start() {
+      listener({ type: "agent-status", agentId, status: "active", readiness: { runtime: "pi", state: "ready" } });
+    },
+    async resetSession() {
+      return { generationChanged: true, sessionChanged: true, turns: 0, runtimeReady: true, pendingCount: 0, sessionId: "fresh-session" };
+    },
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2",
+    feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId), stateDir };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-ledger-auth-stale",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const channelPackage = { createLarkChannel() { return {
+    botIdentity: { openId: "ou_ledger_stale", name: "Ledger Stale" }, rawClient: null, dispatcher: { register() {} }, on() {},
+    async connect() {}, async disconnect() {},
+  }; } };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0, stateStoreForImpl: () => store });
+  try {
+    await host.start();
+    const statusFile = path.join(stateDir, "status.json");
+    const deadline = Date.now() + 1_000;
+    while ((!fs.existsSync(statusFile) || JSON.parse(fs.readFileSync(statusFile, "utf8")).connectedVia !== "channel")
+      && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+    await host.resetSession(agentId, 0);
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+  } finally {
+    await host.shutdown("ledger auth stale test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("HostShell keeps a newer generic auth over historical missing-key rows across ready and reset", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-generic-supersede-"));
+  const agentId = "cli_hostGenericAuthA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const store = createAgentStateStore(root, agentId);
+  store.writeJson("agentState", {
+    sessions: {},
+    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+  });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{
+    deliveryId: "d-old-missing", messageId: "om_host_old_missing", status: "error", retryable: false,
+    errorCategory: "auth", authProvider: "zai-coding-cn",
+    reason: "Provider zai-coding-cn is missing from this Agent's official credential store.",
+    input: { inputId: "i-old-missing", deliveryId: "d-old-missing", kind: "wake", text: "redacted", attempt: 0 },
+    updatedAt: "2026-09-04T00:00:00.000Z",
+  }] });
+  let listener = () => {};
+  const runtimeHost = {
+    subscribe(next) { listener = next; return () => {}; },
+    async start() {
+      listener({ type: "agent-status", agentId, status: "active", readiness: { runtime: "pi", state: "ready" } });
+    },
+    async resetSession() {
+      return { generationChanged: true, sessionChanged: true, turns: 0, runtimeReady: true, pendingCount: 0, sessionId: "fresh-session" };
+    },
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2",
+    feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId), stateDir };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-generic-supersede",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const channelPackage = { createLarkChannel() { return {
+    botIdentity: { openId: "ou_generic_auth", name: "Generic Auth" }, rawClient: null, dispatcher: { register() {} }, on() {},
+    async connect() {}, async disconnect() {},
+  }; } };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0, stateStoreForImpl: () => store });
+  try {
+    await host.start();
+    const statusFile = path.join(stateDir, "status.json");
+    const deadline = Date.now() + 1_000;
+    while ((!fs.existsSync(statusFile) || JSON.parse(fs.readFileSync(statusFile, "utf8")).connectedVia !== "channel")
+      && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const started = store.readJson("status", {}).runtimeReadiness;
+    assert.equal(started.state, "unauthenticated");
+    assert.match(started.nextAction, /login|API-key resolver/);
+    assert.doesNotMatch(JSON.stringify(started), /official store/);
+    await host.resetSession(agentId, 0);
+    const reset = store.readJson("status", {}).runtimeReadiness;
+    assert.equal(reset.state, "unauthenticated");
+    assert.match(reset.nextAction, /login|API-key resolver/);
+    assert.doesNotMatch(JSON.stringify(reset), /official store/);
+  } finally {
+    await host.shutdown("generic supersede test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("HostShell does not keep generic provider A auth after a builtin model switch to B", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-generic-provider-switch-"));
+  const agentId = "cli_hostGenericSwitchA1";
+  const stateDir = path.join(root, "state", "agents", agentId);
+  const store = createAgentStateStore(root, agentId);
+  store.writeJson("agentState", {
+    sessions: {},
+    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+  });
+  store.writeJson("runtimeDeliveries", { version: 1, records: [{
+    deliveryId: "d-generic-a", messageId: "om_host_generic_a", status: "error", retryable: false,
+    errorCategory: "auth",
+    reason: "Provider zai-coding-cn API-key authentication failed during a Runtime turn.",
+    input: { inputId: "i-generic-a", deliveryId: "d-generic-a", kind: "wake", text: "redacted", attempt: 0 },
+    updatedAt: "2026-09-04T00:00:00.000Z",
+  }] });
+  let listener = () => {};
+  const runtimeHost = {
+    subscribe(next) { listener = next; return () => {}; },
+    async start() {
+      listener({ type: "agent-status", agentId, status: "active", readiness: { runtime: "pi", state: "ready" } });
+    },
+    async resetSession() {
+      return { generationChanged: true, sessionChanged: true, turns: 0, runtimeReady: true, pendingCount: 0, sessionId: "fresh-session" };
+    },
+    async deliver() { throw new Error("not used"); },
+    async stop() {},
+    async shutdown() {},
+  };
+  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "openai-codex/gpt-5",
+    feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId), stateDir };
+  const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-generic-provider-switch",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([agent]), LARKIN_INBOUND_DROUGHT_SEC: "0" };
+  const channelPackage = { createLarkChannel() { return {
+    botIdentity: { openId: "ou_generic_switch", name: "Generic Switch" }, rawClient: null, dispatcher: { register() {} }, on() {},
+    async connect() {}, async disconnect() {},
+  }; } };
+  const host = createHostShell({ env, runtimeHost, channelPackage, eventSourceStartDelayMs: 0, stateStoreForImpl: () => store });
+  try {
+    await host.start();
+    const statusFile = path.join(stateDir, "status.json");
+    const deadline = Date.now() + 1_000;
+    while ((!fs.existsSync(statusFile) || JSON.parse(fs.readFileSync(statusFile, "utf8")).connectedVia !== "channel")
+      && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+    await host.resetSession(agentId, 0);
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
+  } finally {
+    await host.shutdown("generic provider switch test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("assembled HostShell recovery compensates persisted session/status after a later Runtime listener throws", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-host-context-listener-failure-"));
   const agentId = "cli_hostListenerA1";

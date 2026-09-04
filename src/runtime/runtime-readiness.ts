@@ -1,8 +1,10 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { resolveConfigDir as resolveRootConfigDir } from "../platform/root-layout.js";
 import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
-import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
+import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, ownedPiCatalogAgentDir, piAgentDirectory } from "./pi-provider-config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
@@ -132,11 +134,27 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       ? "Install Pi and ensure `pi` is on PATH, or set LARKIN_PI_COMMAND."
       : `Install ${options.runtime} and ensure it is on PATH.`,
   };
+  const piAgentId = options.agentId;
+  if (options.runtime === "pi" && !piAgentId) {
+    return {
+      runtime: "pi",
+      state: "unavailable",
+      executable,
+      reason: "Pi catalog readiness requires Agent ID",
+      nextAction: "Retry setup or start so Larkin can probe the Agent-owned Pi provider directory.",
+    };
+  }
   const version = executableVersion(executable, env, options.commandArgs);
   try {
     if (options.runtime === "pi") {
       const { discoverPiModelCatalog } = await import("./pi-model-catalog.js");
-      await discoverPiModelCatalog({ cwd: options.cwd, command: executable, commandArgs: options.commandArgs, env });
+      await discoverPiModelCatalog({
+        cwd: options.cwd,
+        command: executable,
+        commandArgs: options.commandArgs,
+        env,
+        agentDir: ownedPiCatalogAgentDir(resolveRootConfigDir(env, os.homedir()), piAgentId as string),
+      });
     } else if (options.runtime === "codex") {
       const { discoverCodexModelCatalog } = await import("./codex-model-catalog.js");
       await discoverCodexModelCatalog({ cwd: options.cwd, command: executable, env });

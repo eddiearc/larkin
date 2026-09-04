@@ -687,7 +687,8 @@ if (!flag("--runtime") && (!testFixture || injectedAgentChoice || process.env.LA
     const choice = injectedAgentChoice
       ? requested
       : await recoverUnavailableExternalPi(requested, questioner, () => probeNativeRuntimeReadiness({
-        runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id), env: process.env,
+        runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id),
+        env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR, LARKIN_PI_DISTRIBUTION: "external" },
       }), (message) => say(`! ${message}`), authServices);
     if (choice) {
       let serializedChoice: SetupAgentChoice & { authCompleted?: true; readinessCompleted?: true } = choice;

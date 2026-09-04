@@ -122,7 +122,7 @@ test("external Pi readiness without Agent identity does not fall through to host
       env: { LARKIN_PI_DISTRIBUTION: "external", PI_CODING_AGENT_DIR: path.join(root, "decoy-pi") },
     });
     assert.equal(readiness.state, "unavailable", JSON.stringify(readiness));
-    assert.match(readiness.reason || "", /Agent ID and LARKIN_CONFIG_DIR/);
+    assert.match(readiness.reason || "", /requires Agent ID/);
     assert.equal(fs.readFileSync(marker, "utf8").trim(), "");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

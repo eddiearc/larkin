@@ -40,7 +40,7 @@ import path from "node:path";
 import readline from "node:readline";
 const marker = ${JSON.stringify(marker)};
 const args = process.argv.slice(2);
-fs.appendFileSync(marker, JSON.stringify({ args, packageDir: process.env.PI_PACKAGE_DIR || null }) + "\\n");
+fs.appendFileSync(marker, JSON.stringify({ args, packageDir: process.env.PI_PACKAGE_DIR || null, agentDir: process.env.PI_CODING_AGENT_DIR || null }) + "\\n");
 if (args.includes("--version")) {
   if (${failIfDirty ? "true" : "false"} && process.env.PI_PACKAGE_DIR) {
     const theme = path.join(process.env.PI_PACKAGE_DIR, "dist/modes/interactive/theme/dark.json");
@@ -69,6 +69,7 @@ function writeThemeRoot(root, name) {
 
 test("external Pi readiness keeps a real package root and strips minimal or broken roots", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-pkg-"));
+  const agentId = "cli_readinessPkgA1";
   const { script, marker } = writeReadinessPi(root);
   const real = writeThemeRoot(root, "nix-store-pi");
   const minimal = path.join(root, ".larkin-official-pi-package");
@@ -76,20 +77,25 @@ test("external Pi readiness keeps a real package root and strips minimal or brok
   fs.writeFileSync(path.join(minimal, "theme", "dark.json"), "{}\n");
   const broken = path.join(root, "broken-link");
   fs.symlinkSync(path.join(root, "missing-target"), broken);
+  const ownedDir = path.join(root, "providers", "pi", agentId);
+  const envFor = (packageDir) => ({
+    PI_PACKAGE_DIR: packageDir, LARKIN_PI_DISTRIBUTION: "external",
+    LARKIN_CONFIG_DIR: root, PI_CODING_AGENT_DIR: path.join(root, "decoy-pi"),
+  });
   try {
     const ready = await probeNativeRuntimeReadiness({
-      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
-      env: { PI_PACKAGE_DIR: real, LARKIN_PI_DISTRIBUTION: "external" },
+      runtime: "pi", agentId, cwd: root, command: process.execPath, commandArgs: [script],
+      env: envFor(real),
     });
     assert.equal(ready.state, "ready", JSON.stringify(ready));
     const strippedMinimal = await probeNativeRuntimeReadiness({
-      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
-      env: { PI_PACKAGE_DIR: minimal, LARKIN_PI_DISTRIBUTION: "external" },
+      runtime: "pi", agentId, cwd: root, command: process.execPath, commandArgs: [script],
+      env: envFor(minimal),
     });
     assert.equal(strippedMinimal.state, "ready", JSON.stringify(strippedMinimal));
     const strippedBroken = await probeNativeRuntimeReadiness({
-      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
-      env: { PI_PACKAGE_DIR: broken, LARKIN_PI_DISTRIBUTION: "external" },
+      runtime: "pi", agentId, cwd: root, command: process.execPath, commandArgs: [script],
+      env: envFor(broken),
     });
     assert.equal(strippedBroken.state, "ready", JSON.stringify(strippedBroken));
     const rows = fs.readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
@@ -99,6 +105,25 @@ test("external Pi readiness keeps a real package root and strips minimal or brok
     assert.ok(realRows.some((row) => row.args.includes("--mode") && row.args.includes("rpc")), JSON.stringify(rows));
     assert.ok(realRows.length >= 2, JSON.stringify(rows));
     assert.equal(dirtyRows.length, 0, JSON.stringify(rows));
+    const rpcRows = rows.filter((row) => row.args.includes("--mode") && row.args.includes("rpc"));
+    assert.ok(rpcRows.length > 0 && rpcRows.every((row) => row.agentDir === ownedDir), JSON.stringify(rows));
+    assert.equal(rpcRows.some((row) => String(row.agentDir).includes("decoy-pi")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("external Pi readiness without Agent identity does not fall through to host Pi", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-noid-"));
+  const { script, marker } = writeReadinessPi(root);
+  try {
+    const readiness = await probeNativeRuntimeReadiness({
+      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
+      env: { LARKIN_PI_DISTRIBUTION: "external", PI_CODING_AGENT_DIR: path.join(root, "decoy-pi") },
+    });
+    assert.equal(readiness.state, "unavailable", JSON.stringify(readiness));
+    assert.match(readiness.reason || "", /Agent ID and LARKIN_CONFIG_DIR/);
+    assert.equal(fs.readFileSync(marker, "utf8").trim(), "");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

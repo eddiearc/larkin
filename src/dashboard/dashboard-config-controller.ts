@@ -9,6 +9,7 @@ import { discoverCodexModelCatalog, type DiscoverCodexCatalogOptions } from "../
 import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtime/pi-model-catalog.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
+import { RUNTIME_OPTIONS, piCatalogDistributionForUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
 
 type Env = Record<string, string | undefined>;
 type LarkJsonCall = { command: string; args: string[]; env: Env; maxBuffer: number; timeout: number };
@@ -405,11 +406,11 @@ export function createDashboardConfigController({
   codexModelDirectoryResolver?: CodexModelDirectoryResolver;
   piModelDirectoryResolver?: PiModelDirectoryResolver;
 }) {
-  const resolvePiModelDirectory = async (agentId: string) => {
+  const resolvePiModelDirectory = async (agentId: string, userRuntime: "pi" | "builtin-pi") => {
     const { config, configDir } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    const catalogCommand = piCatalogCommandSpec(agent.piDistribution, env);
+    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(userRuntime), env);
     return await piModelDirectoryResolver.resolve({
       agentId,
       cwd: agent.workspaceDir,
@@ -422,7 +423,7 @@ export function createDashboardConfigController({
     const { config } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    if (runtime === "pi") return await resolvePiModelDirectory(agentId);
+    if (runtime === "pi" || runtime === "builtin-pi") return await resolvePiModelDirectory(agentId, runtime);
     if (runtime === "codex") return await codexModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     if (runtime === "claude") return await claudeModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     const authored = loadRuntimeModels()[runtime];
@@ -434,7 +435,9 @@ export function createDashboardConfigController({
     const { config } = loadConfig(env);
     const agent = config.agents[mutation.agentId];
     if (!agent) throw new Error("unknown agent");
-    const runtime = mutation.kind === "set-agent-runtime" ? mutation.runtime : agent.runtime;
+    const runtime = mutation.kind === "set-agent-runtime"
+      ? mutation.runtime
+      : toUserRuntime(agent.runtime, agent.piDistribution);
     const model = mutation.kind === "set-agent-runtime" ? mutation.model || "default"
       : mutation.kind === "set-agent-model" ? mutation.model : agent.model;
     if (mutation.kind === "set-agent-effort" && mutation.effort === null) return;
@@ -451,17 +454,21 @@ export function createDashboardConfigController({
       if (requestUrl.pathname === "/api/config" && req.method === "GET") {
         try {
           assertPrivateReadRequest(req, csrfCapability);
-          json(res, 200, { ...await sanitizedView(env, chatDirectoryResolver, requestUrl.searchParams.get("agent") || undefined, requestUrl.searchParams.get("chat") || undefined), runtimeModels: loadRuntimeModels() });
+          json(res, 200, {
+            ...await sanitizedView(env, chatDirectoryResolver, requestUrl.searchParams.get("agent") || undefined, requestUrl.searchParams.get("chat") || undefined),
+            runtimeModels: loadRuntimeModels(),
+            runtimeOptions: [...RUNTIME_OPTIONS],
+          });
         } catch (error) {
           json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "configuration unavailable" });
         }
         return true;
       }
-      if (requestUrl.pathname === "/api/models/pi" && req.method === "GET") {
+      if ((requestUrl.pathname === "/api/models/pi" || requestUrl.pathname === "/api/models/builtin-pi") && req.method === "GET") {
         try {
           assertPrivateReadRequest(req, csrfCapability);
           const agentId = requestUrl.searchParams.get("agent") || "";
-          const models = await resolvePiModelDirectory(agentId);
+          const models = await resolvePiModelDirectory(agentId, requestUrl.pathname === "/api/models/builtin-pi" ? "builtin-pi" : "pi");
           json(res, 200, { models });
         } catch (error) {
           json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "Pi model directory unavailable" });

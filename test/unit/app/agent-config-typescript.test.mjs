@@ -300,6 +300,7 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
           agent_id: first,
           name: first,
           runtime: "codex",
+          runtimeOption: "codex",
           model: "gpt-5.3-codex",
           document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null,
             reply_scope: "docs:document.comment:create", reply_requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null,
@@ -317,6 +318,7 @@ test("TypeScript agent-config bridge preserves listing, fail-closed selection, a
           agent_id: second,
           name: second,
           runtime: "claude",
+          runtimeOption: "claude",
           model: "claude-sonnet-4-5",
           document_comment: { event: "drive.notice.comment_add_v1", category: "not_requested", reason: "setup_required", requested_at: null,
             reply_scope: "docs:document.comment:create", reply_requested_at: null, event_verified_at: null, accepted_at: null, last_error: null, last_error_at: null,
@@ -647,7 +649,8 @@ test("larkin model isolates owned Pi catalog from host decoy and does not spawn 
     const decoyPattern = new RegExp(decoy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 
     const listedExternal = run("model", "--agent", external);
-    assert.match(`${listedExternal.stdout}\n${listedExternal.stderr}`, /用户安装的 Pi/);
+    assert.match(listedExternal.stdout, /runtime=pi\b/);
+    assert.doesNotMatch(listedExternal.stdout, /runtime=builtin-pi|发行版|用户安装的 Pi|内置 Pi/);
     assert.doesNotMatch(`${listedExternal.stdout}\n${listedExternal.stderr}`, decoyPattern);
     const recorded = fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
     assert.ok(recorded.length >= 1, "external catalog must spawn host pi");
@@ -657,8 +660,55 @@ test("larkin model isolates owned Pi catalog from host decoy and does not spawn 
 
     fs.writeFileSync(logFile, "");
     const listedBuiltin = run("model", "--agent", builtin);
-    assert.match(`${listedBuiltin.stdout}\n${listedBuiltin.stderr}`, /内置 Pi/);
+    assert.match(listedBuiltin.stdout, /runtime=builtin-pi\b/);
+    assert.doesNotMatch(listedBuiltin.stdout, /发行版|用户安装的 Pi|内置 Pi/);
     assert.doesNotMatch(`${listedBuiltin.stdout}\n${listedBuiltin.stderr}`, decoyPattern);
     assert.equal(fs.readFileSync(logFile, "utf8").trim(), "", "builtin catalog must not spawn host pi");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("larkin runtime accepts sibling builtin-pi and persists storage projection", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-sibling-cli-"));
+  const app = "cli_runtimeSiblingA1";
+  try {
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-runtime-sibling", mentionPolicy: "require", activeAgent: app,
+      agents: { [app]: { runtime: "pi", model: "default", piDistribution: "external" } },
+    })}\n`, { mode: 0o600 });
+    const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], {
+      cwd: ROOT, encoding: "utf8", env: { ...process.env, LARKIN_CONFIG_DIR: temp },
+    });
+    const listed = run("runtime", "--agent", app);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /runtime=pi\b/);
+    assert.match(listed.stdout, /builtin-pi/);
+    assert.doesNotMatch(listed.stdout, /发行版/);
+
+    const refused = run("runtime", "builtin-pi", "--agent", app);
+    assert.notEqual(refused.status, 0);
+    assert.match(`${refused.stdout}\n${refused.stderr}`, /无法切换到 builtin-pi|larkin setup/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "external");
+
+    const providerDir = path.join(temp, "providers", "pi", app);
+    fs.mkdirSync(providerDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(providerDir, 0o700);
+    fs.writeFileSync(path.join(providerDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "fixture-only" } }) + "\n", { mode: 0o600 });
+    const changed = run("runtime", "builtin-pi", "--agent", app);
+    assert.equal(changed.status, 0, changed.stderr);
+    const stored = JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8"));
+    assert.equal(stored.agents[app].runtime, "pi");
+    assert.equal(stored.agents[app].piDistribution, "builtin");
+    const shown = run("config", "show", "--agent", app, "--json");
+    const view = JSON.parse(shown.stdout).agents[0];
+    assert.equal(view.runtime, "pi");
+    assert.equal(view.runtimeOption, "builtin-pi");
+    const agentsJson = JSON.parse(run("agents", "--json").stdout).agents[0];
+    assert.equal(agentsJson.runtime, "pi");
+    assert.equal(agentsJson.runtimeOption, "builtin-pi");
+    assert.match(run("agents").stdout, /runtime=builtin-pi\b/);
+
+    const back = run("runtime", "pi", "--agent", app);
+    assert.equal(back.status, 0, back.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "external");
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

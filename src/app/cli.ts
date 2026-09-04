@@ -54,8 +54,8 @@ if (runtimeAgentAuthority && command === "comment") routes.comment = ["lark-cli"
 const commandHelp: Record<string, string> = {
   start: `Usage: larkin start [--agent <App ID> | --agents <App ID,...>]
 Start one foreground supervisor for the daemon and local dashboard, or reuse it.`,
-  setup: `Usage: larkin setup [--tenant feishu|lark] [--runtime <builtin-pi|external-pi|codex|claude>] [--provider <id> --api-key <key>]
-Run setup to create or connect a bot, configure its Agent, and attach it. Choose Feishu or Lark before the authorization QR (--tenant; default feishu). Interactive terminals keep the guided flow; Agent-driven (non-TTY) runs default to builtin-pi and need --provider/--api-key (or --runtime external-pi).`,
+  setup: `Usage: larkin setup [--tenant feishu|lark] [--runtime <builtin-pi|pi|codex|claude>] [--provider <id> --api-key <key>]
+Run setup to create or connect a bot, configure its Agent, and attach it. Choose Feishu or Lark before the authorization QR (--tenant; default feishu). Interactive terminals keep the guided flow; Agent-driven (non-TTY) runs default to builtin-pi and need --provider/--api-key (or --runtime pi).`,
   status: `Usage: larkin status [--json]
 Show Agent configuration, bot identity, credentials, and connection status. Use --json for readiness automation.`,
   agents: `Usage: larkin agents [--json]
@@ -63,7 +63,7 @@ List every configured Agent and its current local status. Use --json for daemon/
   model: `Usage: larkin model [<model>] [--agent <App ID>]
 Show or change an Agent model.`,
   runtime: `Usage: larkin runtime [<runtime>] [--agent <App ID>] [--model <model>]
-Show or change an Agent runtime.`,
+Show or change an Agent runtime. User-facing ids: pi | builtin-pi | codex | claude.`,
   "pi-distribution": `Usage: larkin pi-distribution [show|builtin|external] [--agent <App ID>] [--snapshot <private-file>] [--import-external-profile]
        larkin pi-distribution rollback --snapshot <private-file>
 Show or change one Pi Agent distribution. builtin requires configured provider state, or explicitly imports the external Pi 0.84.2 profile with --import-external-profile; all changes support config-lock CAS rollback.`,

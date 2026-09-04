@@ -736,9 +736,9 @@ const setupBaseUrl = flag("--base-url");
 const setupModel = flag("--model");
 if (piDistributionFlag === "builtin") {
   if (!setupProvider && !setupBaseUrl) {
-    throw new Error(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_PRESETS.map((p) => p.id).join("|")}|custom）或 --base-url；或改用 --runtime external-pi 使用已有 pi 环境`);
+    throw new Error(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_PRESETS.map((p) => p.id).join("|")}|custom）或 --base-url；或改用 --runtime pi 使用已有 pi 环境`);
   }
-  if (!setupApiKey) throw new Error("builtin-pi 需要 --api-key；或改用 --runtime external-pi 使用已有 pi 登录");
+  if (!setupApiKey) throw new Error("builtin-pi 需要 --api-key；或改用 --runtime pi 使用已有 pi 登录");
   // 自定义网关（--base-url）走 custom 预设：pi 会把 baseUrl 作为 provider 端点写入配置，
   // 而不是用预设厂商目录（否则会打到预设默认地址，如 api.openai.com）。
   const presetId = setupBaseUrl ? "custom" : (setupProvider ?? "custom");
@@ -776,7 +776,7 @@ if (piDistributionFlag === "builtin") {
     `${JSON.stringify({ ...raw, runtime: "pi", model: validated.model, authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
   say(`[setup 2/5] ✓ 内置 Pi provider 已配置（${presetId}${setupBaseUrl ? " / custom" : ""}）`);
 } else if (piDistributionFlag === "external" && (setupProvider || setupApiKey || setupBaseUrl)) {
-  throw new Error("external-pi 使用已有 pi 环境与登录，不接受 --provider/--api-key/--base-url");
+  throw new Error("pi 使用已有 pi 环境与登录，不接受 --provider/--api-key/--base-url");
 }
 
 const stagedBotFile = path.join(botsDir, `.${id}.${process.pid}.tmp`);

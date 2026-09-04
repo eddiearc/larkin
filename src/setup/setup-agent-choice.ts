@@ -1,11 +1,11 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import type { StoredAgent } from "./setup-binding.js";
+import { toUserRuntime } from "../runtime/user-runtime.js";
 import {
   PI_PROVIDER_PRESETS,
   resolveBuiltinPiProviderSetupSelection,
   type BuiltinPiProviderSetupSelection,
-  type PiDistribution,
 } from "../runtime/pi-provider-config.js";
 import type { OfficialPiAuthProvider, OfficialPiAuthStatus } from "../runtime/pi-official-auth.js";
 
@@ -90,16 +90,15 @@ export async function collectBuiltinPiChoice(questioner: SetupQuestioner,
 export async function collectSetupAgentChoice(questioner: SetupQuestioner, prior?: StoredAgent,
   services?: BuiltinPiChoiceServices): Promise<SetupAgentChoice | null> {
   if (prior) {
-    const keep = (await questioner.ask(`已有 Agent：${prior.runtime}/${prior.model}。直接回车保留；输入 c 才修改：`)).trim().toLowerCase();
+    const keep = (await questioner.ask(`已有 Agent：${toUserRuntime(prior.runtime, prior.piDistribution)}/${prior.model}。直接回车保留；输入 c 才修改：`)).trim().toLowerCase();
     if (!keep) return null;
     if (keep !== "c") throw new Error("请输入 c 修改，或直接回车保留现有配置");
   }
-  const runtimeChoice = number(await questioner.ask("选择 Agent：\n  1. Pi（推荐）\n  2. Codex\n  3. Claude Code\n> "), 1, 3);
-  if (runtimeChoice === 2) return { runtime: "codex" };
-  if (runtimeChoice === 3) return { runtime: "claude" };
-  const sourceChoice = number(await questioner.ask("选择 Pi：\n  1. 外置 Pi（使用本机官方 pi）\n  2. 内置 Pi（无需安装 Agent CLI，推荐）\n> "), 2, 2);
-  const distribution: PiDistribution = sourceChoice === 1 ? "external" : "builtin";
-  return distribution === "external" ? { runtime: "pi", distribution } : collectBuiltinPiChoice(questioner, services);
+  const runtimeChoice = number(await questioner.ask("选择 Agent：\n  1. builtin-pi（Larkin 捆绑，推荐）\n  2. pi（本机官方 pi CLI）\n  3. Codex\n  4. Claude Code\n> "), 1, 4);
+  if (runtimeChoice === 3) return { runtime: "codex" };
+  if (runtimeChoice === 4) return { runtime: "claude" };
+  if (runtimeChoice === 2) return { runtime: "pi", distribution: "external" };
+  return collectBuiltinPiChoice(questioner, services);
 }
 
 export async function recoverUnavailableExternalPi(
@@ -114,8 +113,8 @@ export async function recoverUnavailableExternalPi(
     if (choice?.runtime !== "pi" || choice.distribution !== "external") return choice;
     const readiness = await probe();
     if (readiness.state === "ready") return choice;
-    report(`外置 Pi ${readiness.state}：${readiness.reason || "prerequisite unavailable"}；${readiness.nextAction || "可切换到内置 Pi"}`);
-    const action = number(await questioner.ask("外置 Pi 当前不可用：\n  1. 切换到内置 Pi（推荐）\n  2. 重新选择 Agent\n  3. 取消 setup（保留原配置）\n> "), 1, 3);
+    report(`外置 Pi ${readiness.state}：${readiness.reason || "prerequisite unavailable"}；${readiness.nextAction || "可切换到 builtin-pi"}`);
+    const action = number(await questioner.ask("外置 Pi 当前不可用：\n  1. 切换到 builtin-pi（推荐）\n  2. 重新选择 Agent\n  3. 取消 setup（保留原配置）\n> "), 1, 3);
     if (action === 1) return collectBuiltinPiChoice(questioner, services);
     if (action === 3) throw new Error("setup 已取消；未修改 Agent/config");
     choice = await collectSetupAgentChoice(questioner, undefined, services);

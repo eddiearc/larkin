@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { TargetRootLayout, resolveConfigDir as resolveRootConfigDir } from "./root-layout.js";
 import { exactMode, fsyncDirectoryOf } from "./secure-metadata.js";
 import { CURRENT_RUNTIME_MODELS, type RuntimeModels } from "../runtime/runtime-model-catalog.js";
+import { assertBuiltinPiAgentDirectory, piAgentDirectory } from "../runtime/pi-provider-config.js";
+import { fromUserRuntime, isAdapterRuntime, isUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
 import processInspect from "./process-inspect.cjs";
 import {
   applyPiProfileMigration,
@@ -20,6 +22,9 @@ import {
 type Env = Record<string, string | undefined>;
 type Obj = Record<string, unknown>;
 export type { RuntimeModels } from "../runtime/runtime-model-catalog.js";
+export {
+  RUNTIME_OPTIONS, fromUserRuntime, isAdapterRuntime, isUserRuntime, runtimeOptionOf, runtimeOptionTarget, toUserRuntime,
+} from "../runtime/user-runtime.js";
 export type MentionPolicy = "require" | "free";
 export type MentionPolicyOverride = MentionPolicy | "inherit";
 
@@ -123,7 +128,8 @@ export function loadRuntimeModels(): RuntimeModels {
 }
 
 export function defaultModelFor(runtime: string): string {
-  const models = loadRuntimeModels()[runtime];
+  const adapter = isUserRuntime(runtime) ? fromUserRuntime(runtime).runtime : runtime;
+  const models = loadRuntimeModels()[adapter];
   if (!models) throw new Error(`runtime 模型目录不存在 runtime: ${runtime}`);
   return models[0].id;
 }
@@ -169,7 +175,7 @@ function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asser
   if (!isPlainObject(agent)) throw new Error(`Agent ${key} 必须是普通 object`);
   assertAllowedFields(agent, version === 3 ? AGENT_FIELDS_V3 : AGENT_FIELDS_V4, `Agent ${key}`);
   if (typeof agent.runtime !== "string" || !agent.runtime) throw new Error(`Agent ${key}.runtime 必须是非空字符串`);
-  if (!loadRuntimeModels()[agent.runtime]) throw new Error(`Agent ${key}.runtime 未知：${agent.runtime}`);
+  if (!isAdapterRuntime(agent.runtime)) throw new Error(`Agent ${key}.runtime 未知：${agent.runtime}`);
   if (typeof agent.model !== "string" || !agent.model) throw new Error(`Agent ${key}.model 必须是非空字符串`);
   assertModel(agent.runtime, agent.model);
   if (Object.hasOwn(agent, "piDistribution")) {
@@ -579,11 +585,20 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     if (mutation.distribution !== "builtin" && mutation.distribution !== "external") throw new Error("Pi distribution 只允许 builtin/external");
     agent.piDistribution = mutation.distribution;
   } else if (mutation.kind === "set-agent-runtime") {
-    if (!loadRuntimeModels()[mutation.runtime]) throw new Error(`未知 runtime：${mutation.runtime}`);
-    assertModel(mutation.runtime, mutation.model || "default");
-    agent.runtime = mutation.runtime;
+    if (!isUserRuntime(mutation.runtime)) throw new Error(`未知 runtime：${mutation.runtime}`);
+    const stored = fromUserRuntime(mutation.runtime);
+    if (stored.piDistribution === "builtin") {
+      try {
+        assertBuiltinPiAgentDirectory(piAgentDirectory(config.configDir, mutation.agentId));
+      } catch (error) {
+        throw new Error(`无法切换到 builtin-pi：${error instanceof Error ? error.message : String(error)}。请先运行 larkin setup 并为该 Agent 选择 builtin-pi 完成 provider 配置`);
+      }
+    }
+    assertModel(stored.runtime, mutation.model || "default");
+    agent.runtime = stored.runtime;
     agent.model = mutation.model || "default";
-    if (mutation.runtime !== "pi") delete agent.piDistribution;
+    if (stored.piDistribution) agent.piDistribution = stored.piDistribution;
+    else delete agent.piDistribution;
     delete agent.effort;
   } else if (mutation.kind === "set-agent-model") {
     if (!mutation.model.trim()) throw new Error("model 不能为空");
@@ -958,7 +973,7 @@ export function commitSetupConfig(env: Env, expectedRevision: string, nextStored
 export function safeConfigView(config: HydratedConfig, onlyAgentId?: string, chatId?: string, applyState?: Record<string, unknown>): Record<string, unknown> {
   const entries = onlyAgentId ? [[onlyAgentId, config.agents[onlyAgentId]]] as const : Object.entries(config.agents);
   const agents = entries.filter((entry): entry is readonly [string, HydratedAgent] => Boolean(entry[1])).map(([agentId, agent]) => ({
-    agentId, runtime: agent.runtime, model: agent.model, piDistribution: agent.piDistribution ?? (agent.runtime === "pi" ? "external" : null), effort: agent.effort ?? null,
+    agentId, runtime: agent.runtime, runtimeOption: toUserRuntime(agent.runtime, agent.piDistribution), model: agent.model, piDistribution: agent.piDistribution ?? (agent.runtime === "pi" ? "external" : null), effort: agent.effort ?? null,
     mention: {
       override: agent.mentionPolicy ?? "inherit",
       effective: agent.mentionPolicy ?? config.mentionPolicy,

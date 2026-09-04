@@ -359,7 +359,7 @@ test("external-pi setup rolls back when the effective model lacks a context wind
     assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
     assert.equal(fs.existsSync(path.join(root, "bots", `${APP}.json`)), true);
     const output = `${result.stdout}\n${result.stderr}`;
-    assert.match(output, /larkin setup --runtime external-pi/);
+    assert.match(output, /larkin setup --runtime pi/);
     assert.match(output, /fixture\/pi-windowed/);
     assert.doesNotMatch(output, /larkin model/);
   } finally {
@@ -383,7 +383,7 @@ test("external-pi setup fails closed without an official auth.json", () => {
     assert.match(output, /official file-backed Pi profile/);
     assert.match(output, /auth\.json/);
     assert.match(output, /settings\.json/);
-    assert.match(output, /larkin setup --runtime external-pi/);
+    assert.match(output, /larkin setup --runtime pi/);
     assert.doesNotMatch(output, /larkin model/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -406,7 +406,7 @@ test("external-pi setup fails closed without settings.json or models.json", () =
       const output = `${result.stdout}\n${result.stderr}`;
       assert.match(output, /official file-backed Pi profile/);
       assert.match(output, new RegExp(missing.replace(".", "\\.")));
-      assert.match(output, /larkin setup --runtime external-pi/);
+      assert.match(output, /larkin setup --runtime pi/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

@@ -87,6 +87,7 @@ test("dashboard Pi model directory is wired to the official catalog authority", 
     "Dashboard Pi discovery must reuse discoverPiModelCatalog instead of creating another catalog implementation");
   assert.match(controller, /createPiModelDirectoryResolver/);
   assert.match(controller, /\/api\/models\/pi/);
+  assert.match(controller, /\/api\/models\/builtin-pi/);
 });
 
 test("Pi catalog isolation deletes host-dir fallbacks and labels builtin versus user Pi", () => {
@@ -105,9 +106,15 @@ test("Pi catalog isolation deletes host-dir fallbacks and labels builtin versus 
     assert.doesNotMatch(source, /PI_CODING_AGENT_DIR\s*\?\s*\{\s*agentDir/, `${name} must not omit agentDir when PI_CODING_AGENT_DIR is unset`);
   }
   assert.match(types, /piDistribution:\s*"builtin"\s*\|\s*"external"\s*\|\s*null/);
-  assert.match(app, /piDistributionLabel/);
-  assert.match(app, /内置 Pi|用户安装的 Pi|piDistributionLabel/);
-  assert.match(agentConfig, /piDistributionLabel/);
+  assert.match(app, /RUNTIME_OPTIONS/);
+  assert.match(app, /builtin-pi/);
+  assert.doesNotMatch(app, /Pi 发行版/);
+  assert.match(agentConfig, /toUserRuntime/);
+  assert.match(agentConfig, /RUNTIME_OPTIONS/);
+  assert.match(agentConfig, /builtin-pi/);
+  assert.match(read("src/runtime/runtime-model-catalog.ts"), /pi: \[\.\.\.PI_AUTHORED_MODELS\]/);
+  assert.doesNotMatch(read("src/runtime/runtime-model-catalog.ts"), /"builtin-pi":/);
   assert.match(runtimeDirectory, /ownedPiCatalogAgentDir/);
   assert.match(runtimeDirectory, /piCatalogCommandSpec/);
+  assert.match(runtimeDirectory, /builtin-pi/);
 });

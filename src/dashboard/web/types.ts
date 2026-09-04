@@ -103,6 +103,7 @@ export interface KnownChat {
 export interface ConfigAgent {
   agentId: string;
   runtime: string;
+  runtimeOption: "codex" | "claude" | "pi" | "builtin-pi";
   model: string;
   effort: string | null;
   piDistribution: "builtin" | "external" | null;
@@ -124,6 +125,7 @@ export interface ConfigResponse {
   persistedRevision: string;
   agents: ConfigAgent[];
   runtimeModels: Record<string, RuntimeModel[]>;
+  runtimeOptions: Array<"codex" | "claude" | "pi" | "builtin-pi">;
 }
 
 export type WorkspaceProjection = {

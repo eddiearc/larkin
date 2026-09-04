@@ -17,6 +17,7 @@ import {
   listOfficialPiAuthProviders,
   logoutOfficialPiProvider,
   officialPiAuthStatus,
+  officialPiHasStoredProvider,
   runOfficialPiLogin,
 } from "../../../dist/runtime/pi-official-auth.mjs";
 
@@ -31,6 +32,65 @@ function provider(id, name, options = {}) {
     getModels: () => options.models || [], stream() {}, streamSimple() {},
   };
 }
+
+test("official provider presence reads only the Agent-owned store", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-stored-provider-"));
+  const previousHome = process.env.HOME;
+  const agentId = "cli_storedProviderA1";
+  try {
+    fs.chmodSync(temp, 0o700);
+    process.env.HOME = path.join(temp, "decoy-home");
+    fs.mkdirSync(path.join(temp, "decoy-home", ".pi"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(temp, "decoy-home", ".pi", "auth.json"),
+      `${JSON.stringify({ "zai-coding-cn": { type: "api_key", key: "fixture-global" } })}\n`, { mode: 0o600 });
+    const directory = path.join(temp, "providers", "pi", agentId);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify({
+      "openai-codex": { type: "api_key", key: "fixture-unrelated" },
+    })}\n`, { mode: 0o600 });
+    assert.equal(officialPiHasStoredProvider(temp, agentId, "openai-codex"), true);
+    assert.equal(officialPiHasStoredProvider(temp, agentId, "zai-coding-cn"), false);
+    assert.equal(officialPiHasStoredProvider(temp, "cli_absentStoredA1", "openai-codex"), false);
+    assert.equal(officialPiHasStoredProvider(temp, agentId, "../secret"), false);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("official provider presence refuses a symlinked Agent credential path", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-symlink-provider-"));
+  const previousHome = process.env.HOME;
+  const agentId = "cli_symlinkProviderA1";
+  try {
+    fs.chmodSync(temp, 0o700);
+    process.env.HOME = path.join(temp, "decoy-home");
+    const hostPi = path.join(temp, "host-pi");
+    fs.mkdirSync(hostPi, { recursive: true, mode: 0o700 });
+    fs.chmodSync(hostPi, 0o700);
+    fs.writeFileSync(path.join(hostPi, "auth.json"), `${JSON.stringify({
+      "zai-coding-cn": { type: "api_key", key: "fixture-host" },
+    })}\n`, { mode: 0o600 });
+    const configDir = path.join(temp, "config");
+    const piRoot = path.join(configDir, "providers", "pi");
+    fs.mkdirSync(piRoot, { recursive: true, mode: 0o700 });
+    fs.chmodSync(configDir, 0o700);
+    fs.chmodSync(path.join(configDir, "providers"), 0o700);
+    fs.chmodSync(piRoot, 0o700);
+    fs.symlinkSync(hostPi, path.join(piRoot, agentId));
+    const before = fs.readdirSync(piRoot, { withFileTypes: true }).map((entry) => `${entry.name}:${entry.isSymbolicLink()}`);
+    assert.equal(fs.existsSync(path.join(piRoot, agentId, "auth.json")), true);
+    assert.equal(officialPiHasStoredProvider(configDir, agentId, "zai-coding-cn"), false);
+    const after = fs.readdirSync(piRoot, { withFileTypes: true }).map((entry) => `${entry.name}:${entry.isSymbolicLink()}`);
+    assert.deepEqual(after, before);
+    assert.equal(fs.lstatSync(path.join(piRoot, agentId)).isSymbolicLink(), true);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
 
 test("official Pi auth registry projection is dynamic and preserves every login-capable method", async () => {
   const fake = { getProviders: () => [

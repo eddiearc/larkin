@@ -20,9 +20,124 @@ export interface RuntimeReadiness {
   observedAt?: string;
 }
 
-function safeProviderLabel(value: unknown): string | null {
+export function safeProviderId(value: unknown): string | null {
   const provider = typeof value === "string" ? value.trim() : "";
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(provider) ? provider : null;
+}
+
+function safeProviderLabel(value: unknown): string | null {
+  return safeProviderId(value);
+}
+
+export function isBuiltinPiDistribution(value: unknown): boolean {
+  return value === "builtin";
+}
+
+export type PersistedAuthFailureKind = "missing-provider" | "generic";
+
+/** Current scoped auth-failure marker. Never stores secrets or ledger history. */
+export interface PersistedAuthFailure {
+  kind: PersistedAuthFailureKind;
+  runtime: RuntimeReadiness["runtime"];
+  piDistribution?: "builtin" | "external";
+  provider?: string | null;
+}
+
+export interface AuthFailureScope {
+  runtime: string;
+  model?: string;
+  piDistribution?: unknown;
+  adapterId?: string;
+}
+
+/** Model ids are `provider/model`; only the provider prefix is used for scope. */
+export function configuredProviderId(model: unknown): string | null {
+  const value = typeof model === "string" ? model.trim() : "";
+  const slash = value.indexOf("/");
+  return slash > 0 ? safeProviderId(value.slice(0, slash)) : null;
+}
+
+function persistedRuntime(value: unknown): RuntimeReadiness["runtime"] | null {
+  return value === "pi" || value === "codex" || value === "claude" ? value : null;
+}
+
+export function parsePersistedAuthFailure(state: unknown): PersistedAuthFailure | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const record = state as Record<string, unknown>;
+  if (record.authFailure && typeof record.authFailure === "object" && !Array.isArray(record.authFailure)) {
+    const failure = record.authFailure as Record<string, unknown>;
+    const kind = failure.kind === "missing-provider" || failure.kind === "generic" ? failure.kind : null;
+    const runtime = persistedRuntime(failure.runtime);
+    if (!kind || !runtime) return null;
+    const provider = safeProviderId(failure.provider);
+    if (kind === "missing-provider" && !provider) return null;
+    const piDistribution = failure.piDistribution === "builtin" || failure.piDistribution === "external"
+      ? failure.piDistribution : undefined;
+    return {
+      kind,
+      runtime,
+      ...(piDistribution ? { piDistribution } : {}),
+      provider,
+    };
+  }
+  const legacy = safeProviderId(record.authFailureProvider);
+  return legacy
+    ? { kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: legacy }
+    : null;
+}
+
+function currentAdapterId(current: AuthFailureScope): string {
+  return current.adapterId ?? (current.runtime === "builtin-pi" ? "pi" : current.runtime);
+}
+
+function currentIsBuiltinPi(current: AuthFailureScope): boolean {
+  return currentAdapterId(current) === "pi"
+    && (isBuiltinPiDistribution(current.piDistribution) || current.runtime === "builtin-pi");
+}
+
+/**
+ * Missing-provider and known-provider generic markers apply only to that provider.
+ * Generic without a provider is conservative fallback: it still binds runtime /
+ * builtin distribution, but cannot reject an A→B model switch because the
+ * upstream provider was genuinely unavailable.
+ */
+export function authFailureAppliesTo(current: AuthFailureScope, failure: PersistedAuthFailure): boolean {
+  if (failure.kind === "missing-provider") {
+    return currentIsBuiltinPi(current)
+      && failure.runtime === "pi"
+      && failure.piDistribution === "builtin"
+      && Boolean(failure.provider)
+      && configuredProviderId(current.model) === failure.provider;
+  }
+  if (failure.runtime !== currentAdapterId(current)) return false;
+  if (failure.runtime === "pi") {
+    const persistedBuiltin = failure.piDistribution === "builtin";
+    if (currentIsBuiltinPi(current) !== persistedBuiltin) return false;
+  }
+  if (!failure.provider) return true;
+  const currentProvider = configuredProviderId(current.model);
+  if (currentIsBuiltinPi(current)) return currentProvider === failure.provider;
+  return currentProvider ? currentProvider === failure.provider : true;
+}
+
+export function readinessForPersistedAuthFailure(failure: PersistedAuthFailure): RuntimeReadiness {
+  if (failure.kind === "missing-provider") {
+    return missingProviderCredentialReadiness(failure.runtime, failure.provider);
+  }
+  return providerAuthenticationFailureReadiness(failure.runtime, failure.provider);
+}
+
+const MISSING_CREDENTIAL_REJECTION =
+  /^(?:Pi RPC (?:prompt|steer) failed: )?(No API key found for|No login found for) ([A-Za-z0-9][A-Za-z0-9._-]{0,79})$/;
+
+/** Narrow match for an explicit Pi absent-key / absent-login diagnostic. */
+export function classifyPiMissingCredentialRejection(message: unknown): { provider: string; diagnostic: string } | null {
+  const text = typeof message === "string"
+    ? message.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim()
+    : "";
+  const match = MISSING_CREDENTIAL_REJECTION.exec(text);
+  const provider = match ? safeProviderLabel(match[2]) : null;
+  return provider && match ? { provider, diagnostic: `${match[1]} ${provider}` } : null;
 }
 
 export function providerAuthenticationFailureReadiness(
@@ -37,6 +152,23 @@ export function providerAuthenticationFailureReadiness(
       ? `Provider ${label} API-key authentication failed during a Runtime turn.`
       : "Configured provider API-key authentication failed during a Runtime turn.",
     nextAction: "Check the provider login or API-key resolver command, then retry the Agent turn.",
+  };
+}
+
+export function missingProviderCredentialReadiness(
+  runtime: RuntimeReadiness["runtime"],
+  provider?: unknown,
+): RuntimeReadiness {
+  const label = safeProviderLabel(provider);
+  return {
+    runtime,
+    state: "unauthenticated",
+    reason: label
+      ? `Provider ${label} is missing from this Agent's official credential store.`
+      : "The configured provider is missing from this Agent's official credential store.",
+    nextAction: label
+      ? `Add the missing ${label} credential to this Agent's official store, then retry the Agent turn.`
+      : "Add the missing provider credential to this Agent's official store, then retry the Agent turn.",
   };
 }
 

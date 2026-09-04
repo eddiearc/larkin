@@ -1663,6 +1663,559 @@ test("terminal provider auth failure downgrades only its Agent and a later succe
   await host.shutdown("provider auth readiness test complete");
 });
 
+test("missing-key prompt rejection terminals once as auth and stays unauthenticated until that provider is stored", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-missing-key-"));
+  const failedId = "cli_missingKeyA1";
+  const healthyId = "cli_missingKeyB2";
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const writeOwned = (agentId, providers) => {
+    const directory = path.join(root, "providers", "pi", agentId);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify(Object.fromEntries(
+      providers.map((id) => [id, { type: "api_key", key: `fixture-${id}` }]),
+    ))}\n`, { mode: 0o600 });
+  };
+  const failedSession = new FakeSession();
+  failedSession.prompt = async function(input) {
+    this.prompts.push(input);
+    return { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" };
+  };
+  const recoveredSession = new FakeSession();
+  const healthySession = new FakeSession();
+  const events = [];
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.HOME = path.join(root, "decoy-home");
+  writeOwned(failedId, ["openai-codex"]);
+  writeOwned(healthyId, ["openai-codex"]);
+  fs.mkdirSync(path.join(root, "decoy-home", ".pi"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(root, "decoy-home", ".pi", "auth.json"),
+    `${JSON.stringify({ "zai-coding-cn": { type: "api_key", key: "fixture-global" } })}\n`, { mode: 0o600 });
+  const host = createRuntimeHost({
+    adapterFor: () => ({
+      id: "pi", capabilities: {},
+      async createSession(input) {
+        if (input.agentId === healthyId) return healthySession;
+        return input.model === "zai-coding-cn/glm-5.2-recovered" ? recoveredSession : failedSession;
+      },
+    }),
+    promptBuilder: new ContextPromptBuilder(),
+  });
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([
+      { agentId: failedId, name: "failed", runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2", workspaceDir: "/tmp" },
+      { agentId: healthyId, name: "healthy", runtime: "pi", piDistribution: "builtin", model: "fixture/healthy", workspaceDir: "/tmp" },
+    ]);
+    const first = await host.deliver(failedId, { message_id: "om_missing_key" });
+    assert.deepEqual(first, { status: "error", deliveryId: first.deliveryId, reason: first.reason, retryable: false });
+    assert.match(first.reason, /zai-coding-cn.*missing/i);
+    assert.equal(failedSession.prompts.length, 1, "missing-key must not retry the same rejection");
+    const downgraded = events.filter((event) => event.type === "agent-status" && event.agentId === failedId).at(-1);
+    assert.equal(downgraded.status, "error");
+    assert.equal(downgraded.readiness.state, "unauthenticated");
+    assert.match(downgraded.readiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.doesNotMatch(JSON.stringify(downgraded), /fixture-openai-codex|fixture-global|larkin setup|profile import/);
+    assert.equal(events.filter((event) => event.type === "delivery" && event.messageId === "om_missing_key"
+      && event.status === "deferred").length, 0);
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === healthyId).at(-1).status, "active");
+    assert.equal((await host.deliver(healthyId, { message_id: "om_healthy_missing_key" })).status, "accepted");
+
+    const staged = await host.stage({ agentId: failedId, name: "failed", runtime: "pi", piDistribution: "builtin",
+      model: "zai-coding-cn/glm-5.2-recovered", workspaceDir: "/tmp" });
+    assert.equal(staged.readiness.state, "ready");
+    await staged.commit();
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === failedId).at(-1).readiness.state,
+      "unauthenticated", "unrelated stored credentials must not clear a missing zai-coding-cn failure");
+
+    recoveredSession.prompt = async function(input) {
+      this.prompts.push(input);
+      return { status: "accepted", inputId: input.inputId };
+    };
+    const retry = await host.deliver(failedId, { message_id: "om_missing_key" });
+    assert.equal(retry.status, "accepted");
+    recoveredSession.emit({ type: "turn-start", turnId: "turn-missing-empty" });
+    recoveredSession.emit({ type: "activity", activity: "text" });
+    recoveredSession.emit({ type: "turn-end", turnId: "turn-missing-empty" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === failedId).at(-1).readiness.state,
+      "unauthenticated", "a successful turn without the named provider still stays unauthenticated");
+
+    writeOwned(failedId, ["openai-codex", "zai-coding-cn"]);
+    recoveredSession.emit({ type: "turn-start", turnId: "turn-missing-recovered" });
+    recoveredSession.emit({ type: "activity", activity: "text" });
+    recoveredSession.emit({ type: "turn-end", turnId: "turn-missing-recovered" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const recovered = events.filter((event) => event.type === "agent-status" && event.agentId === failedId).at(-1);
+    assert.equal(recovered.status, "active");
+    assert.equal(recovered.readiness.state, "ready");
+  } finally {
+    await host.shutdown("missing-key readiness test complete");
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("builtin missing-key auth survives restart and reset until that provider is stored", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-missing-key-restart-"));
+  const agentId = "cli_missingKeyRestartA1";
+  const store = createAgentStateStore(root, agentId);
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const writeOwned = (providers) => {
+    const directory = path.join(root, "providers", "pi", agentId);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify(Object.fromEntries(
+      providers.map((id) => [id, { type: "api_key", key: `fixture-${id}` }]),
+    ))}\n`, { mode: 0o600 });
+  };
+  const rejectSession = new FakeSession();
+  rejectSession.prompt = async function(input) {
+    this.prompts.push(input);
+    return { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" };
+  };
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.HOME = path.join(root, "decoy-home");
+  writeOwned(["openai-codex"]);
+  const config = { agentId, name: "failed", runtime: "pi", piDistribution: "builtin",
+    model: "zai-coding-cn/glm-5.2", workspaceDir: "/tmp", stateDir: store.paths.root };
+  const firstEvents = [];
+  const first = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return rejectSession; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  first.subscribe((event) => firstEvents.push(event));
+  try {
+    await first.start([config]);
+    store.prepareInboxDelivery({ message_id: "om_missing_restart", target: "chat:oc_missing_restart", content: "missing key", wake: true });
+    const receipt = await first.deliver(agentId, { message_id: "om_missing_restart", target: "chat:oc_missing_restart", content: "missing key", wake: true });
+    assert.equal(receipt.status, "error");
+    assert.equal(receipt.retryable, false);
+    assert.match(receipt.reason, /zai-coding-cn.*missing/i);
+    assert.equal(firstEvents.filter((event) => event.type === "delivery" && event.messageId === "om_missing_restart"
+      && event.status === "error").length, 1);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].errorCategory, "auth");
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].authProvider, "zai-coding-cn");
+    assert.equal(store.readJson("agentState", {}).authFailureProvider, "zai-coding-cn");
+    assert.deepEqual(store.readJson("agentState", {}).authFailure, {
+      kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn",
+    });
+    store.pollInbox();
+    await first.shutdown("restart boundary");
+
+    const restartedSession = new FakeSession();
+    const restartEvents = [];
+    const restarted = createRuntimeHost({
+      adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return restartedSession; } }),
+      promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+    });
+    restarted.subscribe((event) => restartEvents.push(event));
+    await restarted.start([config]);
+    const restartStatus = restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId);
+    assert.equal(restartStatus.at(-1).readiness.state, "unauthenticated");
+    assert.equal(restartEvents.filter((event) => event.type === "delivery" && event.messageId === "om_missing_restart").length, 0,
+      "restart must not re-emit the already-terminal delivery");
+    const reset = await restarted.resetSession(agentId);
+    assert.equal(reset.runtimeReady, true);
+    assert.equal(restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "unauthenticated", "reset must not publish ready over unresolved missing-key auth");
+    await restarted.shutdown("reset boundary");
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime or provider switch clears stale missing-provider unauthenticated state", async () => {
+  const switches = [
+    { runtime: "pi", piDistribution: "external", model: "zai-coding-cn/glm-5.2", adapterId: "pi" },
+    { runtime: "codex", model: "codex", adapterId: "codex" },
+    { runtime: "claude", model: "claude", adapterId: "claude" },
+    { runtime: "pi", piDistribution: "builtin", model: "openai-codex/gpt-5", adapterId: "pi" },
+  ];
+  for (const next of switches) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-auth-switch-"));
+    const agentId = `cli_authSwitch${next.adapterId}${next.piDistribution === "external" ? "Ext" : next.model.includes("openai") ? "Prov" : "A"}1`;
+    const store = createAgentStateStore(root, agentId);
+    const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+    const previousHome = process.env.HOME;
+    const rejectSession = new FakeSession();
+    rejectSession.prompt = async function(input) {
+      this.prompts.push(input);
+      return { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" };
+    };
+    const switchedSession = new FakeSession();
+    process.env.LARKIN_CONFIG_DIR = root;
+    process.env.HOME = path.join(root, "decoy-home");
+    const directory = path.join(root, "providers", "pi", agentId);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify({
+      "openai-codex": { type: "api_key", key: "fixture-openai-codex" },
+      "zai-coding-cn": { type: "api_key", key: "fixture-zai-coding-cn" },
+    })}\n`, { mode: 0o600 });
+    const events = [];
+    let created = 0;
+    const host = createRuntimeHost({
+      adapterFor: (runtime) => ({
+        id: runtime,
+        capabilities: {},
+        async createSession() {
+          created += 1;
+          return created === 1 ? rejectSession : switchedSession;
+        },
+      }),
+      promptBuilder: new ContextPromptBuilder(),
+      stateStoreFor: () => store,
+    });
+    host.subscribe((event) => events.push(event));
+    const builtin = { agentId, name: "switch", runtime: "pi", piDistribution: "builtin",
+      model: "zai-coding-cn/glm-5.2", workspaceDir: "/tmp", stateDir: store.paths.root };
+    try {
+      await host.start([builtin]);
+      store.prepareInboxDelivery({ message_id: "om_switch_missing", target: "chat:oc_switch_missing", content: "missing", wake: true });
+      const receipt = await host.deliver(agentId, { message_id: "om_switch_missing", target: "chat:oc_switch_missing", content: "missing", wake: true });
+      assert.equal(receipt.status, "error", next.runtime);
+      store.pollInbox();
+      const staged = await host.stage({
+        agentId, name: "switch", runtime: next.runtime, model: next.model, workspaceDir: "/tmp",
+        stateDir: store.paths.root, ...(next.piDistribution ? { piDistribution: next.piDistribution } : {}),
+      });
+      assert.equal(staged.readiness.state, "ready", next.runtime);
+      await staged.commit();
+      assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+        "ready", `${next.runtime} ${next.model}`);
+      const persisted = store.readJson("agentState", {});
+      assert.equal(persisted.authFailure, undefined, next.runtime);
+      assert.equal(persisted.authFailureProvider, undefined, next.runtime);
+      store.prepareInboxDelivery({ message_id: "om_switch_success", target: "chat:oc_switch_success", content: "ok", wake: true });
+      const accepted = await host.deliver(agentId, { message_id: "om_switch_success", target: "chat:oc_switch_success", content: "ok", wake: true });
+      assert.equal(accepted.status, "accepted", next.runtime);
+      switchedSession.emit({ type: "turn-start", turnId: "turn-switch-success" });
+      switchedSession.emit({ type: "activity", activity: "text" });
+      switchedSession.emit({ type: "turn-end", turnId: "turn-switch-success" });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+        "ready", `${next.runtime} success`);
+      assert.equal(store.readJson("agentState", {}).authFailure, undefined, next.runtime);
+      store.pollInbox();
+    } finally {
+      await host.shutdown("auth switch test complete");
+      if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+      else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("restart after a runtime switch does not restore missing-provider auth from ledger history", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-auth-switch-restart-"));
+  const agentId = "cli_authSwitchRestartA1";
+  const store = createAgentStateStore(root, agentId);
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const rejectSession = new FakeSession();
+  rejectSession.prompt = async function(input) {
+    this.prompts.push(input);
+    return { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" };
+  };
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.HOME = path.join(root, "decoy-home");
+  const directory = path.join(root, "providers", "pi", agentId);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify({
+    "zai-coding-cn": { type: "api_key", key: "fixture-zai-coding-cn" },
+  })}\n`, { mode: 0o600 });
+  const builtin = { agentId, name: "switch", runtime: "pi", piDistribution: "builtin",
+    model: "zai-coding-cn/glm-5.2", workspaceDir: "/tmp", stateDir: store.paths.root };
+  const first = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return rejectSession; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  try {
+    await first.start([builtin]);
+    store.prepareInboxDelivery({ message_id: "om_switch_restart", target: "chat:oc_switch_restart", content: "missing", wake: true });
+    assert.equal((await first.deliver(agentId, {
+      message_id: "om_switch_restart", target: "chat:oc_switch_restart", content: "missing", wake: true,
+    })).status, "error");
+    assert.equal(store.readJson("agentState", {}).authFailure.kind, "missing-provider");
+    store.pollInbox();
+    await first.shutdown("switch restart boundary");
+
+    const codexSession = new FakeSession();
+    const events = [];
+    const restarted = createRuntimeHost({
+      adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return codexSession; } }),
+      promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+    });
+    restarted.subscribe((event) => events.push(event));
+    await restarted.start([{ agentId, name: "switch", runtime: "codex", model: "codex",
+      workspaceDir: "/tmp", stateDir: store.paths.root }]);
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "ready");
+    assert.equal(store.readJson("agentState", {}).authFailure, undefined);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].authProvider, "zai-coding-cn");
+    await restarted.resetSession(agentId);
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "ready");
+    store.prepareInboxDelivery({ message_id: "om_switch_restart_ok", target: "chat:oc_switch_restart_ok", content: "ok", wake: true });
+    assert.equal((await restarted.deliver(agentId, {
+      message_id: "om_switch_restart_ok", target: "chat:oc_switch_restart_ok", content: "ok", wake: true,
+    })).status, "accepted");
+    codexSession.emit({ type: "turn-start", turnId: "turn-codex-ok" });
+    codexSession.emit({ type: "activity", activity: "text" });
+    codexSession.emit({ type: "turn-end", turnId: "turn-codex-ok" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "ready");
+    assert.equal(store.readJson("agentState", {}).authFailure, undefined);
+    store.pollInbox();
+    await restarted.shutdown("switch restart complete");
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing-key then generic auth survives restart and reset without rehydrating the old provider", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-missing-then-generic-"));
+  const agentId = "cli_missingThenGenericA1";
+  const store = createAgentStateStore(root, agentId);
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    return this.prompts.length === 1
+      ? { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" }
+      : { status: "accepted", inputId: input.inputId };
+  };
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.HOME = path.join(root, "decoy-home");
+  const directory = path.join(root, "providers", "pi", agentId);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify({
+    "openai-codex": { type: "api_key", key: "fixture-openai-codex" },
+  })}\n`, { mode: 0o600 });
+  const config = { agentId, name: "failed", runtime: "pi", piDistribution: "builtin",
+    model: "zai-coding-cn/glm-5.2", workspaceDir: "/tmp", stateDir: store.paths.root };
+  const firstEvents = [];
+  const first = createRuntimeHost({
+    adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+  });
+  first.subscribe((event) => firstEvents.push(event));
+  try {
+    await first.start([config]);
+    store.prepareInboxDelivery({ message_id: "om_missing_then_generic_a", target: "chat:oc_missing_then_generic", content: "missing", wake: true });
+    const missing = await first.deliver(agentId, {
+      message_id: "om_missing_then_generic_a", target: "chat:oc_missing_then_generic", content: "missing", wake: true,
+    });
+    assert.equal(missing.status, "error");
+    store.pollInbox();
+    store.prepareInboxDelivery({ message_id: "om_missing_then_generic_b", target: "chat:oc_missing_then_generic_b", content: "generic", wake: true });
+    const genericReceipt = await first.deliver(agentId, {
+      message_id: "om_missing_then_generic_b", target: "chat:oc_missing_then_generic_b", content: "generic", wake: true,
+    });
+    assert.equal(genericReceipt.status, "accepted");
+    session.emit({ type: "turn-start", turnId: "turn-generic-auth" });
+    session.emit({
+      type: "input-error", inputId: genericReceipt.deliveryId, retryable: false, willRetry: false,
+      message: "API key auth failed", errorCategory: "auth",
+      upstream: { provider: "zai-coding-cn", message: "invalid key" },
+    });
+    session.emit({ type: "turn-end", turnId: "turn-generic-auth" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const afterGeneric = firstEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1);
+    assert.equal(afterGeneric.readiness.state, "unauthenticated");
+    assert.match(afterGeneric.readiness.nextAction, /login|API-key resolver/);
+    assert.doesNotMatch(JSON.stringify(afterGeneric.readiness), /official store/);
+    const persisted = store.readJson("agentState", {});
+    assert.equal(persisted.authFailure.kind, "generic");
+    assert.equal(persisted.authFailure.provider, "zai-coding-cn");
+    assert.equal(persisted.authFailureProvider, undefined);
+    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].authProvider, "zai-coding-cn");
+    store.pollInbox();
+    await first.shutdown("generic supersede boundary");
+
+    const restartedSession = new FakeSession();
+    const restartEvents = [];
+    const restarted = createRuntimeHost({
+      adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return restartedSession; } }),
+      promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+    });
+    restarted.subscribe((event) => restartEvents.push(event));
+    await restarted.start([config]);
+    const restartStatus = restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1);
+    assert.equal(restartStatus.readiness.state, "unauthenticated");
+    assert.match(restartStatus.readiness.nextAction, /login|API-key resolver/);
+    assert.doesNotMatch(JSON.stringify(restartStatus.readiness), /official store|missing from this Agent/);
+    const reset = await restarted.resetSession(agentId);
+    assert.equal(reset.runtimeReady, true);
+    const resetStatus = restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1);
+    assert.equal(resetStatus.readiness.state, "unauthenticated");
+    assert.match(resetStatus.readiness.nextAction, /login|API-key resolver/);
+    await restarted.shutdown("generic reset boundary");
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generic builtin-Pi auth with a known provider clears on A-to-B stage, restart, and reset", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-generic-provider-switch-"));
+  const agentId = "cli_genericProviderSwitchA1";
+  const store = createAgentStateStore(root, agentId);
+  const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  const failedSession = new FakeSession();
+  const switchedSession = new FakeSession();
+  process.env.LARKIN_CONFIG_DIR = root;
+  process.env.HOME = path.join(root, "decoy-home");
+  const directory = path.join(root, "providers", "pi", agentId);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify({
+    "zai-coding-cn": { type: "api_key", key: "fixture-zai-coding-cn" },
+    "openai-codex": { type: "api_key", key: "fixture-openai-codex" },
+  })}\n`, { mode: 0o600 });
+  let created = 0;
+  const events = [];
+  const host = createRuntimeHost({
+    adapterFor: () => ({
+      id: "pi",
+      capabilities: {},
+      async createSession() {
+        created += 1;
+        return created === 1 ? failedSession : switchedSession;
+      },
+    }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+  });
+  host.subscribe((event) => events.push(event));
+  const builtinA = { agentId, name: "switch", runtime: "pi", piDistribution: "builtin",
+    model: "zai-coding-cn/glm-5.2", workspaceDir: "/tmp", stateDir: store.paths.root };
+  const builtinB = { ...builtinA, model: "openai-codex/gpt-5" };
+  try {
+    await host.start([builtinA]);
+    store.prepareInboxDelivery({ message_id: "om_generic_a", target: "chat:oc_generic_a", content: "generic", wake: true });
+    const receipt = await host.deliver(agentId, {
+      message_id: "om_generic_a", target: "chat:oc_generic_a", content: "generic", wake: true,
+    });
+    failedSession.emit({ type: "turn-start", turnId: "turn-generic-a" });
+    failedSession.emit({
+      type: "input-error", inputId: receipt.deliveryId, retryable: false, willRetry: false,
+      message: "API key auth failed", errorCategory: "auth",
+      upstream: { provider: "zai-coding-cn", message: "invalid key" },
+    });
+    failedSession.emit({ type: "turn-end", turnId: "turn-generic-a" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "unauthenticated");
+    assert.deepEqual(store.readJson("agentState", {}).authFailure, {
+      kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn",
+    });
+    store.pollInbox();
+    const staged = await host.stage(builtinB);
+    assert.equal(staged.readiness.state, "ready");
+    await staged.commit();
+    assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "ready");
+    assert.equal(store.readJson("agentState", {}).authFailure, undefined);
+    await host.shutdown("generic A-to-B stage boundary");
+
+    const restartedSession = new FakeSession();
+    const restartEvents = [];
+    store.writeJson("agentState", {
+      ...store.readJson("agentState", {}),
+      authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+    });
+    const restarted = createRuntimeHost({
+      adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return restartedSession; } }),
+      promptBuilder: new ContextPromptBuilder(), stateStoreFor: () => store,
+    });
+    restarted.subscribe((event) => restartEvents.push(event));
+    await restarted.start([builtinB]);
+    assert.equal(restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "ready");
+    assert.equal(store.readJson("agentState", {}).authFailure, undefined);
+    await restarted.resetSession(agentId);
+    assert.equal(restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state,
+      "ready");
+    await restarted.shutdown("generic A-to-B restart boundary");
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;
+    else process.env.LARKIN_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("matching missing-key rejections stay retryable for external Pi, Codex, and Claude", async () => {
+  for (const [runtime, piDistribution] of [["pi", "external"], ["codex", undefined], ["claude", undefined]]) {
+    const session = new FakeSession();
+    session.prompt = async function(input) {
+      this.prompts.push(input);
+      return { status: "rejected", inputId: input.inputId, retryable: true, reason: "No API key found for zai-coding-cn" };
+    };
+    const events = [];
+    const host = createRuntimeHost({ adapterFor: () => ({ id: runtime, capabilities: {}, async createSession() { return session; } }),
+      promptBuilder: new ContextPromptBuilder(), retryPolicy: { baseDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 0 } });
+    host.subscribe((event) => events.push(event));
+    const agentId = `cli_missingKeyIsolate${runtime === "pi" ? "External" : runtime[0].toUpperCase() + runtime.slice(1)}A1`;
+    try {
+      await host.start([{ agentId, name: runtime, runtime, ...(piDistribution ? { piDistribution } : {}),
+        model: "fixture/model", workspaceDir: "/tmp" }]);
+      const receipt = await host.deliver(agentId, { message_id: `om_missing_${runtime}` });
+      assert.equal(receipt.status, "deferred", runtime);
+      assert.match(receipt.reason, /No API key found for zai-coding-cn/);
+      assert.equal(events.some((event) => event.type === "agent-status" && event.readiness?.state === "unauthenticated"),
+        false, runtime);
+    } finally {
+      await host.shutdown(`${runtime} isolation test complete`);
+    }
+  }
+});
+
+test("transient provider rejection remains retryable after the missing-key classifier", async () => {
+  const session = new FakeSession();
+  session.prompt = async function(input) {
+    this.prompts.push(input);
+    return { status: "rejected", inputId: input.inputId, retryable: true, reason: "fetch failed: provider overloaded" };
+  };
+  const host = createRuntimeHost({ adapterFor: () => ({ id: "pi", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(), retryPolicy: { baseDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 0 } });
+  try {
+    await host.start([{ agentId: "cli_transientProviderA1", name: "transient", runtime: "pi", model: "fixture/model", workspaceDir: "/tmp" }]);
+    const receipt = await host.deliver("cli_transientProviderA1", { message_id: "om_transient_provider" });
+    assert.equal(receipt.status, "deferred");
+    assert.match(receipt.reason, /fetch failed|overloaded/);
+    assert.equal(session.prompts.length, 1);
+  } finally {
+    await host.shutdown("transient provider test complete");
+  }
+});
+
 test("synchronous terminal rejection returns an explicit error receipt and a later explicit delivery retries the same ownership", async () => {
   const session = new FakeSession();
   let reject = true;

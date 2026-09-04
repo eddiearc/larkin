@@ -1904,9 +1904,7 @@ test("short-lived successful creations share one crash epoch and reach bounded e
     retryPolicy: { baseDelayMs: 2, maxDelayMs: 4, maxAttempts: 2, stableWindowMs: 20 } });
   host.subscribe((event) => { if (event.type === "agent-status" && event.status === "error") errors.push(event.error); });
   await host.start([{ agentId: "cli_crashEpochA1", name: "cli_crashEpochA1", runtime: "pi", model: "p", workspaceDir: "/tmp" }]);
-  await new Promise((resolve) => setTimeout(resolve, 35));
-  assert.equal(creates, 3, "initial session plus two recreation attempts remain bounded");
-  assert.ok(errors.some((message) => /recreation exhausted after 2 attempts/.test(message)), errors.join("\n"));
+  await waitForCondition(() => creates === 3 && errors.some((message) => /recreation exhausted after 2 attempts/.test(message)));
   await host.shutdown("test complete");
 });
 

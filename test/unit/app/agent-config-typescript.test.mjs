@@ -602,3 +602,63 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
     assert.equal(stillPending.agents[0].apply.applyState, "pending");
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
+
+function writeFakePiRecorder(bin, logFile) {
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(bin, "pi"), `#!${process.execPath}
+import fs from "node:fs";
+fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify({
+  agentDir: process.env.PI_CODING_AGENT_DIR || null,
+  argv: process.argv.slice(2),
+}) + "\\n");
+process.exit(1);
+`, { mode: 0o755 });
+}
+
+test("larkin model isolates owned Pi catalog from host decoy and does not spawn host pi for builtin", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-catalog-isolation-cli-"));
+  const builtin = "cli_piCatalogBuiltinA1";
+  const external = "cli_piCatalogExternalB2";
+  const decoy = path.join(temp, "decoy-host-pi");
+  const logFile = path.join(temp, "fake-pi.log");
+  const bin = path.join(temp, "bin");
+  try {
+    writeFakePiRecorder(bin, logFile);
+    fs.writeFileSync(logFile, "");
+    fs.mkdirSync(path.join(temp, "agents", builtin), { recursive: true });
+    fs.mkdirSync(path.join(temp, "agents", external), { recursive: true });
+    fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
+      version: 4, serverId: "server-pi-catalog-isolation", mentionPolicy: "require", activeAgent: external,
+      agents: {
+        [builtin]: { runtime: "pi", model: "default", piDistribution: "builtin" },
+        [external]: { runtime: "pi", model: "default", piDistribution: "external" },
+      },
+    })}\n`, { mode: 0o600 });
+    const env = {
+      ...process.env,
+      HOME: temp,
+      PATH: `${bin}:/usr/bin:/bin`,
+      LARKIN_CONFIG_DIR: temp,
+      PI_CODING_AGENT_DIR: decoy,
+    };
+    const run = (...args) => spawnSync(process.execPath, [ENTRY, ...args], {
+      cwd: ROOT, encoding: "utf8", env, timeout: 30_000,
+    });
+    const decoyPattern = new RegExp(decoy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+
+    const listedExternal = run("model", "--agent", external);
+    assert.match(`${listedExternal.stdout}\n${listedExternal.stderr}`, /用户安装的 Pi/);
+    assert.doesNotMatch(`${listedExternal.stdout}\n${listedExternal.stderr}`, decoyPattern);
+    const recorded = fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(recorded.length >= 1, "external catalog must spawn host pi");
+    for (const row of recorded) {
+      assert.equal(row.agentDir, path.join(temp, "providers", "pi", external));
+    }
+
+    fs.writeFileSync(logFile, "");
+    const listedBuiltin = run("model", "--agent", builtin);
+    assert.match(`${listedBuiltin.stdout}\n${listedBuiltin.stderr}`, /内置 Pi/);
+    assert.doesNotMatch(`${listedBuiltin.stdout}\n${listedBuiltin.stderr}`, decoyPattern);
+    assert.equal(fs.readFileSync(logFile, "utf8").trim(), "", "builtin catalog must not spawn host pi");
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});

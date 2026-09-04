@@ -6,6 +6,7 @@ import {
 import { AGENT_TABS, createLatestResponseGate, filterAgents, parseRoute, reconcileAgentId, routeSearch, sameDraft, type AgentTab } from "./dashboard-state";
 import type { ConfigAgent, ConfigResponse, DashboardAgent, RuntimeModel, RuntimeReadinessView, StatusResponse, WorkspaceProjection } from "./types";
 import { Badge, Button, EmptyState, Sheet, cn } from "./components/ui";
+import { piDistributionLabel } from "../../runtime/pi-distribution-label";
 
 const TAB_LABELS: Record<AgentTab, string> = {
   overview: "概览", conversation: "对话", configuration: "配置", reminders: "提醒", workspace: "工作区", logs: "日志",
@@ -386,6 +387,7 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
       <p className="cli-guidance">这里只提供常用微调。更多配置可以直接告诉当前 Agent，让它运行 <code>larkin config --help</code> 后完成。</p>
       <div className="config-grid">
         <label><span>Runtime</span><select value={runtime} disabled={loading} onChange={(event) => { update("runtime", event.target.value); update("model", "default"); update("effort", "default"); }}>{Object.keys(response?.runtimeModels || {}).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+        {runtime === "pi" ? <label><span>Pi 发行版</span><input readOnly disabled aria-label="Pi 发行版" value={piDistributionLabel(config.piDistribution)} /></label> : null}
         <label><span>Model</span><select value={model} disabled={loading || !directoryReady} onChange={(event) => { update("model", event.target.value); if (event.target.value === "default") update("effort", "default"); }}>{visibleModels.map((item) => <option value={item.id} key={item.id}>{item.label || item.id}</option>)}</select></label>
         <label><span>Effort</span><select value={String(draft.effort || "default")} disabled={loading || !directoryReady || model === "default" || !efforts.length} onChange={(event) => update("effort", event.target.value)}><option value="default">default · 不指定</option>{efforts.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
         <label><span>群消息策略</span><select value={String(draft.mention || "inherit")} disabled={loading} onChange={(event) => update("mention", event.target.value)}><option value="inherit">跟随全局设置</option><option value="require">需要 @</option><option value="free">无需 @</option></select></label>

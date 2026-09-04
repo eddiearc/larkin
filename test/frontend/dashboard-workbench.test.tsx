@@ -46,6 +46,7 @@ const config = (agentId?: string) => ({
   },
   agents: (agentId ? agents.filter((agent) => agent.agentId === agentId) : agents).map((agent) => ({
     agentId: agent.agentId, runtime: agent.runtime, model: agent.model, effort: agent.effort,
+    piDistribution: null,
     mention: { override: agent.agentId === "cli_AgentB2" ? "require" : "inherit", effective: agent.agentId === "cli_AgentB2" ? "require" : "free", source: agent.agentId === "cli_AgentB2" ? "agent" : "global" },
     knownChats: agent.agentId === "cli_AgentB2" ? [
       { chatId: "oc_BuildRoom", displayName: "构建群", kind: "group", override: "free", effective: "free", source: "chat" },
@@ -324,6 +325,38 @@ describe("Agent-centric dashboard workbench", () => {
       String(input) === "/api/models/pi?agent=cli_AgentA1")).toBe(true));
     expect(screen.getByRole("option", { name: "default: openai/gpt-5.2" })).toBeVisible();
     expect(screen.getByRole("option", { name: "Claude Sonnet 4.5 · anthropic" })).toBeVisible();
+    expect(screen.getByDisplayValue("用户安装的 Pi")).toBeVisible();
+  });
+
+  it.each([
+    { distribution: "builtin" as const, label: "内置 Pi", absent: "用户安装的 Pi" },
+    { distribution: "external" as const, label: "用户安装的 Pi", absent: "内置 Pi" },
+    { distribution: null, label: "用户安装的 Pi", absent: "内置 Pi" },
+  ])("renders $label for Pi runtime when piDistribution is $distribution", async ({ distribution, label, absent }) => {
+    window.history.replaceState(null, "", "/?agent=cli_AgentA1&tab=configuration");
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") {
+        const value = config("cli_AgentA1");
+        value.agents[0].piDistribution = distribution;
+        return ok(value);
+      }
+      if (url.pathname === "/api/models/pi") return ok({ models: [{ id: "default", label: "default: fixture/model" }] });
+      throw new Error(`unexpected request ${url}`);
+    }));
+    render(<App />);
+    expect(await screen.findByLabelText("Runtime")).toHaveValue("pi");
+    expect(await screen.findByDisplayValue(label)).toBeVisible();
+    expect(screen.queryByDisplayValue(absent)).not.toBeInTheDocument();
+  });
+
+  it("does not render a Pi distribution label for non-Pi runtimes", async () => {
+    render(<App />);
+    expect(await screen.findByLabelText("Runtime")).toHaveValue("codex");
+    expect(screen.queryByText("内置 Pi")).not.toBeInTheDocument();
+    expect(screen.queryByText("用户安装的 Pi")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Pi 发行版")).not.toBeInTheDocument();
   });
 
   it("loads the current Codex CLI catalog instead of presenting only the authored compatibility list", async () => {

@@ -105,6 +105,7 @@ export interface ConfigAgent {
   runtime: string;
   model: string;
   effort: string | null;
+  piDistribution: "builtin" | "external" | null;
   mention: { override: "inherit" | "require" | "free"; effective: "require" | "free"; source: "global" | "agent" };
   knownChats: KnownChat[];
   apply: { applyState?: "unknown" | "pending" | "applied" };

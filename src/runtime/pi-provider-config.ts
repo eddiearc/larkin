@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { internalCommandSpec } from "../app/internal-command.js";
 import { isWindows, secureWindowsDirectoryAcl } from "../platform/secure-metadata.js";
+
+export { piDistributionLabel } from "./pi-distribution-label.js";
 
 export type PiDistribution = "external" | "builtin";
 export const BUNDLED_PI_VERSION = "0.84.2";
@@ -158,6 +161,25 @@ export function validateBuiltinPiProviderSelection(input: BuiltinPiProviderSelec
 export function piAgentDirectory(configDir: string, agentId: string): string {
   if (!APP_ID.test(agentId)) throw new Error("Pi Agent ID 格式无效");
   return path.join(path.resolve(configDir), "providers", "pi", agentId);
+}
+
+/** Catalog/CLI/dashboard must use the Agent-owned provider dir, never host ~/.pi. */
+export function ownedPiCatalogAgentDir(configDir: string, agentId: string): string {
+  return piAgentDirectory(configDir, agentId);
+}
+
+export function piCatalogCommandSpec(
+  distribution: "builtin" | "external" | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): { command: string; commandArgs: readonly string[] } {
+  if (distribution === "builtin") {
+    const spec = internalCommandSpec("pi-rpc", [], env);
+    return { command: spec.command, commandArgs: spec.args };
+  }
+  return {
+    command: env.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi",
+    commandArgs: [],
+  };
 }
 
 function assertPrivateDirectory(directory: string): void {

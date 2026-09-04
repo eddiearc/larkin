@@ -11,6 +11,9 @@ export default defineConfig({
   root,
   base: "/dashboard-assets/",
   plugins: [react(), tailwindcss()],
+  server: {
+    fs: { allow: [path.resolve(root, "../..")] },
+  },
   build: {
     outDir,
     emptyOutDir: true,

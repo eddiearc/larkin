@@ -321,7 +321,7 @@ test("reverse rollback removes only startup-created official Pi artifacts from a
   try {
     const plan = migration.preparePiProfileMigration(f.env, f.config, f.agent);
     migration.applyPiProfileMigration(plan);
-    const boundary = Date.now();
+    const boundary = Date.now() - 5_000;
     fs.mkdirSync(path.join(f.targetDir, ".larkin-official-pi-package", "theme"), { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(f.targetDir, ".larkin-official-pi-package", "package.json"), "{}\n", { mode: 0o600 });
     fs.writeFileSync(path.join(f.targetDir, "models-store.json"), "{}\n", { mode: 0o600 });

@@ -211,6 +211,66 @@ test("rollback journal recovery completes apply-state restoration after config r
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("stored config rejects builtin-pi as an adapter id", () => {
+  const { root, file } = fixture();
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.version = 4;
+    stored.mentionPolicy = "require";
+    stored.agents[APP] = { runtime: "builtin-pi", model: "default" };
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    assert.throws(() => configApi.loadConfig({ LARKIN_CONFIG_DIR: root }), /runtime 未知：builtin-pi/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+function seedBuiltinPiAuth(configDir, agentId) {
+  const directory = path.join(configDir, "providers", "pi", agentId);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  fs.writeFileSync(path.join(directory, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "fixture-only" } }) + "\n", { mode: 0o600 });
+}
+
+test("user-facing runtime siblings project to stored pi + piDistribution", () => {
+  const { root, file } = fixture();
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.version = 4;
+    stored.mentionPolicy = "require";
+    stored.agents[APP] = { runtime: "pi", model: "default" };
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    const env = { LARKIN_CONFIG_DIR: root };
+    const beforeBytes = fs.readFileSync(file);
+    assert.throws(
+      () => configApi.mutateConfig(env, { kind: "set-agent-runtime", agentId: APP, runtime: "builtin-pi", model: "default" }, { kind: "user" }),
+      /无法切换到 builtin-pi|larkin setup/,
+    );
+    assert.deepEqual(fs.readFileSync(file), beforeBytes);
+
+    seedBuiltinPiAuth(root, APP);
+    configApi.mutateConfig(env, { kind: "set-agent-runtime", agentId: APP, runtime: "builtin-pi", model: "default" }, { kind: "user" });
+    let after = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(after.agents[APP].runtime, "pi");
+    assert.equal(after.agents[APP].piDistribution, "builtin");
+    const builtinView = configApi.safeConfigView(configApi.loadConfig(env).config, APP).agents[0];
+    assert.equal(builtinView.runtime, "pi");
+    assert.equal(builtinView.runtimeOption, "builtin-pi");
+
+    configApi.mutateConfig(env, { kind: "set-agent-runtime", agentId: APP, runtime: "pi", model: "default" }, { kind: "user" });
+    after = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(after.agents[APP].runtime, "pi");
+    assert.equal(after.agents[APP].piDistribution, "external");
+    const hostView = configApi.safeConfigView(configApi.loadConfig(env).config, APP).agents[0];
+    assert.equal(hostView.runtime, "pi");
+    assert.equal(hostView.runtimeOption, "pi");
+
+    stored.agents[APP] = { runtime: "pi", model: "default" };
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    const legacyView = configApi.safeConfigView(configApi.loadConfig(env).config, APP).agents[0];
+    assert.equal(legacyView.runtime, "pi");
+    assert.equal(legacyView.runtimeOption, "pi");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("switching a Pi Agent to a non-Pi runtime removes piDistribution before persistence", () => {
   const { root, file } = fixture();
   try {

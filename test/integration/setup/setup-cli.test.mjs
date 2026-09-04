@@ -231,6 +231,8 @@ denied("rmdirSync", () => fs.rmdirSync(createThenDelete));
 
 const setupHelp = run("dist/app/setup.mjs", "--help");
 assert.equal(setupHelp.status, 0);
+assert.match(setupHelp.stdout, /builtin-pi（默认，内置 Pi）\| pi \| codex \| claude/);
+assert.doesNotMatch(setupHelp.stdout, /external-pi \|/);
 assert.match(setupHelp.stdout, /Each Agent is identified by its bot App ID/);
 assert.match(setupHelp.stdout, /selecting\s+the same bot reuses\s+its existing Agent, memory, and state/);
 assert.doesNotMatch(setupHelp.stdout, /--no-dashboard/);
@@ -240,8 +242,20 @@ assert.doesNotMatch(setupHelp.stdout, /--app-id/);
 
 const publicSetupHelp = run("dist/app/cli.mjs", "setup", "--help");
 assert.equal(publicSetupHelp.status, 0);
+assert.match(publicSetupHelp.stdout, /builtin-pi\|pi\|codex\|claude/);
+assert.doesNotMatch(publicSetupHelp.stdout, /external-pi/);
 assert.doesNotMatch(publicSetupHelp.stdout, /--app-id/);
 assert.doesNotMatch(publicSetupHelp.stdout, /--comment-subscription/);
+
+const aliasHelp = run("dist/app/setup.mjs", "--runtime", "external-pi", "--help");
+assert.equal(aliasHelp.status, 0, aliasHelp.stderr);
+assert.match(aliasHelp.stderr, /external-pi 已改名为 pi/);
+
+const unknownRuntime = run("dist/app/setup.mjs", "--runtime", "unknown");
+assert.equal(unknownRuntime.status, 1);
+assert.match(unknownRuntime.stderr, /未知 runtime/);
+assert.match(unknownRuntime.stderr, /builtin-pi \| pi \| codex \| claude/);
+assert.doesNotMatch(unknownRuntime.stderr, /external-pi/);
 
 for (const args of [["--comment-subscription"], ["--comment-subscription", "broad"], ["--comment-subscription", "user"]]) {
   const invalidSubscription = run("dist/app/setup.mjs", ...args);

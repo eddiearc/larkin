@@ -189,7 +189,7 @@ function agentConfigRequest(
   const targetId = options.values.get("--agent") || agent.agentId;
   const target = config.agents[targetId];
   if (!target) throw new Error(`Agent 不存在：${targetId}；运行 larkin config show --json 查看可用 Agent`);
-  const currentDirectory = (runtime = target.runtime): RuntimeDirectoryModel[] => (dependencies.modelDirectory ?? ((input) => discoverRuntimeModelDirectorySync(input, env)))({
+  const currentDirectory = (runtime = larkinConfig.toUserRuntime(target.runtime, target.piDistribution)): RuntimeDirectoryModel[] => (dependencies.modelDirectory ?? ((input) => discoverRuntimeModelDirectorySync(input, env)))({
     agentId: target.agentId, cwd: target.workspaceDir, runtime,
   });
   if (operation === "show") {
@@ -569,7 +569,9 @@ export function runAgentCli(
         kind: "agent", id: agent.agentId, isSelf: true, name, displayName: name,
         openId: identity?.open_id ?? identity?.openId ?? null,
         avatarUrl: identity?.avatar_url ?? identity?.avatarUrl ?? null,
-        runtime: agent.runtime, model: agent.model, reasoningEffort: agent.effort ?? null,
+        runtime: agent.runtime,
+        runtimeOption: larkinConfig.toUserRuntime(agent.runtime, agent.piDistribution),
+        model: agent.model, reasoningEffort: agent.effort ?? null,
         createdAt: agent.createdAt ?? "1970-01-01T00:00:00.000Z",
       });
       return 0;

@@ -386,7 +386,7 @@ function writePiAgents(root, agents) {
   })}\n`, { mode: 0o600 });
 }
 
-test("GET /api/models/pi and directory mutation ignore decoy or unset PI_CODING_AGENT_DIR and use owned dir plus engine", async () => {
+test("GET /api/models/pi and /api/models/builtin-pi select engines by sibling and keep owned dirs", async () => {
   const { createDashboardConfigController } = await import(`${CONTROLLER}?pi-owned=${Date.now()}`);
   const f = fixture();
   onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
@@ -409,18 +409,36 @@ test("GET /api/models/pi and directory mutation ignore decoy or unset PI_CODING_
     if (decoyDir) env.PI_CODING_AGENT_DIR = decoyDir;
     else delete env.PI_CODING_AGENT_DIR;
     const controller = createDashboardConfigController({ csrfCapability: "test", env, piModelDirectoryResolver });
+    const projected = await get(controller, `/api/config?agent=${builtin}`);
+    assert.equal(projected.status, 200);
+    assert.equal(projected.body.agents[0].runtime, "pi");
+    assert.equal(projected.body.agents[0].runtimeOption, "builtin-pi");
+    assert.deepEqual(projected.body.runtimeOptions, ["codex", "claude", "pi", "builtin-pi"]);
+    assert.equal(Object.hasOwn(projected.body.runtimeModels, "builtin-pi"), false);
+    assert.ok(Object.hasOwn(projected.body.runtimeModels, "pi"));
     calls.length = 0;
     const listed = await get(controller, `/api/models/pi?agent=${builtin}`);
     assert.equal(listed.status, 200, JSON.stringify(listed.body));
     assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", builtin));
     assert.notEqual(calls[0].agentDir, decoy);
-    assert.equal(calls[0].commandArgs.includes("pi-rpc"), true, "builtin catalog must use internal pi-rpc");
+    assert.equal(calls[0].commandArgs.includes("pi-rpc"), false, "user-facing pi sibling must use host pi");
+
+    calls.length = 0;
+    const builtinListed = await get(controller, `/api/models/builtin-pi?agent=${builtin}`);
+    assert.equal(builtinListed.status, 200);
+    assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", builtin));
+    assert.equal(calls[0].commandArgs.includes("pi-rpc"), true, "builtin-pi sibling must use internal pi-rpc");
 
     calls.length = 0;
     const externalListed = await get(controller, `/api/models/pi?agent=${external}`);
     assert.equal(externalListed.status, 200);
     assert.equal(calls[0].agentDir, path.join(f.root, "providers", "pi", external));
     assert.equal(calls[0].commandArgs.includes("pi-rpc"), false, "external catalog must use host pi");
+
+    calls.length = 0;
+    const externalBuiltin = await get(controller, `/api/models/builtin-pi?agent=${external}`);
+    assert.equal(externalBuiltin.status, 200);
+    assert.equal(calls[0].commandArgs.includes("pi-rpc"), true, "builtin-pi path must not follow stored external distribution");
 
     calls.length = 0;
     const saved = await patch(controller, { operation: "set-agent-model", agentId: external, model: "owned/model" });

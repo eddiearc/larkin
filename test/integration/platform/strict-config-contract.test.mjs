@@ -224,5 +224,6 @@ test("authored runtime model catalog contains exactly the native adapters", () =
   assert.ok(catalog.codex.slice(1).every((item) => item.verified === "authored-compatibility"), "Codex authored entries are explicitly a compatibility fallback, not the live catalog");
   assert.ok(catalog.claude.slice(1).every((item) => item.verified === "authored-candidate"), "Claude entries are explicitly authored candidates because Claude exposes no list command");
   assert.deepEqual(catalog.pi, [{ id: "default", label: "default", verified: "dynamic" }]);
+  assert.equal(Object.hasOwn(catalog, "builtin-pi"), false);
   assert.throws(() => defaultModelFor("unknown-runtime"), /unknown-runtime|runtime|模型|目录|不存在/i);
 });

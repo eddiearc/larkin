@@ -8,10 +8,12 @@ export interface RuntimeModelDefinition {
 
 export type RuntimeModels = Record<string, RuntimeModelDefinition[]>;
 
-// Larkin supports exactly these three native Runtime adapters. Pi, Codex and Claude replace
-// these placeholders/fallbacks at runtime with their machine-readable catalogs.
+// Authored catalog keys are adapter ids only. builtin-pi is a user-facing sibling, not a stored runtime.
+// Pi, Codex and Claude replace these placeholders/fallbacks at runtime with their machine-readable catalogs.
 // Claude's supported stdin control-channel list is the live authority; its entries below
 // remain explicit compatibility candidates for config loading and discovery failures.
+const PI_AUTHORED_MODELS: RuntimeModelDefinition[] = [{ id: "default", label: "default", verified: "dynamic" }];
+
 export const CURRENT_RUNTIME_MODELS: RuntimeModels = {
   codex: [
     { id: "default", label: "default", verified: "dynamic" },
@@ -46,5 +48,5 @@ export const CURRENT_RUNTIME_MODELS: RuntimeModels = {
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 · 静态候选", verified: "authored-candidate" },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 · 静态候选", verified: "authored-candidate" },
   ],
-  pi: [{ id: "default", label: "default", verified: "dynamic" }],
+  pi: [...PI_AUTHORED_MODELS],
 };

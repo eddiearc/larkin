@@ -41,11 +41,13 @@ const status = {
 const config = (agentId?: string) => ({
   version: 4, mentionPolicy: "free", persistedRevision: "sha256:revision",
   runtimeModels: {
+    pi: [{ id: "default" }],
     codex: [{ id: "default" }, { id: "gpt-5.6-sol", supportedReasoningEfforts: ["low", "high"] }],
-    claude: [{ id: "default" }], pi: [{ id: "default" }],
+    claude: [{ id: "default" }],
   },
+  runtimeOptions: ["codex", "claude", "pi", "builtin-pi"] as const,
   agents: (agentId ? agents.filter((agent) => agent.agentId === agentId) : agents).map((agent) => ({
-    agentId: agent.agentId, runtime: agent.runtime, model: agent.model, effort: agent.effort,
+    agentId: agent.agentId, runtime: agent.runtime, runtimeOption: agent.runtime, model: agent.model, effort: agent.effort,
     piDistribution: null,
     mention: { override: agent.agentId === "cli_AgentB2" ? "require" : "inherit", effective: agent.agentId === "cli_AgentB2" ? "require" : "free", source: agent.agentId === "cli_AgentB2" ? "agent" : "global" },
     knownChats: agent.agentId === "cli_AgentB2" ? [
@@ -325,33 +327,37 @@ describe("Agent-centric dashboard workbench", () => {
       String(input) === "/api/models/pi?agent=cli_AgentA1")).toBe(true));
     expect(screen.getByRole("option", { name: "default: openai/gpt-5.2" })).toBeVisible();
     expect(screen.getByRole("option", { name: "Claude Sonnet 4.5 · anthropic" })).toBeVisible();
-    expect(screen.getByDisplayValue("用户安装的 Pi")).toBeVisible();
+    expect(screen.queryByLabelText("Pi 发行版")).not.toBeInTheDocument();
+    expect(["pi", "builtin-pi", "codex", "claude"].every((value) =>
+      screen.getByRole("option", { name: value }))).toBe(true);
   });
 
-  it.each([
-    { distribution: "builtin" as const, label: "内置 Pi", absent: "用户安装的 Pi" },
-    { distribution: "external" as const, label: "用户安装的 Pi", absent: "内置 Pi" },
-    { distribution: null, label: "用户安装的 Pi", absent: "内置 Pi" },
-  ])("renders $label for Pi runtime when piDistribution is $distribution", async ({ distribution, label, absent }) => {
+  it("loads builtin-pi catalog when Runtime is the sibling builtin-pi", async () => {
     window.history.replaceState(null, "", "/?agent=cli_AgentA1&tab=configuration");
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/status") return ok(status);
       if (url.pathname === "/api/config") {
         const value = config("cli_AgentA1");
-        value.agents[0].piDistribution = distribution;
+        value.agents[0].runtime = "pi";
+        value.agents[0].runtimeOption = "builtin-pi";
+        value.agents[0].piDistribution = "builtin";
         return ok(value);
       }
-      if (url.pathname === "/api/models/pi") return ok({ models: [{ id: "default", label: "default: fixture/model" }] });
+      if (url.pathname === "/api/models/builtin-pi") return ok({ models: [
+        { id: "default", label: "default: deepseek/deepseek-v4-pro" },
+      ] });
       throw new Error(`unexpected request ${url}`);
     }));
     render(<App />);
-    expect(await screen.findByLabelText("Runtime")).toHaveValue("pi");
-    expect(await screen.findByDisplayValue(label)).toBeVisible();
-    expect(screen.queryByDisplayValue(absent)).not.toBeInTheDocument();
+    expect(await screen.findByLabelText("Runtime")).toHaveValue("builtin-pi");
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) =>
+      String(input) === "/api/models/builtin-pi?agent=cli_AgentA1")).toBe(true));
+    expect(screen.getByRole("option", { name: "default: deepseek/deepseek-v4-pro" })).toBeVisible();
+    expect(screen.queryByLabelText("Pi 发行版")).not.toBeInTheDocument();
   });
 
-  it("does not render a Pi distribution label for non-Pi runtimes", async () => {
+  it("does not render a Pi distribution control for any runtime", async () => {
     render(<App />);
     expect(await screen.findByLabelText("Runtime")).toHaveValue("codex");
     expect(screen.queryByText("内置 Pi")).not.toBeInTheDocument();

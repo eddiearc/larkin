@@ -8,6 +8,7 @@ import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import * as larkinConfig from "../platform/config.js";
 import { PI_PROVIDER_PRESETS } from "../runtime/pi-provider-config.js";
+import { fromUserRuntime, isUserRuntime } from "../runtime/user-runtime.js";
 const PI_PROVIDER_IDS = PI_PROVIDER_PRESETS.map((p) => p.id).join(" | ") + " | custom";
 import { acquireProcessLock, readProcessState } from "../platform/process-state.js";
 import { requestAgentUpsert } from "./local-control.js";
@@ -41,17 +42,18 @@ if (has("--comment-subscription")) {
 const commentSubscription = "application";
 const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: true, help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
 
-// runtime 枚举归一：builtin-pi（默认）/ external-pi / codex / claude → 内部 (runtime, distribution)
-const RUNTIME_ENUM = ["builtin-pi", "external-pi", "codex", "claude"] as const;
-type RuntimeEnum = (typeof RUNTIME_ENUM)[number];
+// runtime 枚举归一：builtin-pi（默认）/ pi / codex / claude → 内部 (runtime, distribution)
+const RUNTIME_ENUM = ["builtin-pi", "pi", "codex", "claude"] as const;
 function normalizeRuntime(value: string | null): { runtime: "pi" | "codex" | "claude"; distribution?: "builtin" | "external" } {
-  const chosen: RuntimeEnum = (value || "builtin-pi") as RuntimeEnum;
-  if (!RUNTIME_ENUM.includes(chosen)) {
+  const raw = value || "builtin-pi";
+  if (raw === "external-pi") {
+    console.error("external-pi 已改名为 pi");
+    return fromUserRuntime("pi");
+  }
+  if (!isUserRuntime(raw) || !RUNTIME_ENUM.includes(raw)) {
     die(`未知 runtime \`${value}\`；可选：${RUNTIME_ENUM.join(" | ")}`);
   }
-  if (chosen === "builtin-pi") return { runtime: "pi", distribution: "builtin" };
-  if (chosen === "external-pi") return { runtime: "pi", distribution: "external" };
-  return { runtime: chosen };
+  return fromUserRuntime(raw);
 }
 const normalizedRuntime = normalizeRuntime(OPT.runtime);
 // 参数化路径：显式 --runtime、无 TTY（Agent 驱动）、或任何 provider 参数。
@@ -63,11 +65,11 @@ if (!OPT.help && parameterized && normalizedRuntime.distribution === "builtin") 
   const p = flag("--provider");
   const b = flag("--base-url");
   const k = flag("--api-key");
-  if (!p && !b) die(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_IDS}）或 --base-url；或 --runtime external-pi 用已有 pi`);
-  if (!k) die("builtin-pi 需要 --api-key；或 --runtime external-pi 用已有登录");
+  if (!p && !b) die(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_IDS}）或 --base-url；或 --runtime pi 用已有 pi`);
+  if (!k) die("builtin-pi 需要 --api-key；或 --runtime pi 用已有登录");
 }
 if (!OPT.help && normalizedRuntime.distribution === "external" && (flag("--provider") || flag("--api-key") || flag("--base-url"))) {
-  die("external-pi 使用已有 pi 环境，不接受 --provider/--api-key/--base-url");
+  die("pi 使用已有 pi 环境，不接受 --provider/--api-key/--base-url");
 }
 if (OPT.help) {
   say(`larkin setup — Create or connect a Feishu (Lark) bot, then configure and attach its Agent
@@ -77,7 +79,7 @@ Usage:
   larkin setup --provider <id> --api-key <key>   指定内置 Pi provider（无需交互）
 
 Options:
-  --runtime <runtime>                   Agent runtime 枚举：builtin-pi（默认，内置 Pi）| external-pi | codex | claude
+  --runtime <runtime>                   Agent runtime 枚举：builtin-pi（默认，内置 Pi）| pi | codex | claude
   --provider <id>                       内置 Pi provider：deepseek | kimi | minimax | zhipu | openai |
                                           anthropic | gemini | groq | cerebras | xai | fireworks |
                                           together | mistral | openrouter | kimi-coding | qwen-cn | custom
@@ -99,7 +101,7 @@ daemon + dashboard supervisor used by larkin start.
 
 Interactive terminals without flags keep the guided flow (browser bot selection + runtime choice).
 Non-interactive (Agent-driven) runs default to builtin-pi and require --provider/--api-key (or
---runtime external-pi to reuse an existing pi login).`);
+--runtime pi to reuse an existing pi login).`);
   process.exit(0);
 }
 

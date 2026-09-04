@@ -8,6 +8,7 @@ import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
+import { piCatalogDistributionForUserRuntime } from "../runtime/user-runtime.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -52,7 +53,7 @@ export async function discoverRuntimeModelDirectory(input: RuntimeModelDirectory
       ...catalog.models.map(({ id, label, supportedReasoningEfforts }) => ({ id, label, supportedReasoningEfforts })),
     ];
   }
-  if (input.runtime === "pi") {
+  if (input.runtime === "pi" || input.runtime === "builtin-pi") {
     const env = input.env ?? process.env;
     const agentId = input.agentId || "";
     if (!agentId) throw new Error("runtime model directory requires agentId for Pi");
@@ -60,7 +61,7 @@ export async function discoverRuntimeModelDirectory(input: RuntimeModelDirectory
     const { config } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error(`unknown agent: ${agentId}`);
-    const catalogCommand = piCatalogCommandSpec(agent.piDistribution, env);
+    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(input.runtime), env);
     const catalog = await discoverPiModelCatalog({
       cwd: input.cwd,
       agentDir: ownedPiCatalogAgentDir(configDir, agentId),

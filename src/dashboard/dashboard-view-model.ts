@@ -14,6 +14,7 @@ import { collectWorkspaceEntry as collectTypedWorkspaceEntry } from "./dashboard
 import { buildFingerprint, packageVersion } from "../platform/build-info.js";
 import * as larkinConfig from "../platform/config.js";
 import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
+import { toUserRuntime } from "../runtime/user-runtime.js";
 
 export interface JsonRecord {
   [key: string]: unknown;
@@ -564,7 +565,7 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
     agentId: a.agentId,
     name: a.name,
     displayName: (botIdentity && botIdentity.name) || a.name,
-    runtime: a.runtime,
+    runtime: toUserRuntime(a.runtime, a.piDistribution),
     model: status.session?.runtime === a.runtime && status.session?.model ? String(status.session.model) : a.model,
     effort: status.session?.runtime === a.runtime && status.session?.reasoningEffort ? String(status.session.reasoningEffort) : a.effort || null,
     runtimeReadiness,
@@ -588,7 +589,7 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
     sessions: agentState.sessions || {},
     session: sessionId ? {
       id: sessionId,
-      runtime: a.runtime,
+      runtime: toUserRuntime(a.runtime, a.piDistribution),
       startedAt: usage.startedAt || (status.session?.id === sessionId ? status.session.startedAt : null) || null,
       ageSec: ageSec(usage.startedAt || (status.session?.id === sessionId ? status.session.startedAt : null)),
       lastTurnAt: status.session?.lastTurnAt || null,

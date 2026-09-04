@@ -160,7 +160,7 @@ test("external-pi setup failure keeps the bot credential, leaves config untouche
     assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
     assert.deepEqual(resultFiles(root), []);
     assert.equal(fs.existsSync(path.join(root, "control")), false);
-    assert.match(`${result.stdout}\n${result.stderr}`, /larkin setup --runtime external-pi/);
+    assert.match(`${result.stdout}\n${result.stderr}`, /larkin setup --runtime pi/);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /larkin model/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -277,7 +277,7 @@ test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after 
     const output = `${result.stdout}\n${result.stderr}`;
     assert.notEqual(result.status, 0, output);
     assert.match(output, /Pi effective model is missing a context window/);
-    assert.match(output, /larkin setup --runtime external-pi/);
+    assert.match(output, /larkin setup --runtime pi/);
     assert.equal(fs.readFileSync(configFile, "utf8"), before);
     assert.deepEqual(fs.readFileSync(botFile), botBefore);
     assert.deepEqual(fs.readFileSync(path.join(profile.dir, "auth.json")), profile.auth);

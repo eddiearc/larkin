@@ -278,10 +278,10 @@ function formatExternalPiSetupFailure(error: unknown, options: { agentExisted: b
   const alternatives = catalogModelsFromError(error);
   const parts: string[] = [];
   if (/external Pi (?:auth\.json|models\.json|settings\.json) is required|external Pi profile|external Pi auth\.json has an unsafe mode|external Pi models\.json has an unsafe mode|external Pi settings\.json has an unsafe mode/.test(original)) {
-    parts.push("external-pi requires the official file-backed Pi profile containing auth.json (0600), models.json, and settings.json, normally after `pi` login and default-model selection. Environment-variable-only credentials are unsupported.");
+    parts.push("pi requires the official file-backed Pi profile containing auth.json (0600), models.json, and settings.json, normally after `pi` login and default-model selection. Environment-variable-only credentials are unsupported.");
   }
   if (original) parts.push(original);
-  parts.push("Fix the official `pi` login and default model, then rerun `larkin setup --runtime external-pi`.");
+  parts.push("Fix the official `pi` login and default model, then rerun `larkin setup --runtime pi`.");
   if (options.agentExisted) {
     parts.push("This Agent already exists; after a successful setup you can switch models with `larkin model <provider>/<model>`.");
   }

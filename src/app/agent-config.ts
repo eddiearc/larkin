@@ -20,7 +20,8 @@ import { isChannelReconnecting, projectAgentReadiness, type AgentReadinessStatus
 import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
-import { assertBuiltinPiAgentDirectory, ownedPiCatalogAgentDir, piAgentDirectory, piCatalogCommandSpec, piDistributionLabel } from "../runtime/pi-provider-config.js";
+import { assertBuiltinPiAgentDirectory, ownedPiCatalogAgentDir, piAgentDirectory, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
+import { RUNTIME_OPTIONS, fromUserRuntime, isUserRuntime, piCatalogDistributionForUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 interface RuntimeModel {
@@ -273,6 +274,7 @@ if (kind === "agents") {
         agent_id: agent.agentId,
         name: agent.name,
         runtime: agent.runtime,
+        runtimeOption: toUserRuntime(agent.runtime, agent.piDistribution),
         model: effectiveModel,
         document_comment: {
           event: "drive.notice.comment_add_v1",
@@ -335,7 +337,7 @@ if (kind === "agents") {
     say(`  ${agent.name}${agent.name === config.activeAgent ? " [active]" : ""}`);
     const effectiveModel = status?.session?.runtime === agent.runtime && status.session.model ? status.session.model : agent.model;
     const effectiveEffort = status?.session?.runtime === agent.runtime && status.session.reasoningEffort ? status.session.reasoningEffort : agent.effort;
-    say(`    runtime=${agent.runtime}  model=${effectiveModel}${effectiveModel !== agent.model ? `  stored=${agent.model}` : ""}${effectiveEffort ? `  effort=${effectiveEffort}` : ""}`);
+    say(`    runtime=${toUserRuntime(agent.runtime, agent.piDistribution)}  model=${effectiveModel}${effectiveModel !== agent.model ? `  stored=${agent.model}` : ""}${effectiveEffort ? `  effort=${effectiveEffort}` : ""}`);
     if (status?.runtimeReadiness) {
       const current = projectedReadiness.readiness.runtime_ready;
       const state = status.runtimeReadiness.state === "ready" && !current ? "unavailable" : status.runtimeReadiness.state || "incompatible";
@@ -445,7 +447,7 @@ if (!key) {
     say(`共 ${keys.length} 个 agent（用 --agent <appId> 查看/修改指定一个）:`);
     for (const candidate of keys) {
       const item = config.agents[candidate];
-      say(`  ${candidate}${candidate === config.activeAgent ? " [active]" : ""}  runtime=${item.runtime}  model=${item.model}`);
+      say(`  ${candidate}${candidate === config.activeAgent ? " [active]" : ""}  runtime=${toUserRuntime(item.runtime, item.piDistribution)}  model=${item.model}`);
     }
     process.exit(0);
   }
@@ -458,7 +460,12 @@ if (kind === "pi-distribution") {
   const requested = value || "show";
   if (importExternalProfile && requested !== "builtin") die("--import-external-profile 只允许与 builtin 一起使用");
   if (requested === "show") {
-    say(JSON.stringify({ agentId: selectedKey, runtime: agent.runtime, piDistribution: agent.piDistribution ?? "external" }));
+    say(JSON.stringify({
+      agentId: selectedKey,
+      runtime: agent.runtime,
+      runtimeOption: toUserRuntime(agent.runtime, agent.piDistribution),
+      piDistribution: agent.piDistribution ?? "external",
+    }));
     process.exit(0);
   }
   if (requested !== "builtin" && requested !== "external") die("Pi distribution 只允许 show/builtin/external");
@@ -501,10 +508,18 @@ if ((["model", "effort"].includes(kind || "") && agent.runtime === "claude") || 
   }
 }
 let piCatalog: PiModelCatalog | null = null;
-if (agent.runtime === "pi" || (kind === "runtime" && value === "pi")) {
-  if (kind === "model" && !value) say(`发行版: ${piDistributionLabel(agent.piDistribution)}`);
+const userRuntime = toUserRuntime(agent.runtime, agent.piDistribution);
+const catalogUserRuntime = kind === "runtime" && (value === "pi" || value === "builtin-pi")
+  ? value
+  : userRuntime;
+if ((kind === "model" || kind === "effort" || kind === "runtime") && !value) {
+  say(`agent=${selectedKey}  runtime=${userRuntime}  model=${agent.model}`);
+}
+const needsLivePiCatalog = (["model", "effort"].includes(kind) && agent.runtime === "pi")
+  || (kind === "runtime" && (value === "pi" || value === "builtin-pi") && Boolean(flagModel));
+if (needsLivePiCatalog) {
   try {
-    const catalogCommand = piCatalogCommandSpec(agent.piDistribution, process.env);
+    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(catalogUserRuntime), process.env);
     piCatalog = await discoverPiModelCatalog({
       cwd: String(agent.workspaceDir),
       agentDir: ownedPiCatalogAgentDir(configDir, selectedKey),
@@ -518,11 +533,16 @@ if (agent.runtime === "pi" || (kind === "runtime" && value === "pi")) {
   if (!piCatalog) die("Pi 模型目录加载失败");
   const loadedPiCatalog = piCatalog as PiModelCatalog;
   for (const diagnostic of loadedPiCatalog.diagnostics) console.error(`Pi diagnostic: ${diagnostic}`);
-  catalog.pi = [{ id: "default", label: `default: ${loadedPiCatalog.effectiveModel}` }, ...loadedPiCatalog.models];
+  const piModels = [{ id: "default", label: `default: ${loadedPiCatalog.effectiveModel}` }, ...loadedPiCatalog.models];
+  catalog.pi = piModels;
+}
+
+function catalogRuntimeKey(runtime: string): string {
+  return isUserRuntime(runtime) ? fromUserRuntime(runtime).runtime : runtime;
 }
 
 function listModels(runtime: string, current: string): void {
-  const items = catalog[runtime];
+  const items = catalog[catalogRuntimeKey(runtime)];
   if (!items) {
     say(`  （无 ${runtime} 的目录数据）`);
     return;
@@ -543,7 +563,7 @@ function writeAndHint(mutation: ConfigMutation): void {
 }
 
 function effortChoicesFor(runtime: string, model: string): { list: string[]; note: string; def: string | null } | null {
-  const entry = catalog[runtime]?.find((candidate) => candidate.id === model);
+  const entry = catalog[catalogRuntimeKey(runtime)]?.find((candidate) => candidate.id === model);
   if (!entry?.supportedReasoningEfforts?.length) return null;
   return { list: entry.supportedReasoningEfforts, note: "模型声明", def: entry.defaultReasoningEffort || null };
 }
@@ -560,15 +580,14 @@ function dropEffortIfInvalid(next: AgentConfig): AgentConfig {
 }
 
 if (kind === "model") {
-  const runtime = agent.runtime;
+  const runtime = userRuntime;
   if (!value) {
-    say(`agent=${selectedKey}  runtime=${runtime}  model=${agent.model}`);
     say(`\n${runtime} 可选模型:`);
     listModels(runtime, agent.model);
     say("\n切换: larkin model <id>");
     process.exit(0);
   }
-  const items = catalog[runtime];
+  const items = catalog[catalogRuntimeKey(runtime)];
   if (items && !items.some((model) => model.id === value)) {
     console.error(`✗ "${value}" 不是 ${runtime} 的合法模型。合法值:`);
     for (const model of items) console.error(`    ${model.id}`);
@@ -592,13 +611,11 @@ if (kind === "model") {
   }
   const choices = effortChoicesFor(agent.runtime, agent.model);
   if (!choices) {
-    say(`agent=${selectedKey}  runtime=${agent.runtime}  model=${agent.model}`);
-    say(`模型 ${agent.runtime}/${agent.model} 未显式声明 supportedReasoningEfforts，不能设置 effort。`);
+    say(`模型 ${userRuntime}/${agent.model} 未显式声明 supportedReasoningEfforts，不能设置 effort。`);
     process.exit(value ? 1 : 0);
   }
   const { list, note, def } = choices;
   if (!value) {
-    say(`agent=${selectedKey}  runtime=${agent.runtime}  model=${agent.model}`);
     say(`effort=${agent.effort || `（未设置，runtime 默认${def ? `，该模型默认 ${def}` : ""}）`}`);
     say(`\n${agent.model} 可选档位（${note}）:`);
     for (const level of list) say(`  ${level.padEnd(10)}${level === agent.effort ? "  [← 当前]" : ""}${level === def ? "  [模型默认]" : ""}`);
@@ -606,7 +623,7 @@ if (kind === "model") {
     process.exit(0);
   }
   if (!list.includes(value)) {
-    console.error(`✗ "${value}" 不是 ${agent.runtime}/${agent.model} 的合法档位。合法值: ${list.join(", ")}`);
+    console.error(`✗ "${value}" 不是 ${userRuntime}/${agent.model} 的合法档位。合法值: ${list.join(", ")}`);
     process.exit(1);
   }
   if (value === agent.effort) {
@@ -662,31 +679,30 @@ if (kind === "model") {
   writeAndHint({ kind: "set-chat-mention", agentId: selectedKey, chatId: chatArg, value: action === "free" ? "free" : "require" });
 } else {
   if (!value) {
-    say(`agent=${selectedKey}  runtime=${agent.runtime}  model=${agent.model}`);
     say("\n可选 runtime:");
-    for (const runtime of Object.keys(catalog)) {
-      say(`  ${runtime.padEnd(12)}${runtime === agent.runtime ? "  [← 当前]" : ""}  默认模型=${larkinConfig.defaultModelFor(runtime)}`);
+    for (const runtime of RUNTIME_OPTIONS) {
+      say(`  ${runtime.padEnd(12)}${runtime === userRuntime ? "  [← 当前]" : ""}  默认模型=${larkinConfig.defaultModelFor(runtime)}`);
     }
     say("\n切换: larkin runtime <id> [--model <id>]");
     process.exit(0);
   }
-  if (!catalog[value]) {
-    console.error(`✗ "${value}" 不是合法 runtime。合法值: ${Object.keys(catalog).join(", ")}`);
+  if (!isUserRuntime(value)) {
+    console.error(`✗ "${value}" 不是合法 runtime。合法值: ${RUNTIME_OPTIONS.join(", ")}`);
     process.exit(1);
   }
   let model = flagModel;
   if (model) {
-    const items = catalog[value];
-    if (!items.some((candidate) => candidate.id === model)) {
+    const items = catalog[catalogRuntimeKey(value)];
+    if (!items || !items.some((candidate) => candidate.id === model)) {
       console.error(`✗ "${model}" 不是 ${value} 的合法模型。合法值:`);
-      for (const item of items) console.error(`    ${item.id}`);
+      for (const item of items || []) console.error(`    ${item.id}`);
       process.exit(1);
     }
   } else {
     model = larkinConfig.defaultModelFor(value);
-    if (value !== agent.runtime) say(`model 随 runtime 重置为默认: ${agent.model} → ${model}（可用 --model 显式指定）`);
+    if (value !== userRuntime) say(`model 随 runtime 重置为默认: ${agent.model} → ${model}（可用 --model 显式指定）`);
   }
-  if (value === agent.runtime && model === agent.model) {
+  if (value === userRuntime && model === agent.model) {
     say(`runtime 已经是 ${value}，无需修改`);
     process.exit(0);
   }

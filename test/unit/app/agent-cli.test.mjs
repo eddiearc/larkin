@@ -625,7 +625,7 @@ test("profile show is local and the removed internal IM surface points to larkin
     assert.equal(profile.code, 0, profile.stderr);
     assert.deepEqual(JSON.parse(profile.stdout), {
       kind: "agent", id: f.agentId, isSelf: true, name: "Larkin Bot", displayName: "Larkin Bot", openId: "ou_bot",
-      avatarUrl: "https://example.test/avatar.png", runtime: "codex", model: "gpt-5.6-sol", reasoningEffort: "high",
+      avatarUrl: "https://example.test/avatar.png", runtime: "codex", runtimeOption: "codex", model: "gpt-5.6-sol", reasoningEffort: "high",
       createdAt: "2026-07-19T00:00:00.000Z",
     });
 

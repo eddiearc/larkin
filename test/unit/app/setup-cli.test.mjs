@@ -25,6 +25,7 @@ test("setup help drops provider flags and builtin-pi", () => {
   const help = run(["--help"]);
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /--runtime <runtime>/);
+  assert.match(help.stdout, /--model <id>/);
   assert.match(help.stdout, /pi \| codex \| claude/);
   assert.doesNotMatch(help.stdout, /builtin-pi|--provider|--api-key|--base-url|pi-auth|Provider Credentials/);
 });

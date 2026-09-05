@@ -49,6 +49,7 @@ test("production build, start, and Agent CLI graph contain only current entries"
     "assets/",
     "scripts/npm/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "SECURITY.md",
     "CONTRIBUTING.md",

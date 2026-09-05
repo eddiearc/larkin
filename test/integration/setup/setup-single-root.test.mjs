@@ -141,7 +141,7 @@ test("new Agent product default is pi/default with no effort", async () => {
   const appId = "cli_newPiDefault7";
   const next = planSingleRootBinding({
     config: twoAgentConfig(), profile: { appId }, requestedAgent: appId,
-    runtime: undefined, defaultModel: "default", supportedReasoningEfforts: [], now: "2026-07-15T01:30:00.000Z",
+    runtime: "pi", defaultModel: "default", supportedReasoningEfforts: [], now: "2026-07-15T01:30:00.000Z",
   });
   assert.deepEqual(next.agents[appId], { runtime: "pi", model: "default", createdAt: "2026-07-15T01:30:00.000Z" });
 });

@@ -63,11 +63,11 @@ test("runtime-only dependency notices are deterministic and exclude development 
     const notices = fs.readFileSync(output, "utf8");
     assert.doesNotMatch(notices, /@larksuite\/cli|Embedded lark-cli|Embedded native component/);
     assert.match(notices, /\| qrcode-terminal \| 0\.12\.0 \| runtime direct \| \[\{"type":"Apache 2\.0"\}\] \|/);
+    assert.doesNotMatch(notices, /@earendil-works\/pi-coding-agent/);
     for (const developmentOnly of ["vitest", "typescript", "@testing-library/react", "tailwindcss"]) {
       assert.doesNotMatch(notices, new RegExp(`\\| ${developmentOnly.replace("/", "\\/")} \\|`));
     }
     assert.doesNotMatch(notices, /\(none bundled\)/);
-    assert.match(notices, /agent-base \| 6\.0\.2[\s\S]*AUDITED-agent-base@9\.0\.0-LICENSE/);
     assert.doesNotMatch(notices, /<year>|<copyright holders>/);
     const result = command(ROOT, process.execPath, [path.join(ROOT, "scripts/generate-third-party-notices.mjs"), "--check", "--output", output]);
     assert.equal(result.status, 0, result.stderr || result.stdout);

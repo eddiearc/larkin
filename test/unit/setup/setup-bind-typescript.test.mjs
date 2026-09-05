@@ -308,6 +308,56 @@ test("successful binding writes one stable 0600 runner attachment and no workspa
   }
 });
 
+test("setup-bind --model stores a catalog model for Codex", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-model-codex-"));
+  try {
+    const configFile = path.join(root, "config.json");
+    fs.writeFileSync(configFile, `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`, { mode: 0o600 });
+    writeCredential(root);
+    const result = runBind(root, {}, ["--profile", APP, "--agent", APP, "--runtime", "codex", "--model", "gpt-5.6-sol", "--yes"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    assert.equal(stored.agents[APP].runtime, "codex");
+    assert.equal(stored.agents[APP].model, "gpt-5.6-sol");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup-bind --model rejects a model that is not in the runtime catalog", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-model-unknown-"));
+  try {
+    const configFile = path.join(root, "config.json");
+    const before = `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`;
+    fs.writeFileSync(configFile, before, { mode: 0o600 });
+    writeCredential(root);
+    const result = runBind(root, {}, ["--profile", APP, "--agent", APP, "--runtime", "codex", "--model", "not-a-real-model", "--yes"]);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(`${result.stdout}\n${result.stderr}`, /不在 runtime 模型目录中/);
+    assert.equal(fs.readFileSync(configFile, "utf8"), before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup-bind --model stores a live Pi catalog model", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-model-pi-"));
+  try {
+    const configFile = path.join(root, "config.json");
+    fs.writeFileSync(configFile, `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`, { mode: 0o600 });
+    writeCredential(root);
+    writeExternalPiProfile(path.join(root, "home"));
+    const fake = writeFakePi(root);
+    const result = runBind(root, { LARKIN_PI_COMMAND: fake.command }, ["--profile", APP, "--agent", APP, "--runtime", "pi", "--model", "fixture/pi-fixture", "--yes"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    assert.equal(stored.agents[APP].runtime, "pi");
+    assert.equal(stored.agents[APP].model, "fixture/pi-fixture");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("pi setup stores the concrete catalog model from the user Pi install", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-external-pi-"));
   try {

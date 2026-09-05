@@ -154,40 +154,28 @@ rl.on("line", (line) => {
   }
 });
 
-test("production graph pins official Pi and exposes it only through the shared RPC contract", () => {
+test("production graph does not ship a host Pi package and speaks only the shared RPC contract", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   const lock = fs.readFileSync(path.join(ROOT, "bun.lock"), "utf8");
   const adapter = fs.readFileSync(path.join(ROOT, "src/runtime/runtime-adapters.ts"), "utf8");
   const binaryEntry = fs.readFileSync(path.join(ROOT, "src/app/binary-entry.ts"), "utf8");
-  const inlineExtensions = fs.readFileSync(path.join(ROOT, "src/runtime/pi-inline-extensions.ts"), "utf8");
-  const bundledPi = JSON.parse(fs.readFileSync(path.join(ROOT, "node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
-  const rpcTypes = fs.readFileSync(path.join(ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts"), "utf8");
-  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "0.84.2");
-  assert.equal(bundledPi.name, "@earendil-works/pi-coding-agent");
-  assert.equal(bundledPi.version, "0.84.2");
-  for (const dependency of ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-client", "@earendil-works/pi-protocol", "@earendil-works/pi-tui"]) {
-    assert.match(String(bundledPi.dependencies[dependency]), /^\^0\.84\.2$/);
-  }
-  assert.match(rpcTypes, /type: "prompt"/);
-  assert.match(rpcTypes, /type: "get_state"/);
-  assert.match(rpcTypes, /type: "compact"/);
-  assert.match(rpcTypes, /type: "response"/);
-  assert.match(rpcTypes, /success: true/);
-  assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], "0.14.3");
+  const rpcClient = fs.readFileSync(path.join(ROOT, "src/runtime/pi-rpc-client.ts"), "utf8");
+  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], undefined);
   assert.equal(pkg.dependencies["@mariozechner/pi-coding-agent"], undefined);
+  assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], "0.14.3");
   assert.equal(pkg.packageManager, "bun@1.3.14");
   assert.equal(pkg.engines, undefined);
   assert.equal(pkg.scripts.preinstall, undefined);
-  assert.match(lock, /@earendil-works\/pi-coding-agent/);
+  assert.doesNotMatch(JSON.stringify(pkg.dependencies), /earendil-works\/pi-coding-agent/);
   assert.doesNotMatch(adapter, /from\s+["'][^"']*pi-coding-agent/);
   assert.doesNotMatch(binaryEntry, /pi-coding-agent\/rpc-entry/);
   assert.doesNotMatch(binaryEntry, /pi-rpc/);
-  assert.match(inlineExtensions, /bundledPiSubagentExtensionPath/);
-  assert.doesNotMatch(inlineExtensions, /process\.env\.LARKIN_STANDALONE === ["']1["']/);
-  assert.doesNotMatch(inlineExtensions, /import\(["']@tintinweb\/pi-subagents\/dist\/index\.js["']\)/);
-  assert.match(inlineExtensions, /import\(pathToFileURL\(bundle\)\.href\)/);
+  assert.match(rpcClient, /"prompt"/);
+  assert.match(rpcClient, /"compact"/);
   assert.match(adapter, /--mode["'],\s*["']rpc/);
+  assert.match(adapter, /"get_state"/);
   assert.doesNotMatch(adapter, /available\s*\[\s*0\s*\]/);
+  assert.match(lock, /@tintinweb\/pi-subagents/);
 });
 
 test("Bun preflight requires the exact pinned runtime", () => {

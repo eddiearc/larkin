@@ -15,12 +15,12 @@ export function isAdapterRuntime(value: string): value is AdapterRuntime {
   return value === "pi" || value === "codex" || value === "claude";
 }
 
-/** Identity mapping with validation. Legacy `piDistribution` is ignored. */
-export function runtimeOptionOf(input: { runtime: string; piDistribution?: unknown }): RuntimeOption | string {
+/** Identity mapping with validation. */
+export function runtimeOptionOf(input: { runtime: string }): RuntimeOption | string {
   return input.runtime;
 }
 
-export function toUserRuntime(runtime: string, _piDistribution?: unknown): string {
+export function toUserRuntime(runtime: string): string {
   return runtimeOptionOf({ runtime });
 }
 

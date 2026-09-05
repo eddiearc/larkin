@@ -1,11 +1,9 @@
-import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { BashToolInput } from "@earendil-works/pi-coding-agent";
+import { loadHostCreateBashToolDefinition, type BashToolInput, type PiExtensionAPI } from "./pi-extension-api.js";
 
 /**
  * pi bash 工具超时护栏扩展。
  *
- * 由 Larkin 向 builtin Pi 传入 inline factory，或通过 external Pi 的
- * `pi --extension/-e <bundle>` 注入，覆盖内置 `bash` 工具：
+ * 通过用户安装的 Pi 的 `pi --extension/-e <bundle>` 注入，覆盖内置 `bash` 工具：
  * - 无论模型是否传 `timeout`，都强制收窄到 <= MAX_BASH_SECONDS（默认 60s），
  *   避免单个 bash 调用无限期占住整个 agent 回合（issue #55）。
  * - 超时时 pi 会杀掉整个进程树（不残留卡死子进程，issue #56 的进程堆积），
@@ -26,9 +24,10 @@ function effectiveBashTimeout(): number {
   return MAX_BASH_SECONDS;
 }
 
-export default function (pi: ExtensionAPI): void {
+export default function (pi: PiExtensionAPI): void {
   const cwd = process.cwd();
-  // Built-in bash tool definition (keeps renderCall/renderResult/system-prompt metadata).
+  const createBashToolDefinition = loadHostCreateBashToolDefinition();
+  // Host bash tool definition (keeps renderCall/renderResult/system-prompt metadata).
   const builtin = createBashToolDefinition(cwd);
   const MAX = effectiveBashTimeout();
 
@@ -45,7 +44,7 @@ export default function (pi: ExtensionAPI): void {
     name: "bash",
     label: "bash",
     description: builtin.description,
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId: string, params: BashToolInput, signal: unknown, onUpdate: unknown, ctx: unknown) {
       const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : MAX;
       // 模型显式设置 timeout > 上限 → 它已知这是长任务。立即报错引导改用后台 subagent，
       // 不真的跑（省掉白等 + 避免产生部分副作用）。

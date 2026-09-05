@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-export const BUNDLED_PI_VERSION = "0.84.2";
+export const PINNED_PI_VERSION = "0.84.2";
 
 /** Fallback values used while importing a Pi profile, before Pi reports its model. */
 export const PI_CONTEXT_WINDOW = 272_000;
@@ -256,16 +256,16 @@ export function readOwnedPiSettings(directory: string): EffectivePiSettings {
   return { compaction: { enabled, reserveTokens: values.reserveTokens, keepRecentTokens: values.keepRecentTokens } };
 }
 
-export function parsePiExecutableVersion(output: string): typeof BUNDLED_PI_VERSION {
+export function parsePiExecutableVersion(output: string): typeof PINNED_PI_VERSION {
   const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length !== 1) throw new Error("Pi executable version output must contain exactly one version line");
   const line = lines[0];
   // Pi's bare version is canonical; permit only the fixed official display prefix.
-  const escapedVersion = BUNDLED_PI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedVersion = PINNED_PI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (!new RegExp(`^(?:${escapedVersion}|pi(?:-coding-agent)?(?:\\s+version)?\\s+v?${escapedVersion})$`, "i").test(line)) {
-    throw new Error(`Pi executable version must be exactly ${BUNDLED_PI_VERSION}`);
+    throw new Error(`Pi executable version must be exactly ${PINNED_PI_VERSION}`);
   }
-  return BUNDLED_PI_VERSION;
+  return PINNED_PI_VERSION;
 }
 
 export interface PiCapabilityProbe {
@@ -282,9 +282,9 @@ export interface PiCapabilityProbe {
 }
 
 export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
-  if (capabilities.version !== BUNDLED_PI_VERSION) throw new Error(`trusted Pi version ${BUNDLED_PI_VERSION} is required`);
+  if (capabilities.version !== PINNED_PI_VERSION) throw new Error(`trusted Pi version ${PINNED_PI_VERSION} is required`);
   if (capabilities.trustedProtocol === true) {
-    throw new Error("external Pi cannot use the bundled trusted protocol bypass");
+    throw new Error("external Pi cannot use a trusted protocol bypass");
   }
   const contextWindow = capabilities.contextWindow ?? capabilities.model?.contextWindow;
   const expected = (() => {

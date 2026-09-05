@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { PiExtensionAPI } from "./pi-extension-api.js";
 import { Type } from "typebox";
 import {
   cancelSupervisedCommand,
@@ -17,7 +17,7 @@ function ownerOf(ctx: { sessionManager?: object } | undefined): object {
   return owner;
 }
 
-export default function (pi: ExtensionAPI): void {
+export default function (pi: PiExtensionAPI): void {
   const waitCap = supervisedWaitSeconds();
   let waitUsedThisTurn = false;
   const resetWaitTurn = () => { waitUsedThisTurn = false; };
@@ -38,7 +38,7 @@ export default function (pi: ExtensionAPI): void {
       args: Type.Array(Type.String(), { description: "Argument vector. No shell metacharacters are interpreted." }),
       cwd: Type.Optional(Type.String({ description: "Optional cwd inside the child session root. Symlinks and path escape are rejected." })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id: string, params: { executable: string; args?: string[]; cwd?: string }, _signal: unknown, _onUpdate: unknown, ctx: unknown) {
       const session = ctx as { sessionManager?: object; cwd?: string };
       const root = typeof session.cwd === "string" && session.cwd.length > 0 ? session.cwd : process.cwd();
       const started = startSupervisedCommand({
@@ -59,7 +59,7 @@ export default function (pi: ExtensionAPI): void {
       handle: Type.String({ description: "Handle from supervised_start" }),
       timeout: Type.Optional(Type.Number({ description: `Wait seconds, max ${waitCap}`, maximum: waitCap, minimum: 1 })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id: string, params: { handle: string; timeout?: number }, _signal: unknown, _onUpdate: unknown, ctx: unknown) {
       if (waitUsedThisTurn) {
         throw new Error("supervised_wait is limited to once per turn; return to the model so queued Steer can run first");
       }
@@ -76,7 +76,7 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({
       handle: Type.String({ description: "Handle from supervised_start" }),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id: string, params: { handle: string }, _signal: unknown, _onUpdate: unknown, ctx: unknown) {
       const result = await cancelSupervisedCommand(ownerOf(ctx as { sessionManager?: object }), params.handle);
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },

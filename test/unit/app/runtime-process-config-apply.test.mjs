@@ -12,6 +12,9 @@ const configApi = require(path.join(ROOT, "dist", "platform", "config.cjs"));
 const { applyRuntimeAgentUpsert, loadAndSyncRuntimeAgent, markConfigAppliedAfterRuntimeReady } = await import(
   pathToFileURL(path.join(ROOT, "dist", "app", "runtime-process.mjs")).href
 );
+const runtimeAgentConfig = await import(
+  pathToFileURL(path.join(ROOT, "dist", "app", "runtime-agent-config.mjs")).href
+);
 
 test("runtime startup projects applied only after initialization resolves successfully", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-ready-"));
@@ -65,14 +68,12 @@ test("expected-signature mismatch refuses load before hydrate or profile sync", 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-function seedBuiltinApplyHome() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-runtime-upsert-race-"));
+function seedBuiltinApplyHome(label, agentId, otherId) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-runtime-upsert-${label}-`));
   fs.chmodSync(root, 0o700);
-  const agentId = "cli_runtimeRaceA1";
-  const otherId = "cli_runtimeRaceB2";
   const env = { ...process.env, LARKIN_CONFIG_DIR: root, LARKIN_HOME: root };
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
-    version: 4, serverId: "server-runtime-race", mentionPolicy: "require", activeAgent: agentId,
+    version: 4, serverId: `server-runtime-${label}`, mentionPolicy: "require", activeAgent: agentId,
     agents: {
       [agentId]: { runtime: "pi", piDistribution: "builtin", model: "deepseek/deepseek-v4-pro" },
       [otherId]: { runtime: "pi", piDistribution: "builtin", model: "kimi/kimi-k2.6" },
@@ -80,6 +81,7 @@ function seedBuiltinApplyHome() {
   })}\n`, { mode: 0o600 });
   const botsDir = path.join(root, "bots");
   fs.mkdirSync(botsDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(botsDir, 0o700);
   for (const id of [agentId, otherId]) {
     fs.writeFileSync(path.join(botsDir, `${id}.json`), JSON.stringify({
       appId: id, appSecret: "fixture-secret", tenant: "feishu", updatedAt: "2026-09-05T00:00:00.000Z",
@@ -89,8 +91,34 @@ function seedBuiltinApplyHome() {
   return { root, agentId, otherId, env };
 }
 
+function seedValidSignedProfile(env, agentId) {
+  const loaded = configApi.loadConfig(env);
+  const hydrated = runtimeAgentConfig.hydrateRuntimeAgent(loaded.configDir, loaded.config.agents[agentId]);
+  for (const directory of [
+    hydrated.larkConfigDir,
+    path.join(hydrated.larkConfigDir, "lark-channel"),
+    path.dirname(path.join(hydrated.stateDir, "lark-channel-source", "config.json")),
+  ]) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+  }
+  const sourceFile = path.join(hydrated.stateDir, "lark-channel-source", "config.json");
+  const workspaceFile = path.join(hydrated.larkConfigDir, "lark-channel", "config.json");
+  fs.writeFileSync(sourceFile, `${JSON.stringify(runtimeAgentConfig.sourceProjection(hydrated, env), null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(workspaceFile, `${JSON.stringify({ apps: [{
+    appId: agentId,
+    appSecret: { source: "keychain", id: `appsecret:${agentId}` },
+    defaultAs: "bot",
+    strictMode: "bot",
+    users: [],
+  }] }, null, 2)}\n`, { mode: 0o600 });
+  runtimeAgentConfig.installRuntimeCommandShims(hydrated);
+  runtimeAgentConfig.validateAgentProfile(hydrated);
+  return { lockFile: path.join(loaded.configDir, "config.json.lock") };
+}
+
 test("a switch after signature validation cannot profile-sync or Host-upsert the stale Agent", async () => {
-  const { root, agentId, otherId, env } = seedBuiltinApplyHome();
+  const { root, agentId, otherId, env } = seedBuiltinApplyHome("race-20260905", "cli_runtimeRaceA1", "cli_runtimeRaceB2");
   let synced = false;
   const hostUpserts = [];
   try {
@@ -115,5 +143,42 @@ test("a switch after signature validation cannot profile-sync or Host-upsert the
     assert.equal(current.agents[agentId].piDistribution, "external");
     assert.equal(current.agents[agentId].model, "deepseek/deepseek-v4-pro");
     assert.equal(current.agents[otherId].model, "kimi/kimi-k2.6");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("signed applyRuntimeAgentUpsert holds the config lock through one Host upsert then releases it", async () => {
+  const { root, agentId, env } = seedBuiltinApplyHome("success-20260905", "cli_runtimeOkA1", "cli_runtimeOkB2");
+  const hostUpserts = [];
+  let synced = false;
+  let lockHeldDuringUpsert = false;
+  try {
+    const { lockFile } = seedValidSignedProfile(env, agentId);
+    const expected = configApi.runtimeConfigSignature(configApi.loadConfig(env).config, agentId);
+    assert.equal(fs.existsSync(lockFile), false, "fixture setup must not leave the config lock held");
+    const agent = await applyRuntimeAgentUpsert(env, agentId, {
+      runOfficialCli: () => {
+        synced = true;
+        throw new Error("valid profile must not rebind during signed Host upsert");
+      },
+    }, { expectedSignature: expected }, (candidate) => {
+      lockHeldDuringUpsert = true;
+      assert.equal(fs.existsSync(lockFile), true, "config lock must span the Host upsert");
+      assert.throws(() => fs.openSync(lockFile, "wx", 0o600), { code: "EEXIST" });
+      hostUpserts.push({
+        agentId: candidate.agentId,
+        runtime: candidate.runtime,
+        piDistribution: candidate.piDistribution,
+      });
+    });
+    assert.equal(synced, false);
+    assert.equal(lockHeldDuringUpsert, true);
+    assert.equal(hostUpserts.length, 1);
+    assert.deepEqual(hostUpserts[0], { agentId, runtime: "pi", piDistribution: "builtin" });
+    assert.equal(agent.runtime, "pi");
+    assert.equal(agent.piDistribution, "builtin");
+    assert.equal(fs.existsSync(lockFile), false, "config lock must be released after Host upsert");
+    const after = configApi.mutateConfig(env, { kind: "set-agent-model", agentId, model: "deepseek/deepseek-v4-pro" }, { kind: "user" });
+    assert.equal(after.persisted, true);
+    assert.equal(fs.existsSync(lockFile), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

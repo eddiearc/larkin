@@ -1,5 +1,4 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import * as path from "node:path";
 import { PiRpcClient, type PiRpcProcess } from "./pi-rpc-client.js";
 import { classifyRuntimePrerequisite, RuntimePrerequisiteError } from "./runtime-readiness.js";
 
@@ -34,7 +33,6 @@ export interface PiModelCatalog {
 
 export interface DiscoverPiCatalogOptions {
   cwd: string;
-  agentDir?: string;
   command?: string;
   commandArgs?: readonly string[];
   env?: NodeJS.ProcessEnv;
@@ -79,8 +77,8 @@ function piCatalogChildEnv(options: DiscoverPiCatalogOptions): NodeJS.ProcessEnv
     ...options.env,
     NO_COLOR: "1",
   };
-  if (options.agentDir) env.PI_CODING_AGENT_DIR = path.resolve(options.agentDir);
-  else delete env.PI_CODING_AGENT_DIR;
+  // External pi 必须看见用户自己的 home；Larkin 从不注入或转发 PI_CODING_AGENT_DIR。
+  delete env.PI_CODING_AGENT_DIR;
   return env;
 }
 
@@ -88,7 +86,7 @@ export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions):
   if (!options.spawn) {
     const command = options.command ?? options.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
     const childEnv = piCatalogChildEnv(options);
-    const key = `${command}|${(options.commandArgs ?? []).join("\0")}|${childEnv.PI_CODING_AGENT_DIR ?? ""}|${options.agentDir ?? ""}|${childEnv.PI_PACKAGE_DIR ?? ""}|${options.packageDir ?? ""}`;
+    const key = `${command}|${(options.commandArgs ?? []).join("\0")}|${childEnv.PI_PACKAGE_DIR ?? ""}|${options.packageDir ?? ""}`;
     const cached = discoveryCache.get(key);
     if (cached) return cached;
     const pending = discoverPiModelCatalogUncached(options);

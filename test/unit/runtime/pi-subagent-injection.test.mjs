@@ -150,6 +150,53 @@ test("embedded materialize returns null without embedded asset or configDir", as
   }
 });
 
+test("injection resolvers never open the user's Pi auth.json", async () => {
+  const {
+    resolvePiSubagentExtensionArg,
+    userPiAlreadyHasSubagentsExtension,
+    userPiSubagentsHasBoundedWaitCapability,
+  } = await import("../../../dist/runtime/pi-subagent-injection.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-auth-canary-"));
+  const opened = [];
+  const track = (orig) => function tracked(...args) {
+    if (args[0] !== undefined && args[0] !== null) opened.push(path.resolve(String(args[0])));
+    return orig.apply(this, args);
+  };
+  const originals = {
+    readFileSync: fs.readFileSync,
+    existsSync: fs.existsSync,
+    openSync: fs.openSync,
+    accessSync: fs.accessSync,
+    statSync: fs.statSync,
+    lstatSync: fs.lstatSync,
+    realpathSync: fs.realpathSync,
+  };
+  for (const [name, orig] of Object.entries(originals)) fs[name] = track(orig);
+  try {
+    const agentDir = path.join(root, ".pi", "agent");
+    fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(agentDir, "settings.json"),
+      JSON.stringify({ packages: ["n" + "pm:@tintinweb/pi-subagents"] }));
+    const canary = path.join(agentDir, "auth.json");
+    fs.writeFileSync(canary, `${JSON.stringify({ canary: "do-not-read" })}\n`, { mode: 0o600 });
+    fs.chmodSync(canary, 0o000);
+    const env = { HOME: root, PI_CODING_AGENT_DIR: agentDir };
+    assert.equal(userPiAlreadyHasSubagentsExtension(env), true);
+    assert.equal(userPiSubagentsHasBoundedWaitCapability(env), false);
+    assert.throws(() => resolvePiSubagentExtensionArg(
+      { distribution: "external", piCommand: "pi", env },
+      () => ({ major: 0, minor: 84 }),
+      () => "/tmp/fake/pi-subagents.bundle.js",
+    ), /WARNING: refusing external Pi.*unbounded or unverifiable/);
+    assert.equal(opened.some((file) => path.basename(file) === "settings.json"), true, JSON.stringify(opened));
+    assert.equal(opened.some((file) => path.basename(file) === "auth.json"), false, JSON.stringify(opened));
+  } finally {
+    for (const [name, orig] of Object.entries(originals)) fs[name] = orig;
+    try { fs.chmodSync(path.join(root, ".pi", "agent", "auth.json"), 0o600); } catch { /* cleanup */ }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("userPiAlreadyHasSubagentsExtension detects settings packages and package dir", async () => {
   const { userPiAlreadyHasSubagentsExtension } = await import("../../../dist/runtime/pi-subagent-injection.mjs");
   const fsMod = await import("node:fs");

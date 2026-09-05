@@ -17,7 +17,6 @@ type ChatDirectoryInput = { agentId: string; chatIds: string[]; configDir: strin
 type ClaudeModelDirectoryInput = { agentId: string; cwd: string; env: Env };
 type CodexModelDirectoryInput = { agentId: string; cwd: string; env: Env };
 type PiModelDirectoryInput = {
-  agentDir?: string;
   agentId: string;
   cwd: string;
   command?: string;
@@ -210,7 +209,7 @@ export function createPiModelDirectoryResolver(options: {
       }
     },
     async resolve(input) {
-      const key = [input.agentId, input.cwd, input.agentDir ?? "", input.command ?? "", ...(input.commandArgs ?? [])].join("\u0000");
+      const key = [input.agentId, input.cwd, input.command ?? "", ...(input.commandArgs ?? [])].join("\u0000");
       const started = generationOf(input.agentId);
       pruneCache(cache, (entry) => now() >= entry.expiresAt, 64);
       pruneCache(failures, (entry) => now() >= entry.expiresAt, 64);
@@ -223,7 +222,6 @@ export function createPiModelDirectoryResolver(options: {
           try {
             const catalog = await discover({
               cwd: input.cwd,
-              ...(input.agentDir ? { agentDir: input.agentDir } : {}),
               ...(input.command ? { command: input.command } : {}),
               ...(input.commandArgs ? { commandArgs: input.commandArgs } : {}),
             });
@@ -442,7 +440,7 @@ export function createDashboardConfigController({
     const { config } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    // 外部 `pi --mode rpc` 使用用户自己的 Pi home，不再注入 Larkin 持有的 agentDir。
+    // 外部 `pi --mode rpc` 使用用户自己的 Pi home；catalog 探测不改写子进程 agent 目录。
     return await piModelDirectoryResolver.resolve({
       agentId,
       cwd: agent.workspaceDir,

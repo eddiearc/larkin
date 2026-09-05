@@ -311,7 +311,7 @@ test("Pi model directory reuses discoverPiModelCatalog and caches default plus a
     };
   };
   const resolver = module.createPiModelDirectoryResolver({ discoverPiModelCatalog, now: () => now, ttlMs: 5 * 60_000 });
-  const input = { agentId: APP, cwd: "/tmp/pi-workspace", agentDir: "/tmp/pi-state" };
+  const input = { agentId: APP, cwd: "/tmp/pi-workspace" };
 
   const [first, concurrent] = await Promise.all([resolver.resolve(input), resolver.resolve(input)]);
   assert.deepEqual(first.map(({ id }) => id), ["default", "anthropic/claude-sonnet-4-5"]);
@@ -321,7 +321,7 @@ test("Pi model directory reuses discoverPiModelCatalog and caches default plus a
   assert.equal(Object.hasOwn(first[0], "defaultReasoningEffort"), false);
   assert.deepEqual(concurrent, first);
   assert.equal(calls.length, 1, "concurrent Pi model requests share one official discovery");
-  assert.deepEqual(calls[0], { cwd: input.cwd, agentDir: input.agentDir });
+  assert.deepEqual(calls[0], { cwd: input.cwd });
 
   now += 5 * 60_000 - 1;
   await resolver.resolve(input);
@@ -343,7 +343,7 @@ test("Pi model directory negative-caches discovery failures and retries after th
     now: () => now,
     negativeTtlMs: 30_000,
   });
-  const input = { agentId: APP, cwd: "/tmp/pi-negative", agentDir: "/tmp/pi-state" };
+  const input = { agentId: APP, cwd: "/tmp/pi-negative" };
 
   await assert.rejects(resolver.resolve(input), /fixture auth detail/);
   await assert.rejects(resolver.resolve(input), /Pi model catalog unavailable/);
@@ -456,7 +456,7 @@ test("Pi model directory cache key isolates distinct catalog command specs", asy
       };
     },
   });
-  const shared = { agentId: APP, cwd: "/tmp/pi-workspace", agentDir: "/tmp/owned-pi" };
+  const shared = { agentId: APP, cwd: "/tmp/pi-workspace" };
   await resolver.resolve({ ...shared, command: "/bin/bun", commandArgs: ["entry", "__internal", "pi-rpc"] });
   await resolver.resolve({ ...shared, command: "pi", commandArgs: [] });
   assert.equal(calls.length, 2, "distinct catalog commands must not share a cache entry");

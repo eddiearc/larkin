@@ -14,8 +14,9 @@ declare global {
  *
  * 分发：构建期把 @tintinweb/pi-subagents bundle 成单文件
  * `dist/runtime/pi-subagents.bundle.js`（pi-* 包 external），运行时仅向 external
- * （用户 pi CLI）通过 `pi --extension/-e` 显式注入，不碰用户 ~/.pi 配置。
- * Builtin Pi 直接接收静态 factory，不经过本文件或 Pi 的路径加载器。
+ * （用户 pi CLI）通过 `pi --extension/-e` 显式注入。可只读用户 ~/.pi/agent
+ * 的非密钥设置/扩展元数据以避免重复注册 FATAL；不得读、复制或写 auth.json，
+ * 也不得写入 ~/.pi。
  *
  * 版本门槛：pi-subagents peerDependency 要求 @earendil-works/pi-* >= 0.80.0；
  * external 的 pi 版本低于 0.80 时不注入（降级为无 subagent 能力）。
@@ -183,6 +184,9 @@ export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv
  * 用户 pi 是否已自行安装 pi-subagents（settings.json packages 或包目录）。
  * 已装时 Larkin 不再 -e 注入，避免同名工具（Agent/get_subagent_result/steer_subagent）
  * 重复注册导致 pi 扩展加载 FATAL（pi 对 duplicate tool registration 是硬失败）。
+ *
+ * Owner 边界：只读非密钥兼容信息（settings.json / package 清单 / 扩展源码标记）。
+ * 不得打开或写入用户 Pi home 里的 auth.json，也不得往 ~/.pi 写任何文件。
  */
 const BOUNDED_WAIT_CAPABILITY = "larkin-pi-subagents-bounded-wait-v1";
 const SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";

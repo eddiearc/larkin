@@ -107,7 +107,10 @@ test("Dashboard surfaces only three external runtimes and readiness errors", () 
     ["app", app],
   ]) {
     assert.doesNotMatch(source, /builtin-pi|piDistribution|Provider Credentials|pi-auth|pi-distribution|bundled Pi|auth\.json/, `${name} must not mention removed builtin Pi surfaces`);
-    assert.doesNotMatch(source, /PI_CODING_AGENT_DIR\s*\?\s*\{\s*agentDir/, `${name} must not omit agentDir when PI_CODING_AGENT_DIR is unset`);
+    assert.doesNotMatch(source, /PI_CODING_AGENT_DIR\s*\?\s*\{\s*agentDir/, `${name} must not forward PI_CODING_AGENT_DIR as an agent directory`);
+    if (name === "controller" || name === "view-model") {
+      assert.doesNotMatch(source, /\bagentDir\b/, `${name} must not keep a Pi catalog agentDir`);
+    }
   }
   assert.match(app, /RUNTIME_OPTIONS/);
   assert.match(app, /formatReadiness/);

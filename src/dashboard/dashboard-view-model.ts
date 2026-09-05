@@ -485,7 +485,6 @@ export function projectStatusTimeline(status: JsonRecord) {
 
 export type PiStatusModelResolver = {
   resolve(input: {
-    agentDir?: string;
     agentId: string;
     cwd: string;
     command?: string;

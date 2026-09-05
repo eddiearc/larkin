@@ -43,7 +43,7 @@ import {
 import {
   assertEffectivePiCompactionSettings,
   assertNoProjectPiCompactionOverride,
-  PINNED_PI_VERSION,
+  MINIMUM_PI_VERSION,
   calculatePiCompactionSettings,
   parsePiExecutableVersion,
   prepareOwnedPiDirectory,
@@ -1126,7 +1126,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
       cwd: input.workspaceDir, env: childEnv, encoding: "utf8", timeout: 5_000,
     }).stdout || ""))
-    : PINNED_PI_VERSION;
+    : MINIMUM_PI_VERSION;
   const extensionInput = { piCommand: command, env: childEnv, platform: process.platform };
   // 假 spawn 不需要真实 extension 路径；默认 resolver 会 spawnSync(`pi --version`)。
   const extensionArgs = dependencies.resolvePiProcessExtensionArgs

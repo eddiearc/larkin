@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { MINIMUM_PI_VERSION, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
 
@@ -172,6 +173,14 @@ export function classifyRuntimePrerequisite(runtime: RuntimeReadiness["runtime"]
     runtime, state: "unauthenticated", ...(executable ? { executable } : {}), reason,
     nextAction: runtimeLoginNextAction(runtime),
   };
+  if (/older than the minimum|not a supported version(?: line)?|version output must contain exactly one/i.test(reason)) {
+    return {
+      runtime, state: "incompatible", ...(executable ? { executable } : {}), reason,
+      nextAction: runtime === "pi"
+        ? `Upgrade pi to ${MINIMUM_PI_VERSION} or newer`
+        : `Upgrade ${runtime}, then retry.`,
+    };
+  }
   if (/protocol (?:version )?(?:mismatch|unsupported|incompatible)|unsupported (?:rpc|protocol|schema)|schema (?:mismatch|incompatible)|requires (?:a )?newer version/i.test(reason)) {
     return {
       runtime, state: "incompatible", ...(executable ? { executable } : {}), reason,
@@ -227,7 +236,18 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       nextAction: runtimeInstallNextAction(options.runtime),
     };
   }
-  const version = executableVersion(executable, env, options.commandArgs);
+  let version = executableVersion(executable, env, options.commandArgs);
+  if (options.runtime === "pi") {
+    try {
+      const probe = spawnSync(executable, [...options.commandArgs ?? [], "--version"], {
+        env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024,
+      });
+      version = parsePiExecutableVersion(String(probe.stdout || ""));
+    } catch (error) {
+      const classified = classifyRuntimePrerequisite("pi", error, executable);
+      return { ...classified, executable, ...(version ? { version } : {}) };
+    }
+  }
   try {
     if (options.runtime === "pi") {
       const { discoverPiModelCatalog } = await import("./pi-model-catalog.js");

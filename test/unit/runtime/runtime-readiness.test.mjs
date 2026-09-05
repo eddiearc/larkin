@@ -43,6 +43,17 @@ test("readiness keeps unknown failures unavailable and reserves incompatible for
   assert.equal(classifyRuntimePrerequisite("pi", new Error("RPC protocol version mismatch")).state, "incompatible");
 });
 
+test("Pi readiness classifies an older executable as incompatible", () => {
+  const readiness = classifyRuntimePrerequisite(
+    "pi",
+    new Error("Pi executable version 0.84.1 is older than the minimum 0.84.2"),
+    "/usr/local/bin/pi",
+  );
+  assert.equal(readiness.state, "incompatible");
+  assert.equal(readiness.reason, "Pi executable version 0.84.1 is older than the minimum 0.84.2");
+  assert.equal(readiness.nextAction, "Upgrade pi to 0.84.2 or newer");
+});
+
 test("missing-credential classifier matches only the explicit absent-key or absent-login shape", () => {
   for (const message of [
     "No API key found for zai-coding-cn",
@@ -96,7 +107,7 @@ test("scoped auth persistence matches runtime and provider without a builtin dis
   assert.match(readinessForPersistedAuthFailure(generic).nextAction, /external `pi` CLI/);
 });
 
-function writeReadinessRuntime(root, { authenticated = true, runtime = "pi" } = {}) {
+function writeReadinessRuntime(root, { authenticated = true, runtime = "pi", version = "0.84.2" } = {}) {
   const marker = path.join(root, `readiness-${runtime}.ndjson`);
   const script = path.join(root, `readiness-${runtime}.mjs`);
   fs.writeFileSync(marker, "");
@@ -107,7 +118,7 @@ const marker = ${JSON.stringify(marker)};
 const args = process.argv.slice(2);
 fs.appendFileSync(marker, JSON.stringify({ args }) + "\\n");
 if (args.includes("--version")) {
-  process.stdout.write("0.84.2\\n");
+  process.stdout.write(${JSON.stringify(`${version}\n`)});
   process.exit(0);
 }
 const model = { provider: "plain", id: "chat", name: "Chat", reasoning: false, contextWindow: 32000 };
@@ -167,6 +178,35 @@ test("Pi readiness is unauthenticated when the probe reports no authenticated mo
     assert.equal(readiness.state, "unauthenticated", JSON.stringify(readiness));
     assert.match(readiness.nextAction || "", /external `pi` CLI/);
     assert.doesNotMatch(JSON.stringify(readiness), FORBIDDEN);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi readiness is ready when external pi reports 0.84.4", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-newer-"));
+  const { script } = writeReadinessRuntime(root, { version: "0.84.4" });
+  try {
+    const readiness = await probeNativeRuntimeReadiness({
+      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
+    });
+    assert.equal(readiness.state, "ready", JSON.stringify(readiness));
+    assert.equal(readiness.version, "0.84.4");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi readiness is incompatible when external pi reports 0.84.1", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-older-"));
+  const { script } = writeReadinessRuntime(root, { version: "0.84.1" });
+  try {
+    const readiness = await probeNativeRuntimeReadiness({
+      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
+    });
+    assert.equal(readiness.state, "incompatible", JSON.stringify(readiness));
+    assert.equal(readiness.reason, "Pi executable version 0.84.1 is older than the minimum 0.84.2");
+    assert.equal(readiness.nextAction, "Upgrade pi to 0.84.2 or newer");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

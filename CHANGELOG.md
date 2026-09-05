@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+External pi is accepted at 0.84.2 or newer instead of exactly 0.84.2; 0.5.0 refused newer pi and left every migrated Agent not ready.
+
 ## 0.5.0
 
 BREAKING — builtin Pi is removed. Larkin supports only externally installed `pi`, `codex`, and `claude`. If the selected runtime is not installed, setup, runtime switch, and readiness fail with an explicit missing-install message.

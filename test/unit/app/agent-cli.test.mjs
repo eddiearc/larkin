@@ -284,7 +284,7 @@ let input="";process.stdin.on("data",c=>{input+=c;for(;;){const i=input.indexOf(
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("Runtime session querying another Pi Agent uses the target owned dir and ignores host decoy", () => {
+test("Runtime session querying another Pi Agent uses the user Pi install and ignores a host decoy", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-agent-cli-pi-isolation-"));
   const session = "cli_piCatalogSessionA1";
   const target = "cli_piCatalogTargetB2";
@@ -307,8 +307,8 @@ process.exit(1);
     fs.writeFileSync(path.join(temp, "config.json"), `${JSON.stringify({
       version: 4, serverId: "server-agent-cli-pi-isolation", mentionPolicy: "require", activeAgent: session,
       agents: {
-        [session]: { runtime: "pi", model: "default", piDistribution: "builtin" },
-        [target]: { runtime: "pi", model: "default", piDistribution: "external" },
+        [session]: { runtime: "pi", model: "default" },
+        [target]: { runtime: "pi", model: "default" },
       },
     })}\n`, { mode: 0o600 });
     const env = {
@@ -327,7 +327,7 @@ process.exit(1);
     const recorded = fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
     assert.ok(recorded.length >= 1, "cross-agent catalog must spawn host pi for the external target");
     for (const row of recorded) {
-      assert.equal(row.agentDir, path.join(temp, "providers", "pi", target));
+      assert.equal(row.agentDir, null);
     }
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

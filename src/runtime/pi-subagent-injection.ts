@@ -156,11 +156,27 @@ export function piVersionSupportsSubagents(version: { major: number; minor: numb
   return version.major > 0 || (version.major === 0 && version.minor >= 80);
 }
 
-/** 解析 external `pi --version`；无法确认版本时视为不支持，不注入。 */
+const externalPiVersionProbeCache = new Map<string, { major: number; minor: number } | null>();
+
+function externalPiVersionProbeKey(piCommand: string, env: NodeJS.ProcessEnv): string {
+  return JSON.stringify([piCommand, env.PATH ?? ""]);
+}
+
+/** 测试用：清空进程内 `pi --version` 探测缓存。 */
+export function resetExternalPiVersionProbeCache(): void {
+  externalPiVersionProbeCache.clear();
+}
+
+/** 解析 external `pi --version`；无法确认版本时视为不支持，不注入。按 piCommand+PATH 缓存。 */
 export function probeExternalPiVersion(piCommand: string, env: NodeJS.ProcessEnv): { major: number; minor: number } | null {
+  const key = externalPiVersionProbeKey(piCommand, env);
+  if (externalPiVersionProbeCache.has(key)) return externalPiVersionProbeCache.get(key) ?? null;
   const result = spawnSync(piCommand, ["--version"], { env, encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
-  if (result.error || result.status !== 0) return null;
-  return parsePiVersion(String(result.stdout || result.stderr || ""));
+  const version = result.error || result.status !== 0
+    ? null
+    : parsePiVersion(String(result.stdout || result.stderr || ""));
+  externalPiVersionProbeCache.set(key, version);
+  return version;
 }
 
 /**

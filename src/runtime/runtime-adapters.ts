@@ -1107,11 +1107,11 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
       cwd: input.workspaceDir, env: childEnv, encoding: "utf8", timeout: 5_000,
     }).stdout || ""))
     : PINNED_PI_VERSION;
-  const extensionArgs = (dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
-    piCommand: command,
-    env: childEnv,
-    platform: process.platform,
-  });
+  const extensionInput = { piCommand: command, env: childEnv, platform: process.platform };
+  // 假 spawn 不需要真实 extension 路径；默认 resolver 会 spawnSync(`pi --version`)。
+  const extensionArgs = dependencies.resolvePiProcessExtensionArgs
+    ? dependencies.resolvePiProcessExtensionArgs(extensionInput)
+    : productionSpawn ? resolvePiProcessExtensionArgs(extensionInput) : [];
   commandArgs.push(...extensionArgs);
   let probedModel: PiProbeResult | null = null;
   if (productionSpawn) {

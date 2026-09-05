@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "bun:test";
 import {
   parsePiVersion,
   piVersionSupportsSubagents,
+  probeExternalPiVersion,
+  resetExternalPiVersionProbeCache,
   resolvePiSubagentExtensionArg,
 } from "../../../dist/runtime/pi-subagent-injection.mjs";
 
@@ -25,6 +30,44 @@ test("piVersionSupportsSubagents enforces the >=0.80.0 peer requirement", () => 
   assert.equal(piVersionSupportsSubagents({ major: 1, minor: 0 }), true);
   assert.equal(piVersionSupportsSubagents({ major: 0, minor: 79 }), false);
   assert.equal(piVersionSupportsSubagents(null), false);
+});
+
+test("probeExternalPiVersion memoizes per command and PATH and caches failures", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-version-probe-"));
+  try {
+    const countA = path.join(root, "count-a");
+    const countB = path.join(root, "count-b");
+    const writePi = (file, countFile, version) => {
+      fs.writeFileSync(file, `#!/bin/sh
+# printf is a POSIX sh builtin; do not depend on PATH for cat/wc.
+printf 'x' >> ${JSON.stringify(countFile)}
+printf '%s\\n' ${JSON.stringify(version)}
+`, { mode: 0o755 });
+    };
+    const hits = (file) => {
+      try { return fs.readFileSync(file, "utf8").length; } catch { return 0; }
+    };
+    const piA = path.join(root, "pi-a");
+    const piB = path.join(root, "pi-b");
+    writePi(piA, countA, "0.84.2");
+    writePi(piB, countB, "0.83.1");
+    resetExternalPiVersionProbeCache();
+    assert.deepEqual(probeExternalPiVersion(piA, { PATH: "/probe-a" }), { major: 0, minor: 84 });
+    assert.deepEqual(probeExternalPiVersion(piA, { PATH: "/probe-a" }), { major: 0, minor: 84 });
+    assert.equal(hits(countA), 1);
+    assert.deepEqual(probeExternalPiVersion(piA, { PATH: "/probe-b" }), { major: 0, minor: 84 });
+    assert.equal(hits(countA), 2, "a different PATH must not reuse the cache entry");
+    assert.deepEqual(probeExternalPiVersion(piB, { PATH: "/probe-a" }), { major: 0, minor: 83 });
+    assert.equal(hits(countB), 1);
+    resetExternalPiVersionProbeCache();
+    assert.deepEqual(probeExternalPiVersion(piA, { PATH: "/probe-a" }), { major: 0, minor: 84 });
+    assert.equal(hits(countA), 3);
+    assert.equal(probeExternalPiVersion(path.join(root, "missing-pi"), { PATH: "/probe-a" }), null);
+    assert.equal(probeExternalPiVersion(path.join(root, "missing-pi"), { PATH: "/probe-a" }), null);
+  } finally {
+    resetExternalPiVersionProbeCache();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("resolve returns null when the bundle resolver yields nothing", () => {

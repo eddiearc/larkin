@@ -922,7 +922,6 @@ test("Pi launches one shared append standing-prompt path without replacement", a
     const piCommand = "/fixture/external-pi";
     const pending = createNativeRuntimeAdapter("pi", {
       env: { LARKIN_PI_COMMAND: piCommand },
-      resolvePiProcessExtensionArgs: () => [],
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
     await new Promise((resolve) => setImmediate(resolve));
@@ -944,6 +943,7 @@ test("Pi launches one shared append standing-prompt path without replacement", a
     if (process.platform !== "win32") assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
     assert.equal(launch.command, piCommand);
     assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
+    assert.equal(launch.args.includes("-e"), false, "fake spawn must not run default extension resolvers");
     assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
     await session.close("test complete");
   } finally {

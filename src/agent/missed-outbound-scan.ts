@@ -68,16 +68,17 @@ function save(file: string, registry: AuditRegistry): void {
   fs.chmodSync(file, 0o600);
 }
 
-/** Record only an authoritative human group/topic source; DMs and bots are ignored. */
+/** Record only an originally wake-eligible authoritative human group/topic source. */
 export function observeInboxAuditTarget(file: string, agentId: string, event: {
   chat_id?: string;
   chat_type?: string;
   thread_id?: string | null;
   message_id?: string;
+  wake?: boolean;
   _sender_is_bot?: boolean;
   _scan_authority?: boolean;
 }, now = new Date()): boolean {
-  if (event._scan_authority !== true || event._sender_is_bot !== false || event.chat_type !== "group") return false;
+  if (event.wake !== true || event._scan_authority !== true || event._sender_is_bot !== false || event.chat_type !== "group") return false;
   const parsed = parseTarget(event);
   if (!parsed) return false;
   const registry = load(file);
@@ -87,6 +88,10 @@ export function observeInboxAuditTarget(file: string, agentId: string, event: {
   registry.targets = registry.targets.slice(0, MAX_STORED_TARGETS);
   save(file, registry);
   return true;
+}
+
+export function hasInboxAuditTargets(file: string, agentId: string): boolean {
+  return load(file).targets.some((row) => row.agent_id === agentId);
 }
 
 function instruction(target: InboxAuditTarget): string {

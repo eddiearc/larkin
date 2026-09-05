@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
 import {
+  hasInboxAuditTargets,
   inboxAuditRegistryFile,
   MAX_INBOX_AUDIT_TARGETS,
   observeInboxAuditTarget,
@@ -31,8 +32,13 @@ test("audit registry retains only authoritative human group/topic targets with t
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-"));
   try {
     const file = inboxAuditRegistryFile(root);
-    const common = { chat_id: CHAT, chat_type: "group", _scan_authority: true, _sender_is_bot: false };
+    const common = { chat_id: CHAT, chat_type: "group", wake: true, _scan_authority: true, _sender_is_bot: false };
+    assert.equal(hasInboxAuditTargets(file, "cli_audit"), false);
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, wake: false, message_id: "om_unmentioned" }), false);
+    assert.equal(hasInboxAuditTargets(file, "cli_audit"), false);
     assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, message_id: "om_chat" }), true);
+    assert.equal(hasInboxAuditTargets(file, "cli_audit"), true);
+    assert.equal(hasInboxAuditTargets(file, "cli_unrelated"), false);
     assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, thread_id: "omt_topic", message_id: "om_topic" }), true);
     assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, chat_type: "p2p", message_id: "om_dm" }), false);
     assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, _sender_is_bot: true, message_id: "om_bot" }), false);
@@ -57,7 +63,7 @@ test("controlled audit sink routes only a concrete thread finding to its om_ anc
     const file = inboxAuditRegistryFile(root);
     const traceFile = path.join(root, "provider-writes.ndjson");
     fs.writeFileSync(traceFile, "", { mode: 0o600 });
-    const common = { chat_id: CHAT, chat_type: "group", _scan_authority: true, _sender_is_bot: false };
+    const common = { chat_id: CHAT, chat_type: "group", wake: true, _scan_authority: true, _sender_is_bot: false };
     assert.equal(observeInboxAuditTarget(file, "cli_audit", {
       ...common, thread_id: "omt_auditthread", message_id: "om_audit_thread_anchor",
     }), true);
@@ -85,7 +91,7 @@ test("controlled audit sink routes only a concrete thread finding to its om_ anc
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("one Host timer callback delivers targetless runtime audit wakes to multiple agents", async () => {
+test("one Host timer callback wakes only Agents with an eligible audit target", async () => {
   const timers = [];
   const inbox = [];
   const deliveries = [];
@@ -93,6 +99,7 @@ test("one Host timer callback delivers targetless runtime audit wakes to multipl
     agents: [{ agentId: "cli_auditOne" }, { agentId: "cli_auditTwo" }],
     stateStore: () => ({ appendCanonicalInboxOnce(envelope) { inbox.push(envelope); return { status: "appended", envelope }; } }),
     runtimeHost: { async deliver(agentId, envelope) { deliveries.push({ agentId, envelope }); } },
+    shouldDispatch: (agent) => agent.agentId === "cli_auditTwo",
     now: () => 1234,
     setTimer(callback, delay) { timers.push({ callback, delay }); return { unref() {} }; },
     clearTimer() {},
@@ -103,8 +110,35 @@ test("one Host timer callback delivers targetless runtime audit wakes to multipl
   assert.equal(timers[0].delay, 15 * 60_000);
   await timers[0].callback();
   assert.equal(timers.length, 2, "callback re-arms one successor timer");
-  assert.equal(deliveries.length, 2);
+  assert.deepEqual(deliveries.map((row) => row.agentId), ["cli_auditTwo"]);
+  assert.equal(inbox.length, 1, "an Agent without an eligible audit target receives no model wake");
   assert.equal(inbox.every((row) => row.target === "runtime:reminder" && row.kind === "reminder"), true);
   assert.equal(inbox.every((row) => !Object.hasOwn(row, "deliveryTarget") && !Object.hasOwn(row, "deliveryAnchor")), true);
+  heartbeat.stop();
+});
+
+test("an Agent-scoped audit predicate failure fails closed and does not block a healthy sibling", async () => {
+  const timers = [];
+  const inbox = [];
+  const deliveries = [];
+  const logs = [];
+  const heartbeat = new InboxAuditHeartbeat({
+    agents: [{ agentId: "cli_brokenAudit" }, { agentId: "cli_healthyAudit" }],
+    stateStore: () => ({ appendCanonicalInboxOnce(envelope) { inbox.push(envelope); return { status: "appended", envelope }; } }),
+    runtimeHost: { async deliver(agentId) { deliveries.push(agentId); } },
+    shouldDispatch(agent) {
+      if (agent.agentId === "cli_brokenAudit") throw new Error("fixture registry unavailable");
+      return true;
+    },
+    log: (...parts) => logs.push(parts.join(" ")),
+    setTimer(callback) { timers.push(callback); return { unref() {} }; },
+    clearTimer() {},
+  });
+  heartbeat.start();
+  await timers[0]();
+  assert.deepEqual(deliveries, ["cli_healthyAudit"]);
+  assert.equal(inbox.length, 1);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /cli_brokenAudit.*fixture registry unavailable/);
   heartbeat.stop();
 });

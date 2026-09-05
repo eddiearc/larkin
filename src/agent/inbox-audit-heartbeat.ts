@@ -20,6 +20,7 @@ export class InboxAuditHeartbeat {
     agents: readonly AuditAgent[];
     stateStore(agent: AuditAgent): AuditStateStore;
     runtimeHost: AuditRuntime;
+    shouldDispatch(agent: AuditAgent): boolean;
     log?: (...parts: unknown[]) => void;
     cadenceMs?: number;
     setTimer?: typeof setTimeout;
@@ -54,15 +55,16 @@ export class InboxAuditHeartbeat {
   private async fire(): Promise<void> {
     const now = this.options.now ?? Date.now;
     for (const agent of this.options.agents) {
-      const message_id = `rem_inbox_audit_${now()}_${++this.sequence}_${agent.agentId}`;
-      const envelope = {
-        kind: "reminder",
-        message_id,
-        target: RUNTIME_REMINDER_TARGET,
-        wake: true,
-        content: "Internal inbox audit wake. Poll runtime:reminder, then run larkin inbox audit --json. No finding stays silent.",
-      };
       try {
+        if (!this.options.shouldDispatch(agent)) continue;
+        const message_id = `rem_inbox_audit_${now()}_${++this.sequence}_${agent.agentId}`;
+        const envelope = {
+          kind: "reminder",
+          message_id,
+          target: RUNTIME_REMINDER_TARGET,
+          wake: true,
+          content: "Internal inbox audit wake. Poll runtime:reminder, then run larkin inbox audit --json. No finding stays silent.",
+        };
         const appended = this.options.stateStore(agent).appendCanonicalInboxOnce(envelope);
         if (appended.status === "appended") await this.options.runtimeHost.deliver(agent.agentId, appended.envelope as object);
       } catch (error) {

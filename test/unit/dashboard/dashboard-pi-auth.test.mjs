@@ -92,20 +92,20 @@ test("Pi model directory invalidate drops only the target Agent cache", async ()
   const calls = [];
   const resolver = module.createPiModelDirectoryResolver({
     async discoverPiModelCatalog(options) {
-      calls.push(options.agentDir);
+      calls.push(options.cwd);
       return { models: [], effectiveModel: "owned/model", effectiveThinkingLevel: "off", defaultSource: "settings", diagnostics: [] };
     },
     now: () => now,
     ttlMs: 5 * 60_000,
   });
-  await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/a-dir" });
-  await resolver.resolve({ agentId: OTHER, cwd: "/tmp/b", agentDir: "/tmp/b-dir" });
+  await resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
+  await resolver.resolve({ agentId: OTHER, cwd: "/tmp/b" });
   assert.equal(calls.length, 2);
   resolver.invalidate(APP);
-  await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/a-dir" });
-  await resolver.resolve({ agentId: OTHER, cwd: "/tmp/b", agentDir: "/tmp/b-dir" });
+  await resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
+  await resolver.resolve({ agentId: OTHER, cwd: "/tmp/b" });
   assert.equal(calls.length, 3, "only the invalidated Agent must refresh");
-  assert.equal(calls[2], "/tmp/a-dir");
+  assert.equal(calls[2], "/tmp/a");
 });
 
 test("in-flight pre-login catalog resolve cannot repopulate cache after invalidate", async () => {
@@ -118,9 +118,9 @@ test("in-flight pre-login catalog resolve cannot repopulate cache after invalida
   const calls = [];
   const resolver = module.createPiModelDirectoryResolver({
     async discoverPiModelCatalog(options) {
-      calls.push(options.agentDir);
-      const n = calls.filter((dir) => dir === options.agentDir).length;
-      if (options.agentDir === "/tmp/stale-dir") {
+      calls.push(options.cwd);
+      const n = calls.filter((dir) => dir === options.cwd).length;
+      if (options.cwd === "/tmp/a") {
         if (n === 1) await holdPositive;
         return {
           models: [{ id: `catalog-${n}`, label: `catalog-${n}` }],
@@ -138,8 +138,8 @@ test("in-flight pre-login catalog resolve cannot repopulate cache after invalida
     ttlMs: 5 * 60_000,
     negativeTtlMs: 30_000,
   });
-  const stale = resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/stale-dir" });
-  const staleFail = resolver.resolve({ agentId: OTHER, cwd: "/tmp/b", agentDir: "/tmp/fail-dir" });
+  const stale = resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
+  const staleFail = resolver.resolve({ agentId: OTHER, cwd: "/tmp/b" });
   while (calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
   resolver.invalidate(APP);
   resolver.invalidate(OTHER);
@@ -149,17 +149,17 @@ test("in-flight pre-login catalog resolve cannot repopulate cache after invalida
   assert.equal(staleResult.some((model) => model.id === "catalog-1"), true);
   await assert.rejects(() => staleFail, /stale negative catalog/);
 
-  const fresh = await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/stale-dir" });
-  assert.equal(calls.filter((dir) => dir === "/tmp/stale-dir").length, 2);
+  const fresh = await resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
+  assert.equal(calls.filter((dir) => dir === "/tmp/a").length, 2);
   assert.equal(fresh.some((model) => model.id === "catalog-2"), true);
   assert.equal(fresh.some((model) => model.id === "catalog-1"), false);
   now += 1;
-  const cached = await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/stale-dir" });
-  assert.equal(calls.filter((dir) => dir === "/tmp/stale-dir").length, 2);
+  const cached = await resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
+  assert.equal(calls.filter((dir) => dir === "/tmp/a").length, 2);
   assert.deepEqual(cached.map((model) => model.id).filter((id) => id !== "default"), ["catalog-2"]);
 
-  const recovered = await resolver.resolve({ agentId: OTHER, cwd: "/tmp/b", agentDir: "/tmp/fail-dir" });
-  assert.equal(calls.filter((dir) => dir === "/tmp/fail-dir").length, 2);
+  const recovered = await resolver.resolve({ agentId: OTHER, cwd: "/tmp/b" });
+  assert.equal(calls.filter((dir) => dir === "/tmp/b").length, 2);
   assert.equal(recovered.some((model) => model.id === "recovered"), true);
 });
 
@@ -171,8 +171,8 @@ test("targeted then global invalidate cannot admit a stale in-flight catalog res
   const calls = [];
   const resolver = module.createPiModelDirectoryResolver({
     async discoverPiModelCatalog(options) {
-      calls.push(options.agentDir);
-      const n = calls.filter((dir) => dir === options.agentDir).length;
+      calls.push(options.cwd);
+      const n = calls.filter((dir) => dir === options.cwd).length;
       if (n === 1) await holdStale;
       return {
         models: [{ id: `catalog-${n}`, label: `catalog-${n}` }],
@@ -182,7 +182,7 @@ test("targeted then global invalidate cannot admit a stale in-flight catalog res
     now: () => now,
     ttlMs: 5 * 60_000,
   });
-  const stale = resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/generation-dir" });
+  const stale = resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
   while (calls.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
   resolver.invalidate(APP);
   resolver.invalidate();
@@ -190,12 +190,12 @@ test("targeted then global invalidate cannot admit a stale in-flight catalog res
   const staleResult = await stale;
   assert.equal(staleResult.some((model) => model.id === "catalog-1"), true);
 
-  const fresh = await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/generation-dir" });
+  const fresh = await resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
   assert.equal(calls.length, 2);
   assert.equal(fresh.some((model) => model.id === "catalog-2"), true);
   assert.equal(fresh.some((model) => model.id === "catalog-1"), false);
   now += 1;
-  const cached = await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/generation-dir" });
+  const cached = await resolver.resolve({ agentId: APP, cwd: "/tmp/a" });
   assert.equal(calls.length, 2);
   assert.deepEqual(cached.map((model) => model.id).filter((id) => id !== "default"), ["catalog-2"]);
 });

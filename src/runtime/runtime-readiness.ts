@@ -226,6 +226,7 @@ function executableVersion(executable: string, env: NodeJS.ProcessEnv, commandAr
 /** Resolve and handshake through each runtime's structured native control protocol. */
 export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeReadinessOptions): Promise<RuntimeReadiness> {
   const env = { ...process.env, ...options.env };
+  if (options.runtime === "pi") delete env.PI_CODING_AGENT_DIR;
   const command = selectedCommand(options);
   const executable = resolveRuntimeExecutable(command, env);
   if (!executable) {

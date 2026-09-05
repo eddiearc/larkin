@@ -82,6 +82,45 @@ test("Pi thinking levels follow official reasoning metadata without Codex ultra"
   assert.equal(supportedPiThinkingLevels(models[1]).includes("ultra"), false);
 });
 
+test("catalog child env strips inherited and leftover PI_CODING_AGENT_DIR", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-catalog-strip-"));
+  const inherited = path.join(root, "inherited-agent");
+  const requested = path.join(root, "requested-agent");
+  const envDecoy = path.join(root, "env-agent");
+  for (const dir of [inherited, requested, envDecoy]) fs.mkdirSync(dir, { recursive: true });
+  const log = path.join(root, "child-env.json");
+  const probe = path.join(root, "catalog-pi.mjs");
+  fs.writeFileSync(probe, `
+import fs from "node:fs";
+import readline from "node:readline";
+fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ agentDir: process.env.PI_CODING_AGENT_DIR || null }));
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  const model = { provider: "plain", id: "chat", name: "Chat", reasoning: false, contextWindow: 32000 };
+  const data = request.type === "get_available_models" ? { models: [model] } : { model, thinkingLevel: "off" };
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+});
+`);
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = inherited;
+  try {
+    const catalog = await discoverPiModelCatalog({
+      cwd: root,
+      command: process.execPath,
+      commandArgs: [probe],
+      env: { PI_CODING_AGENT_DIR: envDecoy },
+      ...{ agentDir: requested },
+    });
+    assert.equal(catalog.effectiveModel, "plain/chat");
+    assert.deepEqual(JSON.parse(fs.readFileSync(log, "utf8")), { agentDir: null });
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("catalog discovery succeeds when PI_PACKAGE_DIR is inherited from the host", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-issue156-"));
   const packageDir = path.join(root, ".larkin-official-pi-package");

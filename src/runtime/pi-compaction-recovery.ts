@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-/** External `pi` must be this version or newer; handshake still guards protocol compatibility. */
+/** External `pi` must be this version or newer. Stock 0.84.x does not emit compactionCapabilities. */
 export const MINIMUM_PI_VERSION = "0.84.2";
 
 /** Fallback values used while importing a Pi profile, before Pi reports its model. */
@@ -183,16 +183,18 @@ export function ensureOwnedPiAgentDirectory(root: string, agentId: string): stri
   return directory;
 }
 
-export function ownedPiSettings(directory: string): string {
-  return path.join(directory, "settings.json");
+/** Larkin-owned project settings that Pi deep-merges over the user's global agent dir. */
+export function projectPiSettingsFile(workspaceDir: string): string {
+  return path.join(workspaceDir, ".pi", "settings.json");
 }
 
-export function prepareOwnedPiDirectory(directory: string, compaction?: PiCompactionSettings): string {
-  ensureDirectoryChain(path.dirname(directory));
-  ensureDirectory(path.dirname(directory));
-  ensureDirectory(directory);
-  writeOwnedPiSettings(directory, compaction);
-  return directory;
+export function ownedPiSettings(workspaceDir: string): string {
+  return projectPiSettingsFile(workspaceDir);
+}
+
+export function prepareOwnedPiDirectory(workspaceDir: string, compaction?: PiCompactionSettings): string {
+  writeOwnedPiSettings(workspaceDir, compaction);
+  return workspaceDir;
 }
 
 export function mergeOwnedPiSettings(value: unknown, compaction: PiCompactionSettings = {
@@ -214,10 +216,11 @@ export function mergeOwnedPiSettings(value: unknown, compaction: PiCompactionSet
   } };
 }
 
-export function writeOwnedPiSettings(directory: string, compaction?: PiCompactionSettings): void {
-  ensureDirectoryChain(path.dirname(directory));
-  ensureDirectory(directory);
-  const file = ownedPiSettings(directory);
+export function writeOwnedPiSettings(workspaceDir: string, compaction?: PiCompactionSettings): void {
+  const projectDir = path.join(workspaceDir, ".pi");
+  ensureDirectoryChain(path.resolve(workspaceDir));
+  ensureDirectory(projectDir);
+  const file = projectPiSettingsFile(workspaceDir);
   try {
     const existing = fs.lstatSync(file);
     if (existing.isSymbolicLink() || !existing.isFile()) throw new Error("Pi owned settings must not be a symlink");
@@ -229,7 +232,7 @@ export function writeOwnedPiSettings(directory: string, compaction?: PiCompactio
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Pi owned settings are invalid");
   }
-  const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  const temporary = path.join(projectDir, `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
     fs.writeFileSync(temporary, `${JSON.stringify(mergeOwnedPiSettings(value, compaction), null, 2)}\n`, { flag: "wx", mode: 0o600 });
     fs.renameSync(temporary, file);
@@ -239,10 +242,10 @@ export function writeOwnedPiSettings(directory: string, compaction?: PiCompactio
   }
 }
 
-export function readOwnedPiSettings(directory: string): EffectivePiSettings {
-  ensureDirectoryChain(path.dirname(directory));
-  assertOwnedDirectory(directory);
-  const file = ownedPiSettings(directory);
+export function readOwnedPiSettings(workspaceDir: string): EffectivePiSettings {
+  const projectDir = path.join(workspaceDir, ".pi");
+  assertOwnedDirectory(projectDir);
+  const file = projectPiSettingsFile(workspaceDir);
   const stat = fs.lstatSync(file);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Pi owned settings must be a regular file");
   const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
@@ -300,12 +303,20 @@ export function parsePiExecutableVersion(output: string): string {
   return version;
 }
 
+export interface PiCompactionHandshake {
+  reserveTokens?: unknown;
+  keepRecentTokens?: unknown;
+  events?: readonly string[];
+}
+
 export interface PiCapabilityProbe {
   distribution: "builtin" | "external";
   version?: string;
   contextWindow?: number;
   model?: { contextWindow?: number } | null;
   autoCompactionEnabled?: unknown;
+  /** Optional stock-pi handshake; absence is accepted. Flat fields stay for older callers. */
+  compactionCapabilities?: PiCompactionHandshake | null;
   reserveTokens?: unknown;
   keepRecentTokens?: unknown;
   compactRpc?: boolean;
@@ -313,26 +324,50 @@ export interface PiCapabilityProbe {
   trustedProtocol?: boolean;
 }
 
-export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
+export type PiCompactionPolicySource = "handshake-reported" | "larkin-settings-only";
+
+function resolveOptionalHandshake(capabilities: PiCapabilityProbe): PiCompactionHandshake | undefined {
+  if (capabilities.compactionCapabilities !== undefined && capabilities.compactionCapabilities !== null) {
+    return capabilities.compactionCapabilities;
+  }
+  if (capabilities.reserveTokens !== undefined
+      || capabilities.keepRecentTokens !== undefined
+      || capabilities.events !== undefined) {
+    return {
+      reserveTokens: capabilities.reserveTokens,
+      keepRecentTokens: capabilities.keepRecentTokens,
+      events: capabilities.events,
+    };
+  }
+  return undefined;
+}
+
+export function verifyPiCapabilities(capabilities: PiCapabilityProbe): PiCompactionPolicySource {
   assertSupportedPiVersion(capabilities.version);
   if (capabilities.trustedProtocol === true) {
     throw new Error("external Pi cannot use a trusted protocol bypass");
   }
   const contextWindow = capabilities.contextWindow ?? capabilities.model?.contextWindow;
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    throw new Error("Pi capability context window is invalid");
+  }
   const expected = (() => {
-    try { return calculatePiCompactionSettings(contextWindow as number); }
+    try { return calculatePiCompactionSettings(contextWindow); }
     catch { throw new Error("Pi capability context window is invalid"); }
   })();
   if (requireFiniteBoolean(capabilities.autoCompactionEnabled, "Pi autoCompactionEnabled") !== true) {
     throw new Error("Pi effective native compaction is disabled");
   }
   if (capabilities.compactRpc !== true) throw new Error("Pi compact RPC capability is missing");
-  if (capabilities.reserveTokens !== expected.reserveTokens
-      || capabilities.keepRecentTokens !== expected.keepRecentTokens) {
+  const handshake = resolveOptionalHandshake(capabilities);
+  if (handshake === undefined) return "larkin-settings-only";
+  if (handshake.reserveTokens !== expected.reserveTokens
+      || handshake.keepRecentTokens !== expected.keepRecentTokens) {
     throw new Error(`Pi external effective compaction reserve/keep settings are unproven for context window ${contextWindow}`);
   }
-  const events = new Set(capabilities.events || []);
+  const events = new Set(handshake.events || []);
   for (const event of REQUIRED_PI_EVENTS) if (!events.has(event)) throw new Error(`Pi capability event is unproven: ${event}`);
+  return "handshake-reported";
 }
 
 function stateFile(root: string): string {
@@ -671,12 +706,6 @@ export class PiCompactionRecoveryMachine {
   close(): void {
     if (["native_succeeded", "retrying", "fallback_committed"].includes(this.state)) this.change("closed");
   }
-}
-
-export function prepareOwnedPiEnvironment(input: { root: string; agentId: string; env?: NodeJS.ProcessEnv }): NodeJS.ProcessEnv {
-  const directory = ensureOwnedPiAgentDirectory(input.root, input.agentId);
-  writeOwnedPiSettings(directory);
-  return { ...input.env, PI_CODING_AGENT_DIR: directory };
 }
 
 export function readProjectPiSettings(workspaceDir: string): Record<string, unknown> | null {

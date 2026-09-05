@@ -14,6 +14,9 @@ import {
   prepareOwnedPiDirectory,
   mergeOwnedPiSettings,
   hasProjectPiCompactionOverride,
+  writeOwnedPiSettings,
+  readOwnedPiSettings,
+  projectPiSettingsFile,
   isPiNativeCompactionRequired,
   PiCompactionBreaker,
   PiCompactionRecoveryMachine,
@@ -74,6 +77,26 @@ test("project compaction/context overrides are refused before Pi starts", () => 
   assert.equal(hasProjectPiCompactionOverride({ contextWindow: 128_000 }), true);
 });
 
+test("workspace project settings receive Larkin compaction and preserve unrelated keys", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-project-settings-"));
+  try {
+    fs.mkdirSync(path.join(workspace, ".pi"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(workspace, ".pi", "settings.json"), `${JSON.stringify({
+      theme: "dark", packages: { enabled: true },
+    }, null, 2)}\n`);
+    writeOwnedPiSettings(workspace, calculatePiCompactionSettings(32_000));
+    const file = projectPiSettingsFile(workspace);
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(parsed.theme, "dark");
+    assert.deepEqual(parsed.packages, { enabled: true });
+    assert.deepEqual(parsed.compaction, { enabled: true, reserveTokens: 4_800, keepRecentTokens: 20_000 });
+    assert.deepEqual(readOwnedPiSettings(workspace).compaction, parsed.compaction);
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("owned Pi directory is 0700, current-user owned, and never a symlink", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-owned-"));
   const directory = ensureOwnedPiAgentDirectory(root, "cli_ownedA1");
@@ -119,7 +142,7 @@ test("external capability guard fails closed and accepts only the required Pi pr
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   };
   for (const version of ["0.84.2", "0.84.4", "0.85.0", "1.0.0"]) {
-    assert.doesNotThrow(() => verifyPiCapabilities({ ...handshake, version }));
+    assert.equal(verifyPiCapabilities({ ...handshake, version }), "handshake-reported");
   }
   assert.throws(() => verifyPiCapabilities({ ...handshake, version: "0.84.2-beta" }), {
     message: "Pi executable version 0.84.2-beta is unsupported: SemVer 0.84.2-beta < 0.84.2; Larkin supports stable external pi only",
@@ -136,10 +159,28 @@ test("external capability guard fails closed and accepts only the required Pi pr
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /context/i);
-  assert.throws(() => verifyPiCapabilities({
+  assert.equal(verifyPiCapabilities({
     distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true,
-  }), /unproven|reserve|event/i);
+  }), "larkin-settings-only");
+  assert.equal(verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, compactionCapabilities: {
+      reserveTokens: 40_800, keepRecentTokens: 20_000,
+      events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+    },
+  }), "handshake-reported");
+  assert.throws(() => verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, compactionCapabilities: {
+      reserveTokens: 16_384, keepRecentTokens: 20_000,
+      events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+    },
+  }), /unproven/i);
+  assert.throws(() => verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: false,
+    compactRpc: true,
+  }), /disabled/i);
   assert.throws(() => verifyPiCapabilities({
     distribution: "external", version: "0.84.2", contextWindow: 272_000,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
@@ -148,11 +189,26 @@ test("external capability guard fails closed and accepts only the required Pi pr
   assert.throws(() => verifyPiCapabilities({
     distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
-  }), /external|trusted|unproven/i);
+  }), /external|trusted/i);
   assert.throws(() => verifyPiCapabilities({
     distribution: "builtin", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
-  }), /external|trusted|unproven/i);
+  }), /external|trusted/i);
+});
+
+test("verifyPiCapabilities accepts absent stock handshake and rejects mismatch or disabled compaction", () => {
+  const required = {
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true, compactRpc: true,
+  };
+  assert.equal(verifyPiCapabilities(required), "larkin-settings-only");
+  assert.throws(() => verifyPiCapabilities({
+    ...required,
+    compactionCapabilities: {
+      reserveTokens: 1, keepRecentTokens: 20_000,
+      events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+    },
+  }), /unproven/i);
+  assert.throws(() => verifyPiCapabilities({ ...required, autoCompactionEnabled: false }), /disabled/i);
 });
 
 test("breaker refuses operations without an explicit canonical lock", () => {

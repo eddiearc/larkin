@@ -16,10 +16,22 @@ import { packageVersion } from "../platform/build-info.js";
 
 type HostShellOptions = Parameters<typeof createHostShell>[0];
 
-export function loadAndSyncRuntimeAgent(env: NodeJS.ProcessEnv, agentId: string, dependencies: RuntimeAgentConfigDependencies = {}) {
+export function loadAndSyncRuntimeAgent(
+  env: NodeJS.ProcessEnv,
+  agentId: string,
+  dependencies: RuntimeAgentConfigDependencies = {},
+  options: { expectedSignature?: string } = {},
+) {
   const loaded = loadConfig(env);
   const stored = loaded.config.agents[agentId];
   if (!stored) throw new Error(`Agent ${agentId} 不存在于 canonical config`);
+  // 先对权威签名 CAS，再 hydrate/sync，避免热加载已切换 runtime 的 Agent。
+  if (options.expectedSignature) {
+    const current = runtimeConfigSignature(loaded.config, agentId);
+    if (current !== options.expectedSignature) {
+      throw new Error("配置在 apply 期间发生变化；未热加载已切换的 Agent");
+    }
+  }
   const agent = hydrateRuntimeAgent(loaded.configDir, stored);
   syncAgentProfile(agent, { ...env, LARKIN_CONFIG_DIR: loaded.configDir }, dependencies);
   return agent;
@@ -107,7 +119,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
     larkinHome: env.LARKIN_HOME,
     authorityToken: env.LARKIN_CONTROL_AUTHORIZATION,
     async upsert(request) {
-      const agent = loadAndSyncRuntimeAgent(env, request.agentId);
+      const agent = loadAndSyncRuntimeAgent(env, request.agentId, {}, {
+        ...(request.expectedSignature ? { expectedSignature: request.expectedSignature } : {}),
+      });
       // Only the selected profile is synchronized; active profiles and their directory
       // are never quarantined or rebuilt during hot attach.
       await hostShell.upsertAgent(agent);

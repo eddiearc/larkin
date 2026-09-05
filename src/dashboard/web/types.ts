@@ -119,6 +119,34 @@ export interface RuntimeModel {
   defaultReasoningEffort?: string;
 }
 
+export interface PiProviderCatalogEntry {
+  id: string;
+  name: string;
+  provider: string | null;
+  defaultModel: string | null;
+  custom: boolean;
+  openaiCompatible: boolean;
+}
+
+export interface PiProviderCredentialStatus {
+  providerId: string;
+  providerName: string;
+  credentialType: "api_key" | "oauth";
+  source: string;
+  stored: boolean;
+}
+
+export interface PiProviderLoginResult {
+  ok: true;
+  agentId: string;
+  provider: string;
+  preset: string;
+  model: string;
+  credentialType: "api_key";
+  applyState: "applied" | "saved_not_applied" | "pending";
+  applyError?: string;
+}
+
 export interface ConfigResponse {
   version: 4;
   mentionPolicy: "require" | "free";

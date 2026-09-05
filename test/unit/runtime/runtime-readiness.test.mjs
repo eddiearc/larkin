@@ -12,6 +12,7 @@ import {
   probeNativeRuntimeReadiness,
   readinessForPersistedAuthFailure,
 } from "../../../dist/runtime/runtime-readiness.mjs";
+import { builtinPiProviderRecoveryNextAction } from "../../../dist/runtime/pi-provider-config.mjs";
 
 for (const runtime of ["codex", "claude", "pi"]) {
   test(`${runtime} readiness classifies an unresolved configured command as missing`, async () => {
@@ -62,8 +63,20 @@ test("missing-credential classifier matches only the explicit absent-key or abse
   const readiness = missingProviderCredentialReadiness("pi", "zai-coding-cn");
   assert.equal(readiness.state, "unauthenticated");
   assert.match(readiness.reason, /zai-coding-cn/);
-  assert.match(readiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
-  assert.doesNotMatch(readiness.nextAction, /larkin setup|profile import|pi-auth login|Dashboard/);
+  assert.match(readiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
+  assert.match(readiness.nextAction, /Provider Credentials/);
+  assert.doesNotMatch(readiness.nextAction, /zai-coding-cn|larkin setup|import-external-profile|official store/);
+});
+
+test("UX recovery helper maps official provider IDs to CLI presets without replacing P0 classifiers", () => {
+  const recovery = builtinPiProviderRecoveryNextAction({ agentId: "cli_recoverA1", providerId: "zai-coding-cn" });
+  assert.match(recovery, /pi-auth login zhipu --agent cli_recoverA1/);
+  assert.match(recovery, /Provider Credentials/);
+  assert.doesNotMatch(recovery, /zai-coding-cn|larkin setup|import-external-profile|official store/);
+  const classified = classifyRuntimePrerequisite("pi", new Error("no authenticated available models"));
+  assert.equal(classified.state, "unauthenticated");
+  assert.match(classified.nextAction, /official `pi` login/);
+  assert.doesNotMatch(classified.nextAction, /Dashboard|Provider Credentials|pi-auth login|larkin setup/);
 });
 
 test("scoped auth persistence prefers current generic over a legacy missing-provider string", () => {
@@ -96,8 +109,12 @@ test("scoped auth persistence prefers current generic over a legacy missing-prov
   assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, genericZai), false);
   assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, generic), true,
     "unbound generic is conservative fallback only when the upstream provider was unavailable");
+  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /pi-auth login zhipu --agent <App ID>/);
+  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /Provider Credentials/);
+  assert.doesNotMatch(readinessForPersistedAuthFailure(missing).nextAction, /zai-coding-cn|official store/);
   assert.match(readinessForPersistedAuthFailure(generic).nextAction, /login|API-key resolver/);
-  assert.doesNotMatch(readinessForPersistedAuthFailure(generic).nextAction, /official store/);
+  assert.doesNotMatch(readinessForPersistedAuthFailure(generic).nextAction, /official store|pi-auth login zhipu/);
+  assert.match(readinessForPersistedAuthFailure(genericZai).nextAction, /login|API-key resolver/);
 });
 
 function writeReadinessPi(root, { failIfDirty = false } = {}) {

@@ -31,6 +31,14 @@ const agents = [
     ],
     feed: [{ kind: "activity", state: "idle", detail: "等待任务", at: "2026-07-24T10:00:00.000Z" }], recentErrors: [], knownChats: 1,
   },
+  {
+    agentId: "cli_AgentC3", name: "cli_AgentC3", displayName: "Pi Builtin", runtime: "pi", model: "deepseek/deepseek-v4-pro", effort: null,
+    running: true, issue: false, credentialReady: false, bot: null,
+    connection: { state: "connected", reason: "current channel" }, inbound: { state: "pending", reason: "waiting" },
+    lastActivity: { state: "idle", detail: "等待任务", ageSec: 30 }, lastDeliver: null,
+    eyeIndicator: { pendingCount: 0, oldestAgeSec: null, stuck: false }, activeReminders: 0, remindersList: [],
+    session: null, conversation: [], feed: [], recentErrors: [], knownChats: 0,
+  },
 ];
 
 const status = {
@@ -47,8 +55,10 @@ const config = (agentId?: string) => ({
   },
   runtimeOptions: ["codex", "claude", "pi", "builtin-pi"] as const,
   agents: (agentId ? agents.filter((agent) => agent.agentId === agentId) : agents).map((agent) => ({
-    agentId: agent.agentId, runtime: agent.runtime, runtimeOption: agent.runtime, model: agent.model, effort: agent.effort,
-    piDistribution: null,
+    agentId: agent.agentId, runtime: agent.runtime,
+    runtimeOption: agent.agentId === "cli_AgentC3" ? "builtin-pi" : agent.runtime,
+    model: agent.model, effort: agent.effort,
+    piDistribution: agent.agentId === "cli_AgentC3" ? "builtin" : null,
     mention: { override: agent.agentId === "cli_AgentB2" ? "require" : "inherit", effective: agent.agentId === "cli_AgentB2" ? "require" : "free", source: agent.agentId === "cli_AgentB2" ? "agent" : "global" },
     knownChats: agent.agentId === "cli_AgentB2" ? [
       { chatId: "oc_BuildRoom", displayName: "构建群", kind: "group", override: "free", effective: "free", source: "chat" },
@@ -515,5 +525,105 @@ describe("Agent-centric dashboard workbench", () => {
     await screen.findByText("只读工作区");
     expect(document.querySelector(".agent-content")).toHaveClass("workspace-active");
     expect(document.querySelector(".workspace-browser")).toBeVisible();
+  });
+
+  it("shows Provider Credentials only for builtin Pi and clears the API key after save", async () => {
+    const secret = "frontend-super-secret";
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+      if (url.pathname === "/api/models/codex" || url.pathname === "/api/models/pi" || url.pathname === "/api/models/builtin-pi") {
+        return ok({ models: [{ id: "default", label: "default" }, { id: "deepseek/deepseek-v4-pro", label: "DeepSeek" }] });
+      }
+      if (url.pathname === "/api/pi-auth/providers") {
+        return ok({
+          providers: [
+            { id: "deepseek", name: "DeepSeek（推荐）", provider: "deepseek", defaultModel: "deepseek/deepseek-v4-pro", custom: false, openaiCompatible: true },
+            { id: "custom", name: "Custom OpenAI-compatible", provider: "larkin-custom", defaultModel: null, custom: true, openaiCompatible: true },
+          ],
+        });
+      }
+      if (url.pathname === "/api/pi-auth/status") {
+        return ok({ agentId: url.searchParams.get("agent"), model: "deepseek/deepseek-v4-pro", credentials: [] });
+      }
+      if (url.pathname === "/api/pi-auth/login" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        expect(body.apiKey).toBe(secret);
+        expect(JSON.stringify(body)).not.toContain("?");
+        return ok({
+          ok: true, agentId: body.agentId, provider: body.preset === "custom" ? "larkin-custom" : "deepseek",
+          preset: body.preset, model: body.preset === "custom" ? `larkin-custom/${body.model}` : "deepseek/deepseek-v4-pro",
+          credentialType: "api_key", applyState: "saved_not_applied",
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=configuration");
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    expect(screen.queryByRole("heading", { level: 3, name: "Provider Credentials" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("option", { name: /Pi Builtin/ }));
+    expect(await screen.findByRole("heading", { level: 3, name: "Provider Credentials" })).toBeVisible();
+    await screen.findByRole("option", { name: "DeepSeek（推荐）" });
+    const key = await screen.findByLabelText("API Key");
+    expect(key).toHaveAttribute("type", "password");
+    expect(key).toHaveAttribute("autocomplete", "off");
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "custom");
+    expect(await screen.findByLabelText("Base URL")).toBeVisible();
+    expect(screen.getByLabelText("Custom model")).toBeVisible();
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "deepseek");
+    await userEvent.type(key, secret);
+    expect(key).toHaveValue(secret);
+    await userEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+    await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue(""));
+    expect(await screen.findByRole("status")).toHaveTextContent(/deepseek/);
+    expect(screen.queryByText(secret)).not.toBeInTheDocument();
+  });
+
+  it("clears the API key as soon as login settles even if status refresh stalls", async () => {
+    const secret = "frontend-stalled-secret";
+    const statusHold = deferred<{ ok: boolean; status: number; json: () => Promise<unknown> }>();
+    let loginDone = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+      if (url.pathname === "/api/models/codex" || url.pathname === "/api/models/pi" || url.pathname === "/api/models/builtin-pi") {
+        return ok({ models: [{ id: "default", label: "default" }, { id: "deepseek/deepseek-v4-pro", label: "DeepSeek" }] });
+      }
+      if (url.pathname === "/api/pi-auth/providers") {
+        return ok({
+          providers: [
+            { id: "deepseek", name: "DeepSeek（推荐）", provider: "deepseek", defaultModel: "deepseek/deepseek-v4-pro", custom: false, openaiCompatible: true },
+          ],
+        });
+      }
+      if (url.pathname === "/api/pi-auth/status") {
+        if (loginDone) return statusHold.promise;
+        return ok({ agentId: url.searchParams.get("agent"), model: "deepseek/deepseek-v4-pro", credentials: [] });
+      }
+      if (url.pathname === "/api/pi-auth/login" && init?.method === "POST") {
+        loginDone = true;
+        return ok({
+          ok: true, agentId: "cli_AgentC3", provider: "deepseek", preset: "deepseek",
+          model: "deepseek/deepseek-v4-pro", credentialType: "api_key", applyState: "saved_not_applied",
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentC3&tab=configuration");
+    render(<App />);
+    await screen.findByRole("heading", { level: 3, name: "Provider Credentials" });
+    const key = await screen.findByLabelText("API Key");
+    await userEvent.type(key, secret);
+    await userEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+    await waitFor(() => expect(loginDone).toBe(true));
+    await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue(""));
+    expect(screen.queryByText(secret)).not.toBeInTheDocument();
+    statusHold.resolve({ ok: true, status: 200, json: async () => ({ agentId: "cli_AgentC3", model: "deepseek/deepseek-v4-pro", credentials: [] }) });
   });
 });

@@ -100,3 +100,67 @@ test("dashboard config API is sanitized, same-origin/CSRF protected, bounded, an
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("dashboard pi-auth API is loopback/CSRF protected, bounded, and never echoes an API key", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-dashboard-pi-auth-sec-"));
+  const port = await freePort();
+  const secret = "dashboard-security-super-secret";
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    version: 4, serverId: "server-secret-internal", activeAgent: APP, mentionPolicy: "require",
+    agents: { [APP]: { runtime: "pi", piDistribution: "builtin", model: "default", createdAt: "2026-09-04T00:00:00.000Z" } },
+  })}\n`, { mode: 0o600 });
+  fs.mkdirSync(path.join(root, "providers", "pi", APP), { recursive: true, mode: 0o700 });
+  const child = spawn(process.execPath, [path.join(ROOT, "dist/app/dashboard.mjs"), "--port", String(port)], {
+    cwd: ROOT, env: { ...process.env, LARKIN_CONFIG_DIR: root }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!output.includes(`http://localhost:${port}`) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.match(output, new RegExp(`http://localhost:${port}`));
+    const base = `http://localhost:${port}`;
+    const page = await fetch(`${base}/`).then((response) => response.text());
+    const csrf = JSON.parse(page.match(/"csrfCapability":("[^"]+")/)?.[1] || "null");
+    const privateHeaders = { "X-Larkin-CSRF": csrf };
+    const catalog = await fetch(`${base}/api/pi-auth/providers`, { headers: privateHeaders }).then((response) => {
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      return response.json();
+    });
+    assert.ok(Array.isArray(catalog.providers));
+    assert.ok(catalog.providers.some((entry) => entry.id === "custom" && entry.openaiCompatible));
+    assert.doesNotMatch(JSON.stringify(catalog), new RegExp(secret));
+
+    const raw = JSON.stringify({ agentId: APP, preset: "deepseek", apiKey: secret });
+    const rejected = [
+      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: raw }),
+      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: "https://evil.example", "X-Larkin-CSRF": csrf }, body: raw }),
+      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": "wrong" }, body: raw }),
+      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ agentId: APP, preset: "deepseek", apiKey: secret, padding: "x".repeat(17_000) }) }),
+    ];
+    assert.deepEqual(rejected.map((response) => response.status), [400, 400, 400, 400]);
+    for (const response of rejected) {
+      const body = await response.text();
+      assert.doesNotMatch(body, new RegExp(secret));
+    }
+    const accepted = await fetch(`${base}/api/pi-auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf },
+      body: JSON.stringify({
+        agentId: APP, preset: "custom", apiKey: secret,
+        baseUrl: "http://127.0.0.1:1/v1", model: "fixture-model",
+      }),
+    });
+    const acceptedBody = await accepted.text();
+    assert.doesNotMatch(acceptedBody, new RegExp(secret));
+    assert.doesNotMatch(output, new RegExp(secret));
+    assert.equal(accepted.headers.get("cache-control"), "no-store");
+    assert.ok([200, 400].includes(accepted.status));
+  } finally {
+    child.kill("SIGINT");
+    await Promise.race([new Promise((resolve) => child.once("exit", resolve)), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

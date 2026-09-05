@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveConfigDir as resolveRootConfigDir } from "../platform/root-layout.js";
 import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
-import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, ownedPiCatalogAgentDir, piAgentDirectory } from "./pi-provider-config.js";
+import { assertBuiltinPiAgentDirectory, BUNDLED_PI_VERSION, builtinPiProviderRecoveryNextAction, ownedPiCatalogAgentDir, piAgentDirectory } from "./pi-provider-config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
@@ -155,6 +155,7 @@ export function providerAuthenticationFailureReadiness(
   };
 }
 
+/** P0 分类；Pi nextAction 共用 UX preset 恢复文案，不写官方 provider ID。 */
 export function missingProviderCredentialReadiness(
   runtime: RuntimeReadiness["runtime"],
   provider?: unknown,
@@ -166,9 +167,11 @@ export function missingProviderCredentialReadiness(
     reason: label
       ? `Provider ${label} is missing from this Agent's official credential store.`
       : "The configured provider is missing from this Agent's official credential store.",
-    nextAction: label
-      ? `Add the missing ${label} credential to this Agent's official store, then retry the Agent turn.`
-      : "Add the missing provider credential to this Agent's official store, then retry the Agent turn.",
+    nextAction: runtime === "pi"
+      ? builtinPiProviderRecoveryNextAction({ providerId: label ?? undefined })
+      : label
+        ? `Add the missing ${label} credential to this Agent's official store, then retry the Agent turn.`
+        : "Add the missing provider credential to this Agent's official store, then retry the Agent turn.",
   };
 }
 
@@ -200,7 +203,10 @@ export function classifyRuntimePrerequisite(runtime: RuntimeReadiness["runtime"]
   };
   if (/no authenticated available models|login|credential|unauthenticated|unauthorized|oauth/i.test(reason)) return {
     runtime, state: "unauthenticated", ...(executable ? { executable } : {}), reason,
-    nextAction: runtime === "pi" ? "Run the official `pi` login flow, then retry." : `Authenticate ${runtime}, then retry.`,
+    // 此分类没有 distribution：外部 Pi 不能指向 Dashboard / pi-auth login。
+    nextAction: runtime === "pi"
+      ? "Run the official `pi` login flow, then retry."
+      : `Authenticate ${runtime}, then retry.`,
   };
   if (/protocol (?:version )?(?:mismatch|unsupported|incompatible)|unsupported (?:rpc|protocol|schema)|schema (?:mismatch|incompatible)|requires (?:a )?newer version/i.test(reason)) return {
     runtime, state: "incompatible", ...(executable ? { executable } : {}), reason,
@@ -254,7 +260,7 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
     } catch (error) {
       traceProcessBoundary(env, "readiness:builtin-pi-failure", { configDir: env.LARKIN_CONFIG_DIR, agentId: options.agentId, targetDir: options.agentId && env.LARKIN_CONFIG_DIR ? piAgentDirectory(env.LARKIN_CONFIG_DIR, options.agentId) : undefined, error });
       return { runtime: "pi", state: "unauthenticated", reason: error instanceof Error ? error.message : String(error),
-        nextAction: "重新运行 larkin setup，选择内置 Pi 并配置有效 API Key。" };
+        nextAction: builtinPiProviderRecoveryNextAction({ agentId: options.agentId }) };
     }
   }
   const command = selectedCommand(options);

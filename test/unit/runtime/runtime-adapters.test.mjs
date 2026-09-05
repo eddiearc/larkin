@@ -1410,8 +1410,10 @@ test("Pi provider failures preserve safe actionable categories", () => {
   }
   const missing = classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "builtin" });
   assert.match(missing.reason, /zai-coding-cn.*missing/i);
-  assert.match(missing.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
-  assert.doesNotMatch(missing.reason + missing.nextAction, /larkin setup|profile import|pi-auth login|Dashboard|fixture-secret/i);
+  assert.match(missing.nextAction, /pi-auth login zhipu --agent <App ID>/);
+  assert.match(missing.nextAction, /Provider Credentials/);
+  assert.doesNotMatch(missing.reason + missing.nextAction, /larkin setup|profile import|import-external-profile|fixture-secret/i);
+  assert.doesNotMatch(missing.nextAction, /zai-coding-cn/);
   assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }).category, "provider");
   assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "external" }).category, "provider");
   const unknown = classifyPiProviderError({ provider: "gateway", code: "server_error", status: 502,
@@ -1470,8 +1472,9 @@ test("Pi prompt rejection of an explicit missing credential is terminal auth", a
     assert.equal(failure.retryable, false);
     assert.equal(failure.willRetry, false);
     assert.equal(failure.upstream.provider, "zai-coding-cn");
-    assert.match(failure.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
-    assert.doesNotMatch(JSON.stringify(failure), /fixture-secret|larkin setup|profile import|pi-auth login/i);
+    assert.match(failure.nextAction, /pi-auth login zhipu --agent <App ID>/);
+    assert.doesNotMatch(JSON.stringify(failure), /fixture-secret|larkin setup|profile import|import-external-profile/i);
+    assert.doesNotMatch(failure.nextAction, /zai-coding-cn/);
     assert.equal(classifyPiMissingCredentialRejection(message)?.provider, "zai-coding-cn");
   }
   const transientSdk = { sessionId: "pi-transient", prompt() { throw new Error("fetch failed: provider overloaded"); },

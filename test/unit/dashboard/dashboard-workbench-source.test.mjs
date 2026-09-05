@@ -63,6 +63,8 @@ test("dashboard uses flat sections and two bounded Workspace scroll regions", ()
   assert.match(app, /className="metrics-band"/);
   assert.match(app, /className="content-section/);
   assert.match(app, /className="config-section"/);
+  assert.match(app, /Provider Credentials/);
+  assert.match(app, /isBuiltinPiAgent/);
   assert.match(app, /className="logs-section"/);
   assert.doesNotMatch(app, /className="(?:metric-card|content-card|config-card|logs-panel)/,
     "major content areas must not return to card-wall primitives");

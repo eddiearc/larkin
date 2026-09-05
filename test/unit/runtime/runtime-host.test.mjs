@@ -1715,7 +1715,9 @@ test("missing-key prompt rejection terminals once as auth and stays unauthentica
     const downgraded = events.filter((event) => event.type === "agent-status" && event.agentId === failedId).at(-1);
     assert.equal(downgraded.status, "error");
     assert.equal(downgraded.readiness.state, "unauthenticated");
-    assert.match(downgraded.readiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.match(downgraded.readiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
+    assert.match(downgraded.readiness.nextAction, /Provider Credentials/);
+    assert.doesNotMatch(downgraded.readiness.nextAction, /zai-coding-cn/);
     assert.doesNotMatch(JSON.stringify(downgraded), /fixture-openai-codex|fixture-global|larkin setup|profile import/);
     assert.equal(events.filter((event) => event.type === "delivery" && event.messageId === "om_missing_key"
       && event.status === "deferred").length, 0);

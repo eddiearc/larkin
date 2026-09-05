@@ -215,6 +215,7 @@ test("Pi distribution CLI refuses builtin without provider state before writing 
     });
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /provider 尚未.*配置/);
+    assert.doesNotMatch(result.stderr, /import-external-profile|重新运行 larkin setup/);
     assert.doesNotMatch(result.stderr, new RegExp(temp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.equal(fs.readFileSync(path.join(temp, "config.json"), "utf8"), initial);
     assert.equal(fs.existsSync(snapshot), false, "failed provider preflight must not create a rollback snapshot");
@@ -686,7 +687,8 @@ test("larkin runtime accepts sibling builtin-pi and persists storage projection"
 
     const refused = run("runtime", "builtin-pi", "--agent", app);
     assert.notEqual(refused.status, 0);
-    assert.match(`${refused.stdout}\n${refused.stderr}`, /无法切换到 builtin-pi|larkin setup/);
+    assert.match(`${refused.stdout}\n${refused.stderr}`, /无法切换到 builtin-pi|pi-auth login/);
+    assert.doesNotMatch(`${refused.stdout}\n${refused.stderr}`, /import-external-profile|重新运行 larkin setup/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[app].piDistribution, "external");
 
     const providerDir = path.join(temp, "providers", "pi", app);

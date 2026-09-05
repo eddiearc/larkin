@@ -69,7 +69,7 @@ export type ConfigMutation =
   | { kind: "set-chat-mention"; agentId: string; chatId: string; value: MentionPolicyOverride }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
   | { kind: "set-agent-pi-distribution"; agentId: string; distribution: "builtin" | "external" }
-  | { kind: "set-agent-model"; agentId: string; model: string }
+  | { kind: "set-agent-model"; agentId: string; model: string; requireBuiltinPi?: boolean }
   | { kind: "set-agent-effort"; agentId: string; effort: string | null };
 
 export type ConfigAuthority = { kind: "user" } | { kind: "agent"; agentId: string };
@@ -591,7 +591,7 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
       try {
         assertBuiltinPiAgentDirectory(piAgentDirectory(config.configDir, mutation.agentId));
       } catch (error) {
-        throw new Error(`无法切换到 builtin-pi：${error instanceof Error ? error.message : String(error)}。请先运行 larkin setup 并为该 Agent 选择 builtin-pi 完成 provider 配置`);
+        throw new Error(`无法切换到 builtin-pi：${error instanceof Error ? error.message : String(error)}。请使用 Dashboard Provider Credentials 或 larkin pi-auth login。`);
       }
     }
     assertModel(stored.runtime, mutation.model || "default");
@@ -601,6 +601,9 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     else delete agent.piDistribution;
     delete agent.effort;
   } else if (mutation.kind === "set-agent-model") {
+    if (mutation.requireBuiltinPi && (agent.runtime !== "pi" || agent.piDistribution !== "builtin")) {
+      throw new Error(`Agent ${mutation.agentId} 不是内置 Pi`);
+    }
     if (!mutation.model.trim()) throw new Error("model 不能为空");
     assertModel(agent.runtime, mutation.model);
     const changedModel = mutation.model !== agent.model;

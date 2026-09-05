@@ -128,6 +128,17 @@ test("local control keeps upsert ID idempotency and coalesces only concurrent re
     assert.equal(invalid.ok, false);
     assert.match(invalid.error, /未知字段/);
     assert.doesNotMatch(output, /must-not-pass/);
+    const badSignature = await rawRequest(socket, {
+      operationId: "operation_bad_sig_1", agentId: "cli_newA1", authorization: authority.token,
+      expectedSignature: "not-a-signature",
+    });
+    assert.equal(badSignature.ok, false);
+    assert.match(badSignature.error, /expectedSignature/);
+    const signed = await requestAgentUpsert({
+      larkinHome: root, agentId: "cli_newA1", operationId: "operation_signed_1",
+      expectedSignature: `sha256:${"a".repeat(64)}`,
+    });
+    assert.equal(signed.ok, true);
 
     const resetCalls = () => fs.readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("reset:")).length;
     const [reset, concurrentReset] = await Promise.all([

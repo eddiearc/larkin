@@ -27,6 +27,21 @@ export {
 } from "../runtime/user-runtime.js";
 export type MentionPolicy = "require" | "free";
 export type MentionPolicyOverride = MentionPolicy | "inherit";
+export type InboxAuditEnabledOverride = boolean | "inherit";
+export type InboxAuditIntervalOverride = number | "inherit";
+
+export interface InboxAuditSettings {
+  enabled?: boolean;
+  intervalMs?: number;
+}
+export interface InboxAuditResolved {
+  enabled: boolean;
+  intervalMs: number;
+}
+
+export const DEFAULT_INBOX_AUDIT_INTERVAL_MS = 15 * 60_000;
+export const MIN_INBOX_AUDIT_INTERVAL_MS = 60_000;
+export const MAX_INBOX_AUDIT_INTERVAL_MS = 24 * 60 * 60_000;
 
 export interface StoredAgent {
   runtime: string;
@@ -35,6 +50,7 @@ export interface StoredAgent {
   effort?: string;
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
+  inboxAudit?: InboxAuditSettings;
   createdAt?: string;
 }
 
@@ -55,6 +71,7 @@ export interface HydratedConfig {
   version: 4;
   serverId: string | null;
   mentionPolicy: MentionPolicy;
+  inboxAudit?: InboxAuditResolved;
   configDir: string;
   larkinHome: string;
   larkConfigDir: string;
@@ -67,6 +84,8 @@ export type ConfigMutation =
   | { kind: "set-global-mention"; value: MentionPolicy }
   | { kind: "set-agent-mention"; agentId: string; value: MentionPolicyOverride }
   | { kind: "set-chat-mention"; agentId: string; chatId: string; value: MentionPolicyOverride }
+  | { kind: "set-global-inbox-audit"; enabled?: boolean; intervalMs?: number }
+  | { kind: "set-agent-inbox-audit"; agentId: string; enabled?: InboxAuditEnabledOverride; intervalMs?: InboxAuditIntervalOverride }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
   | { kind: "set-agent-pi-distribution"; agentId: string; distribution: "builtin" | "external" }
   | { kind: "set-agent-model"; agentId: string; model: string }
@@ -88,8 +107,10 @@ interface ConfigApplyFile { version: 1; persistedRevision: string; agents: Recor
 
 const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
+const OPTIONAL_TOP_FIELDS_V4 = new Set(["inboxAudit"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "inboxAudit", "createdAt"]);
+const INBOX_AUDIT_FIELDS = new Set(["enabled", "intervalMs"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -156,6 +177,88 @@ function assertPolicy(value: unknown, label: string): asserts value is MentionPo
   if (value !== "require" && value !== "free") throw new Error(`${label} 只允许 require/free`);
 }
 
+export function assertInboxAuditInterval(value: unknown, label = "inbox-audit interval"): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < MIN_INBOX_AUDIT_INTERVAL_MS || value > MAX_INBOX_AUDIT_INTERVAL_MS) {
+    throw new Error(`${label} 必须是 ${MIN_INBOX_AUDIT_INTERVAL_MS}–${MAX_INBOX_AUDIT_INTERVAL_MS} 毫秒`);
+  }
+}
+
+export function parseInboxAuditInterval(value: string): number {
+  if (typeof value !== "string" || !value) throw new Error("inbox-audit interval 不能为空");
+  let milliseconds: number;
+  if (/^[1-9]\d*$/.test(value)) milliseconds = Number(value);
+  else {
+    const match = /^([1-9]\d*)(m|h)$/.exec(value);
+    if (!match) throw new Error("inbox-audit interval 只允许 15m/1h 或 60000–86400000 毫秒");
+    milliseconds = Number(match[1]) * (match[2] === "h" ? 3_600_000 : 60_000);
+  }
+  assertInboxAuditInterval(milliseconds);
+  return milliseconds;
+}
+
+export function formatInboxAuditInterval(intervalMs: number): string {
+  if (intervalMs % 3_600_000 === 0) return `${intervalMs / 3_600_000}h`;
+  if (intervalMs % 60_000 === 0) return `${intervalMs / 60_000}m`;
+  return `${intervalMs}ms`;
+}
+
+function parseStoredInboxAudit(value: unknown, label: string): InboxAuditSettings {
+  if (!isPlainObject(value)) throw new Error(`${label} 必须是普通 object`);
+  assertAllowedFields(value, INBOX_AUDIT_FIELDS, label);
+  const settings: InboxAuditSettings = {};
+  if (Object.hasOwn(value, "enabled")) {
+    if (typeof value.enabled !== "boolean") throw new Error(`${label}.enabled 必须是 boolean`);
+    settings.enabled = value.enabled;
+  }
+  if (Object.hasOwn(value, "intervalMs")) {
+    assertInboxAuditInterval(value.intervalMs, `${label}.intervalMs`);
+    settings.intervalMs = value.intervalMs;
+  }
+  return settings;
+}
+
+function resolvedInboxAudit(settings: InboxAuditSettings | undefined): InboxAuditResolved {
+  return {
+    enabled: settings?.enabled ?? false,
+    intervalMs: settings?.intervalMs ?? DEFAULT_INBOX_AUDIT_INTERVAL_MS,
+  };
+}
+
+export function inboxAuditMutationFromCli(input: {
+  scope: string;
+  enabled: string | undefined;
+  interval: string | undefined;
+  agentId: string;
+}): ConfigMutation {
+  if (input.scope === "global") {
+    if (input.enabled !== "on" && input.enabled !== "off") {
+      throw new Error("用法: larkin config inbox-audit global <on|off> [--interval <15m|1h>]");
+    }
+    const mutation: Extract<ConfigMutation, { kind: "set-global-inbox-audit" }> = {
+      kind: "set-global-inbox-audit", enabled: input.enabled === "on",
+    };
+    if (input.interval !== undefined) {
+      if (input.interval === "inherit") throw new Error("全局 inbox-audit 不支持 interval=inherit");
+      mutation.intervalMs = parseInboxAuditInterval(input.interval);
+    }
+    return mutation;
+  }
+  if (input.scope === "agent") {
+    if (input.enabled !== "on" && input.enabled !== "off" && input.enabled !== "inherit") {
+      throw new Error("用法: larkin config inbox-audit agent <inherit|on|off> [--agent <App ID>] [--interval <15m|inherit>]");
+    }
+    const mutation: Extract<ConfigMutation, { kind: "set-agent-inbox-audit" }> = {
+      kind: "set-agent-inbox-audit", agentId: input.agentId,
+      enabled: input.enabled === "inherit" ? "inherit" : input.enabled === "on",
+    };
+    if (input.interval !== undefined) {
+      mutation.intervalMs = input.interval === "inherit" ? "inherit" : parseInboxAuditInterval(input.interval);
+    }
+    return mutation;
+  }
+  throw new Error("inbox-audit scope 只支持 global/agent");
+}
+
 function assertModel(runtime: string, model: string): void {
   if (model === "default") return;
   const safe = runtime === "pi" ? PI_MODEL.test(model)
@@ -194,6 +297,7 @@ function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asser
     }
   }
   if (version === 4 && Object.hasOwn(agent, "mentionPolicy")) assertPolicy(agent.mentionPolicy, `Agent ${key}.mentionPolicy`);
+  if (version === 4 && Object.hasOwn(agent, "inboxAudit")) parseStoredInboxAudit(agent.inboxAudit, `Agent ${key}.inboxAudit`);
   if (version === 4 && Object.hasOwn(agent, "chatMentionPolicies")) {
     if (!isPlainObject(agent.chatMentionPolicies)) throw new Error(`Agent ${key}.chatMentionPolicies 必须是普通 object`);
     for (const [chatId, policy] of Object.entries(agent.chatMentionPolicies)) {
@@ -219,6 +323,7 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
     ...(agent.piDistribution === "external" || agent.piDistribution === "builtin" ? { piDistribution: agent.piDistribution } : {}),
     ...(typeof agent.effort === "string" ? { effort: agent.effort } : {}),
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
+    ...(version === 4 && Object.hasOwn(agent, "inboxAudit") ? { inboxAudit: parseStoredInboxAudit(agent.inboxAudit, `Agent ${key}.inboxAudit`) } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
     ...(typeof agent.createdAt === "string" ? { createdAt: agent.createdAt } : {}),
   };
@@ -234,6 +339,7 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
     larkConfigDir: path.join(layout.agentStateDir(key), "lark-cli-config"),
     ...(agent.effort ? { effort: agent.effort } : {}),
     ...(agent.mentionPolicy ? { mentionPolicy: agent.mentionPolicy } : {}),
+    ...(agent.inboxAudit ? { inboxAudit: { ...agent.inboxAudit } } : {}),
     ...(agent.chatMentionPolicies ? { chatMentionPolicies: { ...agent.chatMentionPolicies } } : {}),
     ...(agent.noMentionChats ? { noMentionChats: [...agent.noMentionChats] } : {}),
     ...(agent.createdAt ? { createdAt: agent.createdAt } : {}),
@@ -250,7 +356,7 @@ export function normalizeConfig(raw: unknown, configDir: string, { mint }: { min
   const version = raw.version;
   if (version !== 3 && version !== 4) throw new Error("不支持该配置格式：larkin 只接受 version=3/4");
   const topFields = version === 3 ? TOP_FIELDS_V3 : TOP_FIELDS_V4;
-  assertAllowedFields(raw, topFields, "config");
+  assertAllowedFields(raw, version === 4 ? new Set([...TOP_FIELDS_V4, ...OPTIONAL_TOP_FIELDS_V4]) : topFields, "config");
   for (const field of topFields) if (!Object.hasOwn(raw, field)) throw new Error(`config 缺少必需字段 ${field}`);
   if (typeof raw.serverId !== "string" || !raw.serverId) throw new Error("config.serverId 必须是非空字符串");
   if (version === 4) assertPolicy(raw.mentionPolicy, "config.mentionPolicy");
@@ -260,8 +366,12 @@ export function normalizeConfig(raw: unknown, configDir: string, { mint }: { min
   if (raw.activeAgent !== null && !Object.hasOwn(raw.agents, raw.activeAgent)) throw new Error(`config.activeAgent 指向不存在的 Agent：${raw.activeAgent}`);
   const agents: Record<string, HydratedAgent> = {};
   for (const [key, agent] of Object.entries(raw.agents)) agents[key] = hydrateAgent(key, hydratedStoredAgent(key, agent as Obj, version), layout.root);
+  const inboxAudit = version === 4 && Object.hasOwn(raw, "inboxAudit")
+    ? resolvedInboxAudit(parseStoredInboxAudit(raw.inboxAudit, "config.inboxAudit"))
+    : undefined;
   return {
     version: 4, serverId: raw.serverId, mentionPolicy: version === 4 ? raw.mentionPolicy as MentionPolicy : "require",
+    ...(inboxAudit ? { inboxAudit } : {}),
     configDir: layout.configDir, larkinHome: layout.larkinHome, larkConfigDir: resolveLarkConfigDir({}, layout.root), activeAgent: raw.activeAgent as string | null, agents,
   };
 }
@@ -342,14 +452,23 @@ export function selectAgent(config: HydratedConfig, env: Env = process.env): Hyd
   return agents[config.activeAgent];
 }
 
-export function toStored(config: HydratedConfig): { version: 4; serverId: string | null; mentionPolicy: MentionPolicy; activeAgent: string | null; agents: Record<string, StoredAgent> } {
-  const out = { version: 4 as const, serverId: config.serverId, mentionPolicy: config.mentionPolicy, activeAgent: config.activeAgent, agents: {} as Record<string, StoredAgent> };
+export function toStored(config: HydratedConfig): {
+  version: 4; serverId: string | null; mentionPolicy: MentionPolicy; inboxAudit?: InboxAuditResolved;
+  activeAgent: string | null; agents: Record<string, StoredAgent>;
+} {
+  const out: ReturnType<typeof toStored> = {
+    version: 4, serverId: config.serverId, mentionPolicy: config.mentionPolicy, activeAgent: config.activeAgent, agents: {},
+  };
+  if (config.inboxAudit) out.inboxAudit = { enabled: config.inboxAudit.enabled, intervalMs: config.inboxAudit.intervalMs };
   for (const [key, agent] of Object.entries(config.agents || {})) {
     const stored: StoredAgent = { runtime: agent.runtime, model: agent.model };
     if (agent.piDistribution) stored.piDistribution = agent.piDistribution;
     if (typeof agent.effort === "string" && agent.effort) stored.effort = agent.effort;
     if (agent.mentionPolicy) stored.mentionPolicy = agent.mentionPolicy;
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
+    if (agent.inboxAudit && (agent.inboxAudit.enabled !== undefined || agent.inboxAudit.intervalMs !== undefined)) {
+      stored.inboxAudit = { ...agent.inboxAudit };
+    }
     if (typeof agent.createdAt === "string" && agent.createdAt) stored.createdAt = agent.createdAt;
     out.agents[key] = stored;
   }
@@ -376,6 +495,23 @@ export function resolveAgentGlobalMentionPolicy(config: HydratedConfig, agentId:
   return { effective: config.mentionPolicy, source: "global" };
 }
 
+export function resolveInboxAuditSchedule(config: HydratedConfig, agentId: string): InboxAuditResolved & {
+  enabledSource: "agent" | "global" | "default";
+  intervalSource: "agent" | "global" | "default";
+} {
+  const agent = config.agents[agentId];
+  if (!agent) throw new Error(`Agent 不存在：${agentId}`);
+  const enabled = agent.inboxAudit?.enabled ?? config.inboxAudit?.enabled ?? false;
+  const intervalMs = agent.inboxAudit?.intervalMs ?? config.inboxAudit?.intervalMs ?? DEFAULT_INBOX_AUDIT_INTERVAL_MS;
+  assertInboxAuditInterval(intervalMs);
+  return {
+    enabled,
+    intervalMs,
+    enabledSource: agent.inboxAudit?.enabled !== undefined ? "agent" : config.inboxAudit ? "global" : "default",
+    intervalSource: agent.inboxAudit?.intervalMs !== undefined ? "agent" : config.inboxAudit?.intervalMs !== undefined ? "global" : "default",
+  };
+}
+
 function revision(bytes: Buffer | string): string {
   return `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
 }
@@ -387,6 +523,7 @@ function agentSignature(config: HydratedConfig, agentId: string): string {
   return revision(JSON.stringify({
     runtime: agent.runtime, model: agent.model, piDistribution: agent.piDistribution ?? null, effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
+    globalInboxAudit: config.inboxAudit ?? null, agentInboxAudit: agent.inboxAudit ?? null,
   }));
 }
 
@@ -564,11 +701,36 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     config.mentionPolicy = mutation.value;
     return { scope: "global", runtimeChange: false, affectedAgentIds: Object.keys(config.agents) };
   }
+  if (mutation.kind === "set-global-inbox-audit") {
+    if (mutation.enabled === undefined && mutation.intervalMs === undefined) throw new Error("inbox-audit 全局变更必须包含 enabled 或 interval");
+    const current = resolvedInboxAudit(config.inboxAudit);
+    if (mutation.enabled !== undefined) current.enabled = mutation.enabled;
+    if (mutation.intervalMs !== undefined) {
+      assertInboxAuditInterval(mutation.intervalMs, "全局 inbox-audit interval");
+      current.intervalMs = mutation.intervalMs;
+    }
+    config.inboxAudit = current;
+    return { scope: "global", runtimeChange: false, affectedAgentIds: Object.keys(config.agents) };
+  }
   if (!APP_ID.test(mutation.agentId) || !config.agents[mutation.agentId]) throw new Error(`Agent 不存在：${mutation.agentId}`);
   const agent = config.agents[mutation.agentId];
   if (mutation.kind === "set-agent-mention") {
     if (mutation.value === "inherit") delete agent.mentionPolicy;
     else { assertPolicy(mutation.value, "Agent mention policy"); agent.mentionPolicy = mutation.value; }
+    return { scope: "agent", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
+  }
+  if (mutation.kind === "set-agent-inbox-audit") {
+    if (mutation.enabled === undefined && mutation.intervalMs === undefined) throw new Error("inbox-audit Agent 变更必须包含 enabled 或 interval");
+    const current: InboxAuditSettings = { ...(agent.inboxAudit || {}) };
+    if (mutation.enabled === "inherit") delete current.enabled;
+    else if (mutation.enabled !== undefined) current.enabled = mutation.enabled;
+    if (mutation.intervalMs === "inherit") delete current.intervalMs;
+    else if (mutation.intervalMs !== undefined) {
+      assertInboxAuditInterval(mutation.intervalMs, "Agent inbox-audit interval");
+      current.intervalMs = mutation.intervalMs;
+    }
+    if (current.enabled === undefined && current.intervalMs === undefined) delete agent.inboxAudit;
+    else agent.inboxAudit = current;
     return { scope: "agent", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
   }
   if (mutation.kind === "set-chat-mention") {
@@ -980,8 +1142,24 @@ export function safeConfigView(config: HydratedConfig, onlyAgentId?: string, cha
       source: agent.mentionPolicy ? "agent" : "global",
       ...(chatId ? { chat: { chatId, override: agent.chatMentionPolicies?.[chatId] ?? "inherit", ...resolveMentionPolicy(config, agentId, chatId) } } : {}),
     },
+    inboxAudit: (() => {
+      const resolved = resolveInboxAuditSchedule(config, agentId);
+      return {
+        override: {
+          enabled: agent.inboxAudit?.enabled === undefined ? "inherit" : agent.inboxAudit.enabled ? "on" : "off",
+          intervalMs: agent.inboxAudit?.intervalMs ?? "inherit",
+        },
+        effective: { enabled: resolved.enabled, intervalMs: resolved.intervalMs },
+        source: { enabled: resolved.enabledSource, intervalMs: resolved.intervalSource },
+      };
+    })(),
     chatMentionPolicies: { ...(agent.chatMentionPolicies || {}) },
     apply: (applyState?.agents as Record<string, unknown> | undefined)?.[agentId] ?? { applyState: "unknown" },
   }));
-  return { version: 4, mentionPolicy: config.mentionPolicy, persistedRevision: applyState?.persistedRevision ?? "unknown", agents };
+  const inboxAudit = resolvedInboxAudit(config.inboxAudit);
+  return {
+    version: 4, mentionPolicy: config.mentionPolicy,
+    inboxAudit: { enabled: inboxAudit.enabled, intervalMs: inboxAudit.intervalMs },
+    persistedRevision: applyState?.persistedRevision ?? "unknown", agents,
+  };
 }

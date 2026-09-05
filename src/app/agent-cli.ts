@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
 import * as larkinConfig from "../platform/config.js";
 import { projectInboxCheck, projectInboxEvents, type InboxEnvelope } from "../agent/inbox-projection.js";
-import { inboxAuditRegistryFile, readInboxAuditTargets } from "../agent/missed-outbound-scan.js";
+import { completeInboxAuditTargets, inboxAuditRegistryFile, readInboxAuditTargets } from "../agent/missed-outbound-scan.js";
 import { createReminderRoutes } from "../agent/reminder-routes.js";
 import { InteractionStateMachine } from "../agent/interaction-state-machine.js";
 import { issueCallbackProbe, readCallbackCapability } from "../platform/callback-capability.js";
@@ -175,7 +175,7 @@ function agentConfigRequest(
   const [operation = "show", ...rest] = argv;
   const authority = { kind: "agent" as const, agentId: agent.agentId };
   const options = parseOptions(rest, new Set(["--json"]));
-  const unknownFlags = [...options.values.keys()].filter((flag) => !["--agent", "--chat", "--model"].includes(flag));
+  const unknownFlags = [...options.values.keys()].filter((flag) => !["--agent", "--chat", "--model", "--interval"].includes(flag));
   if (unknownFlags.length) throw new Error(`config 不支持参数：${unknownFlags.join(", ")}；运行 larkin config --help`);
   const assertOnlyFlags = (valueFlags: readonly string[], booleanFlags: readonly string[] = []): void => {
     const allowedValues = new Set(valueFlags);
@@ -237,6 +237,20 @@ function agentConfigRequest(
     } else if (scope === "chat" && options.positionals.length === 3 && first?.startsWith("oc_") && ["inherit", "require", "free"].includes(second || "")) {
       mutation = { kind: "set-chat-mention", agentId: targetId, chatId: first, value: second as larkinConfig.MentionPolicyOverride };
     } else throw new Error("用法: larkin config mention global <require|free> | mention agent <inherit|require|free> | mention chat <oc_id> <inherit|require|free> [--agent <App ID>]");
+  } else if (operation === "inbox-audit") {
+    const [scope, first] = options.positionals;
+    if (scope === "global") assertOnlyFlags(["--interval"]);
+    else if (scope === "agent") assertOnlyFlags(["--agent", "--interval"]);
+    else assertOnlyFlags([]);
+    if (options.positionals.length !== 2) {
+      throw new Error("用法: larkin config inbox-audit global <on|off> [--interval <15m|1h>] | inbox-audit agent <inherit|on|off> [--agent <App ID>] [--interval <15m|inherit>]");
+    }
+    mutation = larkinConfig.inboxAuditMutationFromCli({
+      scope: scope || "",
+      enabled: first,
+      interval: options.values.get("--interval"),
+      agentId: targetId,
+    });
   } else if (operation === "apply") {
     assertOnlyFlags(["--agent"]);
     if (options.positionals.length) throw new Error("用法: larkin config apply [--agent <App ID>]");
@@ -246,7 +260,7 @@ function agentConfigRequest(
       larkinConfig.markConfigApplied(env, targetId, expectedSignature);
       return { ok: true, agentId: targetId, applyState: "applied", result };
     }).catch((error) => { throw new Error(`配置已保存但未应用：${error instanceof Error ? error.message : String(error)}`); });
-  } else throw new Error("config 只支持 show/runtime/model/effort/mention/apply；运行 larkin config --help");
+  } else throw new Error("config 只支持 show/runtime/model/effort/mention/inbox-audit/apply；运行 larkin config --help");
   const result = larkinConfig.mutateConfig(env, mutation, authority);
   return { ok: true, revision: result.revision, persisted: true, applyState: result.applyState, changedScope: result.changedScope };
 }
@@ -493,7 +507,10 @@ export function runAgentCli(
         if (options.positionals.length || options.values.size || options.booleans.size > 1) {
           throw new Error("inbox audit 只接受 --json");
         }
-        emitJson(io, readInboxAuditTargets(inboxAuditRegistryFile(config.larkinHome), agent.agentId));
+        const file = inboxAuditRegistryFile(config.larkinHome);
+        const audit = readInboxAuditTargets(file, agent.agentId);
+        completeInboxAuditTargets(file, agent.agentId);
+        emitJson(io, audit);
         return 0;
       }
       if (options.positionals.length || [...options.values.keys()].some((flag) => !["--target", "--limit"].includes(flag))) {

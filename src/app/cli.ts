@@ -83,6 +83,7 @@ Examples:
   larkin config show --agent cli_x --chat oc_x --json
   larkin config runtime pi --agent cli_x --model default
   larkin config mention chat oc_x free --agent cli_x
+  larkin config inbox-audit global on --interval 15m
 
 Credentials, internal paths, serverId, activeAgent, and raw config are never exposed here.`,
   session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>]

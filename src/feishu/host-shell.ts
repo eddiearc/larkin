@@ -19,8 +19,8 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
-import { InboxAuditHeartbeat } from "../agent/inbox-audit-heartbeat.js";
-import { inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed-outbound-scan.js";
+import { InboxAuditHeartbeat, INBOX_AUDIT_CADENCE_MS } from "../agent/inbox-audit-heartbeat.js";
+import { hasPendingInboxAuditTargets, inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
@@ -35,7 +35,7 @@ import {
   type PersistedAuthFailure,
 } from "../runtime/runtime-readiness.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
-import { loadConfig, resolveMentionPolicy } from "../platform/config.js";
+import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { isChannelReconnecting, isRuntimeReadinessCurrent } from "../app/agent-readiness.js";
@@ -485,13 +485,27 @@ export function createHostShell({
   };
   for (const agent of agents) prepareAgentState(agent);
   const reminder = new HostReminderOrchestrator({ agents, stateStore, envelopeProjector, deliveryTarget: runtimeHost, log });
+  const auditRegistry = inboxAuditRegistryFile(larkinHome);
   const inboxAudit = new InboxAuditHeartbeat({
     agents,
     stateStore,
     runtimeHost,
     log,
+    schedule(agent) {
+      try { return resolveInboxAuditSchedule(loadConfig(env).config, agent.agentId); }
+      catch (error) {
+        log(`inbox audit schedule 读取失败 agent=${agent.agentId}: ${errorMessage(error)}`);
+        return { enabled: false, intervalMs: INBOX_AUDIT_CADENCE_MS };
+      }
+    },
+    shouldDispatch(agent) {
+      try { return hasPendingInboxAuditTargets(auditRegistry, agent.agentId); }
+      catch (error) {
+        log(`inbox audit pending 读取失败 agent=${agent.agentId}: ${errorMessage(error)}`);
+        return false;
+      }
+    },
   });
-  const auditRegistry = inboxAuditRegistryFile(larkinHome);
   const seenEventIds = new Set<string>();
   const inFlightEventIds = new Set<string>();
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
@@ -527,7 +541,7 @@ export function createHostShell({
         // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
         try {
-          observeInboxAuditTarget(auditRegistry, agent.agentId, event);
+          observeInboxAuditTarget(auditRegistry, agent.agentId, { ...event, wake });
         } catch (error) {
           log(`inbox audit target 未持久化: ${(error as Error).message}`);
         }

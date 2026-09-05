@@ -159,7 +159,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(checked(runCli(["--help"]), "standalone help").stdout, /Usage:\s*larkin <command>/);
     assert.equal(checked(runCli(["--version"]), "standalone version").stdout.trim(), `larkin ${PACKAGE.version}`);
     const configHelp = checked(runCli(["help", "config"]), "standalone config help").stdout;
-    for (const token of ["config runtime", "config model", "config effort", "config mention global", "config mention agent", "config mention chat", "config apply", "--agent", "--chat"]) {
+    for (const token of ["config runtime", "config model", "config effort", "config mention global", "config mention agent", "config mention chat", "config inbox-audit global", "config inbox-audit agent", "config apply", "--agent", "--chat", "--interval"]) {
       assert.match(configHelp, new RegExp(token), `config help missing ${token}`);
     }
     assert.equal(JSON.parse(checked(runCli(["config", "show", "--agent", appId, "--json"]), "config show").stdout).agents[0].agentId, appId);

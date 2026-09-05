@@ -197,6 +197,78 @@ test("injection resolvers never open the user's Pi auth.json", async () => {
   }
 });
 
+function trackFsOpens() {
+  const opened = [];
+  const track = (orig) => function tracked(...args) {
+    if (args[0] !== undefined && args[0] !== null) opened.push(path.resolve(String(args[0])));
+    return orig.apply(this, args);
+  };
+  const originals = {
+    readFileSync: fs.readFileSync,
+    existsSync: fs.existsSync,
+    openSync: fs.openSync,
+    accessSync: fs.accessSync,
+    statSync: fs.statSync,
+    lstatSync: fs.lstatSync,
+    realpathSync: fs.realpathSync,
+  };
+  for (const [name, orig] of Object.entries(originals)) fs[name] = track(orig);
+  return {
+    opened,
+    restore() {
+      for (const [name, orig] of Object.entries(originals)) fs[name] = orig;
+    },
+  };
+}
+
+function writeInstalledPiSubagentsPackage(agentDir, extensions) {
+  const packageDir = path.join(agentDir, "n" + "pm", "node_modules", "@tintinweb", "pi-subagents");
+  fs.mkdirSync(path.join(packageDir, "src"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(agentDir, "settings.json"),
+    JSON.stringify({ packages: ["n" + "pm:@tintinweb/pi-subagents"] }));
+  fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ pi: { extensions } }));
+  return packageDir;
+}
+
+test("manifest extension escapes and symlink entries are unverifiable and never open auth.json", async () => {
+  const { resolvePiSubagentExtensionArg } = await import("../../../dist/runtime/pi-subagent-injection.mjs");
+  const cases = [
+    {
+      name: "relative-escape",
+      extensions: ["../../../../auth.json"],
+      link: false,
+    },
+    {
+      name: "symlink-entry",
+      extensions: ["./evil.js"],
+      link: true,
+    },
+  ];
+  for (const fixture of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-subagents-${fixture.name}-`));
+    const agentDir = path.join(root, ".pi", "agent");
+    fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    const canary = path.join(agentDir, "auth.json");
+    fs.writeFileSync(canary, `${JSON.stringify({ canary: "do-not-read" })}\n`, { mode: 0o600 });
+    const packageDir = writeInstalledPiSubagentsPackage(agentDir, fixture.extensions);
+    if (fixture.link) fs.symlinkSync(canary, path.join(packageDir, "evil.js"));
+    fs.chmodSync(canary, 0o000);
+    const spy = trackFsOpens();
+    try {
+      assert.throws(() => resolvePiSubagentExtensionArg(
+        { distribution: "external", piCommand: "pi", env: { HOME: root, PI_CODING_AGENT_DIR: agentDir } },
+        () => ({ major: 0, minor: 84 }),
+        () => "/tmp/fake/pi-subagents.bundle.js",
+      ), /WARNING: refusing external Pi.*unbounded or unverifiable/, fixture.name);
+      assert.equal(spy.opened.some((file) => path.basename(file) === "auth.json"), false, `${fixture.name}: ${JSON.stringify(spy.opened)}`);
+    } finally {
+      spy.restore();
+      try { fs.chmodSync(canary, 0o600); } catch { /* cleanup */ }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("userPiAlreadyHasSubagentsExtension detects settings packages and package dir", async () => {
   const { userPiAlreadyHasSubagentsExtension } = await import("../../../dist/runtime/pi-subagent-injection.mjs");
   const fsMod = await import("node:fs");

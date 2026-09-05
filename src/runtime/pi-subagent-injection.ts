@@ -193,13 +193,42 @@ const SUPERVISED_COMMAND_CAPABILITY = "larkin-pi-supervised-command-v1";
 
 type UserPiSubagentsWaitCapability = "absent" | "bounded" | "unbounded";
 
+function assertRegularFile(file: string): void {
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("user Pi path is not a regular file");
+}
+
+function readRegularFile(file: string): string {
+  assertRegularFile(file);
+  return fs.readFileSync(file, "utf8");
+}
+
+function isRealpathInside(root: string, candidate: string): boolean {
+  const rootReal = fs.realpathSync(root);
+  const candidateReal = fs.realpathSync(candidate);
+  const prefix = rootReal.endsWith(path.sep) ? rootReal : `${rootReal}${path.sep}`;
+  return candidateReal.startsWith(prefix);
+}
+
+/** 只读包根内的常规文件；绝对路径、逃逸、符号链接一律视为不可验证。 */
+function readContainedPackageEntry(packageRoot: string, entry: string): string {
+  if (path.isAbsolute(entry)) throw new Error("absolute Pi extension entry");
+  const root = path.resolve(packageRoot);
+  const resolved = path.resolve(root, entry);
+  const lexicalPrefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (resolved !== root && !resolved.startsWith(lexicalPrefix)) throw new Error("Pi extension entry escaped package root");
+  assertRegularFile(resolved);
+  if (!isRealpathInside(root, resolved)) throw new Error("Pi extension entry escaped package root");
+  return fs.readFileSync(resolved, "utf8");
+}
+
 function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsWaitCapability {
   const agentDir = env.PI_CODING_AGENT_DIR || path.join(env.HOME || process.env.HOME || "", ".pi", "agent");
   try {
     let configured = false;
     const settingsFile = path.join(agentDir, "settings.json");
     if (fs.existsSync(settingsFile)) {
-      const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+      const settings = JSON.parse(readRegularFile(settingsFile));
       const packages: unknown = settings?.packages;
       if (Array.isArray(packages)) {
         configured = packages.some((entry) => typeof entry === "string" && /pi-subagents/i.test(entry));
@@ -214,7 +243,7 @@ function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsW
     const installedRoot = packageRoots.find((root) => fs.existsSync(root));
     if (!configured && !installedRoot) return "absent";
     if (!installedRoot) return "unbounded";
-    const packageManifest = JSON.parse(fs.readFileSync(path.join(installedRoot, "package.json"), "utf8")) as {
+    const packageManifest = JSON.parse(readRegularFile(path.join(installedRoot, "package.json"))) as {
       pi?: { extensions?: unknown };
     };
     const extensions = packageManifest.pi?.extensions;
@@ -224,17 +253,13 @@ function userPiSubagentsWaitCapability(env: NodeJS.ProcessEnv): UserPiSubagentsW
     }
     // Pi executes the entries declared by the package manifest. Do not trust a
     // marker in a build artifact when the manifest points Pi at another file.
-    const capabilityFiles = extensions.map((entry) => path.resolve(installedRoot, entry));
-    const hasCapability = capabilityFiles.every((file) => {
-      try {
-        const source = fs.readFileSync(file, "utf8");
-        return source.includes(BOUNDED_WAIT_CAPABILITY) && source.includes(SUPERVISED_COMMAND_CAPABILITY);
-      }
-      catch { return false; }
+    const hasCapability = extensions.every((entry) => {
+      const source = readContainedPackageEntry(installedRoot, entry);
+      return source.includes(BOUNDED_WAIT_CAPABILITY) && source.includes(SUPERVISED_COMMAND_CAPABILITY);
     });
     return hasCapability ? "bounded" : "unbounded";
   } catch {
-    // Unreadable user extension state is not safe to treat as bounded.
+    // Unreadable or escaped user extension state is not safe to treat as bounded.
     return "unbounded";
   }
 }

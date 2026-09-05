@@ -12,6 +12,10 @@ export const INBOX_AUDIT_LEGACY_MIGRATION_NON_GOAL = "New versions no longer cre
 // cannot accumulate an unbounded work list.
 export const MAX_INBOX_AUDIT_TARGETS = 96;
 const MAX_STORED_TARGETS = MAX_INBOX_AUDIT_TARGETS;
+// Periodic heartbeat reads this file through a cap+1 fd buffer. Fail closed
+// instead of parsing, slicing, or rewriting an oversized registry.
+export const MAX_INBOX_AUDIT_REGISTRY_BYTES = 64 * 1024;
+export const MAX_INBOX_AUDIT_REGISTRY_ROWS = MAX_INBOX_AUDIT_TARGETS;
 const CHAT = /^oc_[A-Za-z0-9]+$/;
 const THREAD = /^omt_[A-Za-z0-9]+$/;
 const ANCHOR = /^om_[A-Za-z0-9_-]+$/;
@@ -38,13 +42,32 @@ function parseTarget(event: { chat_id?: string; thread_id?: string | null; messa
 }
 
 function load(file: string): AuditRegistry {
-  let value: Partial<AuditRegistry>;
-  try { value = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<AuditRegistry>; }
-  catch (error) {
+  let fd: number | undefined;
+  let bytes: Buffer;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY
+      | (fs.constants.O_NOFOLLOW || 0)
+      | (fs.constants.O_NONBLOCK || 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error("inbox audit registry is not a regular file");
+    const buffer = Buffer.alloc(MAX_INBOX_AUDIT_REGISTRY_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    if (offset > MAX_INBOX_AUDIT_REGISTRY_BYTES) throw new Error("inbox audit registry exceeds the bounded byte limit");
+    bytes = buffer.subarray(0, offset);
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, targets: [] };
     throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
+  const value = JSON.parse(bytes.toString("utf8")) as Partial<AuditRegistry>;
   if (value?.version !== 1 || !Array.isArray(value.targets)) return { version: 1, targets: [] };
+  if (value.targets.length > MAX_INBOX_AUDIT_REGISTRY_ROWS) throw new Error("inbox audit registry exceeds the bounded row limit");
   return { version: 1, targets: value.targets.flatMap((row): StoredTarget[] => {
     if (!row || typeof row !== "object") return [];
     const candidate = row as Partial<StoredTarget>;
@@ -61,23 +84,31 @@ function load(file: string): AuditRegistry {
 }
 
 function save(file: string, registry: AuditRegistry): void {
+  if (registry.targets.length > MAX_INBOX_AUDIT_REGISTRY_ROWS) {
+    throw new Error("inbox audit registry exceeds the bounded row limit");
+  }
+  const serialized = `${JSON.stringify(registry)}\n`;
+  if (Buffer.byteLength(serialized) > MAX_INBOX_AUDIT_REGISTRY_BYTES) {
+    throw new Error("inbox audit registry exceeds the bounded byte limit");
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
-  fs.writeFileSync(temporary, `${JSON.stringify(registry)}\n`, { mode: 0o600 });
+  fs.writeFileSync(temporary, serialized, { mode: 0o600 });
   fs.renameSync(temporary, file);
   fs.chmodSync(file, 0o600);
 }
 
-/** Record only an authoritative human group/topic source; DMs and bots are ignored. */
+/** Record only an originally wake-eligible authoritative human group/topic source. */
 export function observeInboxAuditTarget(file: string, agentId: string, event: {
   chat_id?: string;
   chat_type?: string;
   thread_id?: string | null;
   message_id?: string;
+  wake?: boolean;
   _sender_is_bot?: boolean;
   _scan_authority?: boolean;
 }, now = new Date()): boolean {
-  if (event._scan_authority !== true || event._sender_is_bot !== false || event.chat_type !== "group") return false;
+  if (event.wake !== true || event._scan_authority !== true || event._sender_is_bot !== false || event.chat_type !== "group") return false;
   const parsed = parseTarget(event);
   if (!parsed) return false;
   const registry = load(file);
@@ -87,6 +118,10 @@ export function observeInboxAuditTarget(file: string, agentId: string, event: {
   registry.targets = registry.targets.slice(0, MAX_STORED_TARGETS);
   save(file, registry);
   return true;
+}
+
+export function hasInboxAuditTargets(file: string, agentId: string): boolean {
+  return load(file).targets.some((row) => row.agent_id === agentId);
 }
 
 function instruction(target: InboxAuditTarget): string {

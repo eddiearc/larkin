@@ -63,8 +63,9 @@ test("dashboard uses flat sections and two bounded Workspace scroll regions", ()
   assert.match(app, /className="metrics-band"/);
   assert.match(app, /className="content-section/);
   assert.match(app, /className="config-section"/);
-  assert.match(app, /Provider Credentials/);
-  assert.match(app, /isBuiltinPiAgent/);
+  assert.doesNotMatch(app, /Provider Credentials|isBuiltinPiAgent|\/api\/pi-auth/);
+  assert.match(app, /formatReadiness/);
+  assert.match(app, /readinessFailure/);
   assert.match(app, /className="logs-section"/);
   assert.doesNotMatch(app, /className="(?:metric-card|content-card|config-card|logs-panel)/,
     "major content areas must not return to card-wall primitives");
@@ -89,34 +90,31 @@ test("dashboard Pi model directory is wired to the official catalog authority", 
     "Dashboard Pi discovery must reuse discoverPiModelCatalog instead of creating another catalog implementation");
   assert.match(controller, /createPiModelDirectoryResolver/);
   assert.match(controller, /\/api\/models\/pi/);
-  assert.match(controller, /\/api\/models\/builtin-pi/);
+  assert.doesNotMatch(controller, /\/api\/models\/builtin-pi|\/api\/pi-auth/);
+  assert.match(controller, /probeNativeRuntimeReadiness|probeRuntimeReadiness/);
+  assert.match(controller, /RuntimePrerequisiteError/);
 });
 
-test("Pi catalog isolation deletes host-dir fallbacks and labels builtin versus user Pi", () => {
+test("Dashboard surfaces only three external runtimes and readiness errors", () => {
   const controller = read("src/dashboard/dashboard-config-controller.ts");
   const viewModel = read("src/dashboard/dashboard-view-model.ts");
-  const agentConfig = read("src/app/agent-config.ts");
-  const runtimeDirectory = read("src/app/runtime-model-directory.ts");
   const types = read("src/dashboard/web/types.ts");
   const app = read("src/dashboard/web/app.tsx");
   for (const [name, source] of [
     ["controller", controller],
     ["view-model", viewModel],
-    ["agent-config", agentConfig],
-    ["runtime-model-directory", runtimeDirectory],
+    ["types", types],
+    ["app", app],
   ]) {
+    assert.doesNotMatch(source, /builtin-pi|piDistribution|Provider Credentials|pi-auth|pi-distribution|bundled Pi|auth\.json/, `${name} must not mention removed builtin Pi surfaces`);
     assert.doesNotMatch(source, /PI_CODING_AGENT_DIR\s*\?\s*\{\s*agentDir/, `${name} must not omit agentDir when PI_CODING_AGENT_DIR is unset`);
   }
-  assert.match(types, /piDistribution:\s*"builtin"\s*\|\s*"external"\s*\|\s*null/);
   assert.match(app, /RUNTIME_OPTIONS/);
-  assert.match(app, /builtin-pi/);
+  assert.match(app, /formatReadiness/);
+  assert.match(app, /readinessFailure/);
+  assert.match(app, /runtimeReadiness/);
+  assert.match(types, /runtimeOptions:\s*Array<"codex"\s*\|\s*"claude"\s*\|\s*"pi">/);
   assert.doesNotMatch(app, /Pi 发行版/);
-  assert.match(agentConfig, /toUserRuntime/);
-  assert.match(agentConfig, /RUNTIME_OPTIONS/);
-  assert.match(agentConfig, /builtin-pi/);
   assert.match(read("src/runtime/runtime-model-catalog.ts"), /pi: \[\.\.\.PI_AUTHORED_MODELS\]/);
   assert.doesNotMatch(read("src/runtime/runtime-model-catalog.ts"), /"builtin-pi":/);
-  assert.match(runtimeDirectory, /ownedPiCatalogAgentDir/);
-  assert.match(runtimeDirectory, /piCatalogCommandSpec/);
-  assert.match(runtimeDirectory, /builtin-pi/);
 });

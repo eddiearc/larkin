@@ -12,6 +12,10 @@ export const INBOX_AUDIT_LEGACY_MIGRATION_NON_GOAL = "New versions no longer cre
 // cannot accumulate an unbounded work list.
 export const MAX_INBOX_AUDIT_TARGETS = 96;
 const MAX_STORED_TARGETS = MAX_INBOX_AUDIT_TARGETS;
+// Periodic heartbeat reads this file. Bound the read and fail closed instead of
+// parsing or slicing an oversized registry, which would hide or destroy rows.
+export const MAX_INBOX_AUDIT_REGISTRY_BYTES = 64 * 1024;
+export const MAX_INBOX_AUDIT_REGISTRY_ROWS = MAX_INBOX_AUDIT_TARGETS;
 const CHAT = /^oc_[A-Za-z0-9]+$/;
 const THREAD = /^omt_[A-Za-z0-9]+$/;
 const ANCHOR = /^om_[A-Za-z0-9_-]+$/;
@@ -38,13 +42,20 @@ function parseTarget(event: { chat_id?: string; thread_id?: string | null; messa
 }
 
 function load(file: string): AuditRegistry {
-  let value: Partial<AuditRegistry>;
-  try { value = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<AuditRegistry>; }
-  catch (error) {
+  let bytes: Buffer;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) throw new Error("inbox audit registry is not a regular file");
+    if (stat.size > MAX_INBOX_AUDIT_REGISTRY_BYTES) throw new Error("inbox audit registry exceeds the bounded byte limit");
+    bytes = fs.readFileSync(file);
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, targets: [] };
     throw error;
   }
+  if (bytes.length > MAX_INBOX_AUDIT_REGISTRY_BYTES) throw new Error("inbox audit registry exceeds the bounded byte limit");
+  const value = JSON.parse(bytes.toString("utf8")) as Partial<AuditRegistry>;
   if (value?.version !== 1 || !Array.isArray(value.targets)) return { version: 1, targets: [] };
+  if (value.targets.length > MAX_INBOX_AUDIT_REGISTRY_ROWS) throw new Error("inbox audit registry exceeds the bounded row limit");
   return { version: 1, targets: value.targets.flatMap((row): StoredTarget[] => {
     if (!row || typeof row !== "object") return [];
     const candidate = row as Partial<StoredTarget>;

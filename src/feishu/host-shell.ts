@@ -19,7 +19,7 @@ import {
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
-import { InboxAuditHeartbeat } from "../agent/inbox-audit-heartbeat.js";
+import { boundedInboxAuditDiagnostic, InboxAuditHeartbeat } from "../agent/inbox-audit-heartbeat.js";
 import { hasInboxAuditTargets, inboxAuditRegistryFile, observeInboxAuditTarget } from "../agent/missed-outbound-scan.js";
 import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
@@ -530,7 +530,7 @@ export function createHostShell({
         try {
           observeInboxAuditTarget(auditRegistry, agent.agentId, { ...event, wake });
         } catch (error) {
-          log(`inbox audit target 未持久化: ${(error as Error).message}`);
+          log(`inbox audit target 未持久化: ${boundedInboxAuditDiagnostic(error)}`);
         }
         if (append.status === "duplicate_consumed") return null;
         const inboxEnvelope = append.envelope;

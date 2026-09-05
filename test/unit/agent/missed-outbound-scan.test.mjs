@@ -7,11 +7,16 @@ import { test } from "bun:test";
 import {
   hasInboxAuditTargets,
   inboxAuditRegistryFile,
+  MAX_INBOX_AUDIT_REGISTRY_BYTES,
+  MAX_INBOX_AUDIT_REGISTRY_ROWS,
   MAX_INBOX_AUDIT_TARGETS,
   observeInboxAuditTarget,
   readInboxAuditTargets,
 } from "../../../src/agent/missed-outbound-scan.ts";
-import { InboxAuditHeartbeat } from "../../../src/agent/inbox-audit-heartbeat.ts";
+import {
+  InboxAuditHeartbeat,
+  MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS,
+} from "../../../src/agent/inbox-audit-heartbeat.ts";
 
 const CHAT = "oc_7961b9d7be893b46520a926b90cf46eb";
 const ROUTING_SINK = path.resolve(import.meta.dirname, "../../support/inbox-audit-routing-sink.mjs");
@@ -140,5 +145,75 @@ test("an Agent-scoped audit predicate failure fails closed and does not block a 
   assert.equal(inbox.length, 1);
   assert.equal(logs.length, 1);
   assert.match(logs[0], /cli_brokenAudit.*fixture registry unavailable/);
+  heartbeat.stop();
+});
+
+test("hasInboxAuditTargets fails closed on oversized bytes without truncating the registry", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-bytes-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    const padding = "x".repeat(MAX_INBOX_AUDIT_REGISTRY_BYTES);
+    const original = `${JSON.stringify({ version: 1, targets: [], padding })}\n`;
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, original, { mode: 0o600 });
+    assert.ok(fs.statSync(file).size > MAX_INBOX_AUDIT_REGISTRY_BYTES);
+    assert.throws(() => hasInboxAuditTargets(file, "cli_audit"), /bounded byte limit/);
+    assert.equal(fs.readFileSync(file, "utf8"), original, "oversized registry bytes must stay intact");
+    assert.throws(() => readInboxAuditTargets(file, "cli_audit"), /bounded byte limit/);
+    assert.throws(() => observeInboxAuditTarget(file, "cli_audit", {
+      chat_id: CHAT, chat_type: "group", wake: true, _scan_authority: true, _sender_is_bot: false, message_id: "om_keep",
+    }), /bounded byte limit/);
+    assert.equal(fs.readFileSync(file, "utf8"), original, "failed observe must not rewrite an oversized registry");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("hasInboxAuditTargets fails closed on oversized rows without rewriting the registry", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-rows-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    const original = `${JSON.stringify({
+      version: 1,
+      targets: Array.from({ length: MAX_INBOX_AUDIT_REGISTRY_ROWS + 1 }, (_row, index) => ({
+        agent_id: "cli_audit",
+        target: `chat:${CHAT}`,
+        anchor: `om_row${index}`,
+        observed_at: "2026-09-05T00:00:00.000Z",
+      })),
+    })}\n`;
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, original, { mode: 0o600 });
+    assert.throws(() => hasInboxAuditTargets(file, "cli_audit"), /bounded row limit/);
+    assert.equal(fs.readFileSync(file, "utf8"), original, "oversized registry rows must stay intact");
+    assert.throws(() => observeInboxAuditTarget(file, "cli_audit", {
+      chat_id: CHAT, chat_type: "group", wake: true, _scan_authority: true, _sender_is_bot: false, message_id: "om_keep",
+    }), /bounded row limit/);
+    assert.equal(fs.readFileSync(file, "utf8"), original, "failed observe must not slice or rewrite extra rows");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("heartbeat diagnostics stay bounded when a registry error message is huge", async () => {
+  const timers = [];
+  const logs = [];
+  const marker = "secret-should-not-repeat";
+  const huge = `registry boom ${"x".repeat(8_000)} ${marker}`;
+  const heartbeat = new InboxAuditHeartbeat({
+    agents: [{ agentId: "cli_brokenAudit" }, { agentId: "cli_healthyAudit" }],
+    stateStore: () => ({ appendCanonicalInboxOnce(envelope) { return { status: "appended", envelope }; } }),
+    runtimeHost: { async deliver() {} },
+    shouldDispatch(agent) {
+      if (agent.agentId === "cli_brokenAudit") throw new Error(huge);
+      return false;
+    },
+    log: (...parts) => logs.push(parts.join(" ")),
+    setTimer(callback) { timers.push(callback); return { unref() {} }; },
+    clearTimer() {},
+  });
+  heartbeat.start();
+  await timers[0]();
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /cli_brokenAudit/);
+  assert.ok(logs[0].length <= `inbox audit heartbeat failed agent=cli_brokenAudit: `.length + MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS);
+  assert.equal(logs[0].includes(marker), false);
+  assert.equal(logs[0].includes("x".repeat(200)), false);
   heartbeat.stop();
 });

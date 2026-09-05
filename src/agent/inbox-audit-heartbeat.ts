@@ -4,12 +4,13 @@ export const INBOX_AUDIT_CADENCE_MS = 15 * 60_000;
 export const MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS = 120;
 
 export function boundedInboxAuditDiagnostic(error: unknown): string {
+  const max = MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS;
   const code = error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string"
-    ? (error as { code: string }).code
+    ? (error as { code: string }).code.slice(0, max)
     : "";
   const raw = error instanceof Error ? error.message : String(error);
-  const text = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  return [code, text].filter(Boolean).join(" ").slice(0, MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS);
+  const text = String(raw).slice(0, max).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return [code, text].filter(Boolean).join(" ").slice(0, max);
 }
 
 interface AuditAgent { agentId: string }

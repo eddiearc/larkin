@@ -14,6 +14,7 @@ import {
   readInboxAuditTargets,
 } from "../../../src/agent/missed-outbound-scan.ts";
 import {
+  boundedInboxAuditDiagnostic,
   InboxAuditHeartbeat,
   MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS,
 } from "../../../src/agent/inbox-audit-heartbeat.ts";
@@ -189,6 +190,74 @@ test("hasInboxAuditTargets fails closed on oversized rows without rewriting the 
     }), /bounded row limit/);
     assert.equal(fs.readFileSync(file, "utf8"), original, "failed observe must not slice or rewrite extra rows");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("registry load uses a cap+1 fd buffer and never readFileSyncs the registry", () => {
+  const source = fs.readFileSync(new URL("../../../src/agent/missed-outbound-scan.ts", import.meta.url), "utf8");
+  assert.match(source, /MAX_INBOX_AUDIT_REGISTRY_BYTES \+ 1/);
+  assert.match(source, /readSync\(/);
+  assert.match(source, /fstatSync\(/);
+  assert.match(source, /isFile\(\)/);
+  assert.equal(/readFileSync\(/.test(source), false, "load/save must not call readFileSync");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-fd-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    const original = Buffer.concat([
+      Buffer.from(`${JSON.stringify({ version: 1, targets: [] })}\n`),
+      Buffer.alloc(MAX_INBOX_AUDIT_REGISTRY_BYTES, 0x78),
+    ]);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, original, { mode: 0o600 });
+    assert.ok(original.length > MAX_INBOX_AUDIT_REGISTRY_BYTES);
+    assert.throws(() => hasInboxAuditTargets(file, "cli_audit"), /bounded byte limit/);
+    assert.equal(fs.readFileSync(file).equals(original), true, "capped overflow read must leave the registry intact");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("hasInboxAuditTargets fails closed when the registry path is not a regular file", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-dir-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    fs.mkdirSync(file, { recursive: true, mode: 0o700 });
+    assert.throws(() => hasInboxAuditTargets(file, "cli_audit"), /regular file|EISDIR/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("observe rejects a serialized registry the load cap would refuse and keeps the prior file", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-save-"));
+  try {
+    const file = inboxAuditRegistryFile(root);
+    const common = { chat_id: CHAT, chat_type: "group", wake: true, _scan_authority: true, _sender_is_bot: false };
+    assert.equal(observeInboxAuditTarget(file, "cli_audit", { ...common, message_id: "om_keep" }), true);
+    const prior = fs.readFileSync(file);
+    assert.ok(prior.length > 0 && prior.length <= MAX_INBOX_AUDIT_REGISTRY_BYTES);
+    assert.throws(() => observeInboxAuditTarget(file, `cli_${"x".repeat(MAX_INBOX_AUDIT_REGISTRY_BYTES)}`, {
+      ...common, message_id: "om_overflow",
+    }), /bounded byte limit/);
+    assert.deepEqual(fs.readFileSync(file), prior, "oversized serialize must not replace the prior registry");
+    assert.deepEqual(readInboxAuditTargets(file, "cli_audit").targets.map((row) => row.anchor), ["om_keep"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("diagnostic normalization bounds input before regex or join", () => {
+  const marker = "secret-should-not-repeat";
+  const huge = `boom\n\n${"x".repeat(8_000)}\n${marker}`;
+  const error = new Error(huge);
+  error.code = `E${"Y".repeat(8_000)}`;
+  const lengths = [];
+  const originalReplace = String.prototype.replace;
+  String.prototype.replace = function replace(...args) {
+    lengths.push(this.length);
+    return originalReplace.apply(this, args);
+  };
+  try {
+    const diagnostic = boundedInboxAuditDiagnostic(error);
+    assert.ok(diagnostic.length <= MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS);
+    assert.equal(diagnostic.includes(marker), false);
+    assert.equal(lengths.every((length) => length <= MAX_INBOX_AUDIT_DIAGNOSTIC_CHARS), true);
+  } finally {
+    String.prototype.replace = originalReplace;
+  }
 });
 
 test("heartbeat diagnostics stay bounded when a registry error message is huge", async () => {

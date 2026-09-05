@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-/** External `pi` must be this version or newer; handshake still guards protocol compatibility. */
+/** External `pi` must be this version or newer. Stock 0.84.x does not emit compactionCapabilities. */
 export const MINIMUM_PI_VERSION = "0.84.2";
 
 /** Fallback values used while importing a Pi profile, before Pi reports its model. */
@@ -303,12 +303,20 @@ export function parsePiExecutableVersion(output: string): string {
   return version;
 }
 
+export interface PiCompactionHandshake {
+  reserveTokens?: unknown;
+  keepRecentTokens?: unknown;
+  events?: readonly string[];
+}
+
 export interface PiCapabilityProbe {
   distribution: "builtin" | "external";
   version?: string;
   contextWindow?: number;
   model?: { contextWindow?: number } | null;
   autoCompactionEnabled?: unknown;
+  /** Optional stock-pi handshake; absence is accepted. Flat fields stay for older callers. */
+  compactionCapabilities?: PiCompactionHandshake | null;
   reserveTokens?: unknown;
   keepRecentTokens?: unknown;
   compactRpc?: boolean;
@@ -316,26 +324,50 @@ export interface PiCapabilityProbe {
   trustedProtocol?: boolean;
 }
 
-export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
+export type PiCompactionPolicySource = "handshake-reported" | "larkin-settings-only";
+
+function resolveOptionalHandshake(capabilities: PiCapabilityProbe): PiCompactionHandshake | undefined {
+  if (capabilities.compactionCapabilities !== undefined && capabilities.compactionCapabilities !== null) {
+    return capabilities.compactionCapabilities;
+  }
+  if (capabilities.reserveTokens !== undefined
+      || capabilities.keepRecentTokens !== undefined
+      || capabilities.events !== undefined) {
+    return {
+      reserveTokens: capabilities.reserveTokens,
+      keepRecentTokens: capabilities.keepRecentTokens,
+      events: capabilities.events,
+    };
+  }
+  return undefined;
+}
+
+export function verifyPiCapabilities(capabilities: PiCapabilityProbe): PiCompactionPolicySource {
   assertSupportedPiVersion(capabilities.version);
   if (capabilities.trustedProtocol === true) {
     throw new Error("external Pi cannot use a trusted protocol bypass");
   }
   const contextWindow = capabilities.contextWindow ?? capabilities.model?.contextWindow;
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    throw new Error("Pi capability context window is invalid");
+  }
   const expected = (() => {
-    try { return calculatePiCompactionSettings(contextWindow as number); }
+    try { return calculatePiCompactionSettings(contextWindow); }
     catch { throw new Error("Pi capability context window is invalid"); }
   })();
   if (requireFiniteBoolean(capabilities.autoCompactionEnabled, "Pi autoCompactionEnabled") !== true) {
     throw new Error("Pi effective native compaction is disabled");
   }
   if (capabilities.compactRpc !== true) throw new Error("Pi compact RPC capability is missing");
-  if (capabilities.reserveTokens !== expected.reserveTokens
-      || capabilities.keepRecentTokens !== expected.keepRecentTokens) {
+  const handshake = resolveOptionalHandshake(capabilities);
+  if (handshake === undefined) return "larkin-settings-only";
+  if (handshake.reserveTokens !== expected.reserveTokens
+      || handshake.keepRecentTokens !== expected.keepRecentTokens) {
     throw new Error(`Pi external effective compaction reserve/keep settings are unproven for context window ${contextWindow}`);
   }
-  const events = new Set(capabilities.events || []);
+  const events = new Set(handshake.events || []);
   for (const event of REQUIRED_PI_EVENTS) if (!events.has(event)) throw new Error(`Pi capability event is unproven: ${event}`);
+  return "handshake-reported";
 }
 
 function stateFile(root: string): string {

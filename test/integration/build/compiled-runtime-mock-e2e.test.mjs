@@ -164,7 +164,7 @@ record({ type: "launch", runtime: "pi", args: process.argv.slice(2), agentDir: p
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "get_state") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
-    data: { sessionId: "session-compiled-pi", sessionFile: "/tmp/session-compiled-pi.jsonl", model, thinkingLevel: "off", isStreaming: false, autoCompactionEnabled: true, compactionCapabilities: ${JSON.stringify(piFixtureCompactionCapabilities)} } }) + "\\n");
+    data: { sessionId: "session-compiled-pi", sessionFile: "/tmp/session-compiled-pi.jsonl", model, thinkingLevel: "off", isStreaming: false, autoCompactionEnabled: true } }) + "\\n");
   else if (request.type === "get_available_models") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
     data: { models: process.env.PI_CODING_AGENT_DIR ? [] : [model] } }) + "\\n");
   else if (request.type === "get_session_stats") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,

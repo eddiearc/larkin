@@ -87,7 +87,16 @@ const state = () => {
   const contextWindow = ${mode === "context-mismatch" ? 'probe ? 333333 : 333334' : mode === "context-revalidate" ? 'drift ? 333334 : 333333' : '333333'};
   const model = ${mode === "model-mismatch" ? 'probe ? { provider: "test-provider", id: "test-model" } : { provider: "other-provider", id: "other-model" }' : mode === "model-revalidate" ? 'drift ? { provider: "other-provider", id: "other-model" } : { provider: "test-provider", id: "test-model" }' : '{ provider: "test-provider", id: "test-model" }'};
   const autoCompactionEnabled = ${mode === "auto-revalidate" ? 'drift ? false : true' : 'true'};
-  return { sessionId: "production-session", model: { ...model, contextWindow }, autoCompactionEnabled, thinkingLevel: "medium", compactionCapabilities: { reserveTokens: 50000, keepRecentTokens: 20000, events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"] } };
+  const payload = { sessionId: "production-session", model: { ...model, contextWindow }, autoCompactionEnabled, thinkingLevel: "medium" };
+  const handshake = ${mode === "handshake-mismatch"
+    ? '{ reserveTokens: 1, keepRecentTokens: 1, events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"] }'
+    : mode === "handshake-revalidate"
+    ? 'drift ? { reserveTokens: 1, keepRecentTokens: 1, events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"] } : undefined'
+    : mode === "handshake-present"
+    ? '{ reserveTokens: 50000, keepRecentTokens: 20000, events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"] }'
+    : 'undefined'};
+  if (handshake) payload.compactionCapabilities = handshake;
+  return payload;
 };
 let buffer = "";
 process.stdin.on("data", (chunk) => {
@@ -1056,6 +1065,79 @@ test("production Pi writes compaction into workspace project settings and preser
   }
 });
 
+test("production Pi session starts when stock get_state omits compactionCapabilities", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-stock-handshake-absent-"));
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  const stderr = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, encoding, callback) => {
+    stderr.push(String(chunk));
+    return write(chunk, encoding, callback);
+  };
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => [],
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    session = await adapter.createSession(input);
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+    assert.match(stderr.join(""), /Pi compaction policy source=larkin-settings-only agent=cli_test model=test-provider\/test-model contextWindow=333333/);
+  } finally {
+    process.stderr.write = write;
+    await session?.close("stock handshake absent test complete").catch(() => {});
+  }
+});
+
+test("production Pi session starts when get_state reports a matching compaction handshake", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-handshake-present-"));
+  const { command, commandArgs, log } = makeProductionPiCommand(root, "handshake-present");
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  const stderr = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, encoding, callback) => {
+    stderr.push(String(chunk));
+    return write(chunk, encoding, callback);
+  };
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => [],
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    session = await adapter.createSession(input);
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+    assert.match(stderr.join(""), /Pi compaction policy source=handshake-reported agent=cli_test model=test-provider\/test-model contextWindow=333333/);
+  } finally {
+    process.stderr.write = write;
+    await session?.close("handshake present test complete").catch(() => {});
+  }
+});
+
+test("production Pi startup rejects a present but mismatched compaction handshake", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-handshake-mismatch-"));
+  const { command, commandArgs, log } = makeProductionPiCommand(root, "handshake-mismatch");
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  const adapter = createNativeRuntimeAdapter("pi", {
+    piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => [],
+    piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+  });
+  await assert.rejects(adapter.createSession(input), /unproven/);
+});
+
 test("production Pi session starts when external pi reports 0.84.4", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-production-0844-"));
   const { command, commandArgs, log } = makeProductionPiCommand(root, "stable", "0.84.4");
@@ -1134,7 +1216,7 @@ test.each(["context-mismatch", "model-mismatch"])("production Pi startup rejects
   assert.equal(rows.some((row) => row.kind === "request" && !row.probe && ["prompt", "steer", "compact"].includes(row.type)), false);
 });
 
-test.each(["context-revalidate", "model-revalidate", "auto-revalidate"])("production Pi backend rejects %s before prompt or compact submission", async (mode) => {
+test.each(["context-revalidate", "model-revalidate", "auto-revalidate", "handshake-revalidate"])("production Pi backend rejects %s before prompt or compact submission", async (mode) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-production-revalidate-${mode}-`));
   const { command, commandArgs, log } = makeProductionPiCommand(root, mode);
   const input = create({
@@ -1149,7 +1231,7 @@ test.each(["context-revalidate", "model-revalidate", "auto-revalidate"])("produc
   clearProductionPiLog(log);
   const session = await adapter.createSession(input);
   try {
-    const reason = mode === "auto-revalidate" ? /native compaction must be enabled/ : /changed after startup/;
+    const reason = mode === "auto-revalidate" ? /disabled/ : mode === "handshake-revalidate" ? /unproven/ : /changed after startup/;
     const promptResult = await session.prompt({ inputId: "drift-prompt", kind: "user", text: "prompt", attempt: 0 });
     assert.equal(promptResult.status, "rejected");
     assert.match(promptResult.reason, reason);

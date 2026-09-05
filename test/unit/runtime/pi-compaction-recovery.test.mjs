@@ -142,7 +142,7 @@ test("external capability guard fails closed and accepts only the required Pi pr
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   };
   for (const version of ["0.84.2", "0.84.4", "0.85.0", "1.0.0"]) {
-    assert.doesNotThrow(() => verifyPiCapabilities({ ...handshake, version }));
+    assert.equal(verifyPiCapabilities({ ...handshake, version }), "handshake-reported");
   }
   assert.throws(() => verifyPiCapabilities({ ...handshake, version: "0.84.2-beta" }), {
     message: "Pi executable version 0.84.2-beta is unsupported: SemVer 0.84.2-beta < 0.84.2; Larkin supports stable external pi only",
@@ -159,10 +159,28 @@ test("external capability guard fails closed and accepts only the required Pi pr
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   }), /context/i);
-  assert.throws(() => verifyPiCapabilities({
+  assert.equal(verifyPiCapabilities({
     distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true,
-  }), /unproven|reserve|event/i);
+  }), "larkin-settings-only");
+  assert.equal(verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, compactionCapabilities: {
+      reserveTokens: 40_800, keepRecentTokens: 20_000,
+      events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+    },
+  }), "handshake-reported");
+  assert.throws(() => verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
+    compactRpc: true, compactionCapabilities: {
+      reserveTokens: 16_384, keepRecentTokens: 20_000,
+      events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+    },
+  }), /unproven/i);
+  assert.throws(() => verifyPiCapabilities({
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: false,
+    compactRpc: true,
+  }), /disabled/i);
   assert.throws(() => verifyPiCapabilities({
     distribution: "external", version: "0.84.2", contextWindow: 272_000,
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
@@ -171,11 +189,26 @@ test("external capability guard fails closed and accepts only the required Pi pr
   assert.throws(() => verifyPiCapabilities({
     distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
-  }), /external|trusted|unproven/i);
+  }), /external|trusted/i);
   assert.throws(() => verifyPiCapabilities({
     distribution: "builtin", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
-  }), /external|trusted|unproven/i);
+  }), /external|trusted/i);
+});
+
+test("verifyPiCapabilities accepts absent stock handshake and rejects mismatch or disabled compaction", () => {
+  const required = {
+    distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true, compactRpc: true,
+  };
+  assert.equal(verifyPiCapabilities(required), "larkin-settings-only");
+  assert.throws(() => verifyPiCapabilities({
+    ...required,
+    compactionCapabilities: {
+      reserveTokens: 1, keepRecentTokens: 20_000,
+      events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+    },
+  }), /unproven/i);
+  assert.throws(() => verifyPiCapabilities({ ...required, autoCompactionEnabled: false }), /disabled/i);
 });
 
 test("breaker refuses operations without an explicit canonical lock", () => {

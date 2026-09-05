@@ -973,7 +973,7 @@ interface PiRpcState {
   thinkingLevel?: string;
   version?: string;
   autoCompactionEnabled?: boolean;
-  /** Optional external handshake fields; absence is fail-closed for external Pi. */
+  /** Stock 0.84.x omits this; if present it must match Larkin's expected reserve/keep/events. */
   compactionCapabilities?: { reserveTokens?: unknown; keepRecentTokens?: unknown; events?: readonly string[] };
 }
 
@@ -1024,7 +1024,7 @@ class PiRpcBackend implements PiSessionProcessLike {
   model?: { provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> };
   thinkingLevel?: string;
   constructor(private readonly client: PiRpcClient, state: PiRpcState,
-    private readonly policy?: { model: string; contextWindow: number }) {
+    private readonly policy?: { model: string; contextWindow: number; version: string }) {
     this.policyManaged = Boolean(policy);
     this.sessionId = state.sessionId ?? null;
     this.sessionFile = typeof state.sessionFile === "string" && state.sessionFile ? state.sessionFile : null;
@@ -1049,18 +1049,12 @@ class PiRpcBackend implements PiSessionProcessLike {
     }
     if (typeof state.sessionFile === "string" && state.sessionFile) this.sessionFile = state.sessionFile;
     if (typeof state.sessionId === "string" && state.sessionId) this.sessionId = state.sessionId;
-    // Use the live process handshake, not a disk re-read of owned settings.json.
-    // Disk reserveTokens can drift after startup; that must not reject prompt.
-    const handshake = state.compactionCapabilities;
-    if (typeof handshake?.reserveTokens === "number" && typeof handshake?.keepRecentTokens === "number") {
-      assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
-        enabled: state.autoCompactionEnabled,
-        reserveTokens: handshake.reserveTokens,
-        keepRecentTokens: handshake.keepRecentTokens,
-      } });
-      return;
-    }
-    if (state.autoCompactionEnabled !== true) throw new Error("Pi native compaction must be enabled");
+    // Prompt 只信 live get_state：有 handshake 就必须精确匹配，没有则只要求 compaction 仍开启。
+    verifyPiCapabilities({
+      distribution: "external", version: this.policy.version,
+      contextWindow: state.model?.contextWindow, autoCompactionEnabled: state.autoCompactionEnabled,
+      compactRpc: true, compactionCapabilities: state.compactionCapabilities,
+    });
   }
   getState(): Promise<Record<string, unknown>> { return this.client.request("get_state"); }
   dispose(): Promise<void> { return this.client.close(); }
@@ -1164,11 +1158,12 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
         reserveTokens: ownedSettings.compaction?.reserveTokens,
         keepRecentTokens: ownedSettings.compaction?.keepRecentTokens,
       } });
-      const handshake = state.compactionCapabilities;
-      verifyPiCapabilities({ distribution: "external", version: reportedVersion,
+      const policySource = verifyPiCapabilities({
+        distribution: "external", version: reportedVersion,
         contextWindow: state.model?.contextWindow, autoCompactionEnabled: state.autoCompactionEnabled,
-        reserveTokens: handshake?.reserveTokens, keepRecentTokens: handshake?.keepRecentTokens,
-        compactRpc: true, events: handshake?.events });
+        compactRpc: true, compactionCapabilities: state.compactionCapabilities,
+      });
+      process.stderr.write(`[runtime] Pi compaction policy source=${policySource} agent=${input.agentId} model=${effectiveModel} contextWindow=${state.model?.contextWindow}\n`);
     }
     // 严格对账（Owner 决策）：模型必须来自 pi 的权威可用列表，不做后缀猜测——
     // 配置的模型与 pi 可用列表不符即报错，并在错误里列出可用模型。
@@ -1183,7 +1178,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     }
     if (requestedEffort && state.thinkingLevel !== requestedEffort) throw new Error(`Pi thinking level ${requestedEffort} was not accepted by effective model ${effectiveModel || "unknown"}`);
     return new PiRpcBackend(client, state, productionSpawn ? {
-      model: effectiveModel!, contextWindow: state.model?.contextWindow as number,
+      model: effectiveModel!, contextWindow: state.model?.contextWindow as number, version: reportedVersion,
     } : undefined);
   } catch (error) {
     await client.close();

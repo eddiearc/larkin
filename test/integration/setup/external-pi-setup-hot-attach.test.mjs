@@ -101,11 +101,6 @@ process.stdin.on("data", (chunk) => {
       thinkingLevel: "off",
       isStreaming: false,
       autoCompactionEnabled: true,
-      compactionCapabilities: {
-        reserveTokens: 4800,
-        keepRecentTokens: 20000,
-        events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
-      },
     });
     else if (request.type === "get_available_models") respond(request, {
       models: missingWindow ? [effective, windowed] : [effective],

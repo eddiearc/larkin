@@ -6,6 +6,7 @@ import { App, useStatusPolling } from "../../src/dashboard/web/app";
 const agents = [
   {
     agentId: "cli_AgentA1", name: "cli_AgentA1", displayName: "研究员", runtime: "pi", model: "default", effort: null,
+    runtimeReadiness: null,
     running: true, issue: false, credentialReady: true, bot: null,
     connection: { state: "connected", reason: "current channel" }, inbound: { state: "pending", reason: "waiting" },
     lastActivity: { state: "working", detail: "整理资料", ageSec: 8 }, lastDeliver: { from: "idan", target: "#research", ageSec: 12 },
@@ -15,6 +16,12 @@ const agents = [
   },
   {
     agentId: "cli_AgentB2", name: "cli_AgentB2", displayName: "Builder", runtime: "codex", model: "gpt-5.6-sol", effort: "high",
+    runtimeReadiness: null as {
+      runtime: "codex" | "claude" | "pi";
+      state: "missing" | "unauthenticated" | "incompatible" | "ready";
+      reason?: string;
+      nextAction?: string;
+    } | null,
     running: true, issue: false, credentialReady: true, bot: null,
     connection: { state: "connected", reason: "current channel" }, inbound: { state: "verified", reason: "observed" },
     lastActivity: { state: "idle", detail: "等待任务", ageSec: 18 }, lastDeliver: { from: "idan", target: "#build", ageSec: 22 },
@@ -32,7 +39,8 @@ const agents = [
     feed: [{ kind: "activity", state: "idle", detail: "等待任务", at: "2026-07-24T10:00:00.000Z" }], recentErrors: [], knownChats: 1,
   },
   {
-    agentId: "cli_AgentC3", name: "cli_AgentC3", displayName: "Pi Builtin", runtime: "pi", model: "deepseek/deepseek-v4-pro", effort: null,
+    agentId: "cli_AgentC3", name: "cli_AgentC3", displayName: "Pi Agent", runtime: "pi", model: "deepseek/deepseek-v4-pro", effort: null,
+    runtimeReadiness: null,
     running: true, issue: false, credentialReady: false, bot: null,
     connection: { state: "connected", reason: "current channel" }, inbound: { state: "pending", reason: "waiting" },
     lastActivity: { state: "idle", detail: "等待任务", ageSec: 30 }, lastDeliver: null,
@@ -53,12 +61,11 @@ const config = (agentId?: string) => ({
     codex: [{ id: "default" }, { id: "gpt-5.6-sol", supportedReasoningEfforts: ["low", "high"] }],
     claude: [{ id: "default" }],
   },
-  runtimeOptions: ["codex", "claude", "pi", "builtin-pi"] as const,
+  runtimeOptions: ["codex", "claude", "pi"] as const,
   agents: (agentId ? agents.filter((agent) => agent.agentId === agentId) : agents).map((agent) => ({
     agentId: agent.agentId, runtime: agent.runtime,
-    runtimeOption: agent.agentId === "cli_AgentC3" ? "builtin-pi" : agent.runtime,
+    runtimeOption: agent.runtime as "codex" | "claude" | "pi",
     model: agent.model, effort: agent.effort,
-    piDistribution: agent.agentId === "cli_AgentC3" ? "builtin" : null,
     mention: { override: agent.agentId === "cli_AgentB2" ? "require" : "inherit", effective: agent.agentId === "cli_AgentB2" ? "require" : "free", source: agent.agentId === "cli_AgentB2" ? "agent" : "global" },
     knownChats: agent.agentId === "cli_AgentB2" ? [
       { chatId: "oc_BuildRoom", displayName: "构建群", kind: "group", override: "free", effective: "free", source: "chat" },
@@ -338,33 +345,9 @@ describe("Agent-centric dashboard workbench", () => {
     expect(screen.getByRole("option", { name: "default: openai/gpt-5.2" })).toBeVisible();
     expect(screen.getByRole("option", { name: "Claude Sonnet 4.5 · anthropic" })).toBeVisible();
     expect(screen.queryByLabelText("Pi 发行版")).not.toBeInTheDocument();
-    expect(["pi", "builtin-pi", "codex", "claude"].every((value) =>
-      screen.getByRole("option", { name: value }))).toBe(true);
-  });
-
-  it("loads builtin-pi catalog when Runtime is the sibling builtin-pi", async () => {
-    window.history.replaceState(null, "", "/?agent=cli_AgentA1&tab=configuration");
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      if (url.pathname === "/api/status") return ok(status);
-      if (url.pathname === "/api/config") {
-        const value = config("cli_AgentA1");
-        value.agents[0].runtime = "pi";
-        value.agents[0].runtimeOption = "builtin-pi";
-        value.agents[0].piDistribution = "builtin";
-        return ok(value);
-      }
-      if (url.pathname === "/api/models/builtin-pi") return ok({ models: [
-        { id: "default", label: "default: deepseek/deepseek-v4-pro" },
-      ] });
-      throw new Error(`unexpected request ${url}`);
-    }));
-    render(<App />);
-    expect(await screen.findByLabelText("Runtime")).toHaveValue("builtin-pi");
-    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) =>
-      String(input) === "/api/models/builtin-pi?agent=cli_AgentA1")).toBe(true));
-    expect(screen.getByRole("option", { name: "default: deepseek/deepseek-v4-pro" })).toBeVisible();
-    expect(screen.queryByLabelText("Pi 发行版")).not.toBeInTheDocument();
+    const runtimeSelect = screen.getByLabelText("Runtime");
+    expect([...runtimeSelect.querySelectorAll("option")].map((option) => option.getAttribute("value"))).toEqual(["codex", "claude", "pi"]);
+    expect(screen.queryByRole("option", { name: "builtin-pi" })).not.toBeInTheDocument();
   });
 
   it("does not render a Pi distribution control for any runtime", async () => {
@@ -527,103 +510,68 @@ describe("Agent-centric dashboard workbench", () => {
     expect(document.querySelector(".workspace-browser")).toBeVisible();
   });
 
-  it("shows Provider Credentials only for builtin Pi and clears the API key after save", async () => {
-    const secret = "frontend-super-secret";
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  it("does not render Provider Credentials and keeps only three runtime options", async () => {
+    window.history.replaceState(null, "", "/?agent=cli_AgentC3&tab=configuration");
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/status") return ok(status);
       if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
       if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
-      if (url.pathname === "/api/models/codex" || url.pathname === "/api/models/pi" || url.pathname === "/api/models/builtin-pi") {
+      if (url.pathname === "/api/models/pi" || url.pathname === "/api/models/codex" || url.pathname === "/api/models/claude") {
         return ok({ models: [{ id: "default", label: "default" }, { id: "deepseek/deepseek-v4-pro", label: "DeepSeek" }] });
-      }
-      if (url.pathname === "/api/pi-auth/providers") {
-        return ok({
-          providers: [
-            { id: "deepseek", name: "DeepSeek（推荐）", provider: "deepseek", defaultModel: "deepseek/deepseek-v4-pro", custom: false, openaiCompatible: true },
-            { id: "custom", name: "Custom OpenAI-compatible", provider: "larkin-custom", defaultModel: null, custom: true, openaiCompatible: true },
-          ],
-        });
-      }
-      if (url.pathname === "/api/pi-auth/status") {
-        return ok({ agentId: url.searchParams.get("agent"), model: "deepseek/deepseek-v4-pro", credentials: [] });
-      }
-      if (url.pathname === "/api/pi-auth/login" && init?.method === "POST") {
-        const body = JSON.parse(String(init.body));
-        expect(body.apiKey).toBe(secret);
-        expect(JSON.stringify(body)).not.toContain("?");
-        return ok({
-          ok: true, agentId: body.agentId, provider: body.preset === "custom" ? "larkin-custom" : "deepseek",
-          preset: body.preset, model: body.preset === "custom" ? `larkin-custom/${body.model}` : "deepseek/deepseek-v4-pro",
-          credentialType: "api_key", applyState: "saved_not_applied",
-        });
       }
       throw new Error(`unexpected request ${url}`);
     }));
-    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=configuration");
     render(<App />);
-    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await screen.findByRole("heading", { level: 1, name: "Pi Agent" });
     expect(screen.queryByRole("heading", { level: 3, name: "Provider Credentials" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("option", { name: /Pi Builtin/ }));
-    expect(await screen.findByRole("heading", { level: 3, name: "Provider Credentials" })).toBeVisible();
-    await screen.findByRole("option", { name: "DeepSeek（推荐）" });
-    const key = await screen.findByLabelText("API Key");
-    expect(key).toHaveAttribute("type", "password");
-    expect(key).toHaveAttribute("autocomplete", "off");
-    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText("Provider"), "custom");
-    expect(await screen.findByLabelText("Base URL")).toBeVisible();
-    expect(screen.getByLabelText("Custom model")).toBeVisible();
-    await userEvent.selectOptions(screen.getByLabelText("Provider"), "deepseek");
-    await userEvent.type(key, secret);
-    expect(key).toHaveValue(secret);
-    await userEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
-    await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue(""));
-    expect(await screen.findByRole("status")).toHaveTextContent(/deepseek/);
-    expect(screen.queryByText(secret)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pi-auth|pi-distribution|bundled Pi|auth\.json/i)).not.toBeInTheDocument();
+    const runtimeSelect = await screen.findByLabelText("Runtime");
+    expect([...runtimeSelect.querySelectorAll("option")].map((option) => option.getAttribute("value"))).toEqual(["codex", "claude", "pi"]);
   });
 
-  it("clears the API key as soon as login settles even if status refresh stalls", async () => {
-    const secret = "frontend-stalled-secret";
-    const statusHold = deferred<{ ok: boolean; status: number; json: () => Promise<unknown> }>();
-    let loginDone = false;
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input), "http://localhost");
-      if (url.pathname === "/api/status") return ok(status);
-      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
-      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
-      if (url.pathname === "/api/models/codex" || url.pathname === "/api/models/pi" || url.pathname === "/api/models/builtin-pi") {
-        return ok({ models: [{ id: "default", label: "default" }, { id: "deepseek/deepseek-v4-pro", label: "DeepSeek" }] });
-      }
-      if (url.pathname === "/api/pi-auth/providers") {
-        return ok({
-          providers: [
-            { id: "deepseek", name: "DeepSeek（推荐）", provider: "deepseek", defaultModel: "deepseek/deepseek-v4-pro", custom: false, openaiCompatible: true },
-          ],
-        });
-      }
-      if (url.pathname === "/api/pi-auth/status") {
-        if (loginDone) return statusHold.promise;
-        return ok({ agentId: url.searchParams.get("agent"), model: "deepseek/deepseek-v4-pro", credentials: [] });
-      }
-      if (url.pathname === "/api/pi-auth/login" && init?.method === "POST") {
-        loginDone = true;
-        return ok({
-          ok: true, agentId: "cli_AgentC3", provider: "deepseek", preset: "deepseek",
-          model: "deepseek/deepseek-v4-pro", credentialType: "api_key", applyState: "saved_not_applied",
-        });
-      }
-      throw new Error(`unexpected request ${url}`);
-    }));
-    window.history.replaceState(null, "", "/?agent=cli_AgentC3&tab=configuration");
-    render(<App />);
-    await screen.findByRole("heading", { level: 3, name: "Provider Credentials" });
-    const key = await screen.findByLabelText("API Key");
-    await userEvent.type(key, secret);
-    await userEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
-    await waitFor(() => expect(loginDone).toBe(true));
-    await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue(""));
-    expect(screen.queryByText(secret)).not.toBeInTheDocument();
-    statusHold.resolve({ ok: true, status: 200, json: async () => ({ agentId: "cli_AgentC3", model: "deepseek/deepseek-v4-pro", credentials: [] }) });
+  it("renders readiness in Overview and Agent 配置, and shows a rejected runtime-switch error", async () => {
+    const missing = {
+      runtime: "claude" as const,
+      state: "missing" as const,
+      reason: "claude is not installed",
+      nextAction: "Install Claude Code and ensure `claude` is on PATH, or set LARKIN_CLAUDE_COMMAND.",
+    };
+    const prior = agents[1].runtimeReadiness;
+    agents[1].runtimeReadiness = {
+      runtime: "codex",
+      state: "unauthenticated",
+      reason: "codex is installed but not logged in",
+      nextAction: "Run `codex login`, then retry.",
+    };
+    try {
+      vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://localhost");
+        if (url.pathname === "/api/status") return ok(status);
+        if (url.pathname === "/api/config" && init?.method === "PATCH") {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json: async () => ({ error: missing.reason, readiness: missing }),
+          });
+        }
+        if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+        if (url.pathname === "/api/models/codex" || url.pathname === "/api/models/claude") {
+          return ok({ models: [{ id: "default", label: "default: claude" }] });
+        }
+        throw new Error(`unexpected request ${url}`);
+      }));
+      render(<App />);
+      await screen.findByRole("heading", { level: 1, name: "Builder" });
+      expect(screen.getByText(/^Readiness unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: "概览" }));
+      expect(screen.getByText(/^unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: "配置" }));
+      await userEvent.selectOptions(await screen.findByLabelText("Runtime"), "claude");
+      await userEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+      const feedback = await screen.findByRole("status");
+      expect(feedback).toHaveTextContent(/claude is not installed/);
+      expect(feedback).toHaveTextContent(/Install Claude Code/);
+    } finally { agents[1].runtimeReadiness = prior; }
   });
 });

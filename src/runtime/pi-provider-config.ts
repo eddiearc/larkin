@@ -8,6 +8,8 @@ export { piDistributionLabel } from "./pi-distribution-label.js";
 
 export type PiDistribution = "external" | "builtin";
 export const BUNDLED_PI_VERSION = "0.84.2";
+/** API Key 字符上限；stdin 必须在读入任意多余输入前按同一上限截断。 */
+export const MAX_BUILTIN_PI_API_KEY_LENGTH = 16_384;
 export type PiProviderPresetId = "deepseek" | "kimi" | "minimax" | "zhipu" | "openai" | "anthropic"
   | "gemini" | "groq" | "cerebras" | "xai" | "fireworks" | "together" | "mistral"
   | "openrouter" | "kimi-coding" | "qwen-cn" | "opencode-go" | "ant-ling" | "nvidia"
@@ -85,6 +87,26 @@ export interface ResolvedBuiltinPiProviderSetupSelection extends BuiltinPiProvid
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+\/-]{0,255}$/;
 
+/** Node 的 URL.hostname 对 IPv6 是 [::1]，不是 ::1。 */
+export function isPiLoopbackHostname(hostname: string): boolean {
+  const host = hostname.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+/** 官方 provider ID（如 zai-coding-cn）映射到 CLI/Dashboard 接受的 preset ID（如 zhipu）。 */
+export function presetIdForOfficialProvider(providerId: string): string | null {
+  const id = providerId.trim();
+  if (id === "larkin-custom") return "custom";
+  return PI_PROVIDER_PRESETS.find((preset) => preset.provider === id)?.id ?? null;
+}
+
+/** Agent 范围的缺凭证恢复路径：只用 preset，不指向 setup / import / 全局 ~/.pi。 */
+export function builtinPiProviderRecoveryNextAction(options: { agentId?: string; providerId?: string } = {}): string {
+  const preset = options.providerId ? presetIdForOfficialProvider(options.providerId) ?? "<preset|custom>" : "<preset|custom>";
+  const agent = options.agentId && /^cli_[A-Za-z0-9]+$/.test(options.agentId) ? options.agentId : "<App ID>";
+  return `在 Dashboard 的 Provider Credentials 中为该 Agent 配置 Provider 与 API Key，或运行 larkin pi-auth login ${preset} --agent ${agent}。`;
+}
+
 export function validatePiBaseUrl(raw: string): string {
   const input = raw.trim();
   if (!input || /[\0\r\n\t]/.test(input)) throw new Error("Base URL 不能为空或包含控制字符");
@@ -93,7 +115,7 @@ export function validatePiBaseUrl(raw: string): string {
   catch { throw new Error("Base URL 不是合法 URL"); }
   if (url.username || url.password) throw new Error("Base URL 不允许包含用户名或凭证");
   if (url.search || url.hash) throw new Error("Base URL 不允许 query 或 fragment");
-  const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  const local = isPiLoopbackHostname(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) {
     throw new Error("Base URL 必须使用 https；仅 localhost/loopback 开发端点允许 http");
   }
@@ -154,7 +176,7 @@ export function resolveBuiltinPiProviderSetupSelection(input: BuiltinPiProviderS
 
 export function validateBuiltinPiProviderSelection(input: BuiltinPiProviderSelection): ValidatedBuiltinPiProviderSelection {
   const key = input.apiKey.trim();
-  if (!key || key.length > 16_384 || /[\0\r\n]/.test(key)) throw new Error("API Key 不能为空或包含控制字符");
+  if (!key || key.length > MAX_BUILTIN_PI_API_KEY_LENGTH || /[\0\r\n]/.test(key)) throw new Error("API Key 不能为空或包含控制字符");
   return { ...resolveBuiltinPiProviderSetupSelection(input), apiKey: key };
 }
 

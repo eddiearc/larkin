@@ -6,9 +6,21 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
+import { BUNDLED_PI_VERSION } from "../../../dist/runtime/pi-provider-config.mjs";
+import { calculatePiCompactionSettings } from "../../../dist/runtime/pi-compaction-recovery.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const enabled = process.env.LARKIN_RUN_COMPILED_RUNTIME_MOCK_E2E === "1";
+const PI_FIXTURE_CONTEXT_WINDOW = 32000;
+const piFixtureCompaction = calculatePiCompactionSettings(PI_FIXTURE_CONTEXT_WINDOW);
+const piFixtureCompactionCapabilities = {
+  reserveTokens: piFixtureCompaction.reserveTokens,
+  keepRecentTokens: piFixtureCompaction.keepRecentTokens,
+  events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
+};
+const piFixtureSessionStats = {
+  contextUsage: { tokens: 0, contextWindow: PI_FIXTURE_CONTEXT_WINDOW },
+};
 
 function checked(command, args, options, label) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
@@ -145,17 +157,20 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 const piFixtureSource = `import fs from "node:fs";
 import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log("0.82.1"); process.exit(0); }
+if (process.argv.includes("--version")) { console.log(${JSON.stringify(BUNDLED_PI_VERSION)}); process.exit(0); }
 const marker = process.env.RUNTIME_PROTOCOL_MARKER;
 const record = (value) => fs.appendFileSync(marker, JSON.stringify(value) + "\\n");
-const model = { provider: "fixture", id: "pi-fixture", name: "Pi Fixture", reasoning: false, contextWindow: 32000 };
+const model = { provider: "fixture", id: "pi-fixture", name: "Pi Fixture", reasoning: false, contextWindow: ${PI_FIXTURE_CONTEXT_WINDOW} };
 record({ type: "launch", runtime: "pi", args: process.argv.slice(2) });
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "get_state") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
-    data: { sessionId: "session-compiled-pi", sessionFile: "/tmp/session-compiled-pi.jsonl", model, thinkingLevel: "off", isStreaming: false } }) + "\\n");
+    data: { sessionId: "session-compiled-pi", sessionFile: "/tmp/session-compiled-pi.jsonl", model, thinkingLevel: "off", isStreaming: false, autoCompactionEnabled: true, compactionCapabilities: ${JSON.stringify(piFixtureCompactionCapabilities)} } }) + "\\n");
   else if (request.type === "get_available_models") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
     data: { models: [model] } }) + "\\n");
+  else if (request.type === "get_session_stats") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
+    data: ${JSON.stringify(piFixtureSessionStats)} }) + "\\n");
+  else if (request.type === "compact") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true }) + "\\n");
   else if (request.type === "prompt" || request.type === "steer") {
     record({ type: "protocol", runtime: "pi", method: request.type, request });
     process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true }) + "\\n");
@@ -321,8 +336,8 @@ test.skipIf(!enabled)("compiled Pi provider auth failure projects unauthenticate
     const piSource = path.join(home, "pi-auth-fixture.mjs");
     fs.writeFileSync(piSource, `import fs from "node:fs";
 import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log("0.82.1"); process.exit(0); }
-const model = { provider: "bigmodel-anthropic", id: "glm-5.2", name: "GLM Fixture", reasoning: false, contextWindow: 32000 };
+if (process.argv.includes("--version")) { console.log(${JSON.stringify(BUNDLED_PI_VERSION)}); process.exit(0); }
+const model = { provider: "bigmodel-anthropic", id: "glm-5.2", name: "GLM Fixture", reasoning: false, contextWindow: ${PI_FIXTURE_CONTEXT_WINDOW} };
 let promptCount = 0;
 const output = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 const record = (value) => fs.appendFileSync(process.env.PI_AUTH_PROTOCOL_MARKER, JSON.stringify(value) + "\\n");
@@ -336,8 +351,10 @@ const successfulTurn = () => {
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "get_state") return output({ id: request.id, type: "response", command: request.type, success: true,
-    data: { sessionId: "session-compiled-pi-auth", sessionFile: "/tmp/session.jsonl", model, thinkingLevel: "off", isStreaming: false } });
+    data: { sessionId: "session-compiled-pi-auth", sessionFile: "/tmp/session.jsonl", model, thinkingLevel: "off", isStreaming: false, autoCompactionEnabled: true, compactionCapabilities: ${JSON.stringify(piFixtureCompactionCapabilities)} } });
   if (request.type === "get_available_models") return output({ id: request.id, type: "response", command: request.type, success: true, data: { models: [model] } });
+  if (request.type === "get_session_stats") return output({ id: request.id, type: "response", command: request.type, success: true, data: ${JSON.stringify(piFixtureSessionStats)} });
+  if (request.type === "compact") return output({ id: request.id, type: "response", command: request.type, success: true });
   if (request.type === "prompt") {
     promptCount += 1;
     record({ type: "call", method: "prompt", promptCount });

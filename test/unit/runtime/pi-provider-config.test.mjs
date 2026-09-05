@@ -9,6 +9,9 @@ import {
   stageBuiltinPiProvider,
   validateBuiltinPiProviderSelection,
   validatePiBaseUrl,
+  isPiLoopbackHostname,
+  presetIdForOfficialProvider,
+  builtinPiProviderRecoveryNextAction,
 } from "../../../dist/runtime/pi-provider-config.mjs";
 
 test("Pi provider presets keep the requested setup order and audited official endpoints", () => {
@@ -55,6 +58,15 @@ test("Pi provider presets keep the requested setup order and audited official en
 test("custom Pi endpoint validation rejects credentials, unsafe schemes, API leaf paths, and unsafe models", () => {
   assert.equal(validatePiBaseUrl("https://gateway.example/v1/"), "https://gateway.example/v1");
   assert.equal(validatePiBaseUrl("http://127.0.0.1:8080/v1"), "http://127.0.0.1:8080/v1");
+  assert.equal(isPiLoopbackHostname("[::1]"), true);
+  assert.equal(isPiLoopbackHostname("::1"), true);
+  assert.equal(validatePiBaseUrl("http://[::1]:8080/v1"), "http://[::1]:8080/v1");
+  assert.equal(presetIdForOfficialProvider("zai-coding-cn"), "zhipu");
+  assert.equal(presetIdForOfficialProvider("larkin-custom"), "custom");
+  const recovery = builtinPiProviderRecoveryNextAction({ agentId: "cli_recoverA1", providerId: "zai-coding-cn" });
+  assert.match(recovery, /pi-auth login zhipu --agent cli_recoverA1/);
+  assert.match(recovery, /Provider Credentials/);
+  assert.doesNotMatch(recovery, /zai-coding-cn|larkin setup|import-external-profile|~\/\.pi/);
   for (const value of [
     "http://gateway.example/v1",
     "https://key@gateway.example/v1",

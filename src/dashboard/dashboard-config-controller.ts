@@ -10,6 +10,16 @@ import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtim
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
 import { RUNTIME_OPTIONS, piCatalogDistributionForUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
+import {
+  configureBuiltinPiProvider,
+  listBuiltinPiProviderCatalog,
+  logoutBuiltinPiProvider,
+  sanitizeProviderLoginError,
+} from "../runtime/pi-provider-login.js";
+import {
+  createOfficialPiCredentialRuntime,
+  officialPiAuthStatus,
+} from "../runtime/pi-official-auth.js";
 
 type Env = Record<string, string | undefined>;
 type LarkJsonCall = { command: string; args: string[]; env: Env; maxBuffer: number; timeout: number };
@@ -27,7 +37,10 @@ type PiModelDirectoryInput = {
 export type ChatDirectoryResolver = { resolve(input: ChatDirectoryInput): Promise<Record<string, string>> };
 export type ClaudeModelDirectoryResolver = { resolve(input: ClaudeModelDirectoryInput): Promise<Array<Record<string, unknown> & { id: string; label: string }>> };
 export type CodexModelDirectoryResolver = { resolve(input: CodexModelDirectoryInput): Promise<Array<Record<string, unknown> & { id: string; label: string }>> };
-export type PiModelDirectoryResolver = { resolve(input: PiModelDirectoryInput): Promise<Array<Record<string, unknown> & { id: string; label: string }>> };
+export type PiModelDirectoryResolver = {
+  resolve(input: PiModelDirectoryInput): Promise<Array<Record<string, unknown> & { id: string; label: string }>>;
+  invalidate?(agentId?: string): void;
+};
 
 type KnownChat = { chatId: string; displayName: string | null; kind: "group" | "direct" };
 
@@ -183,9 +196,32 @@ export function createPiModelDirectoryResolver(options: {
   const cache = new Map<string, { expiresAt: number; value: Array<Record<string, unknown> & { id: string; label: string }> }>();
   const failures = new Map<string, { expiresAt: number }>();
   const inFlight = new Map<string, Promise<Array<Record<string, unknown> & { id: string; label: string }>>>();
+  const generations = new Map<string, number>();
+  // 单调序号：targeted 后再 global 时，in-flight 的 started 不能与新 generation 相等。
+  let seq = 0;
+  let baseline = 0;
+  const generationOf = (agentId: string) => Math.max(baseline, generations.get(agentId) ?? 0);
+  const dropPrefixed = <T>(store: Map<string, T>, agentId?: string): void => {
+    if (!agentId) { store.clear(); return; }
+    const prefix = `${agentId}\u0000`;
+    for (const key of store.keys()) if (key.startsWith(prefix)) store.delete(key);
+  };
   return {
+    invalidate(agentId?: string) {
+      dropPrefixed(cache, agentId);
+      dropPrefixed(failures, agentId);
+      dropPrefixed(inFlight, agentId);
+      seq += 1;
+      if (!agentId) {
+        baseline = seq;
+        generations.clear();
+      } else {
+        generations.set(agentId, seq);
+      }
+    },
     async resolve(input) {
       const key = [input.agentId, input.cwd, input.agentDir, input.command ?? "", ...(input.commandArgs ?? [])].join("\u0000");
+      const started = generationOf(input.agentId);
       pruneCache(cache, (entry) => now() >= entry.expiresAt, 64);
       pruneCache(failures, (entry) => now() >= entry.expiresAt, 64);
       const cached = cache.get(key);
@@ -207,16 +243,20 @@ export function createPiModelDirectoryResolver(options: {
                 id, label, ...(contextWindow ? { contextWindow } : {}), supportedReasoningEfforts, ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
               })),
             ];
-            failures.delete(key);
-            cache.set(key, { expiresAt: now() + ttlMs, value: models });
+            if (generationOf(input.agentId) === started) {
+              failures.delete(key);
+              cache.set(key, { expiresAt: now() + ttlMs, value: models });
+            }
             return models;
           } catch (error) {
-            failures.set(key, { expiresAt: now() + negativeTtlMs });
+            if (generationOf(input.agentId) === started) failures.set(key, { expiresAt: now() + negativeTtlMs });
             throw error;
           }
         })();
         inFlight.set(key, pending);
-        void pending.finally(() => inFlight.delete(key)).catch(() => undefined);
+        void pending.finally(() => {
+          if (inFlight.get(key) === pending) inFlight.delete(key);
+        }).catch(() => undefined);
       }
       return await pending;
     },
@@ -397,6 +437,10 @@ export function createDashboardConfigController({
   claudeModelDirectoryResolver = createClaudeModelDirectoryResolver(),
   codexModelDirectoryResolver = createCodexModelDirectoryResolver(),
   piModelDirectoryResolver = createPiModelDirectoryResolver(),
+  configureProvider = configureBuiltinPiProvider,
+  logoutProvider = logoutBuiltinPiProvider,
+  listProviderCatalog = listBuiltinPiProviderCatalog,
+  loadProviderStatus = async (configDir: string, agentId: string) => officialPiAuthStatus(await createOfficialPiCredentialRuntime(configDir, agentId)),
 }: {
   csrfCapability: string;
   env?: Env;
@@ -405,6 +449,10 @@ export function createDashboardConfigController({
   claudeModelDirectoryResolver?: ClaudeModelDirectoryResolver;
   codexModelDirectoryResolver?: CodexModelDirectoryResolver;
   piModelDirectoryResolver?: PiModelDirectoryResolver;
+  configureProvider?: typeof configureBuiltinPiProvider;
+  logoutProvider?: typeof logoutBuiltinPiProvider;
+  listProviderCatalog?: typeof listBuiltinPiProviderCatalog;
+  loadProviderStatus?: (configDir: string, agentId: string) => Promise<unknown>;
 }) {
   const resolvePiModelDirectory = async (agentId: string, userRuntime: "pi" | "builtin-pi") => {
     const { config, configDir } = loadConfig(env);
@@ -511,6 +559,84 @@ export function createDashboardConfigController({
           const result = mutateConfig(env, mutation, { kind: "user" });
           json(res, 200, { ok: true, revision: result.revision, persisted: true, applyState: result.applyState, changedScope: result.changedScope });
         } catch { json(res, 400, { error: "configuration update rejected" }); }
+        return true;
+      }
+      if (requestUrl.pathname === "/api/pi-auth/providers" && req.method === "GET") {
+        try {
+          assertPrivateReadRequest(req, csrfCapability);
+          json(res, 200, { providers: listProviderCatalog() });
+        } catch (error) {
+          json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "provider catalog unavailable" });
+        }
+        return true;
+      }
+      if (requestUrl.pathname === "/api/pi-auth/status" && req.method === "GET") {
+        try {
+          assertPrivateReadRequest(req, csrfCapability);
+          const agentId = requestUrl.searchParams.get("agent") || "";
+          const { config, configDir } = loadConfig(env);
+          const agent = config.agents[agentId];
+          if (!agent || agent.runtime !== "pi" || agent.piDistribution !== "builtin") throw new Error("unknown agent");
+          const credentials = await loadProviderStatus(configDir, agentId);
+          json(res, 200, { agentId, model: agent.model, credentials });
+        } catch (error) {
+          json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "provider status unavailable" });
+        }
+        return true;
+      }
+      if (requestUrl.pathname === "/api/pi-auth/login" && req.method === "POST") {
+        let secret = "";
+        try {
+          assertWriteRequest(req, csrfCapability);
+          const body = await boundedJson(req);
+          const allowed = ["agentId", "preset", "apiKey", "model", "baseUrl"];
+          if (Object.keys(body).some((key) => !allowed.includes(key))) throw new Error("unsupported field");
+          const agentId = String(body.agentId || "");
+          const preset = String(body.preset || "");
+          const apiKey = typeof body.apiKey === "string" ? body.apiKey : "";
+          secret = apiKey;
+          if (!/^cli_[A-Za-z0-9]+$/.test(agentId) || !preset) throw new Error("invalid login request");
+          const { config } = loadConfig(env);
+          const agent = config.agents[agentId];
+          if (!agent || agent.runtime !== "pi" || agent.piDistribution !== "builtin") throw new Error("Agent is not builtin Pi");
+          const result = await configureProvider({
+            agentId,
+            preset,
+            apiKey,
+            ...(typeof body.model === "string" ? { model: body.model } : {}),
+            ...(typeof body.baseUrl === "string" ? { baseUrl: body.baseUrl } : {}),
+            env,
+          });
+          piModelDirectoryResolver.invalidate?.(agentId);
+          json(res, 200, {
+            ok: true,
+            agentId: result.agentId,
+            provider: result.provider,
+            preset: result.preset,
+            model: result.model,
+            credentialType: result.credentialType,
+            applyState: result.applyState,
+            ...(result.applyError ? { applyError: sanitizeProviderLoginError(result.applyError, secret || undefined) } : {}),
+          });
+        } catch (error) {
+          json(res, 400, { error: sanitizeProviderLoginError(error, secret || undefined) });
+        }
+        return true;
+      }
+      if (requestUrl.pathname === "/api/pi-auth/logout" && req.method === "POST") {
+        try {
+          assertWriteRequest(req, csrfCapability);
+          const body = await boundedJson(req);
+          if (Object.keys(body).sort().join(",") !== "agentId,provider") throw new Error("invalid logout request");
+          const agentId = String(body.agentId || "");
+          const provider = String(body.provider || "");
+          if (!/^cli_[A-Za-z0-9]+$/.test(agentId)) throw new Error("invalid logout request");
+          const result = await logoutProvider({ agentId, providerId: provider, env });
+          piModelDirectoryResolver.invalidate?.(agentId);
+          json(res, 200, { ok: true, agentId: result.agentId, provider: result.provider });
+        } catch (error) {
+          json(res, 400, { error: sanitizeProviderLoginError(error) });
+        }
         return true;
       }
       if (requestUrl.pathname === "/api/config/apply" && req.method === "POST") {

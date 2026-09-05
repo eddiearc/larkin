@@ -900,7 +900,9 @@ test("missing-key prompt rejection terminals the HostShell ledger and projects u
     const failedStatus = store.readJson("status", {});
     assert.equal(failedStatus.runtimeReadiness.state, "unauthenticated");
     assert.match(failedStatus.runtimeReadiness.reason, /zai-coding-cn.*missing/i);
-    assert.match(failedStatus.runtimeReadiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /Provider Credentials/);
+    assert.doesNotMatch(failedStatus.runtimeReadiness.nextAction, /zai-coding-cn/);
     assert.doesNotMatch(JSON.stringify(failedStatus.runtimeReadiness), /fixture-openai-codex|larkin setup|profile import/);
     await hostShell.ingest(otherId, { chat_id: "oc_missing_other", chat_type: "p2p", sender_id: "ou_sender",
       message_id: "om_missing_other", event_id: "evt_missing_other", content: "other",

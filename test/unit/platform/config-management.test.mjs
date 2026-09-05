@@ -242,7 +242,11 @@ test("user-facing runtime siblings project to stored pi + piDistribution", () =>
     const beforeBytes = fs.readFileSync(file);
     assert.throws(
       () => configApi.mutateConfig(env, { kind: "set-agent-runtime", agentId: APP, runtime: "builtin-pi", model: "default" }, { kind: "user" }),
-      /无法切换到 builtin-pi|larkin setup/,
+      (error) => {
+        assert.match(error.message, /无法切换到 builtin-pi|pi-auth login/);
+        assert.doesNotMatch(error.message, /import-external-profile|重新运行 larkin setup/);
+        return true;
+      },
     );
     assert.deepEqual(fs.readFileSync(file), beforeBytes);
 
@@ -268,6 +272,33 @@ test("user-facing runtime siblings project to stored pi + piDistribution", () =>
     const legacyView = configApi.safeConfigView(configApi.loadConfig(env).config, APP).agents[0];
     assert.equal(legacyView.runtime, "pi");
     assert.equal(legacyView.runtimeOption, "pi");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("requireBuiltinPi model mutation refuses a concurrent runtime switch", () => {
+  const { root, file } = fixture();
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.version = 4;
+    stored.mentionPolicy = "require";
+    stored.agents[APP] = { runtime: "pi", model: "default", piDistribution: "builtin" };
+    stored.agents[OTHER] = { runtime: "pi", model: "kimi/kimi-k2.6", piDistribution: "builtin" };
+    fs.writeFileSync(file, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    seedBuiltinPiAuth(root, APP);
+    const env = { LARKIN_CONFIG_DIR: root };
+    configApi.mutateConfig(env, { kind: "set-agent-runtime", agentId: APP, runtime: "codex", model: "gpt-5.6-sol" }, { kind: "user" });
+    const switched = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.throws(
+      () => configApi.mutateConfig(env, {
+        kind: "set-agent-model", agentId: APP, model: "deepseek/deepseek-v4-pro", requireBuiltinPi: true,
+      }, { kind: "user" }),
+      /不是内置 Pi/,
+    );
+    const after = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(after.agents[APP].runtime, "codex");
+    assert.equal(after.agents[APP].model, "gpt-5.6-sol");
+    assert.equal(after.agents[OTHER].model, "kimi/kimi-k2.6");
+    assert.equal(switched.agents[APP].model, after.agents[APP].model);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

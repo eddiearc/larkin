@@ -261,11 +261,13 @@ test("HostShell keeps durable missing-key auth across ready status and reset", a
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
-    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /official store/);
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /Provider Credentials/);
     const reset = await host.resetSession(agentId, 0);
     assert.equal(reset.resetCommitted, true);
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
-    assert.doesNotMatch(JSON.stringify(store.readJson("status", {}).runtimeReadiness), /pi-auth login|larkin setup|profile import/);
+    assert.doesNotMatch(JSON.stringify(store.readJson("status", {}).runtimeReadiness), /larkin setup|profile import|import-external-profile/);
+    assert.doesNotMatch(store.readJson("status", {}).runtimeReadiness.nextAction, /zai-coding-cn/);
   } finally {
     await host.shutdown("missing-key persist test complete");
     fs.rmSync(root, { recursive: true, force: true });

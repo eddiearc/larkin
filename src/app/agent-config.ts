@@ -475,7 +475,9 @@ if (kind === "pi-distribution") {
     try {
       assertBuiltinPiAgentDirectory(piAgentDirectory(configDir, selectedKey));
     } catch {
-      die("内置 Pi provider 尚未为该 Agent 配置；请先运行 larkin setup 完成内置 Pi provider 配置，或使用 --import-external-profile");
+      die(agent.piDistribution === "builtin"
+        ? "内置 Pi provider 尚未为该 Agent 配置。请使用 Dashboard Provider Credentials 或 larkin pi-auth login。"
+        : "内置 Pi provider 尚未为该 Agent 配置。");
     }
   }
   try {

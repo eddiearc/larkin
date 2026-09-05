@@ -89,8 +89,10 @@ Credentials, internal paths, serverId, activeAgent, and raw config are never exp
        larkin session recover --agent <App ID> --reason context-overflow --json [--wait-ready <seconds>]
 Reset replaces one idle, zero-backlog Runtime session. Recover is an explicit operator-only context-window recovery that preserves and replays canonical Inbox deliveries.`,
   "pi-auth": `Usage: larkin pi-auth status [--agent <App ID>] [--json]
+       larkin pi-auth providers [--json]
+       larkin pi-auth login <preset|custom> --agent <App ID> [--model <model>] [--base-url <url>] [--api-key-stdin] [--json]
        larkin pi-auth logout <provider> [--agent <App ID>]
-Show non-sensitive official Pi credential metadata or remove one target provider credential.`,
+Show a redacted builtin Pi provider catalog, configure one existing Agent with a known preset or custom OpenAI-compatible endpoint, or remove one target provider credential. API keys are accepted only from a TTY prompt or --api-key-stdin.`,
   comment: `Usage: larkin comment reply --message-id <doc_comment_message_id> --text '<reply>' --json
 Reply as the Runtime-bound Bot to the exact cloud-document comment locator supplied by canonical Inbox. Retrying the same body is idempotent; a different body appends a follow-up reply to the same comment.`,
   telemetry: `Usage: larkin telemetry <status|export|import|flush>
@@ -141,7 +143,7 @@ Usage: larkin <command>
   config           Inspect effective config/source, edit mention inheritance, or explicitly apply runtime changes
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
   session recover  Explicitly recover a context-overflowed session and replay retained Inbox deliveries
-  pi-auth          Show non-sensitive built-in Pi auth status or logout one provider
+  pi-auth          Show, configure, or logout one built-in Pi Agent provider credential
   comment reply    Reply to the exact cloud-document comment bound by a polled Inbox message
   telemetry        Inspect, export, import, or flush the durable OpenTelemetry trace queue
   <lark-cli 命令组>  im/docs/wiki/drive 等 lark-cli 命令原样转发，机器人身份已锁定（如 larkin im +chat-list）
@@ -156,7 +158,13 @@ Process persistence is managed externally. larkin start stays in the foreground 
 
 const [mode, ...presetArguments] = routes[command];
 const childSpec = internalCommandSpec(mode, [...presetArguments, ...rest]);
-const child = spawn(childSpec.command, childSpec.args, { stdio: "inherit" });
+// 管道 stdin 必须显式转发：Linux 上 inherit 会在父进程排空后再交给子进程，导致 --api-key-stdin 读到空。
+const pipeStdin = command === "pi-auth" && rest.includes("--api-key-stdin") && !process.stdin.isTTY;
+if (pipeStdin && typeof process.stdin.pause === "function") process.stdin.pause();
+const child = spawn(childSpec.command, childSpec.args, {
+  stdio: [pipeStdin ? "pipe" : "inherit", "inherit", "inherit"],
+});
+if (pipeStdin && child.stdin) process.stdin.pipe(child.stdin);
 
 // Package-manager bin shims add a wrapper process. Forward terminal signals so the actual command
 // does not become an orphan that keeps the machine lock or Feishu connection.

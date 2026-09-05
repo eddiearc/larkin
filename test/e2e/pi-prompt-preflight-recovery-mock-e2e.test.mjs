@@ -394,7 +394,9 @@ test("real Pi adapter missing-key RPC rejection terminals the ledger and project
     assert.equal(record.errorCategory, "auth");
     const status = events.filter((event) => event.type === "agent-status").at(-1);
     assert.equal(status.readiness.state, "unauthenticated");
-    assert.match(status.readiness.nextAction, /Add the missing zai-coding-cn credential to this Agent's official store/);
+    assert.match(status.readiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
+    assert.match(status.readiness.nextAction, /Provider Credentials/);
+    assert.doesNotMatch(status.readiness.nextAction, /zai-coding-cn/);
     assert.equal(events.filter((event) => event.type === "delivery" && event.status === "deferred").length, 0);
 
     rejectMissing = false;

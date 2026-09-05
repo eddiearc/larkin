@@ -13,7 +13,6 @@ import { isAllowedDashboardAvatarUrl } from "./dashboard-avatar.js";
 import { collectWorkspaceEntry as collectTypedWorkspaceEntry } from "./dashboard-workspace.js";
 import { buildFingerprint, packageVersion } from "../platform/build-info.js";
 import * as larkinConfig from "../platform/config.js";
-import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
 import { toUserRuntime } from "../runtime/user-runtime.js";
 
 export interface JsonRecord {
@@ -91,7 +90,6 @@ export interface DashboardAgent {
   workspaceDir: string;
   feishuProfile: string;
   effort?: string;
-  piDistribution?: "external" | "builtin";
   noMentionChats?: string[];
 }
 export interface DashboardConfig {
@@ -487,7 +485,7 @@ export function projectStatusTimeline(status: JsonRecord) {
 
 export type PiStatusModelResolver = {
   resolve(input: {
-    agentDir: string;
+    agentDir?: string;
     agentId: string;
     cwd: string;
     command?: string;
@@ -507,13 +505,11 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
   let piCatalog: readonly PiContextCatalogModel[] = [];
   if (a.runtime === "pi" && piModelResolver) {
     try {
-      const catalogCommand = piCatalogCommandSpec(a.piDistribution, process.env);
       piCatalog = await piModelResolver.resolve({
         agentId: a.agentId,
         cwd: a.workspaceDir,
-        agentDir: ownedPiCatalogAgentDir(configDir, a.agentId),
-        command: catalogCommand.command,
-        commandArgs: catalogCommand.commandArgs,
+        command: process.env.LARKIN_PI_COMMAND || "pi",
+        commandArgs: [],
       });
     } catch { /* unknown or unavailable catalog keeps the explicit turns fallback */ }
   }
@@ -565,7 +561,7 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
     agentId: a.agentId,
     name: a.name,
     displayName: (botIdentity && botIdentity.name) || a.name,
-    runtime: toUserRuntime(a.runtime, a.piDistribution),
+    runtime: toUserRuntime(a.runtime),
     model: status.session?.runtime === a.runtime && status.session?.model ? String(status.session.model) : a.model,
     effort: status.session?.runtime === a.runtime && status.session?.reasoningEffort ? String(status.session.reasoningEffort) : a.effort || null,
     runtimeReadiness,
@@ -589,7 +585,7 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
     sessions: agentState.sessions || {},
     session: sessionId ? {
       id: sessionId,
-      runtime: toUserRuntime(a.runtime, a.piDistribution),
+      runtime: toUserRuntime(a.runtime),
       startedAt: usage.startedAt || (status.session?.id === sessionId ? status.session.startedAt : null) || null,
       ageSec: ageSec(usage.startedAt || (status.session?.id === sessionId ? status.session.startedAt : null)),
       lastTurnAt: status.session?.lastTurnAt || null,

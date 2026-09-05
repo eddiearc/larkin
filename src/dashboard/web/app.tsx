@@ -4,7 +4,7 @@ import {
   Gauge, Logs, Menu, MessageSquareText, RefreshCw, Search, Settings2, SlidersHorizontal, Users, XCircle,
 } from "lucide-react";
 import { AGENT_TABS, createLatestResponseGate, filterAgents, parseRoute, reconcileAgentId, routeSearch, sameDraft, type AgentTab } from "./dashboard-state";
-import type { ConfigAgent, ConfigResponse, DashboardAgent, PiProviderCatalogEntry, PiProviderCredentialStatus, PiProviderLoginResult, RuntimeModel, RuntimeReadinessView, StatusResponse, WorkspaceProjection } from "./types";
+import type { ConfigAgent, ConfigResponse, DashboardAgent, RuntimeModel, RuntimeReadinessView, StatusResponse, WorkspaceProjection } from "./types";
 import { Badge, Button, EmptyState, Sheet, cn } from "./components/ui";
 import { RUNTIME_OPTIONS } from "../../runtime/user-runtime.js";
 
@@ -258,112 +258,20 @@ function GroupPolicyTable({ config, onSave, disabled }: {
   </section>;
 }
 
-function isBuiltinPiAgent(config: ConfigAgent | undefined): boolean {
-  return Boolean(config && (config.runtimeOption === "builtin-pi" || (config.runtime === "pi" && config.piDistribution === "builtin")));
+function formatReadiness(readiness: RuntimeReadinessView): string {
+  return [
+    `Readiness ${readiness.state}`,
+    readiness.reason,
+    readiness.nextAction,
+  ].filter(Boolean).join(" · ");
 }
 
-function ProviderCredentials({ agentId, onConfigured }: { agentId: string; onConfigured: () => void }) {
-  const [catalog, setCatalog] = useState<PiProviderCatalogEntry[]>([]);
-  const [credentials, setCredentials] = useState<PiProviderCredentialStatus[]>([]);
-  const [model, setModel] = useState<string>("");
-  const [preset, setPreset] = useState("deepseek");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [customModel, setCustomModel] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [logoutProvider, setLogoutProvider] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const selected = catalog.find((entry) => entry.id === preset) || catalog[0];
-  const custom = selected?.custom === true;
-
-  const refresh = useCallback(async () => {
-    const [providers, status] = await Promise.all([
-      privateGet<{ providers: PiProviderCatalogEntry[] }>("/api/pi-auth/providers"),
-      privateGet<{ agentId: string; model: string; credentials: PiProviderCredentialStatus[] }>(`/api/pi-auth/status?agent=${encodeURIComponent(agentId)}`),
-    ]);
-    setCatalog(providers.providers);
-    setCredentials(status.credentials);
-    setModel(status.model);
-    setLogoutProvider((current) => current || status.credentials[0]?.providerId || "");
-  }, [agentId]);
-
-  useEffect(() => { void refresh().catch((error) => setFeedback(error instanceof Error ? error.message : String(error))); }, [agentId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const clearKey = () => setApiKey("");
-  const save = async () => {
-    setBusy(true);
-    try {
-      const result = await jsonFetch<PiProviderLoginResult>("/api/pi-auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Larkin-CSRF": bootstrap.csrfCapability },
-        body: JSON.stringify({
-          agentId,
-          preset,
-          apiKey,
-          ...(custom ? { baseUrl, model: customModel } : {}),
-        }),
-      });
-      clearKey();
-      const apply = result.applyState === "applied"
-        ? "已应用"
-        : result.applyState === "pending"
-          ? `已保存但待应用${result.applyError ? `：${result.applyError}` : ""}`
-          : "已保存，将在 larkin start 后生效";
-      setFeedback(`${result.provider} · ${result.model} · ${apply}`);
-      await refresh();
-      onConfigured();
-    } catch (error) {
-      clearKey();
-      setFeedback(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const logout = async () => {
-    if (!logoutProvider) return;
-    setBusy(true);
-    try {
-      const result = await jsonFetch<{ ok: true; provider: string }>("/api/pi-auth/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Larkin-CSRF": bootstrap.csrfCapability },
-        body: JSON.stringify({ agentId, provider: logoutProvider }),
-      });
-      setFeedback(`已退出 ${result.provider}`);
-      await refresh();
-      onConfigured();
-    } catch (error) {
-      setFeedback(error instanceof Error ? error.message : String(error));
-    } finally { setBusy(false); }
-  };
-
-  return <section className="config-section">
-    <div className="section-heading"><div><h3>Provider Credentials</h3><p>只配置当前 builtin Pi Agent 的 Provider 与 API Key；自定义端点必须是 OpenAI-compatible。密钥只在本次保存请求中使用。</p></div></div>
-    <p className="provider-status">当前模型 {model || "未设置"}。{credentials.length
-      ? credentials.map((entry) => `${entry.providerName} (${entry.providerId}): ${entry.credentialType}`).join(" · ")
-      : "尚无已存储的 provider credential"}</p>
-    <div className="config-grid provider-grid">
-      <label><span>Provider</span><select value={preset} disabled={busy} onChange={(event) => setPreset(event.target.value)} aria-label="Provider">
-        {catalog.map((entry) => <option value={entry.id} key={entry.id}>{entry.name}</option>)}
-      </select></label>
-      {!custom ? <label><span>Default model</span><input value={selected?.defaultModel || ""} disabled readOnly /></label> : null}
-      {custom ? <label><span>Base URL</span><input value={baseUrl} disabled={busy} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" aria-label="Base URL" /></label> : null}
-      {custom ? <label><span>Model</span><input value={customModel} disabled={busy} onChange={(event) => setCustomModel(event.target.value)} placeholder="model-id" aria-label="Custom model" /></label> : null}
-      <label><span>API Key</span><input type="password" autoComplete="off" name="larkin-pi-api-key" value={apiKey} disabled={busy} onChange={(event) => setApiKey(event.target.value)} aria-label="API Key" /></label>
-    </div>
-    <div className="form-actions">
-      <Button className="primary" disabled={busy || !apiKey} onClick={() => void save()}>{busy ? "处理中…" : "保存 Provider"}</Button>
-    </div>
-    {credentials.length ? <div className="config-grid provider-grid provider-logout">
-      <label><span>Logout provider</span><select value={logoutProvider} disabled={busy} onChange={(event) => setLogoutProvider(event.target.value)} aria-label="Logout provider">
-        {credentials.map((entry) => <option value={entry.providerId} key={entry.providerId}>{entry.providerName} ({entry.providerId})</option>)}
-      </select></label>
-      <div className="form-actions"><Button disabled={busy || !logoutProvider} onClick={() => void logout()}>退出所选 Provider</Button></div>
-    </div> : null}
-    {feedback ? <p role="status" className="feedback">{feedback}</p> : null}
-  </section>;
-}
-
-function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: string; onDirtyChange: (dirty: boolean) => void; refreshKey: number }) {
+function AgentConfiguration({ agentId, readiness, onDirtyChange, refreshKey }: {
+  agentId: string;
+  readiness: RuntimeReadinessView | null;
+  onDirtyChange: (dirty: boolean) => void;
+  refreshKey: number;
+}) {
   const [response, setResponse] = useState<ConfigResponse | null>(null);
   const [serverDraft, setServerDraft] = useState<Record<string, unknown>>({});
   const [draft, setDraft] = useState<Record<string, unknown>>({});
@@ -374,7 +282,6 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
     status: "loading" | "ready" | "error";
     models: RuntimeModel[];
   } | null>(null);
-  const [providerTick, setProviderTick] = useState(0);
   const gate = useRef(createLatestResponseGate());
   const modelDirectoryGate = useRef(createLatestResponseGate());
   const dirty = !sameDraft(serverDraft, draft);
@@ -409,7 +316,7 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
   const model = String(draft.model || config?.model || "default");
   useEffect(() => {
     setModelDirectory({ runtime, status: "loading", models: [] });
-    if (!new Set(["pi", "builtin-pi", "codex", "claude"]).has(runtime)) {
+    if (!(RUNTIME_OPTIONS as readonly string[]).includes(runtime)) {
       setModelDirectory({ runtime, status: "error", models: [] });
       return;
     }
@@ -424,7 +331,7 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
         }
       });
     return () => controller.abort();
-  }, [agentId, runtime, providerTick]);
+  }, [agentId, runtime]);
   const directoryReady = modelDirectory?.runtime === runtime && modelDirectory.status === "ready";
   const directoryStatus = modelDirectory?.runtime === runtime ? modelDirectory.status : "loading";
   const models = directoryReady ? modelDirectory.models : [];
@@ -463,7 +370,7 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
         setFeedback(latest ? "配置已保存" : "没有需要保存的修改");
       }
       await load(false);
-    } catch (error) { setFeedback(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { setFeedback(readinessFailure(error, error instanceof Error ? error.message : String(error))); }
     finally { setLoading(false); }
   };
   const apply = async () => {
@@ -491,6 +398,7 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
   return <div className="configuration-page">
     <section className="config-section"><div className="section-heading"><div><h3>Agent 配置</h3><p>只作用于 {agentId}；运行配置会在安全时机自动应用，Agent 正忙时会保留待处理。</p></div><Badge className={config.apply.applyState === "pending" ? "warning" : "success"}>{applyStateLabel}</Badge></div>
       <p className="cli-guidance">这里只提供常用微调。更多配置可以直接告诉当前 Agent，让它运行 <code>larkin config --help</code> 后完成。</p>
+      {readiness ? <p className="field-help">{formatReadiness(readiness)}</p> : null}
       <div className="config-grid">
         <label><span>Runtime</span><select value={runtime} disabled={loading} onChange={(event) => { update("runtime", event.target.value); update("model", "default"); update("effort", "default"); }}>{(response?.runtimeOptions || RUNTIME_OPTIONS).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
         <label><span>Model</span><select value={model} disabled={loading || !directoryReady} onChange={(event) => { update("model", event.target.value); if (event.target.value === "default") update("effort", "default"); }}>{visibleModels.map((item) => <option value={item.id} key={item.id}>{item.label || item.id}</option>)}</select></label>
@@ -505,7 +413,6 @@ function AgentConfiguration({ agentId, onDirtyChange, refreshKey }: { agentId: s
       </div> : null}
       {feedback ? <p role="status" className="feedback">{feedback}</p> : null}
     </section>
-    {isBuiltinPiAgent(config) ? <ProviderCredentials agentId={agentId} onConfigured={() => { setProviderTick((value) => value + 1); void load(false); }} /> : null}
     <GroupPolicyTable config={config} onSave={saveChat} disabled={loading} />
   </div>;
 }
@@ -693,7 +600,7 @@ export function App() {
         <div className={cn("agent-content", tab === "workspace" && "workspace-active")} key={selected.agentId}>
           <section role="tabpanel" hidden={tab !== "overview"}><Overview agent={selected} /></section>
           <section role="tabpanel" hidden={tab !== "conversation"}><Conversation agent={selected} /></section>
-          <section role="tabpanel" hidden={tab !== "configuration"}><AgentConfiguration agentId={selected.agentId} onDirtyChange={setAgentDirty} refreshKey={configRefreshKey} /></section>
+          <section role="tabpanel" hidden={tab !== "configuration"}><AgentConfiguration agentId={selected.agentId} readiness={selected.runtimeReadiness ?? null} onDirtyChange={setAgentDirty} refreshKey={configRefreshKey} /></section>
           <section role="tabpanel" hidden={tab !== "reminders"}><Reminders agent={selected} /></section>
           <section className="workspace-tab-panel" role="tabpanel" hidden={tab !== "workspace"}><Workspace agentId={selected.agentId} /></section>
           <section role="tabpanel" hidden={tab !== "logs"}><LogsPanel agent={selected} /></section>

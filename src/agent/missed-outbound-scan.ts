@@ -45,7 +45,9 @@ function load(file: string): AuditRegistry {
   let fd: number | undefined;
   let bytes: Buffer;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    fd = fs.openSync(file, fs.constants.O_RDONLY
+      | (fs.constants.O_NOFOLLOW || 0)
+      | (fs.constants.O_NONBLOCK || 0));
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) throw new Error("inbox audit registry is not a regular file");
     const buffer = Buffer.alloc(MAX_INBOX_AUDIT_REGISTRY_BYTES + 1);

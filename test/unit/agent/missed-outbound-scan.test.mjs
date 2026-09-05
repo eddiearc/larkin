@@ -197,6 +197,7 @@ test("registry load uses a cap+1 fd buffer and never readFileSyncs the registry"
   assert.match(source, /MAX_INBOX_AUDIT_REGISTRY_BYTES \+ 1/);
   assert.match(source, /readSync\(/);
   assert.match(source, /fstatSync\(/);
+  assert.match(source, /O_NONBLOCK/);
   assert.match(source, /isFile\(\)/);
   assert.equal(/readFileSync\(/.test(source), false, "load/save must not call readFileSync");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-fd-"));
@@ -222,6 +223,44 @@ test("hasInboxAuditTargets fails closed when the registry path is not a regular 
     assert.throws(() => hasInboxAuditTargets(file, "cli_audit"), /regular file|EISDIR/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+const POSIX_FIFO_HARNESS = process.platform !== "win32"
+  && Number(fs.constants.O_NONBLOCK) > 0
+  && Boolean(Bun.which("mkfifo"));
+
+test.skipIf(!POSIX_FIFO_HARNESS)("hasInboxAuditTargets rejects a POSIX FIFO without blocking siblings", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-fifo-"));
+  const file = inboxAuditRegistryFile(root);
+  const probe = path.join(root, "fifo-probe.mjs");
+  const childTimeoutMs = 2_000;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const created = spawnSync("mkfifo", ["-m", "0600", file], { encoding: "utf8" });
+    assert.equal(created.status, 0, created.stderr || created.error?.message);
+    assert.equal(fs.lstatSync(file).isFIFO(), true);
+    fs.writeFileSync(probe, `import { hasInboxAuditTargets } from ${JSON.stringify(new URL("../../../src/agent/missed-outbound-scan.ts", import.meta.url).href)};
+try {
+  hasInboxAuditTargets(process.argv[2], "cli_audit");
+  process.exit(2);
+} catch (error) {
+  const text = error instanceof Error ? error.message : String(error);
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  process.exit(/regular file/.test(text) || code === "ENXIO" || code === "EAGAIN" ? 0 : 3);
+}
+`);
+    const child = spawnSync(process.execPath, [probe, file], {
+      encoding: "utf8",
+      timeout: childTimeoutMs,
+      killSignal: "SIGKILL",
+    });
+    assert.notEqual(child.signal, "SIGKILL", "FIFO open must return before the hard timeout");
+    assert.equal(child.error, undefined, child.error?.message);
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+  } finally {
+    try { fs.unlinkSync(file); } catch { /* probe or mkfifo may have left the fifo */ }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, { timeout: 5_000 });
 
 test("observe rejects a serialized registry the load cap would refuse and keeps the prior file", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-audit-save-"));

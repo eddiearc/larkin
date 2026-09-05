@@ -279,8 +279,10 @@ function assertSupportedPiVersion(version: unknown): string {
   const match = PI_VERSION_CORE.exec(raw);
   if (!match) throw new Error(`Pi executable version ${raw || "missing"} is not a supported version`);
   const numeric = `${match[1]}.${match[2]}.${match[3]}`;
+  if (match[4]) {
+    throw new Error(`Pi executable version ${raw} is unsupported: SemVer ${raw} < ${numeric}; Larkin supports stable external pi only`);
+  }
   if (comparePiNumericVersions(numeric, MINIMUM_PI_VERSION) < 0) {
-    if (match[4]) throw new Error(`Pi executable version ${raw} is unsupported`);
     throw new Error(olderThanMinimumPiVersionMessage(numeric));
   }
   return numeric;

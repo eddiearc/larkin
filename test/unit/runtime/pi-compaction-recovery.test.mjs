@@ -118,9 +118,15 @@ test("external capability guard fails closed and accepts only the required Pi pr
     reserveTokens: 40_800, keepRecentTokens: 20_000, compactRpc: true,
     events: ["compaction_start", "compaction_end", "agent_end", "agent_settled"],
   };
-  for (const version of ["0.84.2", "0.84.4", "0.85.0", "1.0.0", "0.84.2-beta"]) {
+  for (const version of ["0.84.2", "0.84.4", "0.85.0", "1.0.0"]) {
     assert.doesNotThrow(() => verifyPiCapabilities({ ...handshake, version }));
   }
+  assert.throws(() => verifyPiCapabilities({ ...handshake, version: "0.84.2-beta" }), {
+    message: "Pi executable version 0.84.2-beta is unsupported: SemVer 0.84.2-beta < 0.84.2; Larkin supports stable external pi only",
+  });
+  assert.throws(() => verifyPiCapabilities({ ...handshake, version: "0.85.0-rc.1" }), {
+    message: "Pi executable version 0.85.0-rc.1 is unsupported: SemVer 0.85.0-rc.1 < 0.85.0; Larkin supports stable external pi only",
+  });
   assert.throws(() => verifyPiCapabilities({ ...handshake, version: "0.84.1" }), {
     message: "Pi executable version 0.84.1 is older than the minimum 0.84.2",
   });

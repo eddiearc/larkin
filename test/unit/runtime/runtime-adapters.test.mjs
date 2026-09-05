@@ -62,7 +62,7 @@ const create = (overrides = {}) => ({
   ...overrides,
 });
 
-function makeProductionPiCommand(root, mode = "stable") {
+function makeProductionPiCommand(root, mode = "stable", version = "0.84.2") {
   const log = path.join(root, "pi-rpc.log");
   const script = path.join(root, "fake-pi.mjs");
   fs.writeFileSync(script, `import fs from "node:fs";
@@ -77,7 +77,7 @@ if (args.includes("--version")) {
     const theme = process.env.PI_PACKAGE_DIR + "/dist/modes/interactive/theme/dark.json";
     if (!fs.existsSync(theme)) process.exit(1);
   }
-  process.stdout.write("0.84.2\\n");
+  process.stdout.write(${JSON.stringify(`${version}\n`)});
   process.exit(0);
 }
 const respond = (request, data) => process.stdout.write(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data }) + "\\n");
@@ -990,6 +990,27 @@ test("inherited PI_PACKAGE_DIR does not drop production extension version probes
   } finally {
     await session?.close("inherited extension probe test complete").catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("production Pi session starts when external pi reports 0.84.4", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-production-0844-"));
+  const { command, commandArgs, log } = makeProductionPiCommand(root, "stable", "0.84.4");
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => ["-e", "fixture-extension"],
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    session = await adapter.createSession(input);
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+  } finally {
+    await session?.close("0.84.4 session start test complete").catch(() => {});
   }
 });
 

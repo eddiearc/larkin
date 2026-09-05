@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-export const PINNED_PI_VERSION = "0.84.2";
+/** External `pi` must be this version or newer; handshake still guards protocol compatibility. */
+export const MINIMUM_PI_VERSION = "0.84.2";
 
 /** Fallback values used while importing a Pi profile, before Pi reports its model. */
 export const PI_CONTEXT_WINDOW = 272_000;
@@ -256,16 +257,45 @@ export function readOwnedPiSettings(directory: string): EffectivePiSettings {
   return { compaction: { enabled, reserveTokens: values.reserveTokens, keepRecentTokens: values.keepRecentTokens } };
 }
 
-export function parsePiExecutableVersion(output: string): typeof PINNED_PI_VERSION {
+const PI_VERSION_LINE = /^(?:pi(?:-coding-agent)?(?:\s+version)?\s+v?)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/i;
+const PI_VERSION_CORE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$/;
+
+function comparePiNumericVersions(left: string, right: string): number {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (leftParts[index] !== rightParts[index]) return Math.sign(leftParts[index] - rightParts[index]);
+  }
+  return 0;
+}
+
+export function olderThanMinimumPiVersionMessage(version: string): string {
+  return `Pi executable version ${version} is older than the minimum ${MINIMUM_PI_VERSION}`;
+}
+
+function assertSupportedPiVersion(version: unknown): string {
+  if (typeof version !== "string") throw new Error(`Pi executable version ${MINIMUM_PI_VERSION} or newer is required`);
+  const raw = version.trim();
+  const match = PI_VERSION_CORE.exec(raw);
+  if (!match) throw new Error(`Pi executable version ${raw || "missing"} is not a supported version`);
+  const numeric = `${match[1]}.${match[2]}.${match[3]}`;
+  if (comparePiNumericVersions(numeric, MINIMUM_PI_VERSION) < 0) {
+    if (match[4]) throw new Error(`Pi executable version ${raw} is unsupported`);
+    throw new Error(olderThanMinimumPiVersionMessage(numeric));
+  }
+  return numeric;
+}
+
+export function parsePiExecutableVersion(output: string): string {
   const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length !== 1) throw new Error("Pi executable version output must contain exactly one version line");
-  const line = lines[0];
-  // Pi's bare version is canonical; permit only the fixed official display prefix.
-  const escapedVersion = PINNED_PI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (!new RegExp(`^(?:${escapedVersion}|pi(?:-coding-agent)?(?:\\s+version)?\\s+v?${escapedVersion})$`, "i").test(line)) {
-    throw new Error(`Pi executable version must be exactly ${PINNED_PI_VERSION}`);
+  const match = PI_VERSION_LINE.exec(lines[0]);
+  if (!match) throw new Error("Pi executable version output is not a supported version line");
+  const version = `${match[1]}.${match[2]}.${match[3]}`;
+  if (comparePiNumericVersions(version, MINIMUM_PI_VERSION) < 0) {
+    throw new Error(olderThanMinimumPiVersionMessage(version));
   }
-  return PINNED_PI_VERSION;
+  return version;
 }
 
 export interface PiCapabilityProbe {
@@ -282,7 +312,7 @@ export interface PiCapabilityProbe {
 }
 
 export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
-  if (capabilities.version !== PINNED_PI_VERSION) throw new Error(`trusted Pi version ${PINNED_PI_VERSION} is required`);
+  assertSupportedPiVersion(capabilities.version);
   if (capabilities.trustedProtocol === true) {
     throw new Error("external Pi cannot use a trusted protocol bypass");
   }

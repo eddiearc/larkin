@@ -28,7 +28,9 @@ import { resolvePiSubagentRecordWatchdogExtensionArg } from "./pi-subagent-recor
 import { effectivePiStateDir, extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
 import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
 import {
+  classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
+  missingProviderCredentialReadiness,
   probeNativeRuntimeReadiness,
   providerAuthenticationFailureReadiness,
   RuntimePrerequisiteError,
@@ -607,6 +609,19 @@ class PiSession extends EventSession {
       this.ownedInputIds.delete(input.inputId);
       this.inputEpochs.delete(input.inputId);
       const rawReason = error instanceof Error ? error.message : String(error);
+      const missing = classifyPiMissingCredentialRejection(rawReason);
+      if (missing) {
+        const classified = classifyPiProviderError(
+          { provider: missing.provider, message: missing.diagnostic },
+        );
+        this.emit({
+          type: "input-error", inputId: input.inputId, retryable: false, willRetry: false,
+          message: classified.reason, errorCategory: classified.category, nextAction: classified.nextAction,
+          upstream: { provider: missing.provider, message: missing.diagnostic },
+        });
+        // 拒绝原因保留 Pi 原文，方便 RuntimeHost 独立分类，不依赖 input-error 事件顺序。
+        return { status: "rejected", inputId: input.inputId, retryable: false, reason: rawReason };
+      }
       return { status: "rejected", inputId: input.inputId, retryable: true, reason: rawReason };
     }
   }
@@ -886,6 +901,11 @@ export function classifyPiProviderError(
   if (upstream.status === 429 || [...signal].some((value) => ["rate_limit", "rate_limit_exceeded", "too_many_requests"].includes(value))) return {
     category: "rate_limit", reason, nextAction: "Wait for the provider rate-limit window, then retry.",
   };
+  const missing = classifyPiMissingCredentialRejection(reason);
+  if (missing) {
+    const readiness = missingProviderCredentialReadiness("pi", missing.provider);
+    return { category: "auth", reason: readiness.reason!, nextAction: readiness.nextAction! };
+  }
   if (upstream.status === 401
       || [...signal].some((value) => ["authentication_error", "invalid_api_key", "invalid_token", "token_expired", "unauthorized", "provider_auth_error"].includes(value))
       || /\bAPI key auth failed\b|\bFailed to resolve API key\b/i.test(reason)) {

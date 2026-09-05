@@ -261,7 +261,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const nativeVersion = checked(spawnSync(officialLauncher, ["--version"], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     }), "standalone Runtime pinned lark-cli version");
-    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.79/);
+    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.80/);
     const evaluatorHelpArgv = ["im", "+messages-send", "--as", "user", "--chat-id", "a", "--chat-id=b", "--help"];
     const standaloneInboxState = path.join(canonicalState, "inbox-state.json");
     const beforeHelpConfig = fs.readFileSync(configFile);

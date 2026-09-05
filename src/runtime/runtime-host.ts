@@ -13,8 +13,10 @@ import type {
 import { buildStrictProviderErrorInput, classifyStrictProviderError } from "./provider-error-classifier.js";
 import {
   authFailureAppliesTo,
+  classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
   configuredProviderId,
+  missingProviderCredentialReadiness,
   parsePersistedAuthFailure,
   providerAuthenticationFailureReadiness,
   readinessForPersistedAuthFailure,
@@ -758,6 +760,24 @@ export function createRuntimeHost(options: {
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId, status: "accepted" });
       return { status: "accepted", deliveryId: record.deliveryId };
+    }
+    const missing = result.status === "rejected" && agent.adapter.id === "pi"
+      ? classifyPiMissingCredentialRejection(result.reason)
+      : null;
+    if (missing) {
+      const readiness = missingProviderCredentialReadiness(agent.adapter.id, missing.provider);
+      const reason = readiness.reason ?? result.reason;
+      if (record.status !== "error") {
+        record.reason = reason;
+        record.retryable = false;
+        record.errorCategory = "auth";
+        record.authProvider = missing.provider;
+        const finalRecord = setRecord(agent, record, "error");
+        if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
+          deliveryId: record.deliveryId, messageId: record.messageId, status: "error", reason });
+        projectAuthFailure(agent, readiness, { kind: "missing-provider", provider: missing.provider });
+      }
+      return { status: "error", deliveryId: record.deliveryId, reason: record.reason ?? reason, retryable: false };
     }
     if (record.status === "error") {
       return { status: "error", deliveryId: record.deliveryId, reason: record.reason ?? result.reason, retryable: false };
@@ -1623,15 +1643,28 @@ export function createRuntimeHost(options: {
       }));
       if (classifiedCategory) record.errorCategory = classifiedCategory;
       else delete record.errorCategory;
-      const finalRecord = setRecord(agent, record, event.retryable ? "pending" : "error");
+      const missing = agent.adapter.id === "pi"
+        ? classifyPiMissingCredentialRejection(event.upstream?.message)
+          ?? classifyPiMissingCredentialRejection(event.message)
+        : null;
+      if (missing) {
+        record.retryable = false;
+        record.errorCategory = "auth";
+        record.authProvider = missing.provider;
+      }
+      const terminal = Boolean(missing) || !event.retryable;
+      const finalRecord = setRecord(agent, record, terminal ? "error" : "pending");
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId,
-        status: event.retryable ? "deferred" : "error", reason: event.message });
-      if (event.errorCategory === "auth" && !event.retryable) {
+        status: terminal ? "error" : "deferred", reason: event.message });
+      if (missing) {
+        const readiness = missingProviderCredentialReadiness(agent.adapter.id, missing.provider);
+        projectAuthFailure(agent, readiness, { kind: "missing-provider", provider: missing.provider });
+      } else if (event.errorCategory === "auth" && !event.retryable) {
         const readiness = providerAuthenticationFailureReadiness(agent.adapter.id, event.upstream?.provider);
         projectAuthFailure(agent, readiness, { kind: "generic", provider: genericAuthProvider(agent, event.upstream) });
       }
-      if (event.retryable && !agent.busy && !agent.turnInProgress) void retryPending(agent);
+      if (!terminal && event.retryable && !agent.busy && !agent.turnInProgress) void retryPending(agent);
     } else if (event.type === "configuration-error") {
       recoverConfiguration(agent, session, event.message);
     } else if (event.type === "error" || event.type === "closed") {

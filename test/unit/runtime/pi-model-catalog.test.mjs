@@ -161,6 +161,7 @@ test("production graph does not ship a host Pi package and speaks only the share
   const binaryEntry = fs.readFileSync(path.join(ROOT, "src/app/binary-entry.ts"), "utf8");
   const rpcClient = fs.readFileSync(path.join(ROOT, "src/runtime/pi-rpc-client.ts"), "utf8");
   assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], undefined);
+  assert.equal(pkg.devDependencies["@earendil-works/pi-coding-agent"], "0.84.2");
   assert.equal(pkg.dependencies["@mariozechner/pi-coding-agent"], undefined);
   assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], "0.14.3");
   assert.equal(pkg.packageManager, "bun@1.3.14");

@@ -335,7 +335,7 @@ test("external Pi production-order preflight timeout stays bounded, pending, obs
   }
 });
 
-test("real Pi adapter missing-key RPC rejection stays retryable without Larkin credential surfaces", async () => {
+test("real Pi adapter missing-key RPC rejection terminals the ledger and projects unauthenticated", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-missing-key-e2e-"));
   const agentId = "cli_piMissingKeyA1";
   const messageId = "om_missing_key_rpc";
@@ -346,6 +346,7 @@ test("real Pi adapter missing-key RPC rejection stays retryable without Larkin c
   const previousHome = process.env.HOME;
   const configDir = path.join(root, "config");
   let rejectMissing = true;
+  let sdkListener;
   const sdk = {
     sessionId: "pi-missing-key-session",
     prompt() {
@@ -353,7 +354,7 @@ test("real Pi adapter missing-key RPC rejection stays retryable without Larkin c
     },
     steer() {},
     abort() {},
-    subscribe() { return () => {}; },
+    subscribe(next) { sdkListener = next; return () => { sdkListener = undefined; }; },
   };
   process.env.LARKIN_CONFIG_DIR = configDir;
   process.env.HOME = path.join(root, "decoy-home");
@@ -375,17 +376,29 @@ test("real Pi adapter missing-key RPC rejection stays retryable without Larkin c
       workspaceDir, stateDir, env: { LARKIN_CONFIG_DIR: configDir } }]);
     store.prepareInboxDelivery({ message_id: messageId, target, content: "missing key", wake: true });
     const receipt = await host.deliver(agentId, { message_id: messageId, target, content: "missing key", wake: true });
-    assert.equal(receipt.status, "deferred");
-    assert.match(receipt.reason, /No API key found for zai-coding-cn/);
+    assert.equal(receipt.status, "error");
+    assert.equal(receipt.retryable, false);
+    assert.match(receipt.reason, /zai-coding-cn/);
     const record = store.readJson("runtimeDeliveries", { records: [] }).records[0];
-    assert.equal(record.status, "pending");
-    assert.equal(record.retryable, true);
+    assert.equal(record.status, "error");
+    assert.equal(record.retryable, false);
+    assert.equal(record.errorCategory, "auth");
     const status = events.filter((event) => event.type === "agent-status").at(-1);
-    assert.notEqual(status.readiness?.state, "unauthenticated");
+    assert.equal(status.readiness.state, "unauthenticated");
+    assert.match(status.readiness.nextAction, /external `pi` CLI/);
+    assert.match(status.readiness.nextAction, /zai-coding-cn/);
     assert.doesNotMatch(JSON.stringify(events), /pi-auth|Provider Credentials/);
-    const duplicate = await host.deliver(agentId, { message_id: messageId, target, content: "missing key", wake: true });
-    assert.equal(duplicate.status, "duplicate");
-    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "pending");
+    assert.equal(events.filter((event) => event.type === "delivery" && event.status === "deferred").length, 0);
+
+    rejectMissing = false;
+    const retry = await host.deliver(agentId, { message_id: messageId, target, content: "missing key", wake: true });
+    assert.equal(retry.status, "accepted");
+    sdkListener({ type: "turn_start", turnIndex: 0 });
+    sdkListener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "authenticated fixture output" } });
+    sdkListener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", provider: "zai-coding-cn", stopReason: "stop" }] });
+    sdkListener({ type: "agent_settled" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.filter((event) => event.type === "agent-status").at(-1).readiness.state, "ready");
   } finally {
     await host.shutdown("missing-key adapter e2e complete").catch(() => {});
     if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;

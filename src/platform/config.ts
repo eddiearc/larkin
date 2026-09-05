@@ -339,10 +339,49 @@ function ownedPiProviderDirectory(configDir: string, agentId: string): string {
   return path.join(path.resolve(configDir), "providers", "pi", agentId);
 }
 
-function deleteOwnedPiProviderDirectory(configDir: string, agentId: string): void {
+function userPiHome(env: Env): string {
+  const home = typeof env.HOME === "string" && env.HOME.trim() ? env.HOME : os.homedir();
+  return path.resolve(home, ".pi");
+}
+
+function isInsideOrEqual(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function pathExists(target: string): boolean {
+  try { fs.lstatSync(target); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function shouldSkipOwnedPiDeletion(configDir: string, expected: string, env: Env): string | null {
+  let userPi: string;
+  try { userPi = fs.realpathSync(userPiHome(env)); }
+  catch { userPi = path.resolve(userPiHome(env)); }
+  let configRoot: string;
+  try { configRoot = fs.realpathSync(path.resolve(configDir)); }
+  catch { configRoot = path.resolve(configDir); }
+  let resolvedExpected: string;
+  try { resolvedExpected = fs.realpathSync(path.resolve(expected)); }
+  catch { resolvedExpected = path.resolve(expected); }
+  if (isInsideOrEqual(configRoot, userPi)) return "config root is inside the user ~/.pi directory";
+  if (isInsideOrEqual(resolvedExpected, userPi)) return "owned Pi directory is inside the user ~/.pi directory";
+  return null;
+}
+
+function deleteOwnedPiProviderDirectory(configDir: string, agentId: string, env: Env = process.env): void {
   const expected = ownedPiProviderDirectory(configDir, agentId);
-  assertNoSymlinkAncestors(expected);
+  const skip = shouldSkipOwnedPiDeletion(configDir, expected, env);
+  if (skip) {
+    process.stderr.write(`[larkin] skipped leftover builtin Pi directory for ${agentId}: ${skip}\n`);
+    return;
+  }
   const parent = path.dirname(expected);
+  if (!pathExists(parent) || !pathExists(expected)) return;
+  assertNoSymlinkAncestors(expected);
   const rootReal = fs.realpathSync(path.resolve(configDir));
   const parentReal = fs.realpathSync(parent);
   const relative = path.relative(rootReal, parentReal);
@@ -352,12 +391,7 @@ function deleteOwnedPiProviderDirectory(configDir: string, agentId: string): voi
   if (path.basename(parent) !== "pi" || path.basename(path.dirname(parent)) !== "providers") {
     throw new Error("owned Pi provider directory is not providers/pi/<agentId>");
   }
-  let stat: fs.Stats;
-  try { stat = fs.lstatSync(expected); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
+  const stat = fs.lstatSync(expected);
   if (stat.isSymbolicLink()) throw new Error("owned Pi provider directory is a symlink");
   if (!stat.isDirectory()) throw new Error("owned Pi provider directory must be a directory");
   fs.rmSync(expected, { recursive: true, force: false });
@@ -365,9 +399,11 @@ function deleteOwnedPiProviderDirectory(configDir: string, agentId: string): voi
 
 function rewriteLegacyBuiltinAgents(raw: unknown): unknown {
   if (!isPlainObject(raw) || !isPlainObject(raw.agents)) return raw;
+  const legacyIds = new Set(collectLegacyBuiltinAgentIds(raw));
+  if (legacyIds.size === 0) return raw;
   const agents: Record<string, unknown> = {};
   for (const [agentId, agent] of Object.entries(raw.agents)) {
-    if (!isPlainObject(agent)) {
+    if (!legacyIds.has(agentId) || !isPlainObject(agent)) {
       agents[agentId] = agent;
       continue;
     }
@@ -378,32 +414,31 @@ function rewriteLegacyBuiltinAgents(raw: unknown): unknown {
   return { ...raw, agents };
 }
 
-function persistLegacyBuiltinMigration(layout: TargetRootLayout, opts: { mint?: () => string }): { raw: unknown; bytes: Buffer } {
+function persistLegacyBuiltinMigration(layout: TargetRootLayout, opts: { mint?: () => string }, env: Env): { raw: unknown; bytes: Buffer } {
   const current = readConfigFile(layout.configFile, layout.root);
   const migratedIds = collectLegacyBuiltinAgentIds(current.raw);
   if (migratedIds.length === 0) return current;
   const rewritten = rewriteLegacyBuiltinAgents(current.raw);
-  const config = normalizeConfig(rewritten, layout.root, opts);
-  const stored = toStored(config);
-  const bytes = atomicWriteConfig(layout.configFile, stored);
+  const config = normalizeConfig(structuredClone(rewritten), layout.root, opts);
+  const bytes = atomicWriteConfig(layout.configFile, rewritten);
   for (const agentId of migratedIds) {
     const agent = config.agents[agentId];
     const model = typeof agent?.model === "string" ? agent.model : "unknown";
     process.stderr.write(`[larkin] migrated Agent ${agentId} from builtin-pi to pi (model=${model})\n`);
-    try { deleteOwnedPiProviderDirectory(layout.root, agentId); }
+    try { deleteOwnedPiProviderDirectory(layout.root, agentId, env); }
     catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       process.stderr.write(`[larkin] failed to delete leftover builtin Pi directory for ${agentId}: ${reason}\n`);
     }
   }
-  return { raw: stored, bytes };
+  return { raw: rewritten, bytes };
 }
 
 export function loadConfig(env: Env = process.env, opts: { mint?: () => string } = {}): { configDir: string; file: string; revision: string; config: HydratedConfig } {
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   const initial = readConfigFile(layout.configFile, layout.root);
   const { raw, bytes } = collectLegacyBuiltinAgentIds(initial.raw).length
-    ? withConfigLock(layout, () => persistLegacyBuiltinMigration(layout, opts))
+    ? withConfigLock(layout, () => persistLegacyBuiltinMigration(layout, opts, env))
     : initial;
   return { configDir: layout.configDir, file: layout.configFile, revision: revision(bytes), config: normalizeConfig(raw, layout.root, opts) };
 }
@@ -462,7 +497,8 @@ function agentSignature(config: HydratedConfig, agentId: string): string {
   if (!agent) throw new Error(`Agent 不存在：${agentId}`);
   const chats = Object.fromEntries(Object.entries(agent.chatMentionPolicies || {}).sort(([left], [right]) => left.localeCompare(right)));
   return revision(JSON.stringify({
-    runtime: agent.runtime, model: agent.model, piDistribution: null, effort: agent.effort ?? null,
+    schema: 2,
+    runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
   }));
 }

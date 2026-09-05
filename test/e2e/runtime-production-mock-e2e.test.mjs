@@ -778,7 +778,7 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
         const failedStatus = store.readJson("status", {});
         assert.equal(failedStatus.runtimeReadiness.state, "unauthenticated");
         assert.match(failedStatus.runtimeReadiness.reason, /bigmodel-anthropic.*authentication failed/i);
-        assert.match(failedStatus.runtimeReadiness.nextAction, /login|API-key resolver/i);
+        assert.match(failedStatus.runtimeReadiness.nextAction, /external `pi` CLI|login|API-key resolver/i);
         assert.doesNotMatch(JSON.stringify(failedStatus.runtimeReadiness) + JSON.stringify(failedStatus.recentErrors),
           /Users\/example|cc-switch-token|fixture-secret|unsafe raw action/);
 
@@ -826,7 +826,7 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
   });
 }
 
-test("missing-key prompt rejection stays retryable and does not mention Larkin credential surfaces", async () => {
+test("missing-key prompt rejection terminals the HostShell ledger and projects unauthenticated", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-production-missing-key-"));
   const agentId = "cli_mockMissingKeyA1";
   const otherId = "cli_mockMissingKeyB2";
@@ -882,20 +882,29 @@ test("missing-key prompt rejection stays retryable and does not mention Larkin c
       message_id: "om_missing_key", event_id: "evt_missing_key", content: "auth retry",
       create_time: "1784160002000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
     await new Promise((resolve) => setImmediate(resolve));
-    const deferred = store.readJson("runtimeDeliveries", { records: [] }).records[0];
-    assert.equal(deferred.status, "pending");
-    assert.equal(deferred.retryable, true);
+    const failed = store.readJson("runtimeDeliveries", { records: [] }).records[0];
+    assert.equal(failed.status, "error");
+    assert.equal(failed.retryable, false);
+    assert.equal(failed.errorCategory, "auth");
     assert.equal(session.prompts.length, 1);
-    const deferredStatus = store.readJson("status", {});
-    assert.notEqual(deferredStatus.runtimeReadiness?.state, "unauthenticated");
-    assert.doesNotMatch(JSON.stringify(deferredStatus), /pi-auth|Provider Credentials|larkin setup|profile import|fixture-openai-codex/);
+    const failedStatus = store.readJson("status", {});
+    assert.equal(failedStatus.runtimeReadiness.state, "unauthenticated");
+    assert.match(failedStatus.runtimeReadiness.reason, /zai-coding-cn/);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /external `pi` CLI/);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /zai-coding-cn/);
+    assert.doesNotMatch(JSON.stringify(failedStatus), /pi-auth|Provider Credentials|larkin setup|profile import|fixture-openai-codex/);
     await hostShell.ingest(otherId, { chat_id: "oc_missing_other", chat_type: "p2p", sender_id: "ou_sender",
       message_id: "om_missing_other", event_id: "evt_missing_other", content: "other",
       create_time: "1784160003000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
     assert.equal((otherStore.readJson("runtimeDeliveries", { records: [] }).records[0] || {}).status, "accepted");
-    const duplicate = await runtimeHost.deliver(agentId, { message_id: "om_missing_key", chat_id: "oc_missing_key" });
-    assert.equal(duplicate.status, "duplicate");
-    assert.equal(store.readJson("runtimeDeliveries", { records: [] }).records[0].status, "pending");
+    rejectMissing = false;
+    const retry = await runtimeHost.deliver(agentId, { message_id: "om_missing_key", chat_id: "oc_missing_key" });
+    assert.equal(retry.status, "accepted");
+    session.emit({ type: "turn-start", turnId: "pi-missing-recovered" });
+    session.emit({ type: "activity", activity: "text" });
+    session.emit({ type: "turn-end", turnId: "pi-missing-recovered" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
   } finally {
     await hostShell.shutdown("missing-key mock e2e complete");
     if (previousConfigDir === undefined) delete process.env.LARKIN_CONFIG_DIR;

@@ -1621,7 +1621,7 @@ test("terminal provider auth failure downgrades only its Agent and a later succe
   assert.equal(downgraded.status, "error");
   assert.equal(downgraded.readiness.state, "unauthenticated");
   assert.match(downgraded.readiness.reason, /bigmodel-anthropic.*authentication failed/i);
-  assert.match(downgraded.readiness.nextAction, /login|API-key resolver/i);
+  assert.match(downgraded.readiness.nextAction, /external `pi` CLI|login|API-key resolver/i);
   assert.doesNotMatch(JSON.stringify(downgraded), /Users\/example|cc-switch-token|fixture-secret|unsafe raw action/);
   assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === "cli_authHealthyB2").at(-1).status, "active");
   assert.equal((await host.deliver("cli_authHealthyB2", { message_id: "om_healthy" })).status, "accepted");
@@ -1683,7 +1683,7 @@ test("leftover missing-provider auth persists across restart and reset until a s
   try {
     await host.start([config]);
     assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state, "unauthenticated");
-    assert.match(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.nextAction, /official `pi` login/);
+    assert.match(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.nextAction, /external `pi` CLI/);
     const reset = await host.resetSession(agentId);
     assert.equal(reset.runtimeReady, true);
     assert.equal(events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1).readiness.state, "unauthenticated");
@@ -1824,7 +1824,7 @@ test("generic auth survives restart and reset without rehydrating a missing-prov
     await new Promise((resolve) => setImmediate(resolve));
     const afterGeneric = firstEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1);
     assert.equal(afterGeneric.readiness.state, "unauthenticated");
-    assert.match(afterGeneric.readiness.nextAction, /official `pi` login|login|API-key resolver/);
+    assert.match(afterGeneric.readiness.nextAction, /external `pi` CLI|login|API-key resolver/);
     assert.doesNotMatch(JSON.stringify(afterGeneric.readiness), /official store|pi-auth|Provider Credentials/);
     const persisted = store.readJson("agentState", {});
     assert.equal(persisted.authFailure.kind, "generic");
@@ -1843,7 +1843,7 @@ test("generic auth survives restart and reset without rehydrating a missing-prov
     await restarted.start([config]);
     const restartStatus = restartEvents.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1);
     assert.equal(restartStatus.readiness.state, "unauthenticated");
-    assert.match(restartStatus.readiness.nextAction, /official `pi` login|login|API-key resolver/);
+    assert.match(restartStatus.readiness.nextAction, /external `pi` CLI|login|API-key resolver/);
     assert.doesNotMatch(JSON.stringify(restartStatus.readiness), /official store|missing from this Agent|pi-auth/);
     const reset = await restarted.resetSession(agentId);
     assert.equal(reset.runtimeReady, true);
@@ -1926,7 +1926,7 @@ test("generic auth with a known provider clears on A-to-B stage, restart, and re
   }
 });
 
-test("matching missing-key rejections stay retryable for Pi, Codex, and Claude", async () => {
+test("matching missing-key rejections are terminal auth for Pi and stay retryable for Codex and Claude", async () => {
   for (const runtime of ["pi", "codex", "claude"]) {
     const session = new FakeSession();
     session.prompt = async function(input) {
@@ -1941,10 +1941,20 @@ test("matching missing-key rejections stay retryable for Pi, Codex, and Claude",
     try {
       await host.start([{ agentId, name: runtime, runtime, model: "fixture/model", workspaceDir: "/tmp" }]);
       const receipt = await host.deliver(agentId, { message_id: `om_missing_${runtime}` });
-      assert.equal(receipt.status, "deferred", runtime);
-      assert.match(receipt.reason, /No API key found for zai-coding-cn/);
-      assert.equal(events.some((event) => event.type === "agent-status" && event.readiness?.state === "unauthenticated"),
-        false, runtime);
+      if (runtime === "pi") {
+        assert.equal(receipt.status, "error", runtime);
+        assert.equal(receipt.retryable, false, runtime);
+        const status = events.filter((event) => event.type === "agent-status" && event.agentId === agentId).at(-1);
+        assert.equal(status.readiness.state, "unauthenticated");
+        assert.match(status.readiness.nextAction, /external `pi` CLI/);
+        assert.match(status.readiness.nextAction, /zai-coding-cn/);
+        assert.doesNotMatch(JSON.stringify(status.readiness), /pi-auth|Provider Credentials/);
+      } else {
+        assert.equal(receipt.status, "deferred", runtime);
+        assert.match(receipt.reason, /No API key found for zai-coding-cn/);
+        assert.equal(events.some((event) => event.type === "agent-status" && event.readiness?.state === "unauthenticated"),
+          false, runtime);
+      }
     } finally {
       await host.shutdown(`${runtime} isolation test complete`);
     }

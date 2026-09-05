@@ -43,7 +43,7 @@ if (REMOVED_SETUP_FLAGS.some((name) => has(name) || argv.some((arg) => arg.start
 
 // 默认应用级评论订阅：平台验证的应用订阅让该应用可见文档的全部评论进入 Agent Inbox。
 const commentSubscription = "application";
-const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: true, help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
+const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: !has("--no-start"), help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
 
 const RUNTIME_ENUM = ["pi", "codex", "claude"] as const;
 function runtimeCommand(runtime: RuntimeOption, env: NodeJS.ProcessEnv = process.env): string {

@@ -1,4 +1,4 @@
-import { loadHostCreateBashToolDefinition, type BashToolInput, type PiExtensionAPI } from "./pi-extension-api.js";
+import { createBashToolDefinition, type ExtensionAPI, type BashToolInput } from "@earendil-works/pi-coding-agent";
 
 /**
  * pi bash 工具超时护栏扩展。
@@ -10,8 +10,8 @@ import { loadHostCreateBashToolDefinition, type BashToolInput, type PiExtensionA
  *   并在返回的错误里明确提示：长任务必须改用后台 subagent
  *   （Agent(run_in_background: true)，来自 pi-subagents 扩展）。
  *
- * 这是 pi 扩展，运行在 Pi RPC 子进程内部；build.mjs 仍为 external Pi
- * 单独产出注入 bundle。
+ * 这是 pi 扩展，运行在 Pi RPC 子进程内部；build.mjs 把 `@earendil-works/pi-*`
+ * 标为 external，由 host Pi 的 loader 在运行时提供模块。
  */
 
 /** 前台 bash 的硬性上限（秒）。issue #55 建议默认 60s。 */
@@ -24,9 +24,8 @@ function effectiveBashTimeout(): number {
   return MAX_BASH_SECONDS;
 }
 
-export default function (pi: PiExtensionAPI): void {
+export default function (pi: ExtensionAPI): void {
   const cwd = process.cwd();
-  const createBashToolDefinition = loadHostCreateBashToolDefinition();
   // Host bash tool definition (keeps renderCall/renderResult/system-prompt metadata).
   const builtin = createBashToolDefinition(cwd);
   const MAX = effectiveBashTimeout();
@@ -44,7 +43,7 @@ export default function (pi: PiExtensionAPI): void {
     name: "bash",
     label: "bash",
     description: builtin.description,
-    async execute(toolCallId: string, params: BashToolInput, signal: unknown, onUpdate: unknown, ctx: unknown) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const requested = typeof params.timeout === "number" && params.timeout > 0 ? params.timeout : MAX;
       // 模型显式设置 timeout > 上限 → 它已知这是长任务。立即报错引导改用后台 subagent，
       // 不真的跑（省掉白等 + 避免产生部分副作用）。

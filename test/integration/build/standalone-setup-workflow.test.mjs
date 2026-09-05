@@ -52,6 +52,12 @@ elif printf '%s\n' "$*" | grep -q '+chat-list'; then
     printf '%s\n' '{"ok":true,"identity":"bot","data":{"chats":[]}}'
 elif printf '%s\n' "$*" | grep -q 'application/v6/scopes'; then
   printf '%s\n' '{"data":{"scopes":[{"scope_name":"im:message.group_msg","grant_status":1}]}}'
+elif printf '%s\n' "$*" | grep -q 'subscription_status'; then
+  printf '%s\n' '{"ok":true,"data":{"is_subscribe":true}}'
+elif printf '%s\n' "$*" | grep -q 'remove_subscription'; then
+  printf '%s\n' '{"ok":true}'
+elif printf '%s\n' "$*" | grep -q 'subscription'; then
+  printf '%s\n' '{"ok":true}'
 else
   printf '%s\n' '{"ok":true}'
 fi
@@ -120,6 +126,12 @@ test.skipIf(!enabled)("compiled setup-bind and public setup preserve Agent confi
       agents: { [firstAgent]: { runtime: "codex", model: "default", createdAt: "2026-07-01T00:00:00.000Z" } },
     };
     fs.writeFileSync(configFile, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 });
+    const botsDir = path.join(configDir, "bots");
+    fs.mkdirSync(botsDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(botsDir, 0o700);
+    fs.writeFileSync(path.join(botsDir, `${secondAgent}.json`), `${JSON.stringify({
+      appId: secondAgent, appSecret: "secret-value", tenant: "feishu",
+    }, null, 2)}\n`, { mode: 0o600 });
     writeLarkCli(binDir);
     const fixtureHome = path.join(temp, "home");
     fs.mkdirSync(fixtureHome, { recursive: true, mode: 0o700 });

@@ -1380,12 +1380,13 @@ test("Pi provider failures preserve safe actionable categories", () => {
   ]) {
     assert.equal(classifyPiProviderError(upstream).category, "provider");
   }
-  assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }).category, "provider");
-  assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "external" }).category, "provider");
-  assert.doesNotMatch(
-    classifyPiProviderError({ message: "No API key found for zai-coding-cn" }).nextAction,
-    /pi-auth|Provider Credentials|import-external-profile/,
-  );
+  const missingKey = classifyPiProviderError({ message: "No API key found for zai-coding-cn" });
+  assert.equal(missingKey.category, "auth");
+  assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "external" }).category, "auth");
+  assert.equal(classifyPiProviderError({ message: "No login found for zai-coding-cn" }).category, "auth");
+  assert.match(missingKey.nextAction, /external `pi` CLI/);
+  assert.match(missingKey.nextAction, /zai-coding-cn/);
+  assert.doesNotMatch(missingKey.nextAction, /pi-auth|Provider Credentials|import-external-profile/);
   const unknown = classifyPiProviderError({ provider: "gateway", code: "server_error", status: 502,
     message: "unusual failure Authorization: Bearer auth-secret Cookie=session-secret request body: {\"description\":\"useful detail\",\"api_key\":\"private\"}" });
   assert.equal(unknown.category, "provider");
@@ -1416,13 +1417,13 @@ test("Pi carries the structured 0.82 provider fixture without flattening fields 
     if (key === "unknown403") assert.match(failure.upstream.message, /request body description remains useful/);
     if (key === "authKeyCommand") {
       assert.match(failure.message, /bigmodel-anthropic.*authentication failed/i);
-      assert.match(failure.nextAction, /login|API-key resolver/i);
+      assert.match(failure.nextAction, /external `pi` CLI|login|API-key resolver/i);
       assert.doesNotMatch(failure.message + failure.nextAction, /Users\/example|cc-switch-token|fixture-secret/);
     }
   }
 });
 
-test("Pi keeps a matching missing-key prompt rejection retryable", async () => {
+test("Pi treats a matching missing-key prompt rejection as terminal auth", async () => {
   const sdk = { sessionId: "pi-external-missing-key", prompt() { throw new Error("No API key found for zai-coding-cn"); },
     steer() {}, abort() {}, subscribe() { return () => {}; } };
   const session = await createNativeRuntimeAdapter("pi", {
@@ -1431,9 +1432,14 @@ test("Pi keeps a matching missing-key prompt rejection retryable", async () => {
   const events = [];
   session.subscribe((event) => events.push(event));
   assert.deepEqual(await session.prompt({ inputId: "pi-external-a", kind: "user", text: "work", attempt: 0 }), {
-    status: "rejected", inputId: "pi-external-a", retryable: true, reason: "No API key found for zai-coding-cn",
+    status: "rejected", inputId: "pi-external-a", retryable: false, reason: "No API key found for zai-coding-cn",
   });
-  assert.equal(events.some((event) => event.type === "input-error"), false);
+  const failure = events.find((event) => event.type === "input-error");
+  assert.equal(failure?.errorCategory, "auth");
+  assert.equal(failure?.retryable, false);
+  assert.match(failure?.nextAction || "", /external `pi` CLI/);
+  assert.match(failure?.nextAction || "", /zai-coding-cn/);
+  assert.doesNotMatch(`${failure?.message || ""}${failure?.nextAction || ""}`, /pi-auth|Provider Credentials/);
 });
 
 test("Pi exposes terminal provider errors without resubmitting them", async () => {

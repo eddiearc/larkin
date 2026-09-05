@@ -24,11 +24,21 @@ function writeConfig(root, agents) {
   return file;
 }
 
-function legacyRuntimeSignature(config, agentId, piDistribution) {
+function currentRuntimeSignature(config, agentId) {
   const agent = config.agents[agentId];
   const chats = Object.fromEntries(Object.entries(agent.chatMentionPolicies || {}).sort(([left], [right]) => left.localeCompare(right)));
   return `sha256:${crypto.createHash("sha256").update(JSON.stringify({
-    runtime: agent.runtime, model: agent.model, piDistribution, effort: agent.effort ?? null,
+    schema: 2,
+    runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
+    globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
+  })).digest("hex")}`;
+}
+
+function legacyBuiltinSignature(config, agentId) {
+  const agent = config.agents[agentId];
+  const chats = Object.fromEntries(Object.entries(agent.chatMentionPolicies || {}).sort(([left], [right]) => left.localeCompare(right)));
+  return `sha256:${crypto.createHash("sha256").update(JSON.stringify({
+    runtime: agent.runtime, model: agent.model, piDistribution: "builtin", effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
   })).digest("hex")}`;
 }
@@ -67,15 +77,15 @@ test("loadConfig rewrites a builtin Agent once, preserves model, and deletes the
     assert.equal(second.revision, first.revision);
     assert.notEqual(
       configApi.runtimeConfigSignature(first.config, BUILTIN),
-      legacyRuntimeSignature(first.config, BUILTIN, "builtin"),
+      legacyBuiltinSignature(first.config, BUILTIN),
     );
     assert.equal(
       configApi.runtimeConfigSignature(first.config, BUILTIN),
-      legacyRuntimeSignature(first.config, BUILTIN, null),
+      currentRuntimeSignature(first.config, BUILTIN),
     );
     assert.equal(
       configApi.runtimeConfigSignature(first.config, CODEX),
-      legacyRuntimeSignature(first.config, CODEX, null),
+      currentRuntimeSignature(first.config, CODEX),
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -145,11 +155,73 @@ test("migrated Agent signature changes so a running daemon can reload it", () =>
       [CODEX]: { runtime: "codex", model: "gpt-5.6-sol" },
     });
     const after = configApi.loadConfig({ LARKIN_CONFIG_DIR: root }).config;
-    assert.notEqual(configApi.runtimeConfigSignature(after, BUILTIN), legacyRuntimeSignature(after, BUILTIN, "builtin"));
-    assert.equal(configApi.runtimeConfigSignature(after, BUILTIN), legacyRuntimeSignature(after, BUILTIN, null));
+    assert.notEqual(configApi.runtimeConfigSignature(after, BUILTIN), legacyBuiltinSignature(after, BUILTIN));
+    assert.equal(configApi.runtimeConfigSignature(after, BUILTIN), currentRuntimeSignature(after, BUILTIN));
     assert.equal(after.agents[CODEX].runtime, "codex");
     assert.equal(after.agents[CODEX].model, "gpt-5.6-sol");
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy-external sibling stays byte-identical when a builtin Agent is migrated", () => {
+  const EXTERNAL = "cli_legacyExternalC3";
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-mixed-sibling-"));
+  try {
+    const file = writeConfig(root, {
+      [BUILTIN]: { runtime: "pi", model: "default", piDistribution: "builtin" },
+      [EXTERNAL]: { runtime: "pi", model: "default", piDistribution: "external", createdAt: "2026-07-01T00:00:00.000Z" },
+    });
+    const beforeExternal = JSON.stringify(JSON.parse(fs.readFileSync(file, "utf8")).agents[EXTERNAL]);
+    const loaded = configApi.loadConfig({ LARKIN_CONFIG_DIR: root, HOME: path.join(root, "home") });
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(JSON.stringify(stored.agents[EXTERNAL]), beforeExternal);
+    assert.equal(stored.agents[EXTERNAL].piDistribution, "external");
+    assert.equal(Object.hasOwn(stored.agents[BUILTIN], "piDistribution"), false);
+    assert.equal(Object.hasOwn(loaded.config.agents[EXTERNAL], "piDistribution"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("LARKIN_CONFIG_DIR=$HOME/.pi refuses to delete owned Pi directories", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-user-home-"));
+  try {
+    const userPi = path.join(home, ".pi");
+    fs.mkdirSync(userPi, { recursive: true, mode: 0o700 });
+    const file = writeConfig(userPi, {
+      [BUILTIN]: { runtime: "pi", model: "default", piDistribution: "builtin" },
+    });
+    const owned = seedOwnedDir(userPi, BUILTIN);
+    const marker = path.join(owned, "auth.json");
+    const before = fs.readFileSync(marker);
+    configApi.loadConfig({ HOME: home, LARKIN_CONFIG_DIR: userPi });
+    assert.equal(fs.existsSync(owned), true);
+    assert.deepEqual(fs.readFileSync(marker), before);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).agents[BUILTIN].runtime, "pi");
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(file, "utf8")).agents[BUILTIN], "piDistribution"), false);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("absent providers/pi parent is a silent no-op during builtin migration", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-legacy-absent-parent-"));
+  const writes = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    return original(chunk, encoding, callback);
+  };
+  try {
+    writeConfig(root, {
+      [BUILTIN]: { runtime: "pi", model: "default", piDistribution: "builtin" },
+    });
+    configApi.loadConfig({ LARKIN_CONFIG_DIR: root, HOME: path.join(root, "home") });
+    assert.equal(writes.some((line) => line.includes("failed to delete leftover")), false);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi")), false);
+  } finally {
+    process.stderr.write = original;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

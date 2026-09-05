@@ -20,6 +20,7 @@
         "undici": "8.5.0",
       },
       "devDependencies": {
+        "@earendil-works/pi-coding-agent": "0.84.2",
         "@tailwindcss/vite": "^4.3.3",
         "@testing-library/jest-dom": "^7.0.0",
         "@testing-library/react": "^16.3.2",

@@ -58,14 +58,14 @@ test("missing-credential classifier matches only the explicit absent-key or abse
   const readiness = missingProviderCredentialReadiness("pi", "zai-coding-cn");
   assert.equal(readiness.state, "unauthenticated");
   assert.match(readiness.reason, /zai-coding-cn/);
-  assert.match(readiness.nextAction, /official `pi` login/);
+  assert.match(readiness.nextAction, /external `pi` CLI/);
   assert.doesNotMatch(readiness.nextAction, FORBIDDEN);
 });
 
 test("unauthenticated classification points at the runtime login flow", () => {
   const classified = classifyRuntimePrerequisite("pi", new Error("no authenticated available models"));
   assert.equal(classified.state, "unauthenticated");
-  assert.match(classified.nextAction, /official `pi` login/);
+  assert.match(classified.nextAction, /external `pi` CLI/);
   assert.doesNotMatch(classified.nextAction, FORBIDDEN);
   assert.match(classifyRuntimePrerequisite("codex", new Error("unauthenticated")).nextAction, /codex login/);
   assert.match(classifyRuntimePrerequisite("claude", new Error("unauthenticated")).nextAction, /claude login/);
@@ -90,9 +90,10 @@ test("scoped auth persistence matches runtime and provider without a builtin dis
   assert.equal(authFailureAppliesTo({ ...piZai, runtime: "codex", adapterId: "codex", model: "codex" }, missing), false);
   assert.equal(authFailureAppliesTo({ ...piZai, model: "openai-codex/gpt-5" }, missing), false);
   assert.equal(authFailureAppliesTo(piZai, generic), true);
-  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /official `pi` login/);
+  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /external `pi` CLI/);
+  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /zai-coding-cn/);
   assert.doesNotMatch(readinessForPersistedAuthFailure(missing).nextAction, FORBIDDEN);
-  assert.match(readinessForPersistedAuthFailure(generic).nextAction, /official `pi` login/);
+  assert.match(readinessForPersistedAuthFailure(generic).nextAction, /external `pi` CLI/);
 });
 
 function writeReadinessRuntime(root, { authenticated = true, runtime = "pi" } = {}) {
@@ -164,7 +165,7 @@ test("Pi readiness is unauthenticated when the probe reports no authenticated mo
       runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
     });
     assert.equal(readiness.state, "unauthenticated", JSON.stringify(readiness));
-    assert.match(readiness.nextAction || "", /official `pi` login/);
+    assert.match(readiness.nextAction || "", /external `pi` CLI/);
     assert.doesNotMatch(JSON.stringify(readiness), FORBIDDEN);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

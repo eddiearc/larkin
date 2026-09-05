@@ -261,13 +261,14 @@ test("HostShell keeps durable missing-key auth across ready status and reset", a
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
-    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /official `pi` login flow/);
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /external `pi` CLI/);
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /zai-coding-cn/);
     assert.doesNotMatch(store.readJson("status", {}).runtimeReadiness.nextAction, /pi-auth|Provider Credentials/);
     const reset = await host.resetSession(agentId, 0);
     assert.equal(reset.resetCommitted, true);
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
     assert.doesNotMatch(JSON.stringify(store.readJson("status", {}).runtimeReadiness), /larkin setup|profile import|import-external-profile/);
-    assert.doesNotMatch(store.readJson("status", {}).runtimeReadiness.nextAction, /zai-coding-cn/);
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /zai-coding-cn/);
   } finally {
     await host.shutdown("missing-key persist test complete");
     fs.rmSync(root, { recursive: true, force: true });
@@ -376,12 +377,12 @@ test("HostShell keeps a newer generic auth over historical missing-key rows acro
     }
     const started = store.readJson("status", {}).runtimeReadiness;
     assert.equal(started.state, "unauthenticated");
-    assert.match(started.nextAction, /login|API-key resolver/);
+    assert.match(started.nextAction, /external `pi` CLI/);
     assert.doesNotMatch(JSON.stringify(started), /official store/);
     await host.resetSession(agentId, 0);
     const reset = store.readJson("status", {}).runtimeReadiness;
     assert.equal(reset.state, "unauthenticated");
-    assert.match(reset.nextAction, /login|API-key resolver/);
+    assert.match(reset.nextAction, /external `pi` CLI/);
     assert.doesNotMatch(JSON.stringify(reset), /official store/);
   } finally {
     await host.shutdown("generic supersede test complete");

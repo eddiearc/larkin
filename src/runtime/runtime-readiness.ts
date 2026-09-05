@@ -104,7 +104,7 @@ export function runtimeInstallNextAction(runtime: RuntimeReadiness["runtime"]): 
 }
 
 export function runtimeLoginNextAction(runtime: RuntimeReadiness["runtime"]): string {
-  if (runtime === "pi") return "Run the official `pi` login flow, then retry.";
+  if (runtime === "pi") return "Log in with the external `pi` CLI, then retry.";
   if (runtime === "codex") return "Run `codex login`, then retry.";
   return "Run `claude login`, then retry.";
 }
@@ -135,7 +135,9 @@ export function missingProviderCredentialReadiness(
     reason: label
       ? `Provider ${label} is not authenticated for this runtime.`
       : "The configured provider is not authenticated for this runtime.",
-    nextAction: runtimeLoginNextAction(runtime),
+    nextAction: runtime === "pi" && label
+      ? `Log in with the external \`pi\` CLI for provider ${label}, then retry.`
+      : runtimeLoginNextAction(runtime),
   };
 }
 

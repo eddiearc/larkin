@@ -11,7 +11,6 @@ const SOURCE = path.join(ROOT, "src/setup/bot-register.ts");
 const BUILT = path.join(ROOT, "dist/setup/bot-register.mjs");
 const ENTRY = path.join(ROOT, "dist/setup/bot-register.mjs");
 const botRegister = await import(pathToFileURL(ENTRY).href);
-const piAuth = await import(pathToFileURL(path.join(ROOT, "dist/runtime/pi-official-auth.mjs")).href);
 
 const statusResult = (value) => ({ status: 0, stdout: JSON.stringify({ ok: true, data: { is_subscribe: value } }), stderr: "" });
 const okResult = () => ({ status: 0, stdout: JSON.stringify({ ok: true }), stderr: "" });
@@ -47,24 +46,15 @@ test("registration publishes the credential before binding, then verifies the bo
   const sync = source.indexOf("synchronizeAgentProfile(agent");
   const verify = source.indexOf("runIdentityProcess(official.command");
   const resultPublish = source.indexOf("fs.writeFileSync(resultFile");
-  const authCommit = source.indexOf("pendingPiAuthTransaction?.commit()");
   const preResolve = source.indexOf("resolvedSetupOfficialCli = resolveOfficialCli({ env: process.env })");
-  const authBegin = source.indexOf("pendingPiAuthTransaction = beginBuiltinPiCredentialTransaction");
-  assert.equal([publish, bind, sync, verify, resultPublish, authCommit].every((index) => index >= 0), true);
+  assert.equal([publish, bind, sync, verify, resultPublish, preResolve].every((index) => index >= 0), true);
   assert.equal(publish < bind && bind < sync && sync < verify, true);
-  assert.equal(verify < resultPublish && resultPublish < authCommit, true,
-    "credential transaction must commit only after identity and result publication");
-  assert.equal(preResolve >= 0 && preResolve < authBegin, true,
-    "the synchronous official CLI probe must complete before the credential transaction lock");
-  const transactionInterval = source.slice(authBegin, authCommit);
-  assert.doesNotMatch(transactionInterval, /resolveOfficialLarkCli\s*\(/,
-    "the active credential transaction must reuse the pre-resolved official CLI");
-  assert.doesNotMatch(transactionInterval, /spawnSync\s*\(/,
-    "production work while the credential transaction is active must remain asynchronous");
+  assert.equal(verify < resultPublish, true);
+  assert.doesNotMatch(source, /beginBuiltinPiCredentialTransaction|pendingPiAuthTransaction|runOfficialPiLogin|stageBuiltinPiProvider/);
   assert.doesNotMatch(source, /spawnSyncImpl/,
     "comment subscription tests must not be able to inject a synchronous process bypass");
   assert.match(source, /await applyDocumentCommentSubscription\(/,
-    "comment subscription reconciliation must keep the credential heartbeat event loop live");
+    "comment subscription reconciliation must keep the event loop live");
   assert.match(source, /synchronizeAgentProfile\([\s\S]*\{ forceRebind: true \}\)/,
     "new setup credentials must explicitly force one authoritative rebind");
   assert.match(source, /presentAuthorizationUrl/);
@@ -72,8 +62,8 @@ test("registration publishes the credential before binding, then verifies the bo
   assert.match(source, /--from-cli-profile/);
   assert.match(source, /mode: 0o700/);
   assert.match(source, /mode: 0o600, flag: "wx"/);
-  assert.match(source, /JSON\.stringify\(\{ \.\.\.raw, runtime: "pi", model: validated\.model, authCompleted: true, readinessCompleted: true \}\)/,
-    "非交互 builtin-pi 的选择文件必须带 runtime:pi 与解析后的全称模型（否则 pi 回落到默认 provider）");
+  assert.match(source, /JSON\.stringify\(\{ runtime: choice\.runtime \}\)/,
+    "setup Agent 选择文件只记录外部 runtime");
   assert.match(source, /callbacks:\s*\{ items: \["card\.action\.trigger"\] \}/);
   assert.match(source, /systemSpawn\(command, args, \{ stdio: "ignore", shell: false \}\)/,
     "browser launch must be non-blocking and shell-free");
@@ -254,82 +244,6 @@ test("ambiguous removals distinguish removed, unchanged, uncertain, and shutdown
   }), /interrupted by shutdown; external state is uncertain/);
   assert.deepEqual(shutdownCalls.map((args) => args[2]), ["subscription_status", "subscription"],
     "process shutdown must not start follow-up children that cannot complete");
-});
-
-test("slow subscription CLI preserves the Pi credential heartbeat and isolates commit and rollback from AuthStorage", {
-  timeout: 60_000,
-}, async () => {
-  const officialAuthStorageModule = pathToFileURL(path.join(ROOT,
-    "node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js")).href;
-  await Promise.all(["commit", "rollback"].map(async (outcome) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-comment-subscription-${outcome}-`));
-    const agentId = `cli_subscription${outcome === "commit" ? "Commit" : "Rollback"}A1`;
-    const directory = path.join(root, "providers", "pi", agentId);
-    const authPath = path.join(directory, "auth.json");
-    const statusState = path.join(root, "subscription-status-count");
-    const contenderStarted = path.join(root, "contender-started");
-    const contenderWritten = path.join(root, "contender-written");
-    let transaction;
-    let contender;
-    try {
-      fs.chmodSync(root, 0o700);
-      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(authPath, `${JSON.stringify({ original: { type: "api_key", key: "original-key" } }, null, 2)}\n`, { mode: 0o600 });
-      transaction = piAuth.beginBuiltinPiCredentialTransaction(root, agentId);
-      fs.writeFileSync(authPath, `${JSON.stringify({
-        original: { type: "api_key", key: "original-key" },
-        setup: { type: "api_key", key: "setup-key" },
-      }, null, 2)}\n`, { mode: 0o600 });
-
-      const slowCli = path.join(root, "slow-subscription-cli.mjs");
-      fs.writeFileSync(slowCli, `import fs from "node:fs";\n`
-        + `const [state,...args]=process.argv.slice(2);const user=args.indexOf("user"),operation=args[user+1];\n`
-        + `if(operation==="subscription_status"){const count=fs.existsSync(state)?Number(fs.readFileSync(state,"utf8")):0;fs.writeFileSync(state,String(count+1));`
-        + `if(count===0)await new Promise(resolve=>setTimeout(resolve,35000));console.log(JSON.stringify({ok:true,data:{is_subscribe:count>0}}));process.exit(0);}\n`
-        + `if(operation==="subscription"){console.log(JSON.stringify({ok:true}));process.exit(0);}\nprocess.exit(1);\n`, { mode: 0o600 });
-      const subscription = botRegister.reconcileDocumentCommentSubscription({
-        mode: "application", command: process.execPath, argsPrefix: [slowCli, statusState], env: process.env,
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 31_500));
-      const contenderScript = path.join(root, "auth-storage-contender.mjs");
-      fs.writeFileSync(contenderScript, `import fs from "node:fs";import {AuthStorage} from ${JSON.stringify(officialAuthStorageModule)};\n`
-        + `const [authPath,started,written]=process.argv.slice(2);fs.writeFileSync(started,"started");`
-        + `const storage=AuthStorage.create(authPath);await storage.modify("contender",async()=>({type:"api_key",key:"contender-key"}));`
-        + `fs.writeFileSync(written,"written");\n`, { mode: 0o600 });
-      contender = spawn(process.execPath, [contenderScript, authPath, contenderStarted, contenderWritten], {
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      let contenderError = "";
-      contender.stderr.on("data", (chunk) => { contenderError += String(chunk); });
-      const contenderExit = new Promise((resolve, reject) => {
-        contender.once("error", reject);
-        contender.once("exit", (code, signal) => resolve({ code, signal }));
-      });
-      const startDeadline = Date.now() + 5_000;
-      while (!fs.existsSync(contenderStarted) && Date.now() < startDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
-      assert.equal(fs.existsSync(contenderStarted), true, `${outcome}: AuthStorage contender did not start`);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      assert.equal(fs.existsSync(contenderWritten), false,
-        `${outcome}: contender acquired a falsely stale lock while subscription CLI was still running`);
-
-      assert.deepEqual(await subscription, { changed: true, subscribed: true, dimension: "application" });
-      transaction[outcome]();
-      transaction = null;
-      const released = await contenderExit;
-      contender = null;
-      assert.equal(released.code, 0, `${outcome}: contender failed after transaction release ${released.signal}: ${contenderError}`);
-      const final = JSON.parse(fs.readFileSync(authPath, "utf8"));
-      assert.equal(final.original.key, "original-key");
-      assert.equal(final.contender.key, "contender-key");
-      assert.equal(Object.hasOwn(final, "setup"), outcome === "commit",
-        `${outcome}: setup credential must follow transaction outcome without clobbering the contender`);
-    } finally {
-      transaction?.rollback();
-      contender?.kill("SIGKILL");
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  }));
 });
 
 test("help does not create credentials or expose a browser-selection bypass", () => {

@@ -54,17 +54,18 @@ test("expected-signature mismatch refuses load before hydrate or profile sync", 
   try {
     fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
       version: 4, serverId: "server-runtime-cas", mentionPolicy: "require", activeAgent: agentId,
-      agents: { [agentId]: { runtime: "pi", piDistribution: "builtin", model: "deepseek/deepseek-v4-pro" } },
+      agents: { [agentId]: { runtime: "pi", model: "deepseek/deepseek-v4-pro" } },
     })}\n`, { mode: 0o600 });
     const expected = configApi.runtimeConfigSignature(configApi.loadConfig(env).config, agentId);
-    configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId, distribution: "external" }, { kind: "user" });
+    configApi.mutateConfig(env, { kind: "set-agent-model", agentId, model: "kimi/kimi-k2.6" }, { kind: "user" });
     assert.throws(() => loadAndSyncRuntimeAgent(env, agentId, {
       runOfficialCli: () => { synced = true; throw new Error("profile sync must not run"); },
     }, { expectedSignature: expected }), /配置在 apply 期间发生变化|未热加载/);
     assert.equal(synced, false);
     const current = configApi.loadConfig(env).config.agents[agentId];
     assert.equal(current.runtime, "pi");
-    assert.equal(current.piDistribution, "external");
+    assert.equal(current.model, "kimi/kimi-k2.6");
+    assert.equal(Object.hasOwn(current, "piDistribution"), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -75,8 +76,8 @@ function seedBuiltinApplyHome(label, agentId, otherId) {
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 4, serverId: `server-runtime-${label}`, mentionPolicy: "require", activeAgent: agentId,
     agents: {
-      [agentId]: { runtime: "pi", piDistribution: "builtin", model: "deepseek/deepseek-v4-pro" },
-      [otherId]: { runtime: "pi", piDistribution: "builtin", model: "kimi/kimi-k2.6" },
+      [agentId]: { runtime: "pi", model: "deepseek/deepseek-v4-pro" },
+      [otherId]: { runtime: "pi", model: "kimi/kimi-k2.6" },
     },
   })}\n`, { mode: 0o600 });
   const botsDir = path.join(root, "bots");
@@ -131,17 +132,17 @@ test("a switch after signature validation cannot profile-sync or Host-upsert the
     }, {
       expectedSignature: expected,
       afterCanonicalValidate: () => {
-        configApi.mutateConfig(env, { kind: "set-agent-pi-distribution", agentId, distribution: "external" }, { kind: "user" });
+        configApi.mutateConfig(env, { kind: "set-agent-model", agentId, model: "kimi/kimi-k2.6" }, { kind: "user" });
       },
     }, (agent) => {
-      hostUpserts.push({ runtime: agent.runtime, piDistribution: agent.piDistribution, model: agent.model, agentId: agent.agentId });
+      hostUpserts.push({ runtime: agent.runtime, model: agent.model, agentId: agent.agentId });
     }), /配置在 apply 期间发生变化|未热加载/);
     assert.equal(synced, false);
     assert.deepEqual(hostUpserts, []);
     const current = configApi.loadConfig(env).config;
     assert.equal(current.agents[agentId].runtime, "pi");
-    assert.equal(current.agents[agentId].piDistribution, "external");
-    assert.equal(current.agents[agentId].model, "deepseek/deepseek-v4-pro");
+    assert.equal(Object.hasOwn(current.agents[agentId], "piDistribution"), false);
+    assert.equal(current.agents[agentId].model, "kimi/kimi-k2.6");
     assert.equal(current.agents[otherId].model, "kimi/kimi-k2.6");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -167,15 +168,14 @@ test("signed applyRuntimeAgentUpsert holds the config lock through one Host upse
       hostUpserts.push({
         agentId: candidate.agentId,
         runtime: candidate.runtime,
-        piDistribution: candidate.piDistribution,
       });
     });
     assert.equal(synced, false);
     assert.equal(lockHeldDuringUpsert, true);
     assert.equal(hostUpserts.length, 1);
-    assert.deepEqual(hostUpserts[0], { agentId, runtime: "pi", piDistribution: "builtin" });
+    assert.deepEqual(hostUpserts[0], { agentId, runtime: "pi" });
     assert.equal(agent.runtime, "pi");
-    assert.equal(agent.piDistribution, "builtin");
+    assert.equal(Object.hasOwn(agent, "piDistribution"), false);
     assert.equal(fs.existsSync(lockFile), false, "config lock must be released after Host upsert");
     const after = configApi.mutateConfig(env, { kind: "set-agent-model", agentId, model: "deepseek/deepseek-v4-pro" }, { kind: "user" });
     assert.equal(after.persisted, true);

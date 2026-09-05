@@ -242,7 +242,7 @@ test("HostShell keeps durable missing-key auth across ready status and reset", a
     async stop() {},
     async shutdown() {},
   };
-  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2",
+  const agent = { agentId, name: agentId, runtime: "pi", model: "zai-coding-cn/glm-5.2",
     feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
     workspaceDir: path.join(root, "agents", agentId), stateDir };
   const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-missing-key-persist",
@@ -261,8 +261,8 @@ test("HostShell keeps durable missing-key auth across ready status and reset", a
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
-    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
-    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /Provider Credentials/);
+    assert.match(store.readJson("status", {}).runtimeReadiness.nextAction, /official `pi` login flow/);
+    assert.doesNotMatch(store.readJson("status", {}).runtimeReadiness.nextAction, /pi-auth|Provider Credentials/);
     const reset = await host.resetSession(agentId, 0);
     assert.equal(reset.resetCommitted, true);
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unauthenticated");
@@ -300,7 +300,7 @@ test("HostShell does not rehydrate missing-key auth from historical delivery row
     async stop() {},
     async shutdown() {},
   };
-  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2",
+  const agent = { agentId, name: agentId, runtime: "pi", model: "zai-coding-cn/glm-5.2",
     feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
     workspaceDir: path.join(root, "agents", agentId), stateDir };
   const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-ledger-auth-stale",
@@ -334,7 +334,7 @@ test("HostShell keeps a newer generic auth over historical missing-key rows acro
   const store = createAgentStateStore(root, agentId);
   store.writeJson("agentState", {
     sessions: {},
-    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+    authFailure: { kind: "generic", runtime: "pi", provider: "zai-coding-cn" },
   });
   store.writeJson("runtimeDeliveries", { version: 1, records: [{
     deliveryId: "d-old-missing", messageId: "om_host_old_missing", status: "error", retryable: false,
@@ -356,7 +356,7 @@ test("HostShell keeps a newer generic auth over historical missing-key rows acro
     async stop() {},
     async shutdown() {},
   };
-  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2",
+  const agent = { agentId, name: agentId, runtime: "pi", model: "zai-coding-cn/glm-5.2",
     feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
     workspaceDir: path.join(root, "agents", agentId), stateDir };
   const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-generic-supersede",
@@ -396,7 +396,7 @@ test("HostShell does not keep generic provider A auth after a builtin model swit
   const store = createAgentStateStore(root, agentId);
   store.writeJson("agentState", {
     sessions: {},
-    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+    authFailure: { kind: "generic", runtime: "pi", provider: "zai-coding-cn" },
   });
   store.writeJson("runtimeDeliveries", { version: 1, records: [{
     deliveryId: "d-generic-a", messageId: "om_host_generic_a", status: "error", retryable: false,
@@ -418,7 +418,7 @@ test("HostShell does not keep generic provider A auth after a builtin model swit
     async stop() {},
     async shutdown() {},
   };
-  const agent = { agentId, name: agentId, runtime: "pi", piDistribution: "builtin", model: "openai-codex/gpt-5",
+  const agent = { agentId, name: agentId, runtime: "pi", model: "openai-codex/gpt-5",
     feishuAppId: agentId, feishuAppSecret: "fixture", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
     workspaceDir: path.join(root, "agents", agentId), stateDir };
   const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-generic-provider-switch",

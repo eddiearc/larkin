@@ -308,36 +308,27 @@ test("successful binding writes one stable 0600 runner attachment and no workspa
   }
 });
 
-test("external-pi setup imports the official profile and stores the concrete catalog model", () => {
+test("pi setup stores the concrete catalog model from the user Pi install", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-external-pi-"));
   try {
     const configFile = path.join(root, "config.json");
     fs.writeFileSync(configFile, `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`, { mode: 0o600 });
     writeCredential(root);
     const home = path.join(root, "home");
-    const profile = writeExternalPiProfile(home);
+    writeExternalPiProfile(home);
     const fake = writeFakePi(root);
     const result = runBind(root, { LARKIN_PI_COMMAND: fake.command }, ["--profile", APP, "--agent", APP, "--runtime", "pi", "--yes"]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
     assert.equal(stored.agents[APP].runtime, "pi");
     assert.equal(stored.agents[APP].model, "fixture/pi-fixture");
-    assert.equal(stored.agents[APP].piDistribution, "external");
-    const ownedAuth = path.join(root, "providers", "pi", APP, "auth.json");
-    const ownedModels = path.join(root, "providers", "pi", APP, "models.json");
-    assert.equal(fs.statSync(ownedAuth).mode & 0o777, 0o600);
-    assert.deepEqual(fs.readFileSync(ownedAuth), profile.auth);
-    assert.deepEqual(fs.readFileSync(ownedModels), profile.models);
-    assert.deepEqual(fs.readFileSync(path.join(profile.dir, "auth.json")), profile.auth);
-    assert.deepEqual(fs.readFileSync(path.join(profile.dir, "models.json")), profile.models);
-    assert.deepEqual(fs.readFileSync(path.join(profile.dir, "settings.json")), profile.settings);
-    const ownedSettings = JSON.parse(fs.readFileSync(path.join(root, "providers", "pi", APP, "settings.json"), "utf8"));
-    assert.equal(ownedSettings.theme, "dark");
-    assert.notEqual(fs.readFileSync(path.join(root, "providers", "pi", APP, "settings.json")), profile.settings);
+    assert.equal(Object.hasOwn(stored.agents[APP], "piDistribution"), false);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
     const launches = fs.readFileSync(fake.marker, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
     const catalog = launches.find((row) => row.args.includes("--mode") && row.args.includes("rpc"));
     assert.ok(catalog, JSON.stringify(launches));
     assert.equal(fs.realpathSync(catalog.cwd), fs.realpathSync(root));
+    assert.equal(catalog.agentDir, null);
     assert.equal(fs.existsSync(path.join(root, "agents", APP)), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -367,49 +358,23 @@ test("external-pi setup rolls back when the effective model lacks a context wind
   }
 });
 
-test("external-pi setup fails closed without an official auth.json", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-external-pi-auth-"));
+test("pi setup fails closed when the external catalog is unavailable", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-bind-external-pi-catalog-"));
   try {
     const configFile = path.join(root, "config.json");
     const before = `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`;
     fs.writeFileSync(configFile, before, { mode: 0o600 });
     writeCredential(root);
-    writeExternalPiProfile(path.join(root, "home"), "auth.json");
-    const fake = writeFakePi(root);
-    const result = runBind(root, { LARKIN_PI_COMMAND: fake.command }, ["--profile", APP, "--agent", APP, "--runtime", "pi", "--yes"]);
+    const sentinel = writeSentinelPi(root);
+    const result = runBind(root, { LARKIN_PI_COMMAND: sentinel.command }, ["--profile", APP, "--agent", APP, "--runtime", "pi", "--yes"]);
     assert.notEqual(result.status, 0, result.stdout + result.stderr);
     assert.equal(fs.readFileSync(configFile, "utf8"), before);
     const output = `${result.stdout}\n${result.stderr}`;
-    assert.match(output, /official file-backed Pi profile/);
-    assert.match(output, /auth\.json/);
-    assert.match(output, /settings\.json/);
     assert.match(output, /larkin setup --runtime pi/);
-    assert.doesNotMatch(output, /larkin model/);
+    assert.match(output, /official `pi` login flow/);
+    assert.doesNotMatch(output, /auth\.json|Provider Credentials|pi-auth|builtin-pi/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("external-pi setup fails closed without settings.json or models.json", () => {
-  for (const missing of ["settings.json", "models.json"]) {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-setup-bind-external-pi-${missing}-`));
-    try {
-      const configFile = path.join(root, "config.json");
-      const before = `${JSON.stringify({ version: 3, serverId: "server-existing", activeAgent: null, agents: {} }, null, 2)}\n`;
-      fs.writeFileSync(configFile, before, { mode: 0o600 });
-      writeCredential(root);
-      writeExternalPiProfile(path.join(root, "home"), missing);
-      const fake = writeFakePi(root);
-      const result = runBind(root, { LARKIN_PI_COMMAND: fake.command }, ["--profile", APP, "--agent", APP, "--runtime", "pi", "--yes"]);
-      assert.notEqual(result.status, 0, `${missing}: ${result.stdout}\n${result.stderr}`);
-      assert.equal(fs.readFileSync(configFile, "utf8"), before);
-      const output = `${result.stdout}\n${result.stderr}`;
-      assert.match(output, /official file-backed Pi profile/);
-      assert.match(output, new RegExp(missing.replace(".", "\\.")));
-      assert.match(output, /larkin setup --runtime pi/);
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
   }
 });
 
@@ -423,7 +388,7 @@ test("external-pi setup repairs a stored model=default without mentioning a bran
       mentionPolicy: "require",
       activeAgent: APP,
       agents: {
-        [APP]: { runtime: "pi", model: "default", piDistribution: "external" },
+        [APP]: { runtime: "pi", model: "default" },
       },
     }, null, 2)}\n`, { mode: 0o600 });
     writeCredential(root);
@@ -433,7 +398,7 @@ test("external-pi setup repairs a stored model=default without mentioning a bran
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
     assert.equal(stored.agents[APP].model, "fixture/pi-fixture");
-    assert.equal(stored.agents[APP].piDistribution, "external");
+    assert.equal(Object.hasOwn(stored.agents[APP], "piDistribution"), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

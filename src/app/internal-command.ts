@@ -17,7 +17,6 @@ export const INTERNAL_MODES = [
   "setup-bind",
   "grant-scopes",
   "lark-channel-secret",
-  "pi-auth",
   "telemetry",
 ] as const;
 

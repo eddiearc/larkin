@@ -1,7 +1,6 @@
 export type StoredAgent = {
   runtime: string;
   model: string;
-  piDistribution?: "external" | "builtin";
   effort?: string;
   noMentionChats?: string[];
   mentionPolicy?: "require" | "free";
@@ -25,7 +24,6 @@ function cloneAgent(agent: StoredAgent): StoredAgent {
   return {
     runtime: agent.runtime,
     model: agent.model,
-    ...(agent.piDistribution ? { piDistribution: agent.piDistribution } : {}),
     ...(agent.effort ? { effort: agent.effort } : {}),
     ...(agent.mentionPolicy ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies } : {}),
@@ -38,7 +36,6 @@ export function planSingleRootBinding({
   profile,
   requestedAgent,
   runtime,
-  piDistribution,
   model,
   defaultModel,
   supportedReasoningEfforts,
@@ -48,7 +45,6 @@ export function planSingleRootBinding({
   profile: BindingProfile;
   requestedAgent?: string;
   runtime?: string;
-  piDistribution?: "external" | "builtin";
   model?: string;
   defaultModel: string;
   supportedReasoningEfforts: readonly string[];
@@ -64,21 +60,18 @@ export function planSingleRootBinding({
   }
   const agents = Object.fromEntries(Object.entries(config.agents).map(([key, agent]) => [key, cloneAgent(agent)]));
   const prior = agents[profile.appId];
-  const nextRuntime = runtime || prior?.runtime || "pi";
-  const nextPiDistribution = nextRuntime === "pi"
-    ? piDistribution || (prior?.runtime === "pi" ? prior.piDistribution : undefined)
-    : undefined;
+  const nextRuntime = runtime || prior?.runtime;
+  if (!nextRuntime) throw new Error("必须指定 --runtime pi|codex|claude");
   if (prior) {
-    const { effort, piDistribution: _priorPiDistribution, ...withoutEffort } = prior;
+    const { effort, ...withoutEffort } = prior;
     agents[profile.appId] = {
       ...withoutEffort,
       runtime: nextRuntime,
       model: model || (prior.runtime === nextRuntime ? prior.model : defaultModel),
-      ...(nextPiDistribution ? { piDistribution: nextPiDistribution } : {}),
       ...(effort && supportedReasoningEfforts.includes(effort) ? { effort } : {}),
     };
   } else {
-    agents[profile.appId] = { runtime: nextRuntime, model: model || "default", ...(nextPiDistribution ? { piDistribution: nextPiDistribution } : {}), createdAt: now };
+    agents[profile.appId] = { runtime: nextRuntime, model: model || "default", createdAt: now };
   }
   return {
     version: 4,

@@ -17,7 +17,6 @@ import type {
 } from "./runtime-contracts.js";
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
-import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
 import {
@@ -42,18 +41,20 @@ import {
 } from "./provider-error-classifier.js";
 import {
   assertEffectivePiCompactionSettings,
-  assertNoProjectPiCompactionOverride,
   MINIMUM_PI_VERSION,
   calculatePiCompactionSettings,
   parsePiExecutableVersion,
-  prepareOwnedPiDirectory,
+  projectPiSettingsFile,
   readOwnedPiSettings,
   verifyPiCapabilities,
   writeOwnedPiSettings,
 } from "./pi-compaction-recovery.js";
 
-function piAgentDirectory(configDir: string, agentId: string): string {
-  return path.join(path.resolve(configDir), "providers", "pi", agentId);
+/** External pi must see the user's own agent dir; Larkin never injects or honors PI_CODING_AGENT_DIR. */
+function stripPiCodingAgentDir(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next = { ...env };
+  delete next.PI_CODING_AGENT_DIR;
+  return next;
 }
 
 interface WritableLike {
@@ -1023,7 +1024,7 @@ class PiRpcBackend implements PiSessionProcessLike {
   model?: { provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, unknown> };
   thinkingLevel?: string;
   constructor(private readonly client: PiRpcClient, state: PiRpcState,
-    private readonly policy?: { model: string; contextWindow: number; ownedPiDirectory: string }) {
+    private readonly policy?: { model: string; contextWindow: number }) {
     this.policyManaged = Boolean(policy);
     this.sessionId = state.sessionId ?? null;
     this.sessionFile = typeof state.sessionFile === "string" && state.sessionFile ? state.sessionFile : null;
@@ -1097,13 +1098,10 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   spawn: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike,
   productionSpawn = true): Promise<PiSessionProcessLike> {
   const stateRoot = effectivePiStateDir(input);
-  const mergedEnv: NodeJS.ProcessEnv = { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" };
-  assertNoProjectPiCompactionOverride(input.workspaceDir);
-  const ownedPiDirectory = mergedEnv.LARKIN_CONFIG_DIR
-    ? piAgentDirectory(mergedEnv.LARKIN_CONFIG_DIR, input.agentId)
-    : path.join(stateRoot, "pi-agent");
-  prepareOwnedPiDirectory(ownedPiDirectory);
-  traceProcessBoundary(mergedEnv, "pi-rpc:child-env", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childEnvConfigDir: mergedEnv.LARKIN_CONFIG_DIR || null, childEnvHome: mergedEnv.HOME || null });
+  const mergedEnv = stripPiCodingAgentDir({ ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" });
+  if (mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin") delete mergedEnv.LARKIN_PI_DISTRIBUTION;
+  const projectSettings = projectPiSettingsFile(input.workspaceDir);
+  traceProcessBoundary(mergedEnv, "pi-rpc:child-env", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: projectSettings, childEnvConfigDir: mergedEnv.LARKIN_CONFIG_DIR || null, childEnvHome: mergedEnv.HOME || null });
   const runtimeDir = path.join(stateRoot, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const promptFile = path.join(runtimeDir, "pi-standing-prompt.md");
@@ -1112,16 +1110,15 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const requestedModel = configuredModel(input.model);
   const requestedEffort = input.reasoningEffort?.trim() || undefined;
   if (requestedEffort && !isPiThinkingLevel(requestedEffort)) throw new Error(`Unknown Pi thinking level: ${requestedEffort}`);
-  const args = ["--mode", "rpc", "--session-dir", session.sessionDir, "--append-system-prompt", promptFile,
+  // `--approve` 让 RPC 在无 UI 时仍加载工作区 `.pi/settings.json`（否则 settings.json 会触发 trust gate 并被忽略）。
+  const args = ["--mode", "rpc", "--approve", "--session-dir", session.sessionDir, "--append-system-prompt", promptFile,
     ...(session.sessionFile ? ["--session", session.sessionFile] : []),
     ...(requestedModel ? ["--model", requestedModel] : []),
     ...(requestedEffort ? ["--thinking", requestedEffort] : [])];
-  if (mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin") delete mergedEnv.LARKIN_PI_DISTRIBUTION;
   const command = dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
   const commandPrefix = dependencies.piCommandArgs ?? [];
   const commandArgs = [...commandPrefix, ...args];
-  mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
-  const childEnv = { ...mergedEnv };
+  const childEnv = stripPiCodingAgentDir(mergedEnv);
   const reportedVersion = productionSpawn
     ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
       cwd: input.workspaceDir, env: childEnv, encoding: "utf8", timeout: 5_000,
@@ -1135,24 +1132,19 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   commandArgs.push(...extensionArgs);
   let probedModel: PiProbeResult | null = null;
   if (productionSpawn) {
-    // Pi reads compaction settings when the process starts. Probe the exact
-    // requested model first, then write the matching 15% reserve before the
-    // real session starts; no prompt, provider request, package, or extension
-    // is loaded by the probe.
+    // 隔离探测用户自己的 Pi home（无 PI_CODING_AGENT_DIR），再把 15% reserve 写到工作区项目设置。
     probedModel = await discoverEffectivePiContextWindow(
       input, command, commandPrefix, requestedModel,
       childEnv, spawn, dependencies.piRpcClientOptions,
     );
-    writeOwnedPiSettings(ownedPiDirectory, calculatePiCompactionSettings(probedModel.contextWindow));
+    writeOwnedPiSettings(input.workspaceDir, calculatePiCompactionSettings(probedModel.contextWindow));
   }
-  const artifactEntriesBeforeSpawn = new Set(fs.readdirSync(ownedPiDirectory));
-  const artifactSpawnBoundary = Date.now();
   const child = spawn(command, commandArgs, {
     cwd: input.workspaceDir,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
-  traceProcessBoundary(mergedEnv, "pi-rpc:child-spawned", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: ownedPiDirectory, childPid: (child as unknown as { pid?: number }).pid ?? null });
+  traceProcessBoundary(mergedEnv, "pi-rpc:child-spawned", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: projectSettings, childPid: (child as unknown as { pid?: number }).pid ?? null });
   const client = new PiRpcClient(child, dependencies.piRpcClientOptions);
   try {
     const [state, available] = await Promise.all([
@@ -1166,7 +1158,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
           || state.model?.contextWindow !== probedModel.contextWindow) {
         throw new Error("Pi model or context window changed between the isolated probe and runtime startup");
       }
-      const ownedSettings = readOwnedPiSettings(ownedPiDirectory);
+      const ownedSettings = readOwnedPiSettings(input.workspaceDir);
       assertEffectivePiCompactionSettings({ contextWindow: state.model?.contextWindow, compaction: {
         enabled: state.autoCompactionEnabled,
         reserveTokens: ownedSettings.compaction?.reserveTokens,
@@ -1190,9 +1182,8 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
       throw new Error(`Pi model fallback refused: requested ${requestedModel} is not in Pi's available models${availableText ? ` (${availableText})` : ""}`);
     }
     if (requestedEffort && state.thinkingLevel !== requestedEffort) throw new Error(`Pi thinking level ${requestedEffort} was not accepted by effective model ${effectiveModel || "unknown"}`);
-    recordPiRuntimeArtifactProvenance(ownedPiDirectory, artifactEntriesBeforeSpawn, artifactSpawnBoundary);
     return new PiRpcBackend(client, state, productionSpawn ? {
-      model: effectiveModel!, contextWindow: state.model?.contextWindow as number, ownedPiDirectory,
+      model: effectiveModel!, contextWindow: state.model?.contextWindow as number,
     } : undefined);
   } catch (error) {
     await client.close();

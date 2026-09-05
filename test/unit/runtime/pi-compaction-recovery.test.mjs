@@ -14,6 +14,9 @@ import {
   prepareOwnedPiDirectory,
   mergeOwnedPiSettings,
   hasProjectPiCompactionOverride,
+  writeOwnedPiSettings,
+  readOwnedPiSettings,
+  projectPiSettingsFile,
   isPiNativeCompactionRequired,
   PiCompactionBreaker,
   PiCompactionRecoveryMachine,
@@ -72,6 +75,26 @@ test("project compaction/context overrides are refused before Pi starts", () => 
   assert.equal(hasProjectPiCompactionOverride({}), false);
   assert.equal(hasProjectPiCompactionOverride({ compaction: { enabled: false } }), true);
   assert.equal(hasProjectPiCompactionOverride({ contextWindow: 128_000 }), true);
+});
+
+test("workspace project settings receive Larkin compaction and preserve unrelated keys", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-project-settings-"));
+  try {
+    fs.mkdirSync(path.join(workspace, ".pi"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(workspace, ".pi", "settings.json"), `${JSON.stringify({
+      theme: "dark", packages: { enabled: true },
+    }, null, 2)}\n`);
+    writeOwnedPiSettings(workspace, calculatePiCompactionSettings(32_000));
+    const file = projectPiSettingsFile(workspace);
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(parsed.theme, "dark");
+    assert.deepEqual(parsed.packages, { enabled: true });
+    assert.deepEqual(parsed.compaction, { enabled: true, reserveTokens: 4_800, keepRecentTokens: 20_000 });
+    assert.deepEqual(readOwnedPiSettings(workspace).compaction, parsed.compaction);
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("owned Pi directory is 0700, current-user owned, and never a symlink", () => {

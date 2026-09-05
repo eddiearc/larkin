@@ -71,7 +71,7 @@ const log = process.env.LARKIN_PI_TEST_LOG;
 const probe = args.includes("--no-session");
 let stateRequests = 0;
 const record = (value) => fs.appendFileSync(log + "." + process.pid, JSON.stringify(value) + "\\n");
-record({ kind: "argv", probe, args, packageDir: process.env.PI_PACKAGE_DIR || null });
+record({ kind: "argv", probe, args, packageDir: process.env.PI_PACKAGE_DIR || null, agentDir: process.env.PI_CODING_AGENT_DIR || null });
 if (args.includes("--version")) {
   if (process.env.PI_PACKAGE_DIR) {
     const theme = process.env.PI_PACKAGE_DIR + "/dist/modes/interactive/theme/dark.json";
@@ -98,7 +98,9 @@ process.stdin.on("data", (chunk) => {
     const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
     const request = JSON.parse(line); record({ kind: "request", probe, type: request.type });
     if (request.type === "get_state") respond(request, state());
-    else if (request.type === "get_available_models") respond(request, { models: [{ provider: "test-provider", id: "test-model" }] });
+    else if (request.type === "get_available_models") respond(request, {
+      models: process.env.PI_CODING_AGENT_DIR ? [] : [{ provider: "test-provider", id: "test-model" }],
+    });
     else if (request.type === "prompt" || request.type === "steer" || request.type === "compact") respond(request, {});
     else respond(request, {});
   }
@@ -921,7 +923,7 @@ test("Pi launches one shared append standing-prompt path without replacement", a
     fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
     const piCommand = "/fixture/external-pi";
     const pending = createNativeRuntimeAdapter("pi", {
-      env: { LARKIN_PI_COMMAND: piCommand },
+      env: { LARKIN_PI_COMMAND: piCommand, PI_CODING_AGENT_DIR: path.join(root, "decoy-agent") },
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
     await new Promise((resolve) => setImmediate(resolve));
@@ -945,6 +947,7 @@ test("Pi launches one shared append standing-prompt path without replacement", a
     assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
     assert.equal(launch.args.includes("-e"), false, "fake spawn must not run default extension resolvers");
     assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
+    assert.equal(launch.options.env.PI_CODING_AGENT_DIR, undefined);
     await session.close("test complete");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -990,6 +993,66 @@ test("inherited PI_PACKAGE_DIR does not drop production extension version probes
   } finally {
     await session?.close("inherited extension probe test complete").catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("production Pi child env strips inherited PI_CODING_AGENT_DIR and still starts", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-strip-agent-dir-"));
+  const decoy = path.join(root, "decoy-agent");
+  fs.mkdirSync(decoy, { recursive: true, mode: 0o700 });
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log, PI_CODING_AGENT_DIR: decoy, LARKIN_CONFIG_DIR: path.join(root, "config") },
+  });
+  fs.mkdirSync(input.workspaceDir, { recursive: true });
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => ["-e", "fixture-extension"],
+      env: { PI_CODING_AGENT_DIR: decoy, LARKIN_PI_TEST_LOG: log },
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    session = await adapter.createSession(input);
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+    const rows = readProductionPiLog(log);
+    assert.ok(rows.some((row) => row.kind === "argv"), JSON.stringify(rows));
+    assert.equal(rows.every((row) => !row.agentDir), true, JSON.stringify(rows));
+    assert.equal(fs.existsSync(path.join(root, "config", "providers", "pi", input.agentId)), false);
+    assert.equal(fs.existsSync(path.join(input.stateDir, "pi-agent")), false);
+  } finally {
+    await session?.close("strip PI_CODING_AGENT_DIR test complete").catch(() => {});
+  }
+});
+
+test("production Pi writes compaction into workspace project settings and preserves unrelated keys", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-project-settings-"));
+  const { command, commandArgs, log } = makeProductionPiCommand(root);
+  const input = create({
+    workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
+    env: { LARKIN_PI_TEST_LOG: log },
+  });
+  fs.mkdirSync(path.join(input.workspaceDir, ".pi"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(input.workspaceDir, ".pi", "settings.json"), `${JSON.stringify({
+    theme: "dark", packages: { enabled: true }, compaction: { enabled: false, reserveTokens: 1 },
+  }, null, 2)}\n`, { mode: 0o600 });
+  let session;
+  try {
+    const adapter = createNativeRuntimeAdapter("pi", {
+      piCommand: command, piCommandArgs: commandArgs, resolvePiProcessExtensionArgs: () => [],
+      piRpcClientOptions: { requestTimeoutMs: 1_000, shutdownGraceMs: 100 },
+    });
+    session = await adapter.createSession(input);
+    assert.equal(session.effectiveModel, "test-provider/test-model");
+    const settings = JSON.parse(fs.readFileSync(path.join(input.workspaceDir, ".pi", "settings.json"), "utf8"));
+    assert.equal(settings.theme, "dark");
+    assert.deepEqual(settings.packages, { enabled: true });
+    assert.deepEqual(settings.compaction, { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000 });
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(path.join(input.workspaceDir, ".pi", "settings.json")).mode & 0o777, 0o600);
+    }
+  } finally {
+    await session?.close("project settings test complete").catch(() => {});
   }
 });
 
@@ -1042,9 +1105,11 @@ test("production Pi probe uses isolated get_state only and preserves the verifie
     assert.deepEqual(probeRequests, ["get_state"]);
     assert.ok(runtimeArgs.args.includes("-e"));
     assert.ok(runtimeArgs.args.includes("fixture-extension"));
+    assert.ok(runtimeArgs.args.includes("--approve"), "RPC must approve the Larkin-owned workspace so project settings load");
     assert.equal(session.effectiveModel, "test-provider/test-model");
-    const settings = JSON.parse(fs.readFileSync(path.join(input.stateDir, "pi-agent", "settings.json"), "utf8"));
+    const settings = JSON.parse(fs.readFileSync(path.join(input.workspaceDir, ".pi", "settings.json"), "utf8"));
     assert.deepEqual(settings.compaction, { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000 });
+    assert.equal(rows.every((row) => !row.agentDir), true, JSON.stringify(rows));
   } finally {
     await session?.close("production probe test complete").catch(() => {});
   }
@@ -1114,7 +1179,7 @@ test.each(["reserveTokens", "keepRecentTokens"])("production Pi backend accepts 
   clearProductionPiLog(log);
   const session = await adapter.createSession(input);
   try {
-    const settingsFile = path.join(input.stateDir, "pi-agent", "settings.json");
+    const settingsFile = path.join(input.workspaceDir, ".pi", "settings.json");
     const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
     settings.compaction[field] = field === "reserveTokens" ? 49_999 : 19_999;
     fs.writeFileSync(settingsFile, JSON.stringify(settings));

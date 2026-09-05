@@ -228,12 +228,13 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
       assert.equal(sessionLaunch.args.includes("--model"), true);
       assert.equal(sessionLaunch.args[sessionLaunch.args.indexOf("--model") + 1], "fixture/pi-fixture");
       const ownedDir = path.join(root, "providers", "pi", APP);
-      assert.equal(sessionLaunch.agentDir, ownedDir);
-      assert.equal(isolated.agentDir, ownedDir);
+      assert.equal(sessionLaunch.agentDir, null);
+      assert.equal(isolated.agentDir, null);
       assert.equal(fs.existsSync(path.join(ownedDir, "auth.json")), false);
+      assert.equal(fs.existsSync(path.join(ownedDir, "settings.json")), false);
       const expected = compaction.calculatePiCompactionSettings(32_000);
-      const ownedSettings = JSON.parse(fs.readFileSync(path.join(ownedDir, "settings.json"), "utf8"));
-      assert.deepEqual(ownedSettings.compaction, {
+      const projectSettings = JSON.parse(fs.readFileSync(path.join(workspaceDir, ".pi", "settings.json"), "utf8"));
+      assert.deepEqual(projectSettings.compaction, {
         enabled: true,
         reserveTokens: expected.reserveTokens,
         keepRecentTokens: expected.keepRecentTokens,

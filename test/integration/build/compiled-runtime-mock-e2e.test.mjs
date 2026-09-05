@@ -160,13 +160,13 @@ if (process.argv.includes("--version")) { console.log("0.84.4"); process.exit(0)
 const marker = process.env.RUNTIME_PROTOCOL_MARKER;
 const record = (value) => fs.appendFileSync(marker, JSON.stringify(value) + "\\n");
 const model = { provider: "fixture", id: "pi-fixture", name: "Pi Fixture", reasoning: false, contextWindow: ${PI_FIXTURE_CONTEXT_WINDOW} };
-record({ type: "launch", runtime: "pi", args: process.argv.slice(2) });
+record({ type: "launch", runtime: "pi", args: process.argv.slice(2), agentDir: process.env.PI_CODING_AGENT_DIR || null });
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "get_state") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
     data: { sessionId: "session-compiled-pi", sessionFile: "/tmp/session-compiled-pi.jsonl", model, thinkingLevel: "off", isStreaming: false, autoCompactionEnabled: true, compactionCapabilities: ${JSON.stringify(piFixtureCompactionCapabilities)} } }) + "\\n");
   else if (request.type === "get_available_models") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
-    data: { models: [model] } }) + "\\n");
+    data: { models: process.env.PI_CODING_AGENT_DIR ? [] : [model] } }) + "\\n");
   else if (request.type === "get_session_stats") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true,
     data: ${JSON.stringify(piFixtureSessionStats)} }) + "\\n");
   else if (request.type === "compact") process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true }) + "\\n");
@@ -351,7 +351,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "get_state") return output({ id: request.id, type: "response", command: request.type, success: true,
     data: { sessionId: "session-compiled-pi-auth", sessionFile: "/tmp/session.jsonl", model, thinkingLevel: "off", isStreaming: false, autoCompactionEnabled: true, compactionCapabilities: ${JSON.stringify(piFixtureCompactionCapabilities)} } });
-  if (request.type === "get_available_models") return output({ id: request.id, type: "response", command: request.type, success: true, data: { models: [model] } });
+  if (request.type === "get_available_models") return output({ id: request.id, type: "response", command: request.type, success: true, data: { models: process.env.PI_CODING_AGENT_DIR ? [] : [model] } });
   if (request.type === "get_session_stats") return output({ id: request.id, type: "response", command: request.type, success: true, data: ${JSON.stringify(piFixtureSessionStats)} });
   if (request.type === "compact") return output({ id: request.id, type: "response", command: request.type, success: true });
   if (request.type === "prompt") {

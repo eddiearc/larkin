@@ -2,7 +2,7 @@
 
 ## Repository purpose
 
-Larkin is a local Runtime Host that connects supported coding-agent runtimes to Feishu. Keep changes within the current product and repository boundaries.
+Larkin is a local Runtime Host that connects externally installed `pi`, `codex`, and `claude` runtimes to Feishu. It does not ship a bundled agent runtime. Keep changes within the current product and repository boundaries.
 
 ## Public directory map
 

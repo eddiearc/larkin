@@ -2,13 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, test } from "bun:test";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
 import { materializeEmbeddedPiSubagentBundle } from "../../../src/runtime/pi-subagent-injection.ts";
+
+const piSdk = await import("@earendil-works/pi-coding-agent").catch(() => null);
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const workDir = fs.mkdtempSync(path.join(ROOT, ".tmp-sa-supervised-"));
@@ -30,7 +26,8 @@ afterAll(() => {
   delete globalThis.__LARKIN_EMBEDDED_PI_SUPERVISED_COMMAND_BUNDLE__;
 });
 
-test("standalone embed materialize exposes public Agent start/wait/cancel", async () => {
+test.skipIf(!piSdk)("standalone embed materialize exposes public Agent start/wait/cancel", async () => {
+  const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } = piSdk;
   delete globalThis[Symbol.for("pi-subagents:manager")];
   const subSrc = path.join(ROOT, "dist/runtime/pi-subagents.bundle.js");
   const supSrc = path.join(ROOT, "dist/runtime/pi-supervised-command.bundle.js");

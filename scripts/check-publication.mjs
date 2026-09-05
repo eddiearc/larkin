@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED = ["README.md", "AGENTS.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md"];
 const ALLOWED_MARKDOWN = new Set([
-  "README.md", "AGENTS.md", "SECURITY.md", "CONTRIBUTING.md",
+  "README.md", "AGENTS.md", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md",
   ".github/pull_request_template.md",
 ]);
 const isAscii = (value) => /^[\x00-\x7f]*$/.test(value);

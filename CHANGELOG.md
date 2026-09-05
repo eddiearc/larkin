@@ -1,0 +1,11 @@
+# Changelog
+
+## 0.5.0
+
+BREAKING — builtin Pi is removed. Larkin supports only externally installed `pi`, `codex`, and `claude`. If the selected runtime is not installed, setup, runtime switch, and readiness fail with an explicit missing-install message.
+
+Existing builtin-pi Agents migrate to external `pi` on first config load and keep their stored model. Larkin-owned Pi credential directories (`providers/pi/<agentId>/`) are deleted during that migration. Users must install and log in to `pi`, `codex`, or `claude` themselves.
+
+The `pi-auth` and `pi-distribution` commands are removed. Invoking them returns the standard unknown-command error. Dashboard Provider Credentials and `/api/pi-auth/*` are gone.
+
+`larkin setup --model <id>` again stores a catalog-validated model for the chosen runtime.

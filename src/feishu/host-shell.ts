@@ -54,7 +54,6 @@ interface ConfiguredAgent {
   name: string;
   runtime: string;
   model: string;
-  piDistribution?: "external" | "builtin";
   effort?: string | null;
   displayName?: string | null;
   description?: string | null;
@@ -200,7 +199,7 @@ export function memberNamesFromPayloads(payloads: readonly unknown[]): Record<st
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function agentConfigSignature(agent: ConfiguredAgent): string {
   return JSON.stringify({
-    agentId: agent.agentId, runtime: agent.runtime, model: agent.model, piDistribution: agent.piDistribution ?? null, effort: agent.effort ?? null,
+    agentId: agent.agentId, runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
     feishuAppId: agent.feishuAppId, feishuProfile: agent.feishuProfile,
     larkConfigDir: agent.larkConfigDir, feishuDomain: agent.feishuDomain,
     feishuAppSecret: agent.feishuAppSecret, workspaceDir: agent.workspaceDir, stateDir: agent.stateDir,
@@ -316,7 +315,6 @@ export function createHostShell({
       return authFailureAppliesTo({
         runtime: agent.runtime,
         model: agent.model,
-        piDistribution: agent.piDistribution,
       }, persisted) ? persisted : null;
     } catch {
       return null;

@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { PiExtensionAPI } from "./pi-extension-api.js";
 import {
   dispatchedSubagentRecordDir,
   PI_SUBAGENT_SESSION_OWNER_ENV,
@@ -23,7 +23,7 @@ interface PiSubagentsManagerRegistry {
  * cannot sweep another session's records. This extension registers
  * session_shutdown first so the final sweep still sees getRecord.
  */
-export default function piSubagentRecordWatchdog(pi: ExtensionAPI): void {
+export default function piSubagentRecordWatchdog(pi: PiExtensionAPI): void {
   const stateDir = process.env.LARKIN_STATE_DIR;
   const owner = process.env[PI_SUBAGENT_SESSION_OWNER_ENV];
   if (!stateDir || !owner) return;

@@ -1,6 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as path from "node:path";
-import { applyPiPackageDirForChild, catalogPiChildDistribution } from "./builtin-pi-assets.js";
 import { PiRpcClient, type PiRpcProcess } from "./pi-rpc-client.js";
 import { classifyRuntimePrerequisite, RuntimePrerequisiteError } from "./runtime-readiness.js";
 
@@ -75,16 +74,14 @@ const discoveryCache = new Map<string, Promise<PiModelCatalog>>();
 
 /** Discover only through Pi's structured RPC protocol; no table parsing or static fallback. */
 function piCatalogChildEnv(options: DiscoverPiCatalogOptions): NodeJS.ProcessEnv {
-  const mergedEnv = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...options.env,
-    ...(options.agentDir ? { PI_CODING_AGENT_DIR: path.resolve(options.agentDir) } : {}),
     NO_COLOR: "1",
   };
-  return applyPiPackageDirForChild(mergedEnv, {
-    distribution: catalogPiChildDistribution(options.commandArgs),
-    explicitPackageDir: options.packageDir,
-  });
+  if (options.agentDir) env.PI_CODING_AGENT_DIR = path.resolve(options.agentDir);
+  else delete env.PI_CODING_AGENT_DIR;
+  return env;
 }
 
 export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {
@@ -119,7 +116,7 @@ async function discoverPiModelCatalogUncached(options: DiscoverPiCatalogOptions)
       client.request<{ model?: PiModelLike | null; thinkingLevel?: string }>("get_state"),
     ]);
     const available = [...(availableResponse?.models ?? [])].sort((left, right) => piModelId(left).localeCompare(piModelId(right)));
-    if (!available.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow or configure provider credentials; Larkin will not create a fallback session.");
+    if (!available.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow; Larkin will not create a fallback session.");
     const effectiveModel = state.model ? piModelId(state.model) : null;
     if (!effectiveModel || !available.some((model) => piModelId(model) === effectiveModel)) {
       throw new Error(`Pi official default resolution returned an unavailable model (${effectiveModel || "none"}); refusing implicit fallback`);

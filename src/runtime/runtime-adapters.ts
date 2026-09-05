@@ -15,11 +15,8 @@ import type {
   StandingPrompt,
   UpstreamProviderError,
 } from "./runtime-contracts.js";
-import { applyPiPackageDirForChild, piChildDistributionFromOverrides } from "./builtin-pi-assets.js";
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
-import { internalCommandSpec } from "../app/internal-command.js";
-import { BUNDLED_PI_VERSION, piAgentDirectory } from "./pi-provider-config.js";
 import { recordPiRuntimeArtifactProvenance } from "./pi-artifact-provenance.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
@@ -33,7 +30,6 @@ import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js
 import {
   classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
-  isBuiltinPiDistribution,
   missingProviderCredentialReadiness,
   probeNativeRuntimeReadiness,
   providerAuthenticationFailureReadiness,
@@ -47,6 +43,7 @@ import {
 import {
   assertEffectivePiCompactionSettings,
   assertNoProjectPiCompactionOverride,
+  PINNED_PI_VERSION,
   calculatePiCompactionSettings,
   parsePiExecutableVersion,
   prepareOwnedPiDirectory,
@@ -54,6 +51,10 @@ import {
   verifyPiCapabilities,
   writeOwnedPiSettings,
 } from "./pi-compaction-recovery.js";
+
+function piAgentDirectory(configDir: string, agentId: string): string {
+  return path.join(path.resolve(configDir), "providers", "pi", agentId);
+}
 
 interface WritableLike {
   destroyed?: boolean;
@@ -540,7 +541,7 @@ class PiSession extends EventSession {
   private firstOutputObserved = false;
   private toolCallOpen = false;
   readonly piPolicyManaged: boolean;
-  constructor(private readonly sdk: PiSessionProcessLike, private readonly distribution: "builtin" | "external") {
+  constructor(private readonly sdk: PiSessionProcessLike, private readonly distribution: "external" = "external") {
     super();
     this.piPolicyManaged = sdk.policyManaged ?? typeof sdk.validatePolicy === "function";
     const result = sdk.subscribe?.((event) => this.onEvent(event));
@@ -608,20 +609,18 @@ class PiSession extends EventSession {
       this.ownedInputIds.delete(input.inputId);
       this.inputEpochs.delete(input.inputId);
       const rawReason = error instanceof Error ? error.message : String(error);
-      const missing = isBuiltinPiDistribution(this.distribution)
-        ? classifyPiMissingCredentialRejection(rawReason)
-        : null;
+      const missing = classifyPiMissingCredentialRejection(rawReason);
       if (missing) {
         const classified = classifyPiProviderError(
           { provider: missing.provider, message: missing.diagnostic },
-          { distribution: this.distribution },
         );
         this.emit({
           type: "input-error", inputId: input.inputId, retryable: false, willRetry: false,
           message: classified.reason, errorCategory: classified.category, nextAction: classified.nextAction,
           upstream: { provider: missing.provider, message: missing.diagnostic },
         });
-        return { status: "rejected", inputId: input.inputId, retryable: false, reason: classified.reason };
+        // 拒绝原因保留 Pi 原文，方便 RuntimeHost 独立分类，不依赖 input-error 事件顺序。
+        return { status: "rejected", inputId: input.inputId, retryable: false, reason: rawReason };
       }
       return { status: "rejected", inputId: input.inputId, retryable: true, reason: rawReason };
     }
@@ -902,9 +901,7 @@ export function classifyPiProviderError(
   if (upstream.status === 429 || [...signal].some((value) => ["rate_limit", "rate_limit_exceeded", "too_many_requests"].includes(value))) return {
     category: "rate_limit", reason, nextAction: "Wait for the provider rate-limit window, then retry.",
   };
-  const missing = isBuiltinPiDistribution(scope?.distribution)
-    ? classifyPiMissingCredentialRejection(reason)
-    : null;
+  const missing = classifyPiMissingCredentialRejection(reason);
   if (missing) {
     const readiness = missingProviderCredentialReadiness("pi", missing.provider);
     return { category: "auth", reason: readiness.reason!, nextAction: readiness.nextAction! };
@@ -1074,7 +1071,7 @@ class PiRpcBackend implements PiSessionProcessLike {
 }
 
 export function resolvePiProcessExtensionArgs(input: {
-  distribution: "builtin" | "external";
+  distribution?: "external";
   piCommand: string;
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
@@ -1083,9 +1080,6 @@ export function resolvePiProcessExtensionArgs(input: {
   bashTimeout?: typeof resolvePiBashTimeoutExtensionArg;
   recordWatchdog?: typeof resolvePiSubagentRecordWatchdogExtensionArg;
 } = {}): string[] {
-  // Builtin factories are passed directly to Pi main on every platform. The platform
-  // field makes that invariant explicit and testable without changing process.platform.
-  if (input.distribution === "builtin") return [];
   const resolverInput = { distribution: "external" as const, piCommand: input.piCommand, env: input.env };
   const args: string[] = [];
   // Watchdog must load before the subagent extension so session_shutdown still
@@ -1122,29 +1116,22 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
     ...(session.sessionFile ? ["--session", session.sessionFile] : []),
     ...(requestedModel ? ["--model", requestedModel] : []),
     ...(requestedEffort ? ["--thinking", requestedEffort] : [])];
-  const builtin = piChildDistributionFromOverrides(dependencies.env, input.env) === "builtin";
-  if (!builtin && mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin") delete mergedEnv.LARKIN_PI_DISTRIBUTION;
-  const builtinSpec = builtin ? internalCommandSpec("pi-rpc", [], mergedEnv) : null;
-  const command = builtinSpec?.command ?? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
-  const commandPrefix = builtinSpec?.args ?? dependencies.piCommandArgs ?? [];
+  if (mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin") delete mergedEnv.LARKIN_PI_DISTRIBUTION;
+  const command = dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi";
+  const commandPrefix = dependencies.piCommandArgs ?? [];
   const commandArgs = [...commandPrefix, ...args];
   mergedEnv.PI_CODING_AGENT_DIR = ownedPiDirectory;
-  if (builtin) mergedEnv.PI_TELEMETRY = "0";
-  const childEnv = applyPiPackageDirForChild(mergedEnv, {
-    distribution: builtin ? "builtin" : "external",
-    explicitPackageDir: input.env?.PI_PACKAGE_DIR ?? dependencies.env?.PI_PACKAGE_DIR,
-  });
-  const reportedVersion = productionSpawn && !builtin
+  const childEnv = { ...mergedEnv };
+  const reportedVersion = productionSpawn
     ? parsePiExecutableVersion(String(spawnSync(command, [...commandPrefix, "--version"], {
       cwd: input.workspaceDir, env: childEnv, encoding: "utf8", timeout: 5_000,
     }).stdout || ""))
-    : BUNDLED_PI_VERSION;
-  const extensionArgs = (dependencies.resolvePiProcessExtensionArgs ?? resolvePiProcessExtensionArgs)({
-    distribution: builtin ? "builtin" : "external",
-    piCommand: command,
-    env: childEnv,
-    platform: process.platform,
-  });
+    : PINNED_PI_VERSION;
+  const extensionInput = { piCommand: command, env: childEnv, platform: process.platform };
+  // 假 spawn 不需要真实 extension 路径；默认 resolver 会 spawnSync(`pi --version`)。
+  const extensionArgs = dependencies.resolvePiProcessExtensionArgs
+    ? dependencies.resolvePiProcessExtensionArgs(extensionInput)
+    : productionSpawn ? resolvePiProcessExtensionArgs(extensionInput) : [];
   commandArgs.push(...extensionArgs);
   let probedModel: PiProbeResult | null = null;
   if (productionSpawn) {
@@ -1172,7 +1159,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
       client.request<PiRpcState>("get_state"),
       client.request<{ models?: Array<{ provider?: string; id?: string }> }>("get_available_models"),
     ]);
-    if (!available?.models?.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow or configure provider credentials; Larkin will not create a fallback session.");
+    if (!available?.models?.length) throw new Error("Pi has no authenticated available models. Run the official `pi` login flow; Larkin will not create a fallback session.");
     const effectiveModel = state.model?.provider && state.model.id ? `${state.model.provider}/${state.model.id}` : null;
     if (productionSpawn) {
       if (!effectiveModel || !probedModel || effectiveModel !== probedModel.model
@@ -1186,11 +1173,10 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
         keepRecentTokens: ownedSettings.compaction?.keepRecentTokens,
       } });
       const handshake = state.compactionCapabilities;
-      verifyPiCapabilities({ distribution: builtin ? "builtin" : "external", version: reportedVersion,
+      verifyPiCapabilities({ distribution: "external", version: reportedVersion,
         contextWindow: state.model?.contextWindow, autoCompactionEnabled: state.autoCompactionEnabled,
         reserveTokens: handshake?.reserveTokens, keepRecentTokens: handshake?.keepRecentTokens,
-        compactRpc: true, events: handshake?.events,
-        trustedProtocol: builtin });
+        compactRpc: true, events: handshake?.events });
     }
     // 严格对账（Owner 决策）：模型必须来自 pi 的权威可用列表，不做后缀猜测——
     // 配置的模型与 pi 可用列表不符即报错，并在错误里列出可用模型。
@@ -1314,10 +1300,9 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
         if (readiness.state !== "ready") throw new RuntimePrerequisiteError(readiness);
       }
       if (id === "pi") {
-        const distribution = piChildDistributionFromOverrides(dependencies.env, input.env);
         return new PiSession(await (dependencies.createPiSession
         ? dependencies.createPiSession(input)
-        : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn, productionSpawn)), distribution);
+        : createPiRpcBackend(input, { ...dependencies, piCommand: resolvedExecutable! }, spawn, productionSpawn)));
       }
       if (id === "codex") {
         const codexInput = dependencies.codexModelOverride?.trim()

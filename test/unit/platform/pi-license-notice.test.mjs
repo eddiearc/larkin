@@ -6,17 +6,12 @@ import { generateRuntimeNotices } from "../../../scripts/generate-third-party-no
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 
-test("runtime notices include the bundled official Pi closure", () => {
+test("runtime notices exclude the host Pi package and still ship the redistributed notice", () => {
   const notice = generateRuntimeNotices();
-  for (const packageName of [
-    "@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-agent-core",
-    "@earendil-works/pi-ai",
-    "@earendil-works/pi-tui",
-  ]) assert.match(notice, new RegExp(packageName.replace("/", "\\/")));
-  assert.match(notice, /Copyright \(c\) 2025 Mario Zechner/);
-  assert.match(notice, /Permission is hereby granted, free of charge/);
-  assert.match(notice, /THE SOFTWARE IS PROVIDED "AS IS"/);
+  assert.doesNotMatch(notice, /@earendil-works\/pi-coding-agent/);
+  assert.doesNotMatch(notice, /@earendil-works\/pi-agent-core/);
+  assert.match(notice, /@tintinweb\/pi-subagents/);
+  assert.match(notice, /Permission is hereby granted, free of charge|Apache License/);
 
   for (const relative of ["scripts/release/build.ts", "scripts/release/assemble.ts"]) {
     const source = fs.readFileSync(path.join(ROOT, relative), "utf8");
@@ -25,18 +20,11 @@ test("runtime notices include the bundled official Pi closure", () => {
   }
 });
 
-test("runtime notices are one locked superset across release target optional installs", () => {
-  const targets = [
-    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-darwin-arm64", "@mariozechner/clipboard-darwin-universal"]),
-    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-darwin-x64", "@mariozechner/clipboard-darwin-universal"]),
-    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-linux-arm64-gnu", "@mariozechner/clipboard-linux-arm64-musl"]),
-    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-linux-x64-gnu", "@mariozechner/clipboard-linux-x64-musl"]),
-    new Set(["zod", "@mariozechner/clipboard", "@mariozechner/clipboard-win32-x64-msvc"]),
+test("runtime notices are deterministic across optional-install views", () => {
+  const rendered = [
+    generateRuntimeNotices(),
+    generateRuntimeNotices({ installedOptionalPackageNames: new Set() }),
+    generateRuntimeNotices({ installedOptionalPackageNames: new Set(["zod"]) }),
   ];
-  const rendered = targets.map((installedOptionalPackageNames) => generateRuntimeNotices({ installedOptionalPackageNames }));
-  assert.equal(new Set(rendered).size, 1, "target-specific optional installs must yield one release notice");
-  assert.equal(rendered[0], generateRuntimeNotices());
-  for (const platformPackage of [
-    "clipboard-darwin-arm64", "clipboard-darwin-x64", "clipboard-linux-x64-gnu", "clipboard-win32-x64-msvc",
-  ]) assert.match(rendered[0], new RegExp(platformPackage));
+  assert.equal(new Set(rendered).size, 1, "optional-install views must yield one release notice");
 });

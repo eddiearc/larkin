@@ -101,15 +101,13 @@ test("dashboard config API is sanitized, same-origin/CSRF protected, bounded, an
   }
 });
 
-test("dashboard pi-auth API is loopback/CSRF protected, bounded, and never echoes an API key", async () => {
+test("removed pi-auth routes 404 like unknown routes; remaining config routes keep loopback/CSRF/no-store/16KB checks", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-dashboard-pi-auth-sec-"));
   const port = await freePort();
-  const secret = "dashboard-security-super-secret";
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 4, serverId: "server-secret-internal", activeAgent: APP, mentionPolicy: "require",
-    agents: { [APP]: { runtime: "pi", piDistribution: "builtin", model: "default", createdAt: "2026-09-04T00:00:00.000Z" } },
+    agents: { [APP]: { runtime: "pi", model: "default", createdAt: "2026-09-04T00:00:00.000Z" } },
   })}\n`, { mode: 0o600 });
-  fs.mkdirSync(path.join(root, "providers", "pi", APP), { recursive: true, mode: 0o700 });
   const child = spawn(process.execPath, [path.join(ROOT, "dist/app/dashboard.mjs"), "--port", String(port)], {
     cwd: ROOT, env: { ...process.env, LARKIN_CONFIG_DIR: root }, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -124,39 +122,46 @@ test("dashboard pi-auth API is loopback/CSRF protected, bounded, and never echoe
     const page = await fetch(`${base}/`).then((response) => response.text());
     const csrf = JSON.parse(page.match(/"csrfCapability":("[^"]+")/)?.[1] || "null");
     const privateHeaders = { "X-Larkin-CSRF": csrf };
-    const catalog = await fetch(`${base}/api/pi-auth/providers`, { headers: privateHeaders }).then((response) => {
-      assert.equal(response.headers.get("cache-control"), "no-store");
-      return response.json();
-    });
-    assert.ok(Array.isArray(catalog.providers));
-    assert.ok(catalog.providers.some((entry) => entry.id === "custom" && entry.openaiCompatible));
-    assert.doesNotMatch(JSON.stringify(catalog), new RegExp(secret));
+    const unknown = await fetch(`${base}/api/does-not-exist`);
+    assert.equal(unknown.status, 404);
+    for (const pathname of ["/api/pi-auth/providers", `/api/pi-auth/status?agent=${APP}`, "/api/models/builtin-pi"]) {
+      const response = await fetch(`${base}${pathname}`, { headers: privateHeaders });
+      assert.equal(response.status, 404, pathname);
+    }
+    for (const pathname of ["/api/pi-auth/login", "/api/pi-auth/logout"]) {
+      const response = await fetch(`${base}${pathname}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf },
+        body: JSON.stringify({ agentId: APP, provider: "deepseek" }),
+      });
+      assert.equal(response.status, 404, pathname);
+    }
 
-    const raw = JSON.stringify({ agentId: APP, preset: "deepseek", apiKey: secret });
+    const config = await fetch(`${base}/api/config`, { headers: privateHeaders });
+    assert.equal(config.status, 200);
+    assert.equal(config.headers.get("cache-control"), "no-store");
+    const view = await config.json();
+    assert.deepEqual(view.runtimeOptions, ["codex", "claude", "pi"]);
+    assert.equal(view.agents[0].runtimeOption, "pi");
+
+    const raw = JSON.stringify({ operation: "set-global-mention", value: "free" });
     const rejected = [
-      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: raw }),
-      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: "https://evil.example", "X-Larkin-CSRF": csrf }, body: raw }),
-      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": "wrong" }, body: raw }),
-      await fetch(`${base}/api/pi-auth/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ agentId: APP, preset: "deepseek", apiKey: secret, padding: "x".repeat(17_000) }) }),
+      await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: raw }),
+      await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: "https://evil.example", "X-Larkin-CSRF": csrf }, body: raw }),
+      await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": "wrong" }, body: raw }),
+      await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ operation: "set-global-mention", value: "free", padding: "x".repeat(17_000) }) }),
     ];
     assert.deepEqual(rejected.map((response) => response.status), [400, 400, 400, 400]);
     for (const response of rejected) {
-      const body = await response.text();
-      assert.doesNotMatch(body, new RegExp(secret));
+      assert.equal(response.headers.get("cache-control"), "no-store");
     }
-    const accepted = await fetch(`${base}/api/pi-auth/login`, {
-      method: "POST",
+    const accepted = await fetch(`${base}/api/config`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf },
-      body: JSON.stringify({
-        agentId: APP, preset: "custom", apiKey: secret,
-        baseUrl: "http://127.0.0.1:1/v1", model: "fixture-model",
-      }),
+      body: raw,
     });
-    const acceptedBody = await accepted.text();
-    assert.doesNotMatch(acceptedBody, new RegExp(secret));
-    assert.doesNotMatch(output, new RegExp(secret));
+    assert.equal(accepted.status, 200);
     assert.equal(accepted.headers.get("cache-control"), "no-store");
-    assert.ok([200, 400].includes(accepted.status));
   } finally {
     child.kill("SIGINT");
     await Promise.race([new Promise((resolve) => child.once("exit", resolve)), new Promise((resolve) => setTimeout(resolve, 3_000))]);

@@ -177,7 +177,7 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
       mentionPolicy: "require",
       activeAgent: APP,
       agents: {
-        [APP]: { runtime: "pi", model: "default", piDistribution: "external" },
+        [APP]: { runtime: "pi", model: "default" },
       },
     }, null, 2)}\n`, { mode: 0o600 });
     writeCredential(root);
@@ -188,8 +188,7 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
     const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
     assert.equal(stored.agents[APP].model, "fixture/pi-fixture");
     assert.deepEqual(resultFiles(root), []);
-    const ownedDir = path.join(root, "providers", "pi", APP);
-    assert.deepEqual(fs.readFileSync(path.join(ownedDir, "auth.json")), profile.auth);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
     assert.deepEqual(fs.readFileSync(path.join(profile.dir, "auth.json")), profile.auth);
 
     const adapters = await import(pathToFileURL(path.join(ROOT, "dist/runtime/runtime-adapters.mjs")).href);
@@ -204,7 +203,6 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
       env: {
         LARKIN_CONFIG_DIR: root,
         LARKIN_PI_COMMAND: fake.command,
-        LARKIN_PI_DISTRIBUTION: "external",
         HOME: path.join(root, "home"),
       },
       resolvePiProcessExtensionArgs: () => [],
@@ -216,7 +214,7 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
       stateDir,
       model: stored.agents[APP].model,
       standingPrompt: { version: "fixture", content: "standing", hash: "fixture" },
-      env: { LARKIN_CONFIG_DIR: root, LARKIN_PI_DISTRIBUTION: "external" },
+      env: { LARKIN_CONFIG_DIR: root },
     });
     try {
       const launches = readLaunches(fake.marker);
@@ -229,9 +227,10 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
       assert.ok(sessionLaunch, JSON.stringify(launches));
       assert.equal(sessionLaunch.args.includes("--model"), true);
       assert.equal(sessionLaunch.args[sessionLaunch.args.indexOf("--model") + 1], "fixture/pi-fixture");
+      const ownedDir = path.join(root, "providers", "pi", APP);
       assert.equal(sessionLaunch.agentDir, ownedDir);
       assert.equal(isolated.agentDir, ownedDir);
-      assert.equal(fs.existsSync(path.join(ownedDir, "auth.json")), true);
+      assert.equal(fs.existsSync(path.join(ownedDir, "auth.json")), false);
       const expected = compaction.calculatePiCompactionSettings(32_000);
       const ownedSettings = JSON.parse(fs.readFileSync(path.join(ownedDir, "settings.json"), "utf8"));
       assert.deepEqual(ownedSettings.compaction, {
@@ -247,8 +246,8 @@ test("rerunning external-pi setup repairs model=default and hot-attach uses the 
   }
 });
 
-test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after catalog failure", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-host-builtin-fail-"));
+test("catalog failure does not create a Larkin-owned Pi credential directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-catalog-fail-"));
   try {
     const configFile = path.join(root, "config.json");
     const before = `${JSON.stringify({
@@ -257,7 +256,7 @@ test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after 
       mentionPolicy: "require",
       activeAgent: APP,
       agents: {
-        [APP]: { runtime: "pi", model: "default", piDistribution: "external" },
+        [APP]: { runtime: "pi", model: "default" },
       },
     }, null, 2)}\n`;
     fs.writeFileSync(configFile, before, { mode: 0o600 });
@@ -265,15 +264,7 @@ test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after 
     const botBefore = fs.readFileSync(botFile);
     const profile = writeExternalPiProfile(path.join(root, "home"));
     const fake = writeFakePi(root, { missingWindow: true });
-    const packageDir = path.join(root, ".larkin-official-pi-package");
-    fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
-    fs.writeFileSync(path.join(packageDir, "package.json"), "{\"name\":\"fixture-builtin-pi\"}\n");
-    fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
-    const result = runBind(root, {
-      LARKIN_PI_COMMAND: fake.command,
-      LARKIN_PI_DISTRIBUTION: "builtin",
-      PI_PACKAGE_DIR: packageDir,
-    });
+    const result = runBind(root, { LARKIN_PI_COMMAND: fake.command });
     const output = `${result.stdout}\n${result.stderr}`;
     assert.notEqual(result.status, 0, output);
     assert.match(output, /Pi effective model is missing a context window/);
@@ -282,22 +273,19 @@ test("builtin host + minimal PI_PACKAGE_DIR rolls back imported artifacts after 
     assert.deepEqual(fs.readFileSync(botFile), botBefore);
     assert.deepEqual(fs.readFileSync(path.join(profile.dir, "auth.json")), profile.auth);
     assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
-    assert.equal(fs.existsSync(path.join(root, "providers", "pi", `${APP}.larkin-pi-import.lock`)), false);
-    assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP, "auth.json")), false);
     const launches = readLaunches(fake.marker);
     assert.ok(launches.length > 0, JSON.stringify(launches));
-    assert.equal(launches.some((row) => row.args.includes("--version")), true, JSON.stringify(launches));
     const catalogProbe = launches.find((row) => row.args.includes("--mode") && row.args.includes("rpc") && row.args.includes("--no-session"));
     assert.ok(catalogProbe, JSON.stringify(launches));
-    assert.equal(catalogProbe.agentDir, path.join(root, "providers", "pi", APP));
+    assert.equal(catalogProbe.agentDir, null);
     assert.equal(launches.every((row) => row.packageDir == null), true, JSON.stringify(launches));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("external-pi setup from a builtin host with minimal PI_PACKAGE_DIR still resolves models", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-host-builtin-"));
+test("leftover PI_PACKAGE_DIR does not change external Pi catalog discovery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-external-pi-package-dir-"));
   try {
     const configFile = path.join(root, "config.json");
     fs.writeFileSync(configFile, `${JSON.stringify({
@@ -306,26 +294,24 @@ test("external-pi setup from a builtin host with minimal PI_PACKAGE_DIR still re
       mentionPolicy: "require",
       activeAgent: APP,
       agents: {
-        [APP]: { runtime: "pi", model: "default", piDistribution: "external" },
+        [APP]: { runtime: "pi", model: "default" },
       },
     }, null, 2)}\n`, { mode: 0o600 });
     writeCredential(root);
     writeExternalPiProfile(path.join(root, "home"));
     const fake = writeFakePi(root);
-    const packageDir = path.join(root, ".larkin-official-pi-package");
-    fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
-    fs.writeFileSync(path.join(packageDir, "package.json"), "{\"name\":\"fixture-builtin-pi\"}\n");
-    fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
+    const leftover = path.join(root, "leftover-pi-package");
+    fs.mkdirSync(path.join(leftover, "dist", "modes", "interactive", "theme"), { recursive: true });
+    fs.writeFileSync(path.join(leftover, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
     const result = runBind(root, {
       LARKIN_PI_COMMAND: fake.command,
-      LARKIN_PI_DISTRIBUTION: "builtin",
-      PI_PACKAGE_DIR: packageDir,
+      PI_PACKAGE_DIR: leftover,
     });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const stored = JSON.parse(fs.readFileSync(configFile, "utf8"));
     assert.equal(stored.agents[APP].model, "fixture/pi-fixture");
-    const launches = readLaunches(fake.marker);
-    assert.equal(launches.every((row) => row.packageDir == null), true, JSON.stringify(launches));
+    assert.equal(Object.hasOwn(stored.agents[APP], "piDistribution"), false);
+    assert.equal(fs.existsSync(path.join(root, "providers", "pi", APP)), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -7,13 +7,11 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import * as larkinConfig from "../platform/config.js";
-import { PI_PROVIDER_PRESETS } from "../runtime/pi-provider-config.js";
-import { fromUserRuntime, isUserRuntime } from "../runtime/user-runtime.js";
-const PI_PROVIDER_IDS = PI_PROVIDER_PRESETS.map((p) => p.id).join(" | ") + " | custom";
+import { isUserRuntime, type RuntimeOption } from "../runtime/user-runtime.js";
 import { acquireProcessLock, readProcessState } from "../platform/process-state.js";
 import { requestAgentUpsert } from "./local-control.js";
 import { openOwnedDashboardWhenReady } from "./setup-dashboard.js";
-import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
+import { probeNativeRuntimeReadiness, resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 import { internalCommandSpec, processCommandToken, type InternalMode } from "./internal-command.js";
 import {
   ensureOfficialLarkCliForSetup,
@@ -38,59 +36,52 @@ if (has("--comment-subscription")) {
   die("--comment-subscription 已移除：评论订阅默认 application（平台验证的应用级订阅），不需要该 flag");
 }
 
+const REMOVED_SETUP_FLAGS = ["--provider", "--api-key", "--base-url", "--pi-distribution", "--api-key-stdin", "--model-from-preset"];
+if (REMOVED_SETUP_FLAGS.some((name) => has(name) || argv.some((arg) => arg.startsWith(`${name}=`)))) {
+  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex 或 claude");
+}
+
 // 默认应用级评论订阅：平台验证的应用订阅让该应用可见文档的全部评论进入 Agent Inbox。
 const commentSubscription = "application";
-const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: true, help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
+const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: !has("--no-start"), help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
 
-// runtime 枚举归一：builtin-pi（默认）/ pi / codex / claude → 内部 (runtime, distribution)
-const RUNTIME_ENUM = ["builtin-pi", "pi", "codex", "claude"] as const;
-function normalizeRuntime(value: string | null): { runtime: "pi" | "codex" | "claude"; distribution?: "builtin" | "external" } {
-  const raw = value || "builtin-pi";
-  if (raw === "external-pi") {
+const RUNTIME_ENUM = ["pi", "codex", "claude"] as const;
+function runtimeCommand(runtime: RuntimeOption, env: NodeJS.ProcessEnv = process.env): string {
+  if (runtime === "pi") return env.LARKIN_PI_COMMAND || "pi";
+  if (runtime === "codex") return env.LARKIN_CODEX_COMMAND || "codex";
+  return env.LARKIN_CLAUDE_COMMAND || "claude";
+}
+function normalizeRuntime(value: string | null): RuntimeOption | null {
+  if (!value) return null;
+  if (value === "external-pi") {
     console.error("external-pi 已改名为 pi");
-    return fromUserRuntime("pi");
+    return "pi";
   }
-  if (!isUserRuntime(raw) || !RUNTIME_ENUM.includes(raw)) {
-    die(`未知 runtime \`${value}\`；可选：${RUNTIME_ENUM.join(" | ")}`);
-  }
-  return fromUserRuntime(raw);
+  if (isUserRuntime(value)) return value;
+  return die(`未知 runtime \`${value}\`；可选：${RUNTIME_ENUM.join(" | ")}`);
 }
-const normalizedRuntime = normalizeRuntime(OPT.runtime);
-// 参数化路径：显式 --runtime、无 TTY（Agent 驱动）、或任何 provider 参数。
-// 交互终端且未指定任何参数时，不传 --runtime 给 bot-register，由其交互选择流程接管。
-const parameterized = Boolean(OPT.runtime) || OPT.nonInteractive
-  || ["--provider", "--api-key", "--base-url"].some((name) => has(name));
-// builtin-pi 前置校验：授权前就 fast-fail（避免用户白授权后才发现缺 key）；--help 永远跳过
-if (!OPT.help && parameterized && normalizedRuntime.distribution === "builtin") {
-  const p = flag("--provider");
-  const b = flag("--base-url");
-  const k = flag("--api-key");
-  if (!p && !b) die(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_IDS}）或 --base-url；或 --runtime pi 用已有 pi`);
-  if (!k) die("builtin-pi 需要 --api-key；或 --runtime pi 用已有登录");
+function assertRuntimeInstalled(runtime: RuntimeOption): void {
+  if (resolveRuntimeExecutable(runtimeCommand(runtime), process.env)) return;
+  die(`${runtime} is not installed；${runtimeInstallNextAction(runtime)}`);
 }
-if (!OPT.help && normalizedRuntime.distribution === "external" && (flag("--provider") || flag("--api-key") || flag("--base-url"))) {
-  die("pi 使用已有 pi 环境，不接受 --provider/--api-key/--base-url");
-}
+
 if (OPT.help) {
   say(`larkin setup — Create or connect a Feishu (Lark) bot, then configure and attach its Agent
 
 Usage:
-  larkin setup                         Select a bot in the browser and run setup（默认：内置 Pi + 配置完成即热挂载）
-  larkin setup --provider <id> --api-key <key>   指定内置 Pi provider（无需交互）
+  larkin setup                         Select a bot in the browser and choose an installed runtime
+  larkin setup --runtime pi            Non-interactive setup for an externally installed runtime
 
 Options:
-  --runtime <runtime>                   Agent runtime 枚举：builtin-pi（默认，内置 Pi）| pi | codex | claude
-  --provider <id>                       内置 Pi provider：deepseek | kimi | minimax | zhipu | openai |
-                                          anthropic | gemini | groq | cerebras | xai | fireworks |
-                                          together | mistral | openrouter | kimi-coding | qwen-cn | custom
-  --api-key <key>                       API key（内置 Pi 必填）
-  --base-url <url>                      custom 端点（provider=custom 时必填；也可覆盖 preset 默认端点）
-  --model <id>                          模型 ID；默认取 provider 预设。不同 runtime 的模型可用
-                                          \`larkin model\` 查看 / 切换
-  --from-cli-profile <name>            可选：复用已有官方 lark-cli profile（需 LARKIN_SETUP_APP_SECRET）
-  --tenant feishu|lark                  授权二维码之前选择品牌。默认 feishu（扫码 /page/launcher）。
-                                          Lark 用 --tenant lark：扫码 /page/cli，完成后凭证回传，
-                                          不要打开 /page/launcher。交互式未指定时会先询问。
+  --runtime <runtime>                   Required without a TTY. Agent runtime: pi | codex | claude
+  --model <id>                          Optional model ID; otherwise the runtime default is used.
+                                          Use \`larkin model\` after setup to inspect or switch.
+  --from-cli-profile <name>            Optional: reuse an existing official lark-cli profile
+                                          (requires LARKIN_SETUP_APP_SECRET)
+  --tenant feishu|lark                  Choose the brand before the authorization QR. Default feishu
+                                          (scan /page/launcher). Lark uses --tenant lark: scan /page/cli,
+                                          then credentials return; do not open /page/launcher.
+                                          Interactive runs ask when omitted.
 
 setup handles browser authorization, permission grants, credential storage, Agent configuration,
 and target-only hot attach. Each Agent is identified by its bot App ID: selecting the same bot reuses
@@ -99,11 +90,18 @@ its existing Agent, memory, and state; creating a new bot creates a new Agent.
 If larkin is running, only the selected Agent is added or updated. Otherwise setup starts the same
 daemon + dashboard supervisor used by larkin start.
 
-Interactive terminals without flags keep the guided flow (browser bot selection + runtime choice).
-Non-interactive (Agent-driven) runs default to builtin-pi and require --provider/--api-key (or
---runtime pi to reuse an existing pi login).`);
+Interactive terminals list pi, Codex, and Claude Code with installed / not installed status and
+refuse a runtime that is not installed. Non-interactive (Agent-driven) runs require --runtime
+and exit non-zero with the readiness message when that executable is missing.`);
   process.exit(0);
 }
+
+if (OPT.nonInteractive && !OPT.runtime) {
+  die("非交互 setup 必须指定 --runtime pi|codex|claude");
+}
+const selectedRuntime = normalizeRuntime(OPT.runtime);
+if (selectedRuntime) assertRuntimeInstalled(selectedRuntime);
+const parameterized = Boolean(OPT.runtime);
 
 function runForeground(mode: InternalMode, args: string[]): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((resolve, reject) => {
@@ -154,17 +152,14 @@ export async function main(): Promise<void> {
   fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
   const resultFile = path.join(CFG_DIR, `.setup-result-${process.pid}.json`);
   const registerArgs = ["--auto", "--result-file", resultFile];
-  if (parameterized) {
-    registerArgs.push("--runtime", normalizedRuntime.runtime);
-    if (normalizedRuntime.distribution) registerArgs.push("--pi-distribution", normalizedRuntime.distribution);
-  }
+  if (parameterized && selectedRuntime) registerArgs.push("--runtime", selectedRuntime);
   registerArgs.push("--comment-subscription", OPT.commentSubscription);
   if (has("--tenant")) {
     const tenant = flag("--tenant");
     if (tenant !== "feishu" && tenant !== "lark") die("--tenant 只支持 feishu 或 lark");
     registerArgs.push("--tenant", tenant === "lark" ? "lark" : "feishu");
   }
-  for (const name of ["--provider", "--api-key", "--base-url", "--model", "--from-cli-profile"] as const) {
+  for (const name of ["--model", "--from-cli-profile"] as const) {
     const value = flag(name);
     if (value) registerArgs.push(name, value);
   }
@@ -183,12 +178,11 @@ export async function main(): Promise<void> {
   if (!(["codex", "claude", "pi"] as const).includes(configuredAgent.runtime as "codex" | "claude" | "pi")) die(`Runtime ${configuredAgent.runtime} 不受支持`);
   // 非交互（Agent 驱动）时仍跳过 probeNativeRuntimeReadiness：该探测保持 interactive-only。
   // external-pi 绑定已在 setup-bind 内做非交互 Pi RPC catalog discovery（RPC over pipes 不需要 TTY）；
-  // daemon attach 探测仍是权威校验。其余真实阻塞（缺 runtime 可执行文件 / 缺 key / 缺 lark-cli）一律 fast-fail。
+  // daemon attach 探测仍是权威校验。其余真实阻塞（缺 runtime 可执行文件 / 缺登录 / 缺 lark-cli）一律 fast-fail。
   if (!OPT.nonInteractive) {
     const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
       agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
-      env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR,
-        ...(configuredAgent.piDistribution ? { LARKIN_PI_DISTRIBUTION: configuredAgent.piDistribution } : {}) } });
+      env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR } });
     if (runtimeReadiness.state !== "ready") {
       die(`Runtime ${configuredAgent.runtime} ${runtimeReadiness.state}：${runtimeReadiness.reason || "prerequisite unavailable"}；${runtimeReadiness.nextAction || "修复后重试"}`);
     }

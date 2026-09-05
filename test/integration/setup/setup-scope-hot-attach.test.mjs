@@ -84,7 +84,7 @@ cp.spawn = function(command, args = [], options = {}) {
     fs.mkdirSync(path.join(root, "agents", ${JSON.stringify(APP)}), { recursive: true, mode: 0o700 });
     fs.writeFileSync(configPath, JSON.stringify({
       version: 4, serverId: "hot", mentionPolicy: "require", activeAgent: ${JSON.stringify(APP)},
-      agents: { [${JSON.stringify(APP)}]: { runtime: "pi", model: "fixture", piDistribution: "builtin" } },
+      agents: { [${JSON.stringify(APP)}]: { runtime: "pi", model: "fixture" } },
     }) + "\\n", { mode: 0o600 });
     fs.chmodSync(configPath, 0o600);
     fs.writeFileSync(resultFile, JSON.stringify({ agentId: ${JSON.stringify(APP)} }) + "\\n", { mode: 0o600 });
@@ -103,13 +103,17 @@ require("node:module").syncBuiltinESMExports();
 
 function runSetup(root, temp, fail) {
   const preload = writePreload(temp);
-  return spawnSync(process.execPath, ["--preload", preload, path.join(ROOT, "dist/app/setup.mjs"), "--provider", "openai", "--api-key", "k", "--model", "gpt-4o"], {
+  const bin = path.join(temp, "bin");
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(bin, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return spawnSync(process.execPath, ["--preload", preload, path.join(ROOT, "dist/app/setup.mjs"), "--runtime", "pi"], {
     cwd: ROOT,
     encoding: "utf8",
     timeout: 15_000,
     env: {
       ...process.env,
       HOME: path.join(temp, "home"),
+      PATH: `${bin}${path.delimiter}${process.env.PATH || "/usr/bin:/bin"}`,
       LARKIN_CONFIG_DIR: root,
       LARKIN_HOME: root,
       LARKIN_INTERNAL_DISPATCH: "0",

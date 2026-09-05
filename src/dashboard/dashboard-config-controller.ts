@@ -8,18 +8,8 @@ import { discoverClaudeModelCatalog, type DiscoverClaudeCatalogOptions } from ".
 import { discoverCodexModelCatalog, type DiscoverCodexCatalogOptions } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtime/pi-model-catalog.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
-import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
-import { RUNTIME_OPTIONS, piCatalogDistributionForUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
-import {
-  configureBuiltinPiProvider,
-  listBuiltinPiProviderCatalog,
-  logoutBuiltinPiProvider,
-  sanitizeProviderLoginError,
-} from "../runtime/pi-provider-login.js";
-import {
-  createOfficialPiCredentialRuntime,
-  officialPiAuthStatus,
-} from "../runtime/pi-official-auth.js";
+import { RUNTIME_OPTIONS, isUserRuntime } from "../runtime/user-runtime.js";
+import { probeNativeRuntimeReadiness, RuntimePrerequisiteError } from "../runtime/runtime-readiness.js";
 
 type Env = Record<string, string | undefined>;
 type LarkJsonCall = { command: string; args: string[]; env: Env; maxBuffer: number; timeout: number };
@@ -27,7 +17,7 @@ type ChatDirectoryInput = { agentId: string; chatIds: string[]; configDir: strin
 type ClaudeModelDirectoryInput = { agentId: string; cwd: string; env: Env };
 type CodexModelDirectoryInput = { agentId: string; cwd: string; env: Env };
 type PiModelDirectoryInput = {
-  agentDir: string;
+  agentDir?: string;
   agentId: string;
   cwd: string;
   command?: string;
@@ -220,7 +210,7 @@ export function createPiModelDirectoryResolver(options: {
       }
     },
     async resolve(input) {
-      const key = [input.agentId, input.cwd, input.agentDir, input.command ?? "", ...(input.commandArgs ?? [])].join("\u0000");
+      const key = [input.agentId, input.cwd, input.agentDir ?? "", input.command ?? "", ...(input.commandArgs ?? [])].join("\u0000");
       const started = generationOf(input.agentId);
       pruneCache(cache, (entry) => now() >= entry.expiresAt, 64);
       pruneCache(failures, (entry) => now() >= entry.expiresAt, 64);
@@ -233,7 +223,7 @@ export function createPiModelDirectoryResolver(options: {
           try {
             const catalog = await discover({
               cwd: input.cwd,
-              agentDir: input.agentDir,
+              ...(input.agentDir ? { agentDir: input.agentDir } : {}),
               ...(input.command ? { command: input.command } : {}),
               ...(input.commandArgs ? { commandArgs: input.commandArgs } : {}),
             });
@@ -437,10 +427,7 @@ export function createDashboardConfigController({
   claudeModelDirectoryResolver = createClaudeModelDirectoryResolver(),
   codexModelDirectoryResolver = createCodexModelDirectoryResolver(),
   piModelDirectoryResolver = createPiModelDirectoryResolver(),
-  configureProvider = configureBuiltinPiProvider,
-  logoutProvider = logoutBuiltinPiProvider,
-  listProviderCatalog = listBuiltinPiProviderCatalog,
-  loadProviderStatus = async (configDir: string, agentId: string) => officialPiAuthStatus(await createOfficialPiCredentialRuntime(configDir, agentId)),
+  probeRuntimeReadiness = probeNativeRuntimeReadiness,
 }: {
   csrfCapability: string;
   env?: Env;
@@ -449,43 +436,51 @@ export function createDashboardConfigController({
   claudeModelDirectoryResolver?: ClaudeModelDirectoryResolver;
   codexModelDirectoryResolver?: CodexModelDirectoryResolver;
   piModelDirectoryResolver?: PiModelDirectoryResolver;
-  configureProvider?: typeof configureBuiltinPiProvider;
-  logoutProvider?: typeof logoutBuiltinPiProvider;
-  listProviderCatalog?: typeof listBuiltinPiProviderCatalog;
-  loadProviderStatus?: (configDir: string, agentId: string) => Promise<unknown>;
+  probeRuntimeReadiness?: typeof probeNativeRuntimeReadiness;
 }) {
-  const resolvePiModelDirectory = async (agentId: string, userRuntime: "pi" | "builtin-pi") => {
-    const { config, configDir } = loadConfig(env);
+  const resolvePiModelDirectory = async (agentId: string) => {
+    const { config } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(userRuntime), env);
+    // 外部 `pi --mode rpc` 使用用户自己的 Pi home，不再注入 Larkin 持有的 agentDir。
     return await piModelDirectoryResolver.resolve({
       agentId,
       cwd: agent.workspaceDir,
-      agentDir: ownedPiCatalogAgentDir(configDir, agentId),
-      command: catalogCommand.command,
-      commandArgs: catalogCommand.commandArgs,
+      command: env.LARKIN_PI_COMMAND || process.env.LARKIN_PI_COMMAND || "pi",
+      commandArgs: [],
     });
   };
   const resolveModelDirectory = async (runtime: string, agentId: string) => {
     const { config } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    if (runtime === "pi" || runtime === "builtin-pi") return await resolvePiModelDirectory(agentId, runtime);
+    if (runtime === "pi") return await resolvePiModelDirectory(agentId);
     if (runtime === "codex") return await codexModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     if (runtime === "claude") return await claudeModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     const authored = loadRuntimeModels()[runtime];
     if (!authored) throw new Error("unknown runtime");
     return authored;
   };
+  const assertRuntimeSwitchReady = async (mutation: ConfigMutation): Promise<void> => {
+    if (mutation.kind !== "set-agent-runtime") return;
+    if (!isUserRuntime(mutation.runtime)) throw new Error(`未知 runtime：${mutation.runtime}`);
+    const { config } = loadConfig(env);
+    const agent = config.agents[mutation.agentId];
+    if (!agent) throw new Error("unknown agent");
+    const readiness = await probeRuntimeReadiness({
+      runtime: mutation.runtime,
+      cwd: agent.workspaceDir,
+      env,
+      agentId: mutation.agentId,
+    });
+    if (readiness.state === "missing") throw new RuntimePrerequisiteError(readiness);
+  };
   const assertDirectoryMutation = async (mutation: ConfigMutation): Promise<void> => {
     if (mutation.kind !== "set-agent-runtime" && mutation.kind !== "set-agent-model" && mutation.kind !== "set-agent-effort") return;
     const { config } = loadConfig(env);
     const agent = config.agents[mutation.agentId];
     if (!agent) throw new Error("unknown agent");
-    const runtime = mutation.kind === "set-agent-runtime"
-      ? mutation.runtime
-      : toUserRuntime(agent.runtime, agent.piDistribution);
+    const runtime = mutation.kind === "set-agent-runtime" ? mutation.runtime : agent.runtime;
     const model = mutation.kind === "set-agent-runtime" ? mutation.model || "default"
       : mutation.kind === "set-agent-model" ? mutation.model : agent.model;
     if (mutation.kind === "set-agent-effort" && mutation.effort === null) return;
@@ -512,11 +507,11 @@ export function createDashboardConfigController({
         }
         return true;
       }
-      if ((requestUrl.pathname === "/api/models/pi" || requestUrl.pathname === "/api/models/builtin-pi") && req.method === "GET") {
+      if (requestUrl.pathname === "/api/models/pi" && req.method === "GET") {
         try {
           assertPrivateReadRequest(req, csrfCapability);
           const agentId = requestUrl.searchParams.get("agent") || "";
-          const models = await resolvePiModelDirectory(agentId, requestUrl.pathname === "/api/models/builtin-pi" ? "builtin-pi" : "pi");
+          const models = await resolvePiModelDirectory(agentId);
           json(res, 200, { models });
         } catch (error) {
           json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "Pi model directory unavailable" });
@@ -555,87 +550,18 @@ export function createDashboardConfigController({
         try {
           assertWriteRequest(req, csrfCapability);
           const mutation = dashboardMutation(await boundedJson(req));
+          await assertRuntimeSwitchReady(mutation);
           await assertDirectoryMutation(mutation);
           const result = mutateConfig(env, mutation, { kind: "user" });
           json(res, 200, { ok: true, revision: result.revision, persisted: true, applyState: result.applyState, changedScope: result.changedScope });
-        } catch { json(res, 400, { error: "configuration update rejected" }); }
-        return true;
-      }
-      if (requestUrl.pathname === "/api/pi-auth/providers" && req.method === "GET") {
-        try {
-          assertPrivateReadRequest(req, csrfCapability);
-          json(res, 200, { providers: listProviderCatalog() });
         } catch (error) {
-          json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "provider catalog unavailable" });
-        }
-        return true;
-      }
-      if (requestUrl.pathname === "/api/pi-auth/status" && req.method === "GET") {
-        try {
-          assertPrivateReadRequest(req, csrfCapability);
-          const agentId = requestUrl.searchParams.get("agent") || "";
-          const { config, configDir } = loadConfig(env);
-          const agent = config.agents[agentId];
-          if (!agent || agent.runtime !== "pi" || agent.piDistribution !== "builtin") throw new Error("unknown agent");
-          const credentials = await loadProviderStatus(configDir, agentId);
-          json(res, 200, { agentId, model: agent.model, credentials });
-        } catch (error) {
-          json(res, error instanceof Error && /host|capability/.test(error.message) ? 403 : 500, { error: "provider status unavailable" });
-        }
-        return true;
-      }
-      if (requestUrl.pathname === "/api/pi-auth/login" && req.method === "POST") {
-        let secret = "";
-        try {
-          assertWriteRequest(req, csrfCapability);
-          const body = await boundedJson(req);
-          const allowed = ["agentId", "preset", "apiKey", "model", "baseUrl"];
-          if (Object.keys(body).some((key) => !allowed.includes(key))) throw new Error("unsupported field");
-          const agentId = String(body.agentId || "");
-          const preset = String(body.preset || "");
-          const apiKey = typeof body.apiKey === "string" ? body.apiKey : "";
-          secret = apiKey;
-          if (!/^cli_[A-Za-z0-9]+$/.test(agentId) || !preset) throw new Error("invalid login request");
-          const { config } = loadConfig(env);
-          const agent = config.agents[agentId];
-          if (!agent || agent.runtime !== "pi" || agent.piDistribution !== "builtin") throw new Error("Agent is not builtin Pi");
-          const result = await configureProvider({
-            agentId,
-            preset,
-            apiKey,
-            ...(typeof body.model === "string" ? { model: body.model } : {}),
-            ...(typeof body.baseUrl === "string" ? { baseUrl: body.baseUrl } : {}),
-            env,
-          });
-          piModelDirectoryResolver.invalidate?.(agentId);
-          json(res, 200, {
-            ok: true,
-            agentId: result.agentId,
-            provider: result.provider,
-            preset: result.preset,
-            model: result.model,
-            credentialType: result.credentialType,
-            applyState: result.applyState,
-            ...(result.applyError ? { applyError: sanitizeProviderLoginError(result.applyError, secret || undefined) } : {}),
-          });
-        } catch (error) {
-          json(res, 400, { error: sanitizeProviderLoginError(error, secret || undefined) });
-        }
-        return true;
-      }
-      if (requestUrl.pathname === "/api/pi-auth/logout" && req.method === "POST") {
-        try {
-          assertWriteRequest(req, csrfCapability);
-          const body = await boundedJson(req);
-          if (Object.keys(body).sort().join(",") !== "agentId,provider") throw new Error("invalid logout request");
-          const agentId = String(body.agentId || "");
-          const provider = String(body.provider || "");
-          if (!/^cli_[A-Za-z0-9]+$/.test(agentId)) throw new Error("invalid logout request");
-          const result = await logoutProvider({ agentId, providerId: provider, env });
-          piModelDirectoryResolver.invalidate?.(agentId);
-          json(res, 200, { ok: true, agentId: result.agentId, provider: result.provider });
-        } catch (error) {
-          json(res, 400, { error: sanitizeProviderLoginError(error) });
+          if (error instanceof RuntimePrerequisiteError) {
+            json(res, 400, { error: error.message, readiness: error.readiness });
+          } else if (error instanceof Error && error.message.startsWith("未知 runtime")) {
+            json(res, 400, { error: error.message });
+          } else {
+            json(res, 400, { error: "configuration update rejected" });
+          }
         }
         return true;
       }

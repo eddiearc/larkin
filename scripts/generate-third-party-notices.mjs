@@ -123,6 +123,8 @@ function runtimePackages(options = {}) {
     };
     for (const name of Object.keys(children).sort()) {
       if (name.startsWith("@types/")) continue;
+      // Host Pi packages are supplied by the user's `pi` install, not shipped by Larkin.
+      if (name.startsWith("@earendil-works/pi-")) continue;
       const optional = Object.hasOwn(manifest.optionalDependencies ?? {}, name) || manifest.peerDependenciesMeta?.[name]?.optional === true;
       try {
         packageRoot(name, root);
@@ -131,17 +133,6 @@ function runtimePackages(options = {}) {
         if (!optional) throw new Error(`runtime dependency is not installed: ${key} -> ${name}`);
       }
     }
-  }
-  // Bun installs only the current target's native clipboard packages. Append
-  // every integrity-pinned variant so all release targets generate one notice.
-  for (const [key, integrity] of integrities) {
-    if (key !== "@mariozechner/clipboard@0.3.9" && !key.startsWith("@mariozechner/clipboard-")) continue;
-    if (seen.has(key)) continue;
-    const separator = key.lastIndexOf("@");
-    const name = key.slice(0, separator);
-    const version = key.slice(separator + 1);
-    packages.push({ name, version, license: "MIT", files: auditedLicenseFallback(key, "MIT"), direct: false, integrity });
-    seen.add(key);
   }
   return packages.sort((left, right) => compareText(left.name, right.name) || compareText(left.version, right.version));
 }

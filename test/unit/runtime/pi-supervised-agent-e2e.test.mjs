@@ -5,12 +5,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { afterAll, test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+
+const piSdk = await import("@earendil-works/pi-coding-agent").catch(() => null);
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-steer-"));
 const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-supervised-steer-agent-"));
@@ -23,7 +19,8 @@ function sse(payloads) {
   return payloads.map((payload) => `data: ${JSON.stringify(payload)}\n\n`).join("") + "data: [DONE]\n\n";
 }
 
-test("public steer_subagent changes the next fake-provider turn", async () => {
+test.skipIf(!piSdk)("public steer_subagent changes the next fake-provider turn", async () => {
+  const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } = piSdk;
   delete globalThis[Symbol.for("pi-subagents:manager")];
   const subagentsEntry = fileURLToPath(new URL("../../../dist/runtime/pi-subagents.bundle.js", import.meta.url));
   assert.ok(fs.existsSync(subagentsEntry));

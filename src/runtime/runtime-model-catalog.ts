@@ -8,7 +8,7 @@ export interface RuntimeModelDefinition {
 
 export type RuntimeModels = Record<string, RuntimeModelDefinition[]>;
 
-// Authored catalog keys are adapter ids only. builtin-pi is a user-facing sibling, not a stored runtime.
+// Authored catalog keys are adapter ids only.
 // Pi, Codex and Claude replace these placeholders/fallbacks at runtime with their machine-readable catalogs.
 // Claude's supported stdin control-channel list is the live authority; its entries below
 // remain explicit compatibility candidates for config loading and discovery failures.

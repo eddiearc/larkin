@@ -18,7 +18,7 @@ function fixture() {
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 4, serverId: "server-dashboard-pi-auth", mentionPolicy: "require", activeAgent: APP,
     agents: {
-      [APP]: { runtime: "pi", piDistribution: "builtin", model: "deepseek/old", createdAt: "2026-09-04T00:00:00.000Z" },
+      [APP]: { runtime: "pi", model: "deepseek/old", createdAt: "2026-09-04T00:00:00.000Z" },
       [OTHER]: { runtime: "codex", model: "gpt-5.6-sol", createdAt: "2026-09-04T00:00:00.000Z" },
     },
   })}\n`, { mode: 0o600 });
@@ -62,85 +62,28 @@ async function post(controller, pathname, body, headers = {
   return { handled, ...response.value() };
 }
 
-test("dashboard provider catalog/status are redacted and login is target-only with cache invalidation", async () => {
+test("removed pi-auth routes are unhandled like any unknown Dashboard route", async () => {
   const { createDashboardConfigController } = await import(`${CONTROLLER}?pi-auth=${Date.now()}`);
   const f = fixture();
   onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
-  const invalidated = [];
-  const logins = [];
-  const controller = createDashboardConfigController({
-    csrfCapability: "test",
-    env: f.env,
-    piModelDirectoryResolver: {
-      async resolve() { return [{ id: "default", label: "default" }]; },
-      invalidate(agentId) { invalidated.push(agentId); },
-    },
-    listProviderCatalog: () => [{ id: "deepseek", name: "DeepSeek", provider: "deepseek", defaultModel: "deepseek/deepseek-v4-pro", custom: false, openaiCompatible: true }],
-    loadProviderStatus: async () => [{ providerId: "deepseek", providerName: "DeepSeek", credentialType: "api_key", source: "configured", stored: true }],
-    configureProvider: async (input) => {
-      logins.push({ agentId: input.agentId, preset: input.preset, hasKey: Boolean(input.apiKey), key: input.apiKey });
-      return {
-        agentId: input.agentId, provider: "deepseek", preset: input.preset,
-        model: "deepseek/deepseek-v4-pro", credentialType: "api_key", applyState: "saved_not_applied",
-      };
-    },
-    logoutProvider: async (input) => ({ agentId: input.agentId, provider: input.providerId }),
-  });
-
-  const catalog = await get(controller, "/api/pi-auth/providers");
-  assert.equal(catalog.status, 200);
-  assert.equal(catalog.body.providers[0].id, "deepseek");
-  assert.equal(JSON.stringify(catalog.body).includes("sk-"), false);
-
-  const status = await get(controller, `/api/pi-auth/status?agent=${APP}`);
-  assert.equal(status.status, 200);
-  assert.equal(status.body.agentId, APP);
-  assert.equal(status.body.credentials[0].credentialType, "api_key");
-  assert.doesNotMatch(JSON.stringify(status.body), /Bearer |sk-|apiKey/i);
-
-  const forbidden = await get(controller, "/api/pi-auth/providers", { host: "example.com", "x-larkin-csrf": "test" });
-  assert.equal(forbidden.status, 403);
-
-  const login = await post(controller, "/api/pi-auth/login", {
-    agentId: APP, preset: "deepseek", apiKey: "dashboard-secret-key",
-  });
-  assert.equal(login.status, 200, JSON.stringify(login.body));
-  assert.equal(login.body.provider, "deepseek");
-  assert.equal(login.body.applyState, "saved_not_applied");
-  assert.equal(Object.hasOwn(login.body, "apiKey"), false);
-  assert.doesNotMatch(JSON.stringify(login.body), /dashboard-secret-key/);
-  assert.deepEqual(invalidated, [APP]);
-  assert.equal(logins[0].hasKey, true);
-  assert.equal(logins[0].agentId, APP);
-
-  const extraField = await post(controller, "/api/pi-auth/login", {
-    agentId: APP, preset: "deepseek", apiKey: "x", padding: "nope",
-  });
-  assert.equal(extraField.status, 400);
-
-  const leaky = createDashboardConfigController({
-    csrfCapability: "test",
-    env: f.env,
-    configureProvider: async (input) => {
-      throw new Error(`failed key=${input.apiKey}`);
-    },
-  });
-  const leaked = await post(leaky, "/api/pi-auth/login", {
-    agentId: APP, preset: "deepseek", apiKey: "dashboard-secret-key",
-  });
-  assert.equal(leaked.status, 400);
-  assert.doesNotMatch(JSON.stringify(leaked.body), /dashboard-secret-key/);
-
-  const otherAgent = await post(controller, "/api/pi-auth/login", {
-    agentId: OTHER, preset: "deepseek", apiKey: "should-not-reach-other",
-  });
-  assert.equal(otherAgent.status, 400);
-  assert.equal(logins.length, 1, "non-builtin Agents must not enter the login service");
-  assert.doesNotMatch(JSON.stringify(otherAgent.body), /should-not-reach-other/);
-
-  const logout = await post(controller, "/api/pi-auth/logout", { agentId: APP, provider: "deepseek" });
-  assert.equal(logout.status, 200);
-  assert.deepEqual(invalidated, [APP, APP]);
+  const controller = createDashboardConfigController({ csrfCapability: "test", env: f.env });
+  const unknown = await get(controller, "/api/does-not-exist");
+  assert.equal(unknown.handled, false);
+  for (const pathname of [
+    "/api/pi-auth/providers",
+    `/api/pi-auth/status?agent=${APP}`,
+  ]) {
+    const response = await get(controller, pathname);
+    assert.equal(response.handled, false, pathname);
+  }
+  for (const [pathname, body] of [
+    ["/api/pi-auth/login", { agentId: APP, preset: "deepseek", apiKey: "dashboard-secret-key" }],
+    ["/api/pi-auth/logout", { agentId: APP, provider: "deepseek" }],
+  ]) {
+    const response = await post(controller, pathname, body);
+    assert.equal(response.handled, false, pathname);
+    assert.doesNotMatch(JSON.stringify(response.body), /dashboard-secret-key/);
+  }
 });
 
 test("Pi model directory invalidate drops only the target Agent cache", async () => {
@@ -255,27 +198,4 @@ test("targeted then global invalidate cannot admit a stale in-flight catalog res
   const cached = await resolver.resolve({ agentId: APP, cwd: "/tmp/a", agentDir: "/tmp/generation-dir" });
   assert.equal(calls.length, 2);
   assert.deepEqual(cached.map((model) => model.id).filter((id) => id !== "default"), ["catalog-2"]);
-});
-
-test("login applyError response redacts the submitted API key", async () => {
-  const { createDashboardConfigController } = await import(`${CONTROLLER}?pi-apply-error=${Date.now()}`);
-  const f = fixture();
-  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
-  const secret = "dashboard-apply-secret-key";
-  const controller = createDashboardConfigController({
-    csrfCapability: "test",
-    env: f.env,
-    configureProvider: async (input) => ({
-      agentId: input.agentId, provider: "deepseek", preset: input.preset,
-      model: "deepseek/deepseek-v4-pro", credentialType: "api_key", applyState: "pending",
-      applyError: `targeted upsert failed key=${input.apiKey}`,
-    }),
-  });
-  const login = await post(controller, "/api/pi-auth/login", {
-    agentId: APP, preset: "deepseek", apiKey: secret,
-  });
-  assert.equal(login.status, 200, JSON.stringify(login.body));
-  assert.equal(login.body.applyState, "pending");
-  assert.match(login.body.applyError, /\[redacted\]/);
-  assert.doesNotMatch(JSON.stringify(login.body), new RegExp(secret));
 });

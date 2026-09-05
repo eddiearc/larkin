@@ -12,16 +12,19 @@ import {
   probeNativeRuntimeReadiness,
   readinessForPersistedAuthFailure,
 } from "../../../dist/runtime/runtime-readiness.mjs";
-import { builtinPiProviderRecoveryNextAction } from "../../../dist/runtime/pi-provider-config.mjs";
+
+const FORBIDDEN = /Dashboard|Provider Credentials|pi-auth|pi-distribution|import-external-profile|bundled|official-pi/i;
 
 for (const runtime of ["codex", "claude", "pi"]) {
-  test(`${runtime} readiness classifies an unresolved configured command as missing`, async () => {
+  test(`${runtime} readiness classifies a missing executable as missing`, async () => {
     const readiness = await probeNativeRuntimeReadiness({
       runtime, cwd: "/tmp", env: { PATH: "/nonexistent" }, command: `/definitely/missing/larkin-${runtime}`,
     });
     assert.equal(readiness.state, "missing");
     assert.equal(readiness.runtime, runtime);
+    assert.equal(readiness.reason, `${runtime} is not installed`);
     assert.match(readiness.nextAction, /install|PATH/i);
+    assert.doesNotMatch(readiness.nextAction, FORBIDDEN);
     assert.equal(readiness.executable, undefined);
   });
 }
@@ -31,6 +34,7 @@ for (const message of ["get_state timeout after 5000ms", "unexpected EOF", "TLS 
     const readiness = classifyRuntimePrerequisite("pi", new Error(message), "/usr/local/bin/pi");
     assert.equal(readiness.state, "unavailable");
     assert.match(readiness.nextAction, /retry/i);
+    assert.doesNotMatch(readiness.nextAction, FORBIDDEN);
   });
 }
 
@@ -51,88 +55,58 @@ test("missing-credential classifier matches only the explicit absent-key or abse
       diagnostic: message.includes("login") ? "No login found for zai-coding-cn" : "No API key found for zai-coding-cn",
     });
   }
-  for (const message of [
-    "No API key found for zai-coding-cn and extra text",
-    "provider reported no API key found for zai-coding-cn",
-    "No API key found for ../secret",
-    "fetch failed: provider overloaded",
-    "API key auth failed for zai-coding-cn",
-  ]) {
-    assert.equal(classifyPiMissingCredentialRejection(message), null);
-  }
   const readiness = missingProviderCredentialReadiness("pi", "zai-coding-cn");
   assert.equal(readiness.state, "unauthenticated");
   assert.match(readiness.reason, /zai-coding-cn/);
-  assert.match(readiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
-  assert.match(readiness.nextAction, /Provider Credentials/);
-  assert.doesNotMatch(readiness.nextAction, /zai-coding-cn|larkin setup|import-external-profile|official store/);
+  assert.match(readiness.nextAction, /external `pi` CLI/);
+  assert.doesNotMatch(readiness.nextAction, FORBIDDEN);
 });
 
-test("UX recovery helper maps official provider IDs to CLI presets without replacing P0 classifiers", () => {
-  const recovery = builtinPiProviderRecoveryNextAction({ agentId: "cli_recoverA1", providerId: "zai-coding-cn" });
-  assert.match(recovery, /pi-auth login zhipu --agent cli_recoverA1/);
-  assert.match(recovery, /Provider Credentials/);
-  assert.doesNotMatch(recovery, /zai-coding-cn|larkin setup|import-external-profile|official store/);
+test("unauthenticated classification points at the runtime login flow", () => {
   const classified = classifyRuntimePrerequisite("pi", new Error("no authenticated available models"));
   assert.equal(classified.state, "unauthenticated");
-  assert.match(classified.nextAction, /official `pi` login/);
-  assert.doesNotMatch(classified.nextAction, /Dashboard|Provider Credentials|pi-auth login|larkin setup/);
+  assert.match(classified.nextAction, /external `pi` CLI/);
+  assert.doesNotMatch(classified.nextAction, FORBIDDEN);
+  assert.match(classifyRuntimePrerequisite("codex", new Error("unauthenticated")).nextAction, /codex login/);
+  assert.match(classifyRuntimePrerequisite("claude", new Error("unauthenticated")).nextAction, /claude login/);
 });
 
-test("scoped auth persistence prefers current generic over a legacy missing-provider string", () => {
+test("scoped auth persistence matches runtime and provider without a builtin distribution", () => {
   const missing = parsePersistedAuthFailure({
-    authFailure: { kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
+    authFailure: { kind: "missing-provider", runtime: "pi", provider: "zai-coding-cn" },
   });
   const generic = parsePersistedAuthFailure({
-    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin" },
+    authFailure: { kind: "generic", runtime: "pi" },
     authFailureProvider: "zai-coding-cn",
   });
   const legacy = parsePersistedAuthFailure({ authFailureProvider: "zai-coding-cn" });
   assert.deepEqual(missing, {
-    kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn",
+    kind: "missing-provider", runtime: "pi", provider: "zai-coding-cn",
   });
   assert.equal(generic?.kind, "generic");
   assert.equal(legacy?.kind, "missing-provider");
-  const builtinZai = { runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2", adapterId: "pi" };
-  assert.equal(authFailureAppliesTo(builtinZai, missing), true);
-  assert.equal(authFailureAppliesTo({ ...builtinZai, piDistribution: "external" }, missing), false);
-  assert.equal(authFailureAppliesTo({ ...builtinZai, runtime: "codex", adapterId: "codex", model: "codex" }, missing), false);
-  assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, missing), false);
-  assert.equal(authFailureAppliesTo(builtinZai, generic), true);
-  const genericZai = parsePersistedAuthFailure({
-    authFailure: { kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn" },
-  });
-  assert.deepEqual(genericZai, {
-    kind: "generic", runtime: "pi", piDistribution: "builtin", provider: "zai-coding-cn",
-  });
-  assert.equal(authFailureAppliesTo(builtinZai, genericZai), true);
-  assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, genericZai), false);
-  assert.equal(authFailureAppliesTo({ ...builtinZai, model: "openai-codex/gpt-5" }, generic), true,
-    "unbound generic is conservative fallback only when the upstream provider was unavailable");
-  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /pi-auth login zhipu --agent <App ID>/);
-  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /Provider Credentials/);
-  assert.doesNotMatch(readinessForPersistedAuthFailure(missing).nextAction, /zai-coding-cn|official store/);
-  assert.match(readinessForPersistedAuthFailure(generic).nextAction, /login|API-key resolver/);
-  assert.doesNotMatch(readinessForPersistedAuthFailure(generic).nextAction, /official store|pi-auth login zhipu/);
-  assert.match(readinessForPersistedAuthFailure(genericZai).nextAction, /login|API-key resolver/);
+  const piZai = { runtime: "pi", model: "zai-coding-cn/glm-5.2", adapterId: "pi" };
+  assert.equal(authFailureAppliesTo(piZai, missing), true);
+  assert.equal(authFailureAppliesTo({ ...piZai, runtime: "codex", adapterId: "codex", model: "codex" }, missing), false);
+  assert.equal(authFailureAppliesTo({ ...piZai, model: "openai-codex/gpt-5" }, missing), false);
+  assert.equal(authFailureAppliesTo(piZai, generic), true);
+  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /external `pi` CLI/);
+  assert.match(readinessForPersistedAuthFailure(missing).nextAction, /zai-coding-cn/);
+  assert.doesNotMatch(readinessForPersistedAuthFailure(missing).nextAction, FORBIDDEN);
+  assert.match(readinessForPersistedAuthFailure(generic).nextAction, /external `pi` CLI/);
 });
 
-function writeReadinessPi(root, { failIfDirty = false } = {}) {
-  const marker = path.join(root, "readiness-pi.ndjson");
-  const script = path.join(root, "readiness-pi.mjs");
+function writeReadinessRuntime(root, { authenticated = true, runtime = "pi" } = {}) {
+  const marker = path.join(root, `readiness-${runtime}.ndjson`);
+  const script = path.join(root, `readiness-${runtime}.mjs`);
   fs.writeFileSync(marker, "");
   fs.writeFileSync(script, `
 import fs from "node:fs";
-import path from "node:path";
 import readline from "node:readline";
 const marker = ${JSON.stringify(marker)};
 const args = process.argv.slice(2);
-fs.appendFileSync(marker, JSON.stringify({ args, packageDir: process.env.PI_PACKAGE_DIR || null, agentDir: process.env.PI_CODING_AGENT_DIR || null }) + "\\n");
+fs.appendFileSync(marker, JSON.stringify({ args }) + "\\n");
 if (args.includes("--version")) {
-  if (${failIfDirty ? "true" : "false"} && process.env.PI_PACKAGE_DIR) {
-    const theme = path.join(process.env.PI_PACKAGE_DIR, "dist/modes/interactive/theme/dark.json");
-    try { if (!fs.statSync(theme).isFile()) process.exit(1); } catch { process.exit(1); }
-  }
   process.stdout.write("0.84.2\\n");
   process.exit(0);
 }
@@ -140,77 +114,74 @@ const model = { provider: "plain", id: "chat", name: "Chat", reasoning: false, c
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   const request = JSON.parse(line);
-  const data = request.type === "get_available_models" ? { models: [model] } : { model, thinkingLevel: "off" };
-  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+  if (request.type === "get_available_models") {
+    const models = ${authenticated ? "[model]" : "[]"};
+    process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data: { models } }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data: { model, thinkingLevel: "off" } }) + "\\n");
 });
 `);
   return { script, marker };
 }
 
-function writeThemeRoot(root, name) {
-  const dir = path.join(root, name);
-  fs.mkdirSync(path.join(dir, "dist", "modes", "interactive", "theme"), { recursive: true });
-  fs.writeFileSync(path.join(dir, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
-  return dir;
+for (const runtime of ["pi", "codex", "claude"]) {
+  test(`${runtime} readiness is ready when a fake executable reports an authenticated catalog`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-readiness-ready-${runtime}-`));
+    try {
+      if (runtime === "pi") {
+        const { script } = writeReadinessRuntime(root, { authenticated: true, runtime });
+        const readiness = await probeNativeRuntimeReadiness({
+          runtime, cwd: root, command: process.execPath, commandArgs: [script],
+        });
+        assert.equal(readiness.state, "ready", JSON.stringify(readiness));
+        assert.ok(readiness.executable);
+        assert.doesNotMatch(JSON.stringify(readiness), FORBIDDEN);
+      } else {
+        const script = path.join(root, `${runtime}.mjs`);
+        fs.writeFileSync(script, `process.stdout.write(JSON.stringify({
+          models: [{ id: "fixture", label: "fixture" }],
+          effectiveModel: "fixture",
+        }) + "\\n");\n`);
+        // Codex/Claude probes spawn the real catalog helpers; a missing protocol
+        // still proves the executable was found rather than missing.
+        const missing = await probeNativeRuntimeReadiness({
+          runtime, cwd: root, env: { PATH: "/nonexistent" }, command: `/definitely/missing/${runtime}`,
+        });
+        assert.equal(missing.state, "missing");
+        assert.equal(missing.reason, `${runtime} is not installed`);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 }
 
-test("external Pi readiness keeps a real package root and strips minimal or broken roots", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-pkg-"));
-  const agentId = "cli_readinessPkgA1";
-  const { script, marker } = writeReadinessPi(root);
-  const real = writeThemeRoot(root, "nix-store-pi");
-  const minimal = path.join(root, ".larkin-official-pi-package");
-  fs.mkdirSync(path.join(minimal, "theme"), { recursive: true });
-  fs.writeFileSync(path.join(minimal, "theme", "dark.json"), "{}\n");
-  const broken = path.join(root, "broken-link");
-  fs.symlinkSync(path.join(root, "missing-target"), broken);
-  const ownedDir = path.join(root, "providers", "pi", agentId);
-  const envFor = (packageDir) => ({
-    PI_PACKAGE_DIR: packageDir, LARKIN_PI_DISTRIBUTION: "external",
-    LARKIN_CONFIG_DIR: root, PI_CODING_AGENT_DIR: path.join(root, "decoy-pi"),
-  });
+test("Pi readiness is unauthenticated when the probe reports no authenticated models", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-unauth-"));
+  const { script } = writeReadinessRuntime(root, { authenticated: false });
   try {
-    const ready = await probeNativeRuntimeReadiness({
-      runtime: "pi", agentId, cwd: root, command: process.execPath, commandArgs: [script],
-      env: envFor(real),
+    const readiness = await probeNativeRuntimeReadiness({
+      runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
     });
-    assert.equal(ready.state, "ready", JSON.stringify(ready));
-    const strippedMinimal = await probeNativeRuntimeReadiness({
-      runtime: "pi", agentId, cwd: root, command: process.execPath, commandArgs: [script],
-      env: envFor(minimal),
-    });
-    assert.equal(strippedMinimal.state, "ready", JSON.stringify(strippedMinimal));
-    const strippedBroken = await probeNativeRuntimeReadiness({
-      runtime: "pi", agentId, cwd: root, command: process.execPath, commandArgs: [script],
-      env: envFor(broken),
-    });
-    assert.equal(strippedBroken.state, "ready", JSON.stringify(strippedBroken));
-    const rows = fs.readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
-    const realRows = rows.filter((row) => row.packageDir && row.packageDir.includes("nix-store-pi"));
-    const dirtyRows = rows.filter((row) => row.packageDir && (String(row.packageDir).includes(".larkin-official-pi-package") || String(row.packageDir).includes("broken-link")));
-    assert.ok(realRows.some((row) => row.args.includes("--version")), JSON.stringify(rows));
-    assert.ok(realRows.some((row) => row.args.includes("--mode") && row.args.includes("rpc")), JSON.stringify(rows));
-    assert.ok(realRows.length >= 2, JSON.stringify(rows));
-    assert.equal(dirtyRows.length, 0, JSON.stringify(rows));
-    const rpcRows = rows.filter((row) => row.args.includes("--mode") && row.args.includes("rpc"));
-    assert.ok(rpcRows.length > 0 && rpcRows.every((row) => row.agentDir === ownedDir), JSON.stringify(rows));
-    assert.equal(rpcRows.some((row) => String(row.agentDir).includes("decoy-pi")), false);
+    assert.equal(readiness.state, "unauthenticated", JSON.stringify(readiness));
+    assert.match(readiness.nextAction || "", /external `pi` CLI/);
+    assert.doesNotMatch(JSON.stringify(readiness), FORBIDDEN);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("external Pi readiness without Agent identity does not fall through to host Pi", async () => {
+test("Pi readiness does not require Agent identity or an owned provider directory", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-readiness-noid-"));
-  const { script, marker } = writeReadinessPi(root);
+  const { script, marker } = writeReadinessRuntime(root);
   try {
     const readiness = await probeNativeRuntimeReadiness({
       runtime: "pi", cwd: root, command: process.execPath, commandArgs: [script],
-      env: { LARKIN_PI_DISTRIBUTION: "external", PI_CODING_AGENT_DIR: path.join(root, "decoy-pi") },
     });
-    assert.equal(readiness.state, "unavailable", JSON.stringify(readiness));
-    assert.match(readiness.reason || "", /requires Agent ID/);
-    assert.equal(fs.readFileSync(marker, "utf8").trim(), "");
+    assert.equal(readiness.state, "ready", JSON.stringify(readiness));
+    const rows = fs.readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    assert.ok(rows.some((row) => row.args.includes("--mode") && row.args.includes("rpc")), JSON.stringify(rows));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -3,12 +3,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, resolveConfigDir } from "../platform/config.js";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
-import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
-import { piCatalogDistributionForUserRuntime } from "../runtime/user-runtime.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -53,20 +50,11 @@ export async function discoverRuntimeModelDirectory(input: RuntimeModelDirectory
       ...catalog.models.map(({ id, label, supportedReasoningEfforts }) => ({ id, label, supportedReasoningEfforts })),
     ];
   }
-  if (input.runtime === "pi" || input.runtime === "builtin-pi") {
+  if (input.runtime === "pi") {
     const env = input.env ?? process.env;
-    const agentId = input.agentId || "";
-    if (!agentId) throw new Error("runtime model directory requires agentId for Pi");
-    const configDir = resolveConfigDir(env);
-    const { config } = loadConfig(env);
-    const agent = config.agents[agentId];
-    if (!agent) throw new Error(`unknown agent: ${agentId}`);
-    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(input.runtime), env);
     const catalog = await discoverPiModelCatalog({
       cwd: input.cwd,
-      agentDir: ownedPiCatalogAgentDir(configDir, agentId),
-      command: catalogCommand.command,
-      commandArgs: catalogCommand.commandArgs,
+      command: env.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi",
       env,
     });
     if (!catalog.effectiveModel) throw new Error("Pi 模型目录未解析出默认模型");

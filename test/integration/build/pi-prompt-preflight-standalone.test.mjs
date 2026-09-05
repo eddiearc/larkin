@@ -131,7 +131,7 @@ test.skipIf(!ENABLED)("standalone Pi keeps delayed compaction preflight pending,
     }, "compile fake Pi");
     fs.writeFileSync(path.join(configDir, "config.json"), `${JSON.stringify({
       version: 4, serverId: "pi-preflight-standalone", mentionPolicy: "free", activeAgent: agentId,
-      agents: { [agentId]: { runtime: "pi", model: "fixture/pi-preflight", piDistribution: "external" } },
+      agents: { [agentId]: { runtime: "pi", model: "fixture/pi-preflight" } },
     }, null, 2)}\n`, { mode: 0o600 });
     const botsDir = path.join(configDir, "bots"); fs.mkdirSync(botsDir, { mode: 0o700 });
     fs.writeFileSync(path.join(botsDir, `${agentId}.json`), JSON.stringify({

@@ -84,6 +84,10 @@ test.skipIf(!ENABLED)("standalone binary preserves CLI, Agent, local-control, Da
     assert.equal(manifest.artifacts.length, 1);
     const artifact = path.join(releaseDir, manifest.artifacts[0].file);
     assert.equal(fs.statSync(artifact).isFile(), true);
+    const artifactBytes = fs.readFileSync(artifact);
+    assert.equal(artifactBytes.includes(Buffer.from("official-pi")), false, "standalone binary must not contain official-pi");
+    assert.equal(artifactBytes.includes(Buffer.from(".larkin-official-pi-package")), false,
+      "standalone binary must not contain .larkin-official-pi-package");
 
     fs.writeFileSync(configFile, `${JSON.stringify({
       version: 4,
@@ -157,6 +161,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       cwd: temp, env: { ...baseEnv, ...extraEnv }, encoding: "utf8", timeout: 15_000,
     });
     assert.match(checked(runCli(["--help"]), "standalone help").stdout, /Usage:\s*larkin <command>/);
+    assert.doesNotMatch(checked(runCli(["--help"]), "standalone help no retired commands").stdout, /pi-auth|pi-distribution|builtin-pi/);
+    for (const command of ["pi-auth", "pi-distribution"]) {
+      const unknown = runCli([command]);
+      assert.equal(unknown.status, 1, `${command} must be unknown`);
+      assert.match(unknown.stdout, /larkin <command>/);
+    }
     assert.equal(checked(runCli(["--version"]), "standalone version").stdout.trim(), `larkin ${PACKAGE.version}`);
     const configHelp = checked(runCli(["help", "config"]), "standalone config help").stdout;
     for (const token of ["config runtime", "config model", "config effort", "config mention global", "config mention agent", "config mention chat", "config apply", "--agent", "--chat"]) {
@@ -251,7 +261,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const nativeVersion = checked(spawnSync(officialLauncher, ["--version"], {
       cwd: temp, env: { ...serviceEnv, LARKIN_AGENT_ID: appId }, encoding: "utf8", timeout: 15_000,
     }), "standalone Runtime pinned lark-cli version");
-    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.79/);
+    assert.match(nativeVersion.stdout, /lark-cli version 1\.0\.80/);
     const evaluatorHelpArgv = ["im", "+messages-send", "--as", "user", "--chat-id", "a", "--chat-id=b", "--help"];
     const standaloneInboxState = path.join(canonicalState, "inbox-state.json");
     const beforeHelpConfig = fs.readFileSync(configFile);

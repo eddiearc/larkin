@@ -6,8 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
-import { BUNDLED_PI_VERSION } from "../../../dist/runtime/pi-provider-config.mjs";
-import { calculatePiCompactionSettings } from "../../../dist/runtime/pi-compaction-recovery.mjs";
+import { PINNED_PI_VERSION, calculatePiCompactionSettings } from "../../../dist/runtime/pi-compaction-recovery.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const enabled = process.env.LARKIN_RUN_COMPILED_RUNTIME_MOCK_E2E === "1";
@@ -157,7 +156,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 const piFixtureSource = `import fs from "node:fs";
 import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log(${JSON.stringify(BUNDLED_PI_VERSION)}); process.exit(0); }
+if (process.argv.includes("--version")) { console.log(${JSON.stringify(PINNED_PI_VERSION)}); process.exit(0); }
 const marker = process.env.RUNTIME_PROTOCOL_MARKER;
 const record = (value) => fs.appendFileSync(marker, JSON.stringify(value) + "\\n");
 const model = { provider: "fixture", id: "pi-fixture", name: "Pi Fixture", reasoning: false, contextWindow: ${PI_FIXTURE_CONTEXT_WINDOW} };
@@ -336,7 +335,7 @@ test.skipIf(!enabled)("compiled Pi provider auth failure projects unauthenticate
     const piSource = path.join(home, "pi-auth-fixture.mjs");
     fs.writeFileSync(piSource, `import fs from "node:fs";
 import readline from "node:readline";
-if (process.argv.includes("--version")) { console.log(${JSON.stringify(BUNDLED_PI_VERSION)}); process.exit(0); }
+if (process.argv.includes("--version")) { console.log(${JSON.stringify(PINNED_PI_VERSION)}); process.exit(0); }
 const model = { provider: "bigmodel-anthropic", id: "glm-5.2", name: "GLM Fixture", reasoning: false, contextWindow: ${PI_FIXTURE_CONTEXT_WINDOW} };
 let promptCount = 0;
 const output = (value) => process.stdout.write(JSON.stringify(value) + "\\n");

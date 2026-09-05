@@ -26,24 +26,6 @@ async function dispatchInternal(mode: InternalMode, rest: string[]): Promise<voi
     case "setup-bind": await (await import("../setup/setup-bind.js")).main(); return;
     case "grant-scopes": await (await import("../setup/grant-scopes.js")).main(); return;
     case "lark-channel-secret": await (await import("./lark-channel-secret.js")).main(process.env); return;
-    case "pi-rpc": {
-      const { prepareBuiltinPiPackageAssets } = await import("../runtime/builtin-pi-assets.js");
-      prepareBuiltinPiPackageAssets();
-      process.title = "pi-rpc";
-      process.env.PI_CODING_AGENT = "true";
-      process.emitWarning = (() => {}) as typeof process.emitWarning;
-      // The Pi package's normal Bun CLI registers OAuth loaders before starting.
-      // Larkin invokes its RPC entrypoint directly, so do the same here; otherwise
-      // an OAuth-backed compact falls back to a dynamic module import unavailable in
-      // a compiled standalone binary.
-      const { registerBunOAuthFlows } = await import("@earendil-works/pi-ai/bun-oauth");
-      registerBunOAuthFlows();
-      const { main: piMain } = await import("@earendil-works/pi-coding-agent");
-      const { invokeBuiltinPiRpc } = await import("../runtime/pi-inline-extensions.js");
-      await invokeBuiltinPiRpc(piMain, rest);
-      return;
-    }
-    case "pi-auth": await (await import("./pi-auth-cli.js")).main(rest, process.env); return;
     case "telemetry": await (await import("./telemetry.js")).main(rest, process.env); return;
   }
 }

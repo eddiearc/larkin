@@ -778,7 +778,7 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
         const failedStatus = store.readJson("status", {});
         assert.equal(failedStatus.runtimeReadiness.state, "unauthenticated");
         assert.match(failedStatus.runtimeReadiness.reason, /bigmodel-anthropic.*authentication failed/i);
-        assert.match(failedStatus.runtimeReadiness.nextAction, /login|API-key resolver/i);
+        assert.match(failedStatus.runtimeReadiness.nextAction, /external `pi` CLI|login|API-key resolver/i);
         assert.doesNotMatch(JSON.stringify(failedStatus.runtimeReadiness) + JSON.stringify(failedStatus.recentErrors),
           /Users\/example|cc-switch-token|fixture-secret|unsafe raw action/);
 
@@ -832,14 +832,6 @@ test("missing-key prompt rejection terminals the HostShell ledger and projects u
   const otherId = "cli_mockMissingKeyB2";
   const previousConfigDir = process.env.LARKIN_CONFIG_DIR;
   const previousHome = process.env.HOME;
-  const writeOwned = (id, providers) => {
-    const directory = path.join(root, "providers", "pi", id);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    fs.chmodSync(directory, 0o700);
-    fs.writeFileSync(path.join(directory, "auth.json"), `${JSON.stringify(Object.fromEntries(
-      providers.map((provider) => [provider, { type: "api_key", key: `fixture-${provider}` }]),
-    ))}\n`, { mode: 0o600 });
-  };
   const session = new FakeNativeSession("pi");
   let rejectMissing = true;
   session.prompt = async function(input) {
@@ -863,17 +855,15 @@ test("missing-key prompt rejection terminals the HostShell ledger and projects u
     retryPolicy: { baseDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 0 },
   });
   const agents = [agentId, otherId].map((id) => ({
-    agentId: id, name: id, runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2", feishuAppId: id, feishuProfile: id,
+    agentId: id, name: id, runtime: "pi", model: "zai-coding-cn/glm-5.2", feishuAppId: id, feishuProfile: id,
     feishuAppSecret: "fixture-secret", feishuDomain: "https://open.feishu.cn",
     larkConfigDir: path.join(root, "lark-cli-config"), workspaceDir: path.join(root, "agents", id),
     stateDir: path.join(root, "state", "agents", id),
   }));
   fs.mkdirSync(root, { recursive: true });
-  writeOwned(agentId, ["openai-codex"]);
-  writeOwned(otherId, ["openai-codex"]);
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 3, serverId: "server-missing-key", activeAgent: agentId,
-    agents: Object.fromEntries([agentId, otherId].map((id) => [id, { runtime: "pi", piDistribution: "builtin", model: "zai-coding-cn/glm-5.2" }])),
+    agents: Object.fromEntries([agentId, otherId].map((id) => [id, { runtime: "pi", model: "zai-coding-cn/glm-5.2" }])),
   })}\n`, { mode: 0o600 });
   process.env.LARKIN_CONFIG_DIR = root;
   process.env.HOME = path.join(root, "decoy-home");
@@ -899,18 +889,15 @@ test("missing-key prompt rejection terminals the HostShell ledger and projects u
     assert.equal(session.prompts.length, 1);
     const failedStatus = store.readJson("status", {});
     assert.equal(failedStatus.runtimeReadiness.state, "unauthenticated");
-    assert.match(failedStatus.runtimeReadiness.reason, /zai-coding-cn.*missing/i);
-    assert.match(failedStatus.runtimeReadiness.nextAction, /pi-auth login zhipu --agent <App ID>/);
-    assert.match(failedStatus.runtimeReadiness.nextAction, /Provider Credentials/);
-    assert.doesNotMatch(failedStatus.runtimeReadiness.nextAction, /zai-coding-cn/);
-    assert.doesNotMatch(JSON.stringify(failedStatus.runtimeReadiness), /fixture-openai-codex|larkin setup|profile import/);
+    assert.match(failedStatus.runtimeReadiness.reason, /zai-coding-cn/);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /external `pi` CLI/);
+    assert.match(failedStatus.runtimeReadiness.nextAction, /zai-coding-cn/);
+    assert.doesNotMatch(JSON.stringify(failedStatus), /pi-auth|Provider Credentials|larkin setup|profile import|fixture-openai-codex/);
     await hostShell.ingest(otherId, { chat_id: "oc_missing_other", chat_type: "p2p", sender_id: "ou_sender",
       message_id: "om_missing_other", event_id: "evt_missing_other", content: "other",
       create_time: "1784160003000", thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: true });
     assert.equal((otherStore.readJson("runtimeDeliveries", { records: [] }).records[0] || {}).status, "accepted");
-
     rejectMissing = false;
-    writeOwned(agentId, ["openai-codex", "zai-coding-cn"]);
     const retry = await runtimeHost.deliver(agentId, { message_id: "om_missing_key", chat_id: "oc_missing_key" });
     assert.equal(retry.status, "accepted");
     session.emit({ type: "turn-start", turnId: "pi-missing-recovered" });

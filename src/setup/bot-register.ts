@@ -13,24 +13,8 @@ import { createAgentStateStore } from "../agent/agent-state-store.js";
 import { hydrateRuntimeAgent, syncAgentProfile, syncAgentProfileAsync } from "../app/runtime-agent-config.js";
 import { managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "../app/official-lark-cli.js";
-import { collectSetupAgentChoice, recoverUnavailableExternalPi, terminalSetupQuestioner } from "./setup-agent-choice.js";
-import { probeNativeRuntimeReadiness } from "../runtime/runtime-readiness.js";
-import { configureBuiltinPiProviderModel, stageBuiltinPiProvider, validatePiBaseUrl, validateBuiltinPiProviderSelection, listProviderModels, PI_PROVIDER_PRESETS,
-  type BuiltinPiProviderSetupSelection, type PiProviderPresetId } from "../runtime/pi-provider-config.js";
-import {
-  beginBuiltinPiCredentialTransaction,
-  createOfficialPiCredentialRuntime,
-  createOfficialPiAuthInteraction,
-  createOfficialPiModelRuntime,
-  createOfficialPiLogoutRuntime,
-  createOfficialPiRegistryRuntime,
-  listOfficialPiAuthProviders,
-  logoutOfficialPiProvider,
-  officialPiAuthStatus,
-  runOfficialPiLogin,
-  verifyOfficialPiProviderTurn,
-} from "../runtime/pi-official-auth.js";
-import type { OfficialPiAuthSelection, SetupAgentChoice } from "./setup-agent-choice.js";
+import { collectSetupAgentChoice, missingRuntimeInstallMessage, terminalSetupQuestioner } from "./setup-agent-choice.js";
+import type { SetupAgentChoice } from "./setup-agent-choice.js";
 import {
   documentCommentSubscriptionCapability,
   markDocumentCommentSubscriptionVerified,
@@ -95,7 +79,6 @@ const resolveOfficialCli = testFixture?.resolveOfficialLarkCli ?? resolveOfficia
 const wait = testFixture?.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
 const CFG_DIR = larkinConfig.resolveConfigDir(process.env);
 let temporaryAgentChoiceFile: string | null = null;
-let pendingPiAuthTransaction: ReturnType<typeof beginBuiltinPiCredentialTransaction> | null = null;
 let pendingBindChild: ChildProcess | null = null;
 let pendingChildSettled: Promise<void> | null = null;
 let settlePendingChild: (() => void) | null = null;
@@ -116,7 +99,6 @@ function trackPendingChild(child: ChildProcess | null): void {
 }
 
 process.on("exit", () => {
-  pendingPiAuthTransaction?.rollback();
   if (!temporaryAgentChoiceFile) return;
   try { fs.unlinkSync(temporaryAgentChoiceFile); } catch { /* consumed or best effort */ }
 });
@@ -127,8 +109,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const settling = pendingChildSettled;
     shutdownController.abort(new Error(`setup interrupted by ${signal}`));
     void (settling ?? Promise.resolve()).finally(() => {
-      pendingPiAuthTransaction?.rollback();
-      pendingPiAuthTransaction = null;
       process.exit(signal === "SIGINT" ? 130 : 143);
     });
   });
@@ -155,7 +135,6 @@ const CHILD_MAX_OUTPUT_BYTES = Number.isFinite(testChildMaxOutput) && testChildM
 
 function officialCliForProfile(env: NodeJS.ProcessEnv): OfficialLarkCliCommand {
   if (resolvedSetupOfficialCli) return resolvedSetupOfficialCli;
-  if (pendingPiAuthTransaction) throw new Error("official lark-cli must be resolved before the Pi credential transaction starts");
   resolvedSetupOfficialCli = resolveOfficialCli({ env });
   return resolvedSetupOfficialCli;
 }
@@ -359,7 +338,7 @@ function openBrowser(url: string): boolean {
 }
 
 async function runBindProcess(command: string, args: readonly string[]): Promise<number | null> {
-  if (testFixture?.spawnSync && !pendingPiAuthTransaction) {
+  if (testFixture?.spawnSync) {
     return spawnSync(command, [...args], { env: process.env, stdio: "inherit" }).status;
   }
   return await new Promise<number | null>((resolve, reject) => {
@@ -389,7 +368,7 @@ async function runBindProcess(command: string, args: readonly string[]): Promise
 async function runBoundedCliProcess(command: string, args: readonly string[], env: NodeJS.ProcessEnv, label: string): Promise<{
   status: number | null; stdout: string; stderr: string;
 }> {
-  if (testFixture?.spawnSync && !pendingPiAuthTransaction && process.env.LARKIN_TEST_ASYNC_IDENTITY !== "1") {
+  if (testFixture?.spawnSync && process.env.LARKIN_TEST_ASYNC_IDENTITY !== "1") {
     const result = spawnSync(command, [...args], { encoding: "utf8", env });
     return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
   }
@@ -664,119 +643,26 @@ const documentCommentSubscription: DocumentCommentSubscriptionCapability = comme
     ? { mode: "none", status: "safe-default", source: "setup-default", updatedAt: requestedAt }
     : priorSubscription;
 
+if (flag("--provider") || flag("--api-key") || flag("--base-url") || flag("--pi-distribution")) {
+  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex 或 claude");
+}
+
 const injectedAgentChoice = testFixture?.collectSetupAgentChoice;
 if (!flag("--runtime") && (!testFixture || injectedAgentChoice || process.env.LARKIN_TEST_ENABLE_AGENT_CHOICE === "1")) {
   const existing = larkinConfig.loadConfig(process.env).config.agents[id];
-  // The official resolver performs a synchronous login-shell probe. Resolve it
-  // exactly once before the credential heartbeat lock becomes active.
   resolvedSetupOfficialCli = resolveOfficialCli({ env: process.env });
   const questioner = injectedAgentChoice ? { ask: async () => "", secret: async () => "" } : terminalSetupQuestioner();
-  // One setup-owned transaction starts before status/logout and remains active
-  // through selection, login, bind, readiness, and the final setup commit.
-  pendingPiAuthTransaction = beginBuiltinPiCredentialTransaction(CFG_DIR, id);
-  const authServices = {
-    providers: async () => listOfficialPiAuthProviders(await createOfficialPiRegistryRuntime()),
-    status: async () => officialPiAuthStatus(await createOfficialPiCredentialRuntime(CFG_DIR, id)),
-    logout: async (providerId: string) => logoutOfficialPiProvider(await createOfficialPiLogoutRuntime(CFG_DIR, id), providerId),
-    report: (message: string) => say(message),
-  };
   try {
-    const requested = injectedAgentChoice
-      ? await injectedAgentChoice()
-      : await collectSetupAgentChoice(questioner, existing, authServices);
     const choice = injectedAgentChoice
-      ? requested
-      : await recoverUnavailableExternalPi(requested, questioner, () => probeNativeRuntimeReadiness({
-        runtime: "pi", agentId: id, cwd: path.join(CFG_DIR, "agents", id),
-        env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR, LARKIN_PI_DISTRIBUTION: "external" },
-      }), (message) => say(`! ${message}`), authServices);
+      ? await injectedAgentChoice()
+      : await collectSetupAgentChoice(questioner, existing);
     if (choice) {
-      let serializedChoice: SetupAgentChoice & { authCompleted?: true; readinessCompleted?: true } = choice;
-      if (choice.runtime === "pi" && choice.distribution === "builtin") {
-        if (!injectedAgentChoice) {
-          const official = choice.preset === "official" ? choice as OfficialPiAuthSelection : null;
-          const configured = official ? null : configureBuiltinPiProviderModel(CFG_DIR, id, choice as BuiltinPiProviderSetupSelection);
-          const providerId = official?.providerId || configured!.provider;
-          const authType = official?.authType || "api_key";
-          let piRuntime: Awaited<ReturnType<typeof createOfficialPiModelRuntime>>;
-          try {
-            say(`正在通过捆绑官方 Pi 登录 ${providerId}（${authType}）…`);
-            piRuntime = await createOfficialPiModelRuntime(CFG_DIR, id);
-            await runOfficialPiLogin(piRuntime, providerId, authType,
-              createOfficialPiAuthInteraction({ questioner, report: (message) => say(message), openUrl: openBrowser }));
-          } catch {
-            pendingPiAuthTransaction.rollback();
-            pendingPiAuthTransaction = null;
-            throw new Error(`官方 Pi ${providerId} 登录失败或已取消；credential/config 未修改`);
-          }
-          if (process.env.LARKIN_TEST_SKIP_BUILTIN_PI_PROVIDER_TURN !== "1") {
-            say("正在验证内置 Pi provider（受控单轮，不发送飞书（Lark）消息）…");
-            try { await verifyOfficialPiProviderTurn(piRuntime, choice.model); }
-            catch {
-              pendingPiAuthTransaction.rollback();
-              pendingPiAuthTransaction = null;
-              throw new Error(`官方 Pi ${providerId} readiness 失败；credential/config 未修改`);
-            }
-          }
-        }
-        serializedChoice = { ...choice, authCompleted: true, readinessCompleted: true };
-      }
+      const missing = missingRuntimeInstallMessage(choice.runtime, process.env);
+      if (missing) die(missing);
       temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
-      fs.writeFileSync(temporaryAgentChoiceFile, `${JSON.stringify(serializedChoice)}\n`, { mode: 0o600, flag: "wx" });
+      fs.writeFileSync(temporaryAgentChoiceFile, `${JSON.stringify({ runtime: choice.runtime })}\n`, { mode: 0o600, flag: "wx" });
     }
   } finally { questioner.close?.(); }
-}
-
-// ── 非交互参数化内置 Pi（builtin-pi 是默认 runtime 类型）──
-// --pi-distribution builtin：需 --provider <id> + --api-key <key>（或 --base-url 自定义端点）。
-const piDistributionFlag = flag("--pi-distribution");
-const setupProvider = flag("--provider");
-const setupApiKey = flag("--api-key");
-const setupBaseUrl = flag("--base-url");
-const setupModel = flag("--model");
-if (piDistributionFlag === "builtin") {
-  if (!setupProvider && !setupBaseUrl) {
-    throw new Error(`builtin-pi 需要 --provider <id>（${PI_PROVIDER_PRESETS.map((p) => p.id).join("|")}|custom）或 --base-url；或改用 --runtime pi 使用已有 pi 环境`);
-  }
-  if (!setupApiKey) throw new Error("builtin-pi 需要 --api-key；或改用 --runtime pi 使用已有 pi 登录");
-  // 自定义网关（--base-url）走 custom 预设：pi 会把 baseUrl 作为 provider 端点写入配置，
-  // 而不是用预设厂商目录（否则会打到预设默认地址，如 api.openai.com）。
-  const presetId = setupBaseUrl ? "custom" : (setupProvider ?? "custom");
-  if (presetId === "custom" && !setupModel) throw new Error("custom base-url 需要 --model <模型名>");
-  const presetDef = PI_PROVIDER_PRESETS.find((p) => p.id === presetId);
-  if (!presetDef && !setupBaseUrl) throw new Error(`未知 provider \`${presetId}\`；可选：${PI_PROVIDER_PRESETS.map((p) => p.id).join(" | ")} | custom`);
-  const raw: BuiltinPiProviderSetupSelection = {
-    distribution: "builtin",
-    preset: presetId as PiProviderPresetId,
-    model: setupModel ?? presetDef?.defaultModel ?? "",
-    // 显式 --base-url 优先于预设默认值（自定义网关场景，如 opencode）。
-    ...(setupBaseUrl ? { baseUrl: validatePiBaseUrl(setupBaseUrl) } : presetDef ? { baseUrl: presetDef.baseUrl } : {}),
-  };
-  if (setupModel && raw.baseUrl) {
-    // Owner 决策：模型名必须来自 provider 的权威可用列表，输错即报错，不做运行时猜测。
-    // 网络超时/不可达时不阻塞 setup（null），运行时对账会严格兜底。
-    const availableIds = await listProviderModels(raw.baseUrl, setupApiKey);
-    if (availableIds !== null) {
-      const matched = availableIds.some((id) => id === setupModel || id.endsWith(`/${setupModel}`));
-      if (!matched) {
-        const preview = availableIds.slice(0, 12).join(", ") + (availableIds.length > 12 ? ", …" : "");
-        throw new Error(`未知模型 ${setupModel}；provider 可用模型：[${preview || "无"}]`);
-      }
-    } else {
-      say("[setup] 网络暂不可达，跳过 /models 预校验；运行时将对模型严格对账");
-    }
-  }
-  stageBuiltinPiProvider(CFG_DIR, id, { ...raw, apiKey: setupApiKey });
-  // 选择文件写入解析后的全称模型（custom 预设为 larkin-custom/<model>）：
-  // pi 运行时按 provider 前缀解析凭证，裸模型名会回落到默认 provider（deepseek）
-  // 导致「No API key found for deepseek」。
-  const validated = validateBuiltinPiProviderSelection({ ...raw, apiKey: setupApiKey });
-  temporaryAgentChoiceFile = path.join(CFG_DIR, `.setup-agent-choice-${process.pid}-${Date.now()}.json`);
-  fs.writeFileSync(temporaryAgentChoiceFile,
-    `${JSON.stringify({ ...raw, runtime: "pi", model: validated.model, authCompleted: true, readinessCompleted: true })}\n`, { mode: 0o600, flag: "wx" });
-  say(`[setup 2/5] ✓ 内置 Pi provider 已配置（${presetId}${setupBaseUrl ? " / custom" : ""}）`);
-} else if (piDistributionFlag === "external" && (setupProvider || setupApiKey || setupBaseUrl)) {
-  throw new Error("pi 使用已有 pi 环境与登录，不接受 --provider/--api-key/--base-url");
 }
 
 const stagedBotFile = path.join(botsDir, `.${id}.${process.pid}.tmp`);
@@ -821,12 +707,12 @@ const targetAgent = flag("--agent") || id;
 const bindArgs = ["--profile", id, "--yes", "--agent", targetAgent];
 const runtime = flag("--runtime");
 if (runtime) bindArgs.push("--runtime", runtime);
+const model = flag("--model");
+if (model) bindArgs.push("--model", model);
 if (temporaryAgentChoiceFile) bindArgs.push("--selection-file", temporaryAgentChoiceFile);
 const bindSpec = internalCommandSpec("setup-bind", bindArgs, process.env);
 const bindStatus = await runBindProcess(bindSpec.command, bindSpec.args);
 if (bindStatus !== 0) {
-  pendingPiAuthTransaction?.rollback();
-  pendingPiAuthTransaction = null;
   die("新 bot 凭证已发布但 Agent 绑定失败；权威凭证状态已保留，请重跑 larkin setup 并在网页中重新选择机器人");
 }
 try {
@@ -932,8 +818,6 @@ if (resultFile) {
   try { fs.writeFileSync(resultFile, `${JSON.stringify({ agentId: id })}\n`, { mode: 0o600, flag: "wx" }); }
   catch { die("Agent 绑定与新 bot 凭证已保留，但 setup 结果写入失败；请重跑 larkin setup 并在网页中重新选择机器人"); }
 }
-pendingPiAuthTransaction?.commit();
-pendingPiAuthTransaction = null;
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {

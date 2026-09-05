@@ -65,7 +65,7 @@ function writeBoundConfig() {
   fs.mkdirSync(path.join(root, "agents", ${JSON.stringify(APP)}), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
     version: 4, serverId: "scope-pi", activeAgent: ${JSON.stringify(APP)}, mentionPolicy: "require",
-    agents: { [${JSON.stringify(APP)}]: { runtime: "pi", model: "larkin-custom/fixture-model", piDistribution: "builtin" } },
+    agents: { [${JSON.stringify(APP)}]: { runtime: "pi", model: "default" } },
   }) + "\\n", { mode: 0o600 });
 }
 module.exports = {
@@ -96,12 +96,7 @@ module.exports = {
     fs.writeFileSync(path.join(workspace, "config.json"), "{}", { mode: 0o600 });
   },
   async collectSetupAgentChoice() {
-    const dir = path.join(process.env.LARKIN_CONFIG_DIR, "providers", "pi", ${JSON.stringify(APP)});
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dir, 0o700);
-    fs.writeFileSync(path.join(dir, "auth.json"), ${JSON.stringify(SETUP_AUTH)}, { mode: 0o600 });
-    fs.writeFileSync(path.join(dir, "models.json"), ${JSON.stringify(SETUP_AUTH)}, { mode: 0o600 });
-    return { runtime: "pi", distribution: "builtin", preset: "custom", baseUrl: "http://127.0.0.1:9", model: "fixture-model" };
+    return { runtime: "pi" };
   },
 };
 `);
@@ -146,6 +141,7 @@ test("injected agent-choice enters Pi transaction and rolls back on scope failur
     assert.equal(fs.existsSync(resultFile), false);
     assert.deepEqual(fs.readFileSync(path.join(root, "providers", "pi", APP, "auth.json")), authBefore);
     assert.deepEqual(fs.readFileSync(path.join(root, "providers", "pi", APP, "models.json")), modelsBefore);
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8")).agents[APP], "piDistribution"), false);
     assert.equal(walkQuarantine(root).length, 0);
     const configAfter = fs.readFileSync(path.join(root, "config.json"));
     if (configBefore) assert.notEqual(Buffer.compare(configAfter, configBefore), 0);
@@ -173,9 +169,9 @@ test("injected agent-choice retries after grant and keeps Pi setup credential", 
     const second = runRegister(root, temp, granted, resultFile);
     assert.equal(second.status, 0, second.stderr || second.stdout);
     assert.equal(fs.existsSync(resultFile), true);
-    const auth = JSON.parse(fs.readFileSync(path.join(root, "providers", "pi", APP, "auth.json"), "utf8"));
-    assert.equal(auth.setup.key, "setup-key");
+    assert.deepEqual(fs.readFileSync(path.join(root, "providers", "pi", APP, "auth.json"), "utf8"), ORIGINAL_AUTH);
     assert.equal(walkQuarantine(root).length, 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8")).agents[APP].runtime, "pi");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

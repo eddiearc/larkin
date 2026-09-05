@@ -35,11 +35,9 @@ const routes: Record<string, Route> = {
   model: ["agent-config", "model"],
   runtime: ["agent-config", "runtime"],
   effort: ["agent-config", "effort"],
-  "pi-distribution": ["agent-config", "pi-distribution"],
   chats: ["agent-config", "chats"],
   config: ["agent-config", "config"],
   session: ["session-cli"],
-  "pi-auth": ["pi-auth"],
   telemetry: ["telemetry"],
 };
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
@@ -54,8 +52,8 @@ if (runtimeAgentAuthority && command === "comment") routes.comment = ["lark-cli"
 const commandHelp: Record<string, string> = {
   start: `Usage: larkin start [--agent <App ID> | --agents <App ID,...>]
 Start one foreground supervisor for the daemon and local dashboard, or reuse it.`,
-  setup: `Usage: larkin setup [--tenant feishu|lark] [--runtime <builtin-pi|pi|codex|claude>] [--provider <id> --api-key <key>]
-Run setup to create or connect a bot, configure its Agent, and attach it. Choose Feishu or Lark before the authorization QR (--tenant; default feishu). Interactive terminals keep the guided flow; Agent-driven (non-TTY) runs default to builtin-pi and need --provider/--api-key (or --runtime pi).`,
+  setup: `Usage: larkin setup [--tenant feishu|lark] [--runtime <pi|codex|claude>]
+Run setup to create or connect a bot, configure its Agent, and attach it. Choose Feishu or Lark before the authorization QR (--tenant; default feishu). Interactive terminals list pi, Codex, and Claude Code with installed / not installed status. Non-TTY runs require --runtime and fail if that executable is missing.`,
   status: `Usage: larkin status [--json]
 Show Agent configuration, bot identity, credentials, and connection status. Use --json for readiness automation.`,
   agents: `Usage: larkin agents [--json]
@@ -63,10 +61,7 @@ List every configured Agent and its current local status. Use --json for daemon/
   model: `Usage: larkin model [<model>] [--agent <App ID>]
 Show or change an Agent model.`,
   runtime: `Usage: larkin runtime [<runtime>] [--agent <App ID>] [--model <model>]
-Show or change an Agent runtime. User-facing ids: pi | builtin-pi | codex | claude.`,
-  "pi-distribution": `Usage: larkin pi-distribution [show|builtin|external] [--agent <App ID>] [--snapshot <private-file>] [--import-external-profile]
-       larkin pi-distribution rollback --snapshot <private-file>
-Show or change one Pi Agent distribution. builtin requires configured provider state, or explicitly imports the external Pi 0.84.2 profile with --import-external-profile; all changes support config-lock CAS rollback.`,
+Show or change an Agent runtime. User-facing ids: pi | codex | claude. A missing executable is rejected and does not write config.`,
   effort: `Usage: larkin effort [<level>|clear|default] [--agent <App ID>]
 Show or change an Agent reasoning effort; clear/default restores the Runtime default.`,
   chats: `Usage: larkin chats [--agent <App ID>]
@@ -88,11 +83,6 @@ Credentials, internal paths, serverId, activeAgent, and raw config are never exp
   session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>]
        larkin session recover --agent <App ID> --reason context-overflow --json [--wait-ready <seconds>]
 Reset replaces one idle, zero-backlog Runtime session. Recover is an explicit operator-only context-window recovery that preserves and replays canonical Inbox deliveries.`,
-  "pi-auth": `Usage: larkin pi-auth status [--agent <App ID>] [--json]
-       larkin pi-auth providers [--json]
-       larkin pi-auth login <preset|custom> --agent <App ID> [--model <model>] [--base-url <url>] [--api-key-stdin] [--json]
-       larkin pi-auth logout <provider> [--agent <App ID>]
-Show a redacted builtin Pi provider catalog, configure one existing Agent with a known preset or custom OpenAI-compatible endpoint, or remove one target provider credential. API keys are accepted only from a TTY prompt or --api-key-stdin.`,
   comment: `Usage: larkin comment reply --message-id <doc_comment_message_id> --text '<reply>' --json
 Reply as the Runtime-bound Bot to the exact cloud-document comment locator supplied by canonical Inbox. Retrying the same body is idempotent; a different body appends a follow-up reply to the same comment.`,
   telemetry: `Usage: larkin telemetry <status|export|import|flush>
@@ -122,9 +112,10 @@ if (!runtimeAgentCommand && command === "config" && ["runtime", "model", "effort
 // At a user terminal, unregistered non-flag commands keep the legacy lark-cli passthrough.
 // Inside an Agent Runtime, unknown Feishu command groups enter the same Larkin-owned
 // identity and freshness AOP before delegation to the verified global official CLI.
+const retiredPublicCommands = new Set(["pi-auth", "pi-distribution"]);
 const wantsHelp = command === "help" || command === "--help" || command === "-h"
   || (!runtimeAgentAuthority && command.startsWith("-"));
-if (!routes[command] && !wantsHelp) {
+if (!routes[command] && !wantsHelp && !retiredPublicCommands.has(command)) {
   routes[command] = runtimeAgentAuthority ? ["lark-cli", command] : ["lark", command];
 }
 
@@ -143,7 +134,6 @@ Usage: larkin <command>
   config           Inspect effective config/source, edit mention inheritance, or explicitly apply runtime changes
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
   session recover  Explicitly recover a context-overflowed session and replay retained Inbox deliveries
-  pi-auth          Show, configure, or logout one built-in Pi Agent provider credential
   comment reply    Reply to the exact cloud-document comment bound by a polled Inbox message
   telemetry        Inspect, export, import, or flush the durable OpenTelemetry trace queue
   <lark-cli 命令组>  im/docs/wiki/drive 等 lark-cli 命令原样转发，机器人身份已锁定（如 larkin im +chat-list）
@@ -158,13 +148,9 @@ Process persistence is managed externally. larkin start stays in the foreground 
 
 const [mode, ...presetArguments] = routes[command];
 const childSpec = internalCommandSpec(mode, [...presetArguments, ...rest]);
-// 管道 stdin 必须显式转发：Linux 上 inherit 会在父进程排空后再交给子进程，导致 --api-key-stdin 读到空。
-const pipeStdin = command === "pi-auth" && rest.includes("--api-key-stdin") && !process.stdin.isTTY;
-if (pipeStdin && typeof process.stdin.pause === "function") process.stdin.pause();
 const child = spawn(childSpec.command, childSpec.args, {
-  stdio: [pipeStdin ? "pipe" : "inherit", "inherit", "inherit"],
+  stdio: ["inherit", "inherit", "inherit"],
 });
-if (pipeStdin && child.stdin) process.stdin.pipe(child.stdin);
 
 // Package-manager bin shims add a wrapper process. Forward terminal signals so the actual command
 // does not become an orphan that keeps the machine lock or Feishu connection.

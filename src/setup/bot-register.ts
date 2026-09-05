@@ -707,6 +707,8 @@ const targetAgent = flag("--agent") || id;
 const bindArgs = ["--profile", id, "--yes", "--agent", targetAgent];
 const runtime = flag("--runtime");
 if (runtime) bindArgs.push("--runtime", runtime);
+const model = flag("--model");
+if (model) bindArgs.push("--model", model);
 if (temporaryAgentChoiceFile) bindArgs.push("--selection-file", temporaryAgentChoiceFile);
 const bindSpec = internalCommandSpec("setup-bind", bindArgs, process.env);
 const bindStatus = await runBindProcess(bindSpec.command, bindSpec.args);

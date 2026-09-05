@@ -86,6 +86,7 @@ const options = {
   agent: flag("--agent"),
   profile: flag("--profile"),
   runtime: flag("--runtime"),
+  model: flag("--model"),
   selectionFile: flag("--selection-file"),
   yes: has("--yes"),
   list: has("--list"),
@@ -279,9 +280,6 @@ function printAgents(config: HydratedConfig): void {
 }
 
 export async function main(): Promise<void> {
-  if (has("--model")) {
-    die("setup 不支持配置 model；请用 larkin model <id> 单独切换（bun run model -- <id>，带合法值校验）");
-  }
   if (options.help) {
     say(`larkin setup（内部绑定阶段）
 
@@ -292,12 +290,13 @@ export async function main(): Promise<void> {
   --agent <App ID>     必须与所选 profile 的 App ID 一致；缺省自动使用该 App ID
   --profile <name>     复用已有 lark-cli profile（可用 profile 名或 appId；缺省交互选择）
   --runtime <runtime>  pi / codex / claude；缺省沿用已有 agent 的 runtime
+  --model <id>         可选；按 runtime 目录校验后写入。省略则沿用已有值或 runtime 默认
   --yes                非交互接受默认项
   --list               查看已经配置的 Agent
   --help               显示帮助
 
 普通用户请直接运行 larkin setup；该内部阶段只负责绑定已取得的凭证。
-模型不在 setup 配置：沿用已有值（换 runtime 时重置为该 runtime 默认），切换用 larkin model <id>。`);
+省略 --model 时沿用已有值（换 runtime 时重置为该 runtime 默认）；也可用 larkin model <id> 事后切换。`);
     return;
   }
   const loaded = loadConfig();
@@ -322,32 +321,49 @@ export async function main(): Promise<void> {
   const runtime = selection?.runtime || options.runtime || prior?.runtime;
   if (!runtime) die("必须指定 --runtime pi|codex|claude");
   validateRuntime(runtime);
+  const requestedModel = options.model?.trim() || undefined;
   const defaultModel = larkinConfig.defaultModelFor(runtime);
-  let targetModelId = prior?.runtime === runtime ? prior.model : defaultModel;
+  let targetModelId = requestedModel && requestedModel !== "default"
+    ? requestedModel
+    : (prior?.runtime === runtime ? prior.model : defaultModel);
   let resolvedExternalModel: string | undefined;
   let runtimeModels = larkinConfig.loadRuntimeModels()[runtime];
   try {
-    if (runtime === "pi" && targetModelId === "default") {
+    if (runtime === "pi" && (targetModelId === "default" || requestedModel)) {
       try {
         const catalog = await discoverPiModelCatalog({
           cwd: CFG_DIR,
           env: process.env,
         });
-        const effective = catalog.effectiveModel;
-        const entry = effective ? catalog.models.find((model) => model.id === effective) : undefined;
-        if (!effective || !entry) {
-          throw new Error("Pi official default resolution returned an unavailable model");
+        if (targetModelId === "default") {
+          const effective = catalog.effectiveModel;
+          const entry = effective ? catalog.models.find((model) => model.id === effective) : undefined;
+          if (!effective || !entry) {
+            throw new Error("Pi official default resolution returned an unavailable model");
+          }
+          if (!entry.contextWindow) {
+            const alternatives = catalog.models
+              .filter((model) => Number.isFinite(model.contextWindow) && Number(model.contextWindow) > 0)
+              .map((model) => model.id);
+            throw Object.assign(new Error("Pi effective model is missing a context window"), { catalogModels: alternatives });
+          }
+          calculatePiCompactionSettings(entry.contextWindow);
+          targetModelId = effective;
+          resolvedExternalModel = effective;
+          runtimeModels = [{ id: effective, supportedReasoningEfforts: entry.supportedReasoningEfforts }];
+        } else {
+          const entry = catalog.models.find((model) => model.id === targetModelId);
+          if (!entry) throw new Error(`目标模型 pi/${targetModelId} 不在 runtime 模型目录中；未修改 Agent 配置`);
+          if (!entry.contextWindow) {
+            const alternatives = catalog.models
+              .filter((model) => Number.isFinite(model.contextWindow) && Number(model.contextWindow) > 0)
+              .map((model) => model.id);
+            throw Object.assign(new Error("Pi effective model is missing a context window"), { catalogModels: alternatives });
+          }
+          calculatePiCompactionSettings(entry.contextWindow);
+          resolvedExternalModel = targetModelId;
+          runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: entry.supportedReasoningEfforts }];
         }
-        if (!entry.contextWindow) {
-          const alternatives = catalog.models
-            .filter((model) => Number.isFinite(model.contextWindow) && Number(model.contextWindow) > 0)
-            .map((model) => model.id);
-          throw Object.assign(new Error("Pi effective model is missing a context window"), { catalogModels: alternatives });
-        }
-        calculatePiCompactionSettings(entry.contextWindow);
-        targetModelId = effective;
-        resolvedExternalModel = effective;
-        runtimeModels = [{ id: effective, supportedReasoningEfforts: entry.supportedReasoningEfforts }];
       } catch (error) {
         throw new Error(formatExternalPiSetupFailure(error, { agentExisted: Boolean(prior) }));
       }
@@ -356,6 +372,8 @@ export async function main(): Promise<void> {
         ? [prior.effort]
         : [];
       runtimeModels = [{ id: targetModelId, supportedReasoningEfforts: preservedEffort }];
+    } else if (requestedModel && requestedModel !== "default") {
+      resolvedExternalModel = requestedModel;
     }
     const targetModel = runtimeModels.find((model) => model.id === targetModelId);
     if (!targetModel) throw new Error(`目标模型 ${runtime}/${targetModelId} 不在 runtime 模型目录中；未修改 Agent 配置`);

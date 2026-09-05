@@ -13,6 +13,8 @@ import { createReminderRoutes } from "../agent/reminder-routes.js";
 import { InteractionStateMachine } from "../agent/interaction-state-machine.js";
 import { issueCallbackProbe, readCallbackCapability } from "../platform/callback-capability.js";
 import { requestAgentUpsert } from "./local-control.js";
+import { isUserRuntime } from "../runtime/user-runtime.js";
+import { resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 export { AGENT_CLI_CAPABILITIES } from "../agent/agent-cli-capabilities.js";
 import { AGENT_CLI_CAPABILITIES } from "../agent/agent-cli-capabilities.js";
 import { CONFIG_CLI_USAGE, CONFIG_CLI_VALUES } from "../agent/config-cli-contract.js";
@@ -189,7 +191,7 @@ function agentConfigRequest(
   const targetId = options.values.get("--agent") || agent.agentId;
   const target = config.agents[targetId];
   if (!target) throw new Error(`Agent 不存在：${targetId}；运行 larkin config show --json 查看可用 Agent`);
-  const currentDirectory = (runtime = larkinConfig.toUserRuntime(target.runtime, target.piDistribution)): RuntimeDirectoryModel[] => (dependencies.modelDirectory ?? ((input) => discoverRuntimeModelDirectorySync(input, env)))({
+  const currentDirectory = (runtime = larkinConfig.toUserRuntime(target.runtime)): RuntimeDirectoryModel[] => (dependencies.modelDirectory ?? ((input) => discoverRuntimeModelDirectorySync(input, env)))({
     agentId: target.agentId, cwd: target.workspaceDir, runtime,
   });
   if (operation === "show") {
@@ -203,6 +205,15 @@ function agentConfigRequest(
     assertOnlyFlags(["--agent", "--model"]);
     const runtime = options.positionals[0];
     if (!runtime || options.positionals.length > 1) throw new Error("用法: larkin config runtime <runtime> [--model <model>] [--agent <App ID>]");
+    if (!isUserRuntime(runtime)) throw new Error(`未知 runtime：${runtime}`);
+    const command = runtime === "pi"
+      ? env.LARKIN_PI_COMMAND || "pi"
+      : runtime === "codex"
+        ? env.LARKIN_CODEX_COMMAND || "codex"
+        : env.LARKIN_CLAUDE_COMMAND || "claude";
+    if (!resolveRuntimeExecutable(command, env)) {
+      throw new Error(`${runtime} is not installed；${runtimeInstallNextAction(runtime)}`);
+    }
     const model = options.values.get("--model");
     if (model && !currentDirectory(runtime).some((item) => item.id === model)) throw new Error(`model 不在 ${runtime} 当前目录中：${model}`);
     mutation = { kind: "set-agent-runtime", agentId: targetId, runtime, ...(model ? { model } : {}) };
@@ -570,7 +581,7 @@ export function runAgentCli(
         openId: identity?.open_id ?? identity?.openId ?? null,
         avatarUrl: identity?.avatar_url ?? identity?.avatarUrl ?? null,
         runtime: agent.runtime,
-        runtimeOption: larkinConfig.toUserRuntime(agent.runtime, agent.piDistribution),
+        runtimeOption: larkinConfig.toUserRuntime(agent.runtime),
         model: agent.model, reasoningEffort: agent.effort ?? null,
         createdAt: agent.createdAt ?? "1970-01-01T00:00:00.000Z",
       });

@@ -74,12 +74,14 @@ const discoveryCache = new Map<string, Promise<PiModelCatalog>>();
 
 /** Discover only through Pi's structured RPC protocol; no table parsing or static fallback. */
 function piCatalogChildEnv(options: DiscoverPiCatalogOptions): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...options.env,
-    ...(options.agentDir ? { PI_CODING_AGENT_DIR: path.resolve(options.agentDir) } : {}),
     NO_COLOR: "1",
   };
+  if (options.agentDir) env.PI_CODING_AGENT_DIR = path.resolve(options.agentDir);
+  else delete env.PI_CODING_AGENT_DIR;
+  return env;
 }
 
 export async function discoverPiModelCatalog(options: DiscoverPiCatalogOptions): Promise<PiModelCatalog> {

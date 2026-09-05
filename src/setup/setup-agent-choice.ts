@@ -1,26 +1,10 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import type { StoredAgent } from "./setup-binding.js";
-import { toUserRuntime } from "../runtime/user-runtime.js";
-import {
-  PI_PROVIDER_PRESETS,
-  resolveBuiltinPiProviderSetupSelection,
-  type BuiltinPiProviderSetupSelection,
-} from "../runtime/pi-provider-config.js";
-import type { OfficialPiAuthProvider, OfficialPiAuthStatus } from "../runtime/pi-official-auth.js";
+import { RUNTIME_OPTIONS, toUserRuntime, type RuntimeOption } from "../runtime/user-runtime.js";
+import { resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 
-export interface OfficialPiAuthSelection {
-  distribution: "builtin";
-  preset: "official";
-  providerId: string;
-  authType: "api_key" | "oauth";
-  model: string;
-}
-
-export type SetupAgentChoice =
-  | { runtime: "codex" | "claude" }
-  | { runtime: "pi"; distribution: "external" }
-  | ({ runtime: "pi" } & (BuiltinPiProviderSetupSelection | OfficialPiAuthSelection));
+export type SetupAgentChoice = { runtime: RuntimeOption };
 
 export interface SetupQuestioner {
   ask(prompt: string, signal?: AbortSignal): Promise<string>;
@@ -28,18 +12,43 @@ export interface SetupQuestioner {
   close?(): void;
 }
 
-export interface BuiltinPiChoiceServices {
-  providers(): Promise<OfficialPiAuthProvider[]>;
-  status(): Promise<OfficialPiAuthStatus[]>;
-  logout(providerId: string): Promise<void>;
-  report(message: string): void;
-}
-
-export interface ExternalPiProbeResult {
-  state: "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
+export interface RuntimeInstallStatus {
+  runtime: RuntimeOption;
+  installed: boolean;
   reason?: string;
   nextAction?: string;
 }
+
+function runtimeCommand(runtime: RuntimeOption, env: NodeJS.ProcessEnv): string {
+  if (runtime === "pi") return env.LARKIN_PI_COMMAND || "pi";
+  if (runtime === "codex") return env.LARKIN_CODEX_COMMAND || "codex";
+  return env.LARKIN_CLAUDE_COMMAND || "claude";
+}
+
+export function listRuntimeInstallStatuses(env: NodeJS.ProcessEnv = process.env): RuntimeInstallStatus[] {
+  return RUNTIME_OPTIONS.map((runtime) => {
+    if (resolveRuntimeExecutable(runtimeCommand(runtime, env), env)) return { runtime, installed: true };
+    return {
+      runtime,
+      installed: false,
+      reason: `${runtime} is not installed`,
+      nextAction: runtimeInstallNextAction(runtime),
+    };
+  });
+}
+
+export function missingRuntimeInstallMessage(runtime: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (runtime !== "pi" && runtime !== "codex" && runtime !== "claude") return null;
+  const status = listRuntimeInstallStatuses(env).find((entry) => entry.runtime === runtime);
+  if (!status || status.installed) return null;
+  return `${status.reason}；${status.nextAction}`;
+}
+
+const RUNTIME_LABELS: Record<RuntimeOption, string> = {
+  pi: "pi（本机官方 pi CLI）",
+  codex: "Codex",
+  claude: "Claude Code",
+};
 
 function number(value: string, fallback: number, max: number): number {
   const parsed = value.trim() ? Number(value.trim()) : fallback;
@@ -47,79 +56,30 @@ function number(value: string, fallback: number, max: number): number {
   return parsed;
 }
 
-export async function collectBuiltinPiChoice(questioner: SetupQuestioner,
-  services?: BuiltinPiChoiceServices): Promise<SetupAgentChoice> {
-  const lines = PI_PROVIDER_PRESETS.map((preset, index) => `  ${index + 1}. ${preset.name} — ${preset.baseUrl}`).join("\n");
-  const providerChoice = number(await questioner.ask(`选择模型服务 / 认证：\n${lines}\n  5. Custom OpenAI-compatible\n  6. 官方 Pi provider 登录（API Key / OAuth / subscription）\n  7. 查看或退出已有官方 Pi 认证\n> `), 1, 7);
-  if (providerChoice === 7) {
-    if (!services) throw new Error("当前 setup 上下文无法管理官方 Pi 认证");
-    const status = await services.status();
-    if (status.length === 0) services.report("尚无已配置的官方 Pi credential");
-    else status.forEach((entry, index) => services.report(`  ${index + 1}. ${entry.providerName} (${entry.providerId}) — ${entry.credentialType}/${entry.source}${entry.stored ? "，已存储" : "，ambient"}`));
-    const answer = (await questioner.ask("输入要 logout 的序号；直接回车返回：")).trim();
-    if (answer) {
-      const selected = number(answer, 0, status.length);
-      await services.logout(status[selected - 1]!.providerId);
-      services.report(`已退出 ${status[selected - 1]!.providerName}；未修改其他 provider`);
-    }
-    return collectBuiltinPiChoice(questioner, services);
-  }
-  if (providerChoice === 6) {
-    if (!services) throw new Error("当前 setup 上下文无法读取官方 Pi auth registry");
-    const providers = await services.providers();
-    const methods = providers.flatMap((provider) => provider.methods.map((method) => ({ provider, method })));
-    if (methods.length === 0) throw new Error("捆绑官方 Pi auth registry 没有可交互登录方式");
-    const methodLines = methods.map(({ provider, method }, index) => `  ${index + 1}. ${provider.name} — ${method.name} [${method.type}]`).join("\n");
-    const methodChoice = number(await questioner.ask(`选择官方 Pi 登录方式：\n${methodLines}\n> `), 1, methods.length);
-    const selected = methods[methodChoice - 1]!;
-    const defaultModel = selected.provider.models[0] || "";
-    const model = (await questioner.ask(`模型 ID${defaultModel ? `（默认 ${defaultModel}）` : "（provider/model）"}：`)).trim() || defaultModel;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._:@+\/-]{0,255}$/.test(model)) throw new Error("模型 ID 必须是安全的 provider/model");
-    if (!model.startsWith(`${selected.provider.id}/`)) throw new Error(`模型 ID 必须属于 ${selected.provider.id}`);
-    return { runtime: "pi", distribution: "builtin", preset: "official", providerId: selected.provider.id,
-      authType: selected.method.type, model };
-  }
-  const preset = providerChoice === 5 ? "custom" : PI_PROVIDER_PRESETS[providerChoice - 1].id;
-  const selected = preset === "custom" ? null : PI_PROVIDER_PRESETS.find((candidate) => candidate.id === preset)!;
-  const baseUrl = preset === "custom" ? await questioner.ask("Base URL（https；localhost 可用 http）：") : selected!.baseUrl;
-  const model = (await questioner.ask(`模型 ID${selected ? `（默认 ${selected.defaultModel}）` : ""}：`)).trim() || selected?.defaultModel || "";
-  const validated = resolveBuiltinPiProviderSetupSelection({ distribution: "builtin", preset, model, ...(baseUrl ? { baseUrl } : {}) });
-  return { runtime: "pi", distribution: "builtin", preset, model: validated.model, ...(preset === "custom" ? { baseUrl: validated.baseUrl } : {}) };
+function formatRuntimeMenu(statuses: readonly RuntimeInstallStatus[]): string {
+  const lines = statuses.map((status, index) => {
+    const mark = status.installed ? "installed" : "not installed";
+    return `  ${index + 1}. ${RUNTIME_LABELS[status.runtime]} [${mark}]`;
+  });
+  return `选择 Agent：\n${lines.join("\n")}\n> `;
 }
 
-export async function collectSetupAgentChoice(questioner: SetupQuestioner, prior?: StoredAgent,
-  services?: BuiltinPiChoiceServices): Promise<SetupAgentChoice | null> {
+export async function collectSetupAgentChoice(
+  questioner: SetupQuestioner,
+  prior?: StoredAgent,
+  statuses: readonly RuntimeInstallStatus[] = listRuntimeInstallStatuses(),
+): Promise<SetupAgentChoice | null> {
   if (prior) {
-    const keep = (await questioner.ask(`已有 Agent：${toUserRuntime(prior.runtime, prior.piDistribution)}/${prior.model}。直接回车保留；输入 c 才修改：`)).trim().toLowerCase();
+    const keep = (await questioner.ask(`已有 Agent：${toUserRuntime(prior.runtime)}/${prior.model}。直接回车保留；输入 c 才修改：`)).trim().toLowerCase();
     if (!keep) return null;
     if (keep !== "c") throw new Error("请输入 c 修改，或直接回车保留现有配置");
   }
-  const runtimeChoice = number(await questioner.ask("选择 Agent：\n  1. builtin-pi（Larkin 捆绑，推荐）\n  2. pi（本机官方 pi CLI）\n  3. Codex\n  4. Claude Code\n> "), 1, 4);
-  if (runtimeChoice === 3) return { runtime: "codex" };
-  if (runtimeChoice === 4) return { runtime: "claude" };
-  if (runtimeChoice === 2) return { runtime: "pi", distribution: "external" };
-  return collectBuiltinPiChoice(questioner, services);
-}
-
-export async function recoverUnavailableExternalPi(
-  initial: SetupAgentChoice | null,
-  questioner: SetupQuestioner,
-  probe: () => Promise<ExternalPiProbeResult>,
-  report: (message: string) => void = () => {},
-  services?: BuiltinPiChoiceServices,
-): Promise<SetupAgentChoice | null> {
-  let choice = initial;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    if (choice?.runtime !== "pi" || choice.distribution !== "external") return choice;
-    const readiness = await probe();
-    if (readiness.state === "ready") return choice;
-    report(`外置 Pi ${readiness.state}：${readiness.reason || "prerequisite unavailable"}；${readiness.nextAction || "可切换到 builtin-pi"}`);
-    const action = number(await questioner.ask("外置 Pi 当前不可用：\n  1. 切换到 builtin-pi（推荐）\n  2. 重新选择 Agent\n  3. 取消 setup（保留原配置）\n> "), 1, 3);
-    if (action === 1) return collectBuiltinPiChoice(questioner, services);
-    if (action === 3) throw new Error("setup 已取消；未修改 Agent/config");
-    choice = await collectSetupAgentChoice(questioner, undefined, services);
+  const runtimeChoice = number(await questioner.ask(formatRuntimeMenu(statuses)), 1, statuses.length);
+  const selected = statuses[runtimeChoice - 1]!;
+  if (!selected.installed) {
+    throw new Error(`${selected.reason}；${selected.nextAction}`);
   }
-  throw new Error("外置 Pi 恢复选择已达到 3 次；未修改 Agent/config，请修复后重试");
+  return { runtime: selected.runtime };
 }
 
 export function terminalSetupQuestioner(): SetupQuestioner {
@@ -172,7 +132,7 @@ export function terminalSetupQuestioner(): SetupQuestioner {
         };
         const onData = (chunk: Buffer): void => {
           for (const byte of chunk) {
-            if (byte === 3) return finish(new Error("setup 已取消；未保存 API Key"));
+            if (byte === 3) return finish(new Error("setup 已取消；未保存输入"));
             if (byte === 10 || byte === 13) return finish();
             if (byte === 8 || byte === 127) { value = value.slice(0, -1); continue; }
             if (byte >= 32 && byte <= 126) value += String.fromCharCode(byte);

@@ -5,19 +5,8 @@ import * as path from "node:path";
 import { TargetRootLayout, resolveConfigDir as resolveRootConfigDir } from "./root-layout.js";
 import { exactMode, fsyncDirectoryOf } from "./secure-metadata.js";
 import { CURRENT_RUNTIME_MODELS, type RuntimeModels } from "../runtime/runtime-model-catalog.js";
-import { assertBuiltinPiAgentDirectory, piAgentDirectory } from "../runtime/pi-provider-config.js";
 import { fromUserRuntime, isAdapterRuntime, isUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
 import processInspect from "./process-inspect.cjs";
-import {
-  applyPiProfileMigration,
-  assertPiProfileMigrationAfterState,
-  preparePiProfileMigration,
-  releasePiProfileMigrationLock,
-  rollbackPiProfileMigration,
-  validatePiProfileMigrationState,
-  type PiProfileMigrationPlan,
-  type PiProfileMigrationState,
-} from "../runtime/pi-profile-migration.js";
 
 type Env = Record<string, string | undefined>;
 type Obj = Record<string, unknown>;
@@ -31,7 +20,6 @@ export type MentionPolicyOverride = MentionPolicy | "inherit";
 export interface StoredAgent {
   runtime: string;
   model: string;
-  piDistribution?: "external" | "builtin";
   effort?: string;
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
@@ -68,8 +56,7 @@ export type ConfigMutation =
   | { kind: "set-agent-mention"; agentId: string; value: MentionPolicyOverride }
   | { kind: "set-chat-mention"; agentId: string; chatId: string; value: MentionPolicyOverride }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
-  | { kind: "set-agent-pi-distribution"; agentId: string; distribution: "builtin" | "external" }
-  | { kind: "set-agent-model"; agentId: string; model: string; requireBuiltinPi?: boolean }
+  | { kind: "set-agent-model"; agentId: string; model: string }
   | { kind: "set-agent-effort"; agentId: string; effort: string | null };
 
 export type ConfigAuthority = { kind: "user" } | { kind: "agent"; agentId: string };
@@ -89,7 +76,8 @@ interface ConfigApplyFile { version: 1; persistedRevision: string; agents: Recor
 const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "piDistribution", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "effort", "mentionPolicy", "chatMentionPolicies", "createdAt"]);
+const LEGACY_AGENT_FIELDS = new Set(["piDistribution", "runtimeOption"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -170,23 +158,42 @@ function runtimeSupportsEffort(runtime: string, effort: string): boolean {
       : runtime === "claude" ? CLAUDE_EFFORTS.has(effort) : false;
 }
 
+function takeLegacyAgentFields(agent: Obj): Obj {
+  const cleaned: Obj = {};
+  for (const [field, value] of Object.entries(agent)) {
+    if (!LEGACY_AGENT_FIELDS.has(field)) cleaned[field] = value;
+  }
+  return cleaned;
+}
+
+function isLegacyBuiltinAgentRecord(agent: unknown): boolean {
+  if (!isPlainObject(agent)) return false;
+  return agent.piDistribution === "builtin" || agent.runtime === "builtin-pi" || agent.runtimeOption === "builtin-pi";
+}
+
+function canonicalizeLegacyStoredAgent(key: string, agent: Obj): Obj {
+  const cleaned = takeLegacyAgentFields(agent);
+  if (cleaned.runtime === "builtin-pi" || isLegacyBuiltinAgentRecord(agent)) cleaned.runtime = "pi";
+  if (typeof cleaned.runtime !== "string" || !cleaned.runtime) throw new Error(`Agent ${key}.runtime 必须是非空字符串`);
+  return cleaned;
+}
+
 function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asserts agent is Obj {
   if (!APP_ID.test(key)) throw new Error(`Agent key 必须是安全的飞书 App ID（cli_ + ASCII 字母数字）：${key}`);
   if (!isPlainObject(agent)) throw new Error(`Agent ${key} 必须是普通 object`);
-  assertAllowedFields(agent, version === 3 ? AGENT_FIELDS_V3 : AGENT_FIELDS_V4, `Agent ${key}`);
-  if (typeof agent.runtime !== "string" || !agent.runtime) throw new Error(`Agent ${key}.runtime 必须是非空字符串`);
-  if (!isAdapterRuntime(agent.runtime)) throw new Error(`Agent ${key}.runtime 未知：${agent.runtime}`);
-  if (typeof agent.model !== "string" || !agent.model) throw new Error(`Agent ${key}.model 必须是非空字符串`);
-  assertModel(agent.runtime, agent.model);
-  if (Object.hasOwn(agent, "piDistribution")) {
-    if (agent.runtime !== "pi" || (agent.piDistribution !== "external" && agent.piDistribution !== "builtin")) {
-      throw new Error(`Agent ${key}.piDistribution 只允许 Pi runtime 使用 external/builtin`);
-    }
-  }
+  const canonical = canonicalizeLegacyStoredAgent(key, agent);
+  assertAllowedFields(canonical, version === 3 ? AGENT_FIELDS_V3 : AGENT_FIELDS_V4, `Agent ${key}`);
+  if (typeof canonical.runtime !== "string" || !canonical.runtime) throw new Error(`Agent ${key}.runtime 必须是非空字符串`);
+  if (!isAdapterRuntime(canonical.runtime)) throw new Error(`Agent ${key}.runtime 未知：${canonical.runtime}`);
+  if (typeof canonical.model !== "string" || !canonical.model) throw new Error(`Agent ${key}.model 必须是非空字符串`);
+  assertModel(canonical.runtime, canonical.model);
+  Object.assign(agent, canonical);
+  for (const field of LEGACY_AGENT_FIELDS) delete agent[field];
+
   if (Object.hasOwn(agent, "effort") && (typeof agent.effort !== "string" || !agent.effort)) throw new Error(`Agent ${key}.effort 必须是非空字符串`);
   if (agent.model === "default" && Object.hasOwn(agent, "effort")) throw new Error(`Agent ${key}.model=default 时不能保存 effort`);
   if (typeof agent.effort === "string") {
-    if (!runtimeSupportsEffort(agent.runtime, agent.effort)) throw new Error(`Agent ${key}.effort=${agent.effort} 不在 ${agent.runtime} 安全档位中`);
+    if (!runtimeSupportsEffort(canonical.runtime, agent.effort)) throw new Error(`Agent ${key}.effort=${agent.effort} 不在 ${canonical.runtime} 安全档位中`);
   }
   if (version === 3 && Object.hasOwn(agent, "noMentionChats")) {
     if (!Array.isArray(agent.noMentionChats) || agent.noMentionChats.some((chat) => typeof chat !== "string" || !CHAT_ID.test(chat))) {
@@ -216,7 +223,6 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
   return {
     runtime: agent.runtime as string,
     model: agent.model as string,
-    ...(agent.piDistribution === "external" || agent.piDistribution === "builtin" ? { piDistribution: agent.piDistribution } : {}),
     ...(typeof agent.effort === "string" ? { effort: agent.effort } : {}),
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
@@ -229,7 +235,6 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
   return {
     name: key, agentId: key, feishuAppId: key, feishuProfile: key,
     runtime: agent.runtime, model: agent.model,
-    ...(agent.piDistribution ? { piDistribution: agent.piDistribution } : {}),
     workspaceDir: layout.workspaceDir(key), stateDir: layout.agentStateDir(key),
     larkConfigDir: path.join(layout.agentStateDir(key), "lark-cli-config"),
     ...(agent.effort ? { effort: agent.effort } : {}),
@@ -324,9 +329,82 @@ function readConfigFile(file: string, root = path.dirname(file)): { raw: unknown
   }
 }
 
+function collectLegacyBuiltinAgentIds(raw: unknown): string[] {
+  if (!isPlainObject(raw) || !isPlainObject(raw.agents)) return [];
+  return Object.entries(raw.agents).filter(([, agent]) => isLegacyBuiltinAgentRecord(agent)).map(([agentId]) => agentId);
+}
+
+function ownedPiProviderDirectory(configDir: string, agentId: string): string {
+  if (!APP_ID.test(agentId)) throw new Error(`Pi Agent ID 格式无效：${agentId}`);
+  return path.join(path.resolve(configDir), "providers", "pi", agentId);
+}
+
+function deleteOwnedPiProviderDirectory(configDir: string, agentId: string): void {
+  const expected = ownedPiProviderDirectory(configDir, agentId);
+  assertNoSymlinkAncestors(expected);
+  const parent = path.dirname(expected);
+  const rootReal = fs.realpathSync(path.resolve(configDir));
+  const parentReal = fs.realpathSync(parent);
+  const relative = path.relative(rootReal, parentReal);
+  if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new Error("owned Pi provider directory escaped the config root");
+  }
+  if (path.basename(parent) !== "pi" || path.basename(path.dirname(parent)) !== "providers") {
+    throw new Error("owned Pi provider directory is not providers/pi/<agentId>");
+  }
+  let stat: fs.Stats;
+  try { stat = fs.lstatSync(expected); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) throw new Error("owned Pi provider directory is a symlink");
+  if (!stat.isDirectory()) throw new Error("owned Pi provider directory must be a directory");
+  fs.rmSync(expected, { recursive: true, force: false });
+}
+
+function rewriteLegacyBuiltinAgents(raw: unknown): unknown {
+  if (!isPlainObject(raw) || !isPlainObject(raw.agents)) return raw;
+  const agents: Record<string, unknown> = {};
+  for (const [agentId, agent] of Object.entries(raw.agents)) {
+    if (!isPlainObject(agent)) {
+      agents[agentId] = agent;
+      continue;
+    }
+    const next = takeLegacyAgentFields(agent);
+    if (next.runtime === "builtin-pi" || isLegacyBuiltinAgentRecord(agent)) next.runtime = "pi";
+    agents[agentId] = next;
+  }
+  return { ...raw, agents };
+}
+
+function persistLegacyBuiltinMigration(layout: TargetRootLayout, opts: { mint?: () => string }): { raw: unknown; bytes: Buffer } {
+  const current = readConfigFile(layout.configFile, layout.root);
+  const migratedIds = collectLegacyBuiltinAgentIds(current.raw);
+  if (migratedIds.length === 0) return current;
+  const rewritten = rewriteLegacyBuiltinAgents(current.raw);
+  const config = normalizeConfig(rewritten, layout.root, opts);
+  const stored = toStored(config);
+  const bytes = atomicWriteConfig(layout.configFile, stored);
+  for (const agentId of migratedIds) {
+    const agent = config.agents[agentId];
+    const model = typeof agent?.model === "string" ? agent.model : "unknown";
+    process.stderr.write(`[larkin] migrated Agent ${agentId} from builtin-pi to pi (model=${model})\n`);
+    try { deleteOwnedPiProviderDirectory(layout.root, agentId); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[larkin] failed to delete leftover builtin Pi directory for ${agentId}: ${reason}\n`);
+    }
+  }
+  return { raw: stored, bytes };
+}
+
 export function loadConfig(env: Env = process.env, opts: { mint?: () => string } = {}): { configDir: string; file: string; revision: string; config: HydratedConfig } {
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
-  const { raw, bytes } = readConfigFile(layout.configFile, layout.root);
+  const initial = readConfigFile(layout.configFile, layout.root);
+  const { raw, bytes } = collectLegacyBuiltinAgentIds(initial.raw).length
+    ? withConfigLock(layout, () => persistLegacyBuiltinMigration(layout, opts))
+    : initial;
   return { configDir: layout.configDir, file: layout.configFile, revision: revision(bytes), config: normalizeConfig(raw, layout.root, opts) };
 }
 
@@ -346,7 +424,6 @@ export function toStored(config: HydratedConfig): { version: 4; serverId: string
   const out = { version: 4 as const, serverId: config.serverId, mentionPolicy: config.mentionPolicy, activeAgent: config.activeAgent, agents: {} as Record<string, StoredAgent> };
   for (const [key, agent] of Object.entries(config.agents || {})) {
     const stored: StoredAgent = { runtime: agent.runtime, model: agent.model };
-    if (agent.piDistribution) stored.piDistribution = agent.piDistribution;
     if (typeof agent.effort === "string" && agent.effort) stored.effort = agent.effort;
     if (agent.mentionPolicy) stored.mentionPolicy = agent.mentionPolicy;
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
@@ -385,7 +462,7 @@ function agentSignature(config: HydratedConfig, agentId: string): string {
   if (!agent) throw new Error(`Agent 不存在：${agentId}`);
   const chats = Object.fromEntries(Object.entries(agent.chatMentionPolicies || {}).sort(([left], [right]) => left.localeCompare(right)));
   return revision(JSON.stringify({
-    runtime: agent.runtime, model: agent.model, piDistribution: agent.piDistribution ?? null, effort: agent.effort ?? null,
+    runtime: agent.runtime, model: agent.model, piDistribution: null, effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
   }));
 }
@@ -428,25 +505,9 @@ interface ConfigRollbackJournal {
   beforeRevision: string;
   beforeConfigBytes: string;
   beforeApplyState: ConfigApplyFile;
-  migration?: PiProfileMigrationState;
-}
-
-interface ConfigMigrationJournal {
-  version: 1;
-  phase: "forward";
-  targetAgentId: string;
-  beforeRevision: string;
-  expectedAfterRevision: string;
-  migration: PiProfileMigrationState;
 }
 
 function rollbackJournalFile(root: string): string { return path.join(root, CONFIG_ROLLBACK_JOURNAL_FILE); }
-function migrationJournalFile(root: string): string { return path.join(root, ".pi-profile-migration-journal.json"); }
-function assertMigrationTarget(root: string, agentId: string, migration: PiProfileMigrationState): void {
-  if (migration.agentId !== agentId || path.resolve(migration.targetDir) !== path.join(path.resolve(root), "providers", "pi", agentId)) {
-    throw new Error("Pi profile migration target is invalid");
-  }
-}
 
 function restoreTargetApplyState(root: string, targetAgentId: string, beforeRevision: string, before: ConfigApplyFile): void {
   const current = readApplyFile(root);
@@ -475,11 +536,9 @@ function recoverRollbackJournal(root: string): void {
   const beforeRaw = JSON.parse(beforeBytes.toString("utf8"));
   normalizeConfig(beforeRaw, root);
   validateApplyState(journal.beforeApplyState);
-  if (journal.migration !== undefined) { validatePiProfileMigrationState(journal.migration); assertMigrationTarget(root, journal.targetAgentId, journal.migration); }
   const current = readConfigFile(path.join(root, "config.json"), root);
   const currentRevision = revision(current.bytes);
   if (currentRevision === journal.expectedAfterRevision) {
-    if (journal.migration) rollbackPiProfileMigration(journal.migration);
     atomicWriteBytes(path.join(root, "config.json"), beforeBytes);
     restoreTargetApplyState(root, journal.targetAgentId, journal.beforeRevision, journal.beforeApplyState as ConfigApplyFile);
   } else if (currentRevision === journal.beforeRevision) {
@@ -491,35 +550,6 @@ function recoverRollbackJournal(root: string): void {
   }
   fs.unlinkSync(file);
   fsyncDirectoryOf(file);
-}
-
-function recoverMigrationJournal(root: string): void {
-  const file = migrationJournalFile(root);
-  const bytes = readPrivateFile(file, root, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES, "Pi profile migration journal");
-  if (bytes === null) return;
-  let journal: Partial<ConfigMigrationJournal>;
-  try { journal = JSON.parse(bytes.toString("utf8")) as Partial<ConfigMigrationJournal>; }
-  catch { throw new Error("Pi profile migration journal is invalid"); }
-  if (journal.version !== 1 || journal.phase !== "forward" || typeof journal.targetAgentId !== "string"
-      || typeof journal.beforeRevision !== "string" || typeof journal.expectedAfterRevision !== "string" || !journal.migration) {
-    throw new Error("Pi profile migration journal is invalid");
-  }
-  validatePiProfileMigrationState(journal.migration);
-  assertMigrationTarget(root, journal.targetAgentId, journal.migration);
-  const current = readConfigFile(path.join(root, "config.json"), root);
-  const currentRevision = revision(current.bytes);
-  if (currentRevision === journal.beforeRevision) {
-    // Forward import did not publish config. The migration helper restores only
-    // files still matching its expected post-import hashes.
-    try { rollbackPiProfileMigration(journal.migration); }
-    catch (error) { throw new Error(`Pi profile migration recovery refused: ${error instanceof Error ? error.message : String(error)}`); }
-  } else if (currentRevision === journal.expectedAfterRevision) {
-    // Config won the race; verify the provider target before finalizing.
-    const migration = journal.migration;
-    assertPiProfileMigrationAfterState(migration);
-  } else throw new Error("Pi profile migration journal conflicts with the current configuration");
-  releasePiProfileMigrationLock(journal.migration);
-  fs.unlinkSync(file); fsyncDirectoryOf(file);
 }
 
 export function configApplyState(env: Env, config: HydratedConfig): Record<string, unknown> {
@@ -580,30 +610,14 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     agent.noMentionChats = Object.entries(policies).filter(([, value]) => value === "free").map(([chatId]) => chatId);
     return { scope: "chat", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
   }
-  if (mutation.kind === "set-agent-pi-distribution") {
-    if (agent.runtime !== "pi") throw new Error(`Agent ${mutation.agentId} 不是 Pi runtime`);
-    if (mutation.distribution !== "builtin" && mutation.distribution !== "external") throw new Error("Pi distribution 只允许 builtin/external");
-    agent.piDistribution = mutation.distribution;
-  } else if (mutation.kind === "set-agent-runtime") {
+  if (mutation.kind === "set-agent-runtime") {
     if (!isUserRuntime(mutation.runtime)) throw new Error(`未知 runtime：${mutation.runtime}`);
     const stored = fromUserRuntime(mutation.runtime);
-    if (stored.piDistribution === "builtin") {
-      try {
-        assertBuiltinPiAgentDirectory(piAgentDirectory(config.configDir, mutation.agentId));
-      } catch (error) {
-        throw new Error(`无法切换到 builtin-pi：${error instanceof Error ? error.message : String(error)}。请使用 Dashboard Provider Credentials 或 larkin pi-auth login。`);
-      }
-    }
     assertModel(stored.runtime, mutation.model || "default");
     agent.runtime = stored.runtime;
     agent.model = mutation.model || "default";
-    if (stored.piDistribution) agent.piDistribution = stored.piDistribution;
-    else delete agent.piDistribution;
     delete agent.effort;
   } else if (mutation.kind === "set-agent-model") {
-    if (mutation.requireBuiltinPi && (agent.runtime !== "pi" || agent.piDistribution !== "builtin")) {
-      throw new Error(`Agent ${mutation.agentId} 不是内置 Pi`);
-    }
     if (!mutation.model.trim()) throw new Error("model 不能为空");
     assertModel(agent.runtime, mutation.model);
     const changedModel = mutation.model !== agent.model;
@@ -767,7 +781,6 @@ function acquireConfigLock(layout: TargetRootLayout): { release: () => void } {
 function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
   const held = acquireConfigLock(layout);
   try {
-    recoverMigrationJournal(layout.root);
     recoverRollbackJournal(layout.root);
     return action();
   } finally {
@@ -783,7 +796,6 @@ export async function withConfigMutationLockAsync<T>(env: Env, action: () => Pro
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   const held = acquireConfigLock(layout);
   try {
-    recoverMigrationJournal(layout.root);
     recoverRollbackJournal(layout.root);
     return await action();
   } finally {
@@ -800,7 +812,6 @@ interface ConfigSnapshot {
   beforeConfig: unknown;
   beforeConfigBytes: string;
   beforeApplyState: ConfigApplyFile;
-  migration?: PiProfileMigrationState;
 }
 
 const CONFIG_ROLLBACK_JOURNAL_FILE = ".config-rollback-journal.json";
@@ -863,10 +874,6 @@ function readConfigSnapshot(file: string, root: string): ConfigSnapshot {
   try { beforeRaw = JSON.parse(beforeBytes.toString("utf8")); } catch { throw new Error("config snapshot before config is invalid"); }
   if (JSON.stringify(beforeRaw) !== JSON.stringify(parsed.beforeConfig)) throw new Error("config snapshot before config does not match bytes");
   validateApplyState(parsed.beforeApplyState);
-  if (parsed.migration !== undefined) {
-    validatePiProfileMigrationState(parsed.migration);
-    assertMigrationTarget(root, parsed.targetAgentId, parsed.migration);
-  }
   return parsed as ConfigSnapshot;
 }
 
@@ -889,7 +896,7 @@ function atomicWriteConfig(file: string, value: unknown, limit = CONFIG_LIMIT_BY
   return atomicWriteBytes(file, bytes, limit);
 }
 
-export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority, options: { snapshotFile?: string; importExternalProfile?: boolean } = {}): ConfigMutationResult {
+export function mutateConfig(env: Env, mutation: ConfigMutation, authority: ConfigAuthority, options: { snapshotFile?: string } = {}): ConfigMutationResult {
   assertAuthority(authority, mutation);
   const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
   return withConfigLock(layout, () => {
@@ -897,12 +904,6 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
     if (current.raw === null) throw new Error(`没找到配置 ${layout.configFile}，先跑 larkin setup`);
     const config = normalizeConfig(current.raw, layout.root);
     const priorSignatures = Object.fromEntries(Object.keys(config.agents).map((agentId) => [agentId, agentSignature(config, agentId)]));
-    if (options.importExternalProfile && (mutation.kind !== "set-agent-pi-distribution" || mutation.distribution !== "builtin")) {
-      throw new Error("external Pi profile import is only valid for builtin Pi distribution");
-    }
-    const migrationPlan = options.importExternalProfile && mutation.kind === "set-agent-pi-distribution"
-      ? preparePiProfileMigration(env, layout.root, mutation.agentId, "builtin")
-      : undefined;
     const changed = applyMutation(config, mutation);
     const stored = toStored(config);
     normalizeConfig(stored, layout.root);
@@ -917,15 +918,7 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
         version: 2, targetAgentId: changed.agentId, beforeRevision: revision(current.bytes), afterRevision: nextRevision,
         afterSignature: agentSignature(config, changed.agentId), beforeConfig: current.raw,
         beforeConfigBytes: current.bytes.toString("base64"), beforeApplyState,
-        ...(migrationPlan ? { migration: migrationPlan.state } : {}),
       });
-    }
-    if (migrationPlan) {
-      atomicWriteConfig(migrationJournalFile(layout.root), {
-        version: 1, phase: "forward", targetAgentId: changed.agentId, beforeRevision: revision(current.bytes),
-        expectedAfterRevision: nextRevision, migration: migrationPlan.state,
-      }, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES);
-      applyPiProfileMigration(migrationPlan);
     }
     atomicWriteConfig(layout.configFile, stored);
     let fullyApplied = changed.affectedAgentIds.length === 0;
@@ -946,11 +939,6 @@ export function mutateConfig(env: Env, mutation: ConfigMutation, authority: Conf
       }
       writeApplyFile(layout.root, applyState);
     } catch { fullyApplied = false; /* Config persistence remains authoritative. */ }
-    if (migrationPlan) {
-      releasePiProfileMigrationLock(migrationPlan.state);
-      try { fs.unlinkSync(migrationJournalFile(layout.root)); fsyncDirectoryOf(migrationJournalFile(layout.root)); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
     return {
       revision: nextRevision, previousRevision: revision(current.bytes), changedScope: changed.scope,
       ...(changed.agentId ? { agentId: changed.agentId } : {}), persisted: true,
@@ -975,10 +963,8 @@ export function rollbackConfig(env: Env, snapshotFile: string): { revision: stri
     const journal: ConfigRollbackJournal = {
       version: 1, targetAgentId: snapshot.targetAgentId, expectedAfterRevision: snapshot.afterRevision,
       beforeRevision: snapshot.beforeRevision, beforeConfigBytes: snapshot.beforeConfigBytes, beforeApplyState: snapshot.beforeApplyState,
-      ...(snapshot.migration ? { migration: snapshot.migration } : {}),
     };
     atomicWriteConfig(rollbackJournalFile(layout.root), journal, PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES);
-    if (snapshot.migration) rollbackPiProfileMigration(snapshot.migration);
     const bytes = atomicWriteBytes(layout.configFile, beforeBytes);
     restoreTargetApplyState(layout.root, snapshot.targetAgentId, snapshot.beforeRevision, snapshot.beforeApplyState);
     fs.unlinkSync(rollbackJournalFile(layout.root));
@@ -1001,7 +987,7 @@ export function commitSetupConfig(env: Env, expectedRevision: string, nextStored
 export function safeConfigView(config: HydratedConfig, onlyAgentId?: string, chatId?: string, applyState?: Record<string, unknown>): Record<string, unknown> {
   const entries = onlyAgentId ? [[onlyAgentId, config.agents[onlyAgentId]]] as const : Object.entries(config.agents);
   const agents = entries.filter((entry): entry is readonly [string, HydratedAgent] => Boolean(entry[1])).map(([agentId, agent]) => ({
-    agentId, runtime: agent.runtime, runtimeOption: toUserRuntime(agent.runtime, agent.piDistribution), model: agent.model, piDistribution: agent.piDistribution ?? (agent.runtime === "pi" ? "external" : null), effort: agent.effort ?? null,
+    agentId, runtime: agent.runtime, runtimeOption: toUserRuntime(agent.runtime), model: agent.model, effort: agent.effort ?? null,
     mention: {
       override: agent.mentionPolicy ?? "inherit",
       effective: agent.mentionPolicy ?? config.mentionPolicy,

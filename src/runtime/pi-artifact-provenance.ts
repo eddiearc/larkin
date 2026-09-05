@@ -4,7 +4,7 @@ import path from "node:path";
 import { exactMode } from "../platform/secure-metadata.js";
 
 export const PI_RUNTIME_ARTIFACT_MANIFEST = ".larkin-pi-owned-artifacts.json";
-export const PI_RUNTIME_ARTIFACT_NAMES = [".larkin-official-pi-package", "models-store.json", "npm"] as const;
+export const PI_RUNTIME_ARTIFACT_NAMES = ["models-store.json", "npm"] as const;
 type ArtifactName = typeof PI_RUNTIME_ARTIFACT_NAMES[number];
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_ENTRIES = 4096;
@@ -20,7 +20,7 @@ export interface PiArtifactIdentity {
 
 export interface PiArtifactManifest {
   version: 1;
-  owner: "larkin-builtin-pi";
+  owner: "larkin-pi";
   directory: { device: string; inode: string };
   recordedAt: string;
   artifacts: Partial<Record<ArtifactName, PiArtifactIdentity>>;
@@ -70,7 +70,7 @@ function readManifest(file: string): PiArtifactManifest | null {
     const stat = assertSafeEntry(file, "Pi artifact provenance manifest");
     if (!stat.isFile() || !exactMode(stat, 0o600) || stat.size > 1024 * 1024) throw new Error("Pi artifact provenance manifest is unsafe");
     const value = JSON.parse(fs.readFileSync(file, "utf8")) as PiArtifactManifest;
-    if (value?.version !== 1 || value.owner !== "larkin-builtin-pi" || !value.directory || !value.artifacts) throw new Error("Pi artifact provenance manifest is invalid");
+    if (value?.version !== 1 || (value.owner !== "larkin-pi" && value.owner !== "larkin-builtin-pi") || !value.directory || !value.artifacts) throw new Error("Pi artifact provenance manifest is invalid");
     return value;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -93,7 +93,7 @@ export function recordPiRuntimeArtifactProvenance(targetDir: string, beforeEntri
   const manifestFile = path.join(targetDir, PI_RUNTIME_ARTIFACT_MANIFEST);
   const existing = readManifest(manifestFile);
   const manifest: PiArtifactManifest = existing ?? {
-    version: 1, owner: "larkin-builtin-pi", directory: { device: String(target.dev), inode: String(target.ino) },
+    version: 1, owner: "larkin-pi", directory: { device: String(target.dev), inode: String(target.ino) },
     recordedAt: new Date(boundaryAt).toISOString(), artifacts: {},
   };
   if (manifest.directory.device !== String(target.dev) || manifest.directory.inode !== String(target.ino)) throw new Error("Pi artifact provenance target identity changed");

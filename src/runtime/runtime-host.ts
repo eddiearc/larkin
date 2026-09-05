@@ -13,11 +13,8 @@ import type {
 import { buildStrictProviderErrorInput, classifyStrictProviderError } from "./provider-error-classifier.js";
 import {
   authFailureAppliesTo,
-  classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
   configuredProviderId,
-  isBuiltinPiDistribution,
-  missingProviderCredentialReadiness,
   parsePersistedAuthFailure,
   providerAuthenticationFailureReadiness,
   readinessForPersistedAuthFailure,
@@ -27,7 +24,6 @@ import {
   type PersistedAuthFailure,
   type RuntimeReadiness,
 } from "./runtime-readiness.js";
-import { officialPiHasStoredProvider } from "./pi-official-auth.js";
 import { resolveOfficialLarkCli } from "../app/official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "../app/agent-lark-cli-workspace.js";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
@@ -60,7 +56,6 @@ import {
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
   runtime: string; model: string; effort?: string | null; workspaceDir: string;
-  piDistribution?: "external" | "builtin";
   stateDir?: string; sessionId?: string | null;
   previousSession?: PreviousSessionRef | null;
   larkConfigDir?: string;
@@ -74,7 +69,7 @@ export interface DeliveryRecord {
   target?: string;
   wakeReason?: string;
   reason?: string; retryable?: boolean; errorCategory?: string;
-  /** Bounded missing-provider identity for builtin-Pi terminal auth; never a secret. */
+  /** Bounded provider identity for a terminal auth failure; never a secret. */
   authProvider?: string;
 }
 interface DeliveryFile { version: 1; records: DeliveryRecord[] }
@@ -258,36 +253,22 @@ function persistPreviousSession(agent: ManagedAgent, previous: PreviousSessionRe
   }
 }
 
-function isBuiltinPiAgent(agent: Pick<ManagedAgent, "adapter" | "config">): boolean {
-  return agent.adapter.id === "pi"
-    && (isBuiltinPiDistribution(agent.config.piDistribution) || agent.config.runtime === "builtin-pi");
-}
-
 function authFailureScopeOf(agent: Pick<ManagedAgent, "adapter" | "config">): AuthFailureScope {
   return {
     runtime: agent.config.runtime,
     model: agent.config.model,
-    piDistribution: agent.config.piDistribution,
     adapterId: agent.adapter.id,
   };
 }
 
 function currentAuthFailure(agent: ManagedAgent): PersistedAuthFailure | null {
   if (!agent.authFailureActive) return null;
-  const kind = agent.authFailureKind
-    ?? (agent.authFailureProvider ? "missing-provider" : "generic");
-  if (kind === "missing-provider") {
-    if (!agent.authFailureProvider) return null;
-    return { kind: "missing-provider", runtime: "pi", piDistribution: "builtin", provider: agent.authFailureProvider };
-  }
   const runtime = agent.adapter.id === "codex" || agent.adapter.id === "claude" || agent.adapter.id === "pi"
     ? agent.adapter.id : null;
   if (!runtime) return null;
   return {
-    kind: "generic",
+    kind: agent.authFailureKind === "missing-provider" ? "missing-provider" : "generic",
     runtime,
-    ...(runtime === "pi" && (agent.config.piDistribution === "builtin" || agent.config.piDistribution === "external")
-      ? { piDistribution: agent.config.piDistribution } : {}),
     provider: agent.authFailureProvider,
   };
 }
@@ -495,7 +476,6 @@ export function createRuntimeHost(options: {
     } : {}),
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
-    ...(config.piDistribution ? { LARKIN_PI_DISTRIBUTION: config.piDistribution } : {}),
     LARKIN_STATE_DIR: effectivePiStateDir(config),
     ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
     ...(process.env.SHELL ? { SHELL: process.env.SHELL } : {}),
@@ -743,11 +723,6 @@ export function createRuntimeHost(options: {
     }
   };
 
-  const ownedConfigDir = (): string | null => {
-    const value = process.env.LARKIN_CONFIG_DIR?.trim();
-    return value || null;
-  };
-
   const projectAuthFailure = (
     agent: ManagedAgent,
     readiness: RuntimeReadiness,
@@ -769,10 +744,7 @@ export function createRuntimeHost(options: {
   const namedAuthProviderPresent = (agent: ManagedAgent): boolean => {
     if (agent.authFailureKind !== "missing-provider" || !agent.authFailureProvider) return true;
     const failure = currentAuthFailure(agent);
-    if (!failure || !authFailureAppliesTo(authFailureScopeOf(agent), failure)) return false;
-    const configDir = ownedConfigDir();
-    if (!configDir) return false;
-    return officialPiHasStoredProvider(configDir, agent.config.agentId, agent.authFailureProvider);
+    return Boolean(failure && authFailureAppliesTo(authFailureScopeOf(agent), failure));
   };
 
   const resultFor = (agent: ManagedAgent, record: DeliveryRecord, result: RuntimeInputResult): DeliveryReceipt => {
@@ -786,24 +758,6 @@ export function createRuntimeHost(options: {
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId, status: "accepted" });
       return { status: "accepted", deliveryId: record.deliveryId };
-    }
-    const missing = result.status === "rejected" && isBuiltinPiAgent(agent)
-      ? classifyPiMissingCredentialRejection(result.reason)
-      : null;
-    if (missing) {
-      const readiness = missingProviderCredentialReadiness(agent.adapter.id, missing.provider);
-      const reason = readiness.reason ?? `Provider ${missing.provider} is missing from this Agent's official credential store.`;
-      if (record.status !== "error") {
-        record.reason = reason;
-        record.retryable = false;
-        record.errorCategory = "auth";
-        record.authProvider = missing.provider;
-        const finalRecord = setRecord(agent, record, "error");
-        if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
-          deliveryId: record.deliveryId, messageId: record.messageId, status: "error", reason });
-        projectAuthFailure(agent, readiness, { kind: "missing-provider", provider: missing.provider });
-      }
-      return { status: "error", deliveryId: record.deliveryId, reason: record.reason ?? reason, retryable: false };
     }
     if (record.status === "error") {
       return { status: "error", deliveryId: record.deliveryId, reason: record.reason ?? result.reason, retryable: false };
@@ -1669,22 +1623,13 @@ export function createRuntimeHost(options: {
       }));
       if (classifiedCategory) record.errorCategory = classifiedCategory;
       else delete record.errorCategory;
-      const missing = event.errorCategory === "auth" && !event.retryable && isBuiltinPiAgent(agent)
-        ? classifyPiMissingCredentialRejection(event.upstream?.message)
-          ?? classifyPiMissingCredentialRejection(event.message)
-        : null;
-      if (missing) record.authProvider = missing.provider;
       const finalRecord = setRecord(agent, record, event.retryable ? "pending" : "error");
       if (finalRecord.status !== "consumed") emit({ type: "delivery", agentId: agent.config.agentId,
         deliveryId: record.deliveryId, messageId: record.messageId,
         status: event.retryable ? "deferred" : "error", reason: event.message });
       if (event.errorCategory === "auth" && !event.retryable) {
-        const readiness = missing
-          ? missingProviderCredentialReadiness(agent.adapter.id, missing.provider)
-          : providerAuthenticationFailureReadiness(agent.adapter.id, event.upstream?.provider);
-        projectAuthFailure(agent, readiness, missing
-          ? { kind: "missing-provider", provider: missing.provider }
-          : { kind: "generic", provider: genericAuthProvider(agent, event.upstream) });
+        const readiness = providerAuthenticationFailureReadiness(agent.adapter.id, event.upstream?.provider);
+        projectAuthFailure(agent, readiness, { kind: "generic", provider: genericAuthProvider(agent, event.upstream) });
       }
       if (event.retryable && !agent.busy && !agent.turnInProgress) void retryPending(agent);
     } else if (event.type === "configuration-error") {
@@ -1923,7 +1868,6 @@ export function createRuntimeHost(options: {
             && authFailureAppliesTo({
               runtime: config.runtime,
               model: config.model,
-              piDistribution: config.piDistribution,
               adapterId: adapter.id,
             }, previousFailure));
           const candidate: ManagedAgent = {

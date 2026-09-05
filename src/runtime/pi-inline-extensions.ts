@@ -24,14 +24,14 @@ async function loadBundledPiSubagentExtension(): Promise<InlineExtension> {
   const compiled = globalThis.__LARKIN_COMPILED_PI_SUBAGENTS__;
   if (compiled) {
     if (typeof compiled !== "function" && typeof compiled.factory !== "function") {
-      throw new Error("Larkin compiled pi-subagents factory is missing; refusing to start builtin Pi");
+      throw new Error("Larkin compiled pi-subagents factory is missing; refusing to start Pi");
     }
     return compiled;
   }
   const bundle = bundledPiSubagentExtensionPath(process.env.LARKIN_CONFIG_DIR);
-  if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start builtin Pi");
+  if (!bundle) throw new Error("Larkin bounded pi-subagents bundle is unavailable; refusing to start Pi");
   const loaded = await import(pathToFileURL(bundle).href) as { default?: InlineExtension };
-  if (!loaded.default) throw new Error("Larkin bounded pi-subagents bundle is invalid; refusing to start builtin Pi");
+  if (!loaded.default) throw new Error("Larkin bounded pi-subagents bundle is invalid; refusing to start Pi");
   return loaded.default;
 }
 

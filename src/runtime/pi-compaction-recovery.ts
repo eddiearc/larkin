@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BUNDLED_PI_VERSION } from "./pi-provider-config.js";
+export const BUNDLED_PI_VERSION = "0.84.2";
 
 /** Fallback values used while importing a Pi profile, before Pi reports its model. */
 export const PI_CONTEXT_WINDOW = 272_000;
@@ -283,7 +283,7 @@ export interface PiCapabilityProbe {
 
 export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
   if (capabilities.version !== BUNDLED_PI_VERSION) throw new Error(`trusted Pi version ${BUNDLED_PI_VERSION} is required`);
-  if (capabilities.distribution === "external" && capabilities.trustedProtocol === true) {
+  if (capabilities.trustedProtocol === true) {
     throw new Error("external Pi cannot use the bundled trusted protocol bypass");
   }
   const contextWindow = capabilities.contextWindow ?? capabilities.model?.contextWindow;
@@ -295,7 +295,6 @@ export function verifyPiCapabilities(capabilities: PiCapabilityProbe): void {
     throw new Error("Pi effective native compaction is disabled");
   }
   if (capabilities.compactRpc !== true) throw new Error("Pi compact RPC capability is missing");
-  if (capabilities.distribution === "builtin" && capabilities.trustedProtocol === true) return;
   if (capabilities.reserveTokens !== expected.reserveTokens
       || capabilities.keepRecentTokens !== expected.keepRecentTokens) {
     throw new Error(`Pi external effective compaction reserve/keep settings are unproven for context window ${contextWindow}`);

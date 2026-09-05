@@ -9,7 +9,7 @@ import { discoverCodexModelCatalog, type DiscoverCodexCatalogOptions } from "../
 import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtime/pi-model-catalog.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { ownedPiCatalogAgentDir, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
-import { RUNTIME_OPTIONS, piCatalogDistributionForUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
+import { RUNTIME_OPTIONS, toUserRuntime } from "../runtime/user-runtime.js";
 import {
   configureBuiltinPiProvider,
   listBuiltinPiProviderCatalog,
@@ -458,7 +458,7 @@ export function createDashboardConfigController({
     const { config, configDir } = loadConfig(env);
     const agent = config.agents[agentId];
     if (!agent) throw new Error("unknown agent");
-    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(userRuntime), env);
+    const catalogCommand = piCatalogCommandSpec("external", env);
     return await piModelDirectoryResolver.resolve({
       agentId,
       cwd: agent.workspaceDir,

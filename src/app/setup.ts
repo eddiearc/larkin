@@ -187,8 +187,7 @@ export async function main(): Promise<void> {
   if (!OPT.nonInteractive) {
     const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
       agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
-      env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR,
-        ...(configuredAgent.piDistribution ? { LARKIN_PI_DISTRIBUTION: configuredAgent.piDistribution } : {}) } });
+      env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR } });
     if (runtimeReadiness.state !== "ready") {
       die(`Runtime ${configuredAgent.runtime} ${runtimeReadiness.state}：${runtimeReadiness.reason || "prerequisite unavailable"}；${runtimeReadiness.nextAction || "修复后重试"}`);
     }

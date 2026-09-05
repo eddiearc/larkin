@@ -21,7 +21,7 @@ import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
 import { assertBuiltinPiAgentDirectory, ownedPiCatalogAgentDir, piAgentDirectory, piCatalogCommandSpec } from "../runtime/pi-provider-config.js";
-import { RUNTIME_OPTIONS, fromUserRuntime, isUserRuntime, piCatalogDistributionForUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
+import { RUNTIME_OPTIONS, fromUserRuntime, isUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 
 interface RuntimeModel {
@@ -480,16 +480,7 @@ if (kind === "pi-distribution") {
         : "内置 Pi provider 尚未为该 Agent 配置。");
     }
   }
-  try {
-    const result = larkinConfig.mutateConfig(process.env, { kind: "set-agent-pi-distribution", agentId: selectedKey, distribution: requested as "builtin" | "external" }, { kind: "user" }, {
-      snapshotFile: snapshotFile as string, ...(importExternalProfile ? { importExternalProfile: true } : {}),
-    });
-    traceProcessBoundary(process.env, "agent-config:pi-distribution-persisted", { configDir, agentId: selectedKey, targetDir: piAgentDirectory(configDir, selectedKey), requested, applyState: result.applyState });
-    say(JSON.stringify({ ok: true, agentId: selectedKey, piDistribution: requested, revision: result.revision, applyState: result.applyState }));
-  } catch (error) {
-    if (importExternalProfile) die("Pi external profile import failed; no secret or private path was disclosed");
-    die(`Pi distribution 修改失败：${error instanceof Error ? error.message : String(error)}`);
-  }
+  die("Pi distribution was removed; install and log in with the external `pi` CLI");
   process.exit(0);
 }
 const catalog = larkinConfig.loadRuntimeModels();
@@ -521,7 +512,7 @@ const needsLivePiCatalog = (["model", "effort"].includes(kind) && agent.runtime 
   || (kind === "runtime" && (value === "pi" || value === "builtin-pi") && Boolean(flagModel));
 if (needsLivePiCatalog) {
   try {
-    const catalogCommand = piCatalogCommandSpec(piCatalogDistributionForUserRuntime(catalogUserRuntime), process.env);
+    const catalogCommand = piCatalogCommandSpec("external", process.env);
     piCatalog = await discoverPiModelCatalog({
       cwd: String(agent.workspaceDir),
       agentDir: ownedPiCatalogAgentDir(configDir, selectedKey),

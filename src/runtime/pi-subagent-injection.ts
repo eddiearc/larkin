@@ -195,7 +195,9 @@ type UserPiSubagentsWaitCapability = "absent" | "bounded" | "unbounded";
 
 function assertRegularFile(file: string): void {
   const stat = fs.lstatSync(file);
-  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("user Pi path is not a regular file");
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error("user Pi path is not a regular file");
+  }
 }
 
 function readRegularFile(file: string): string {
@@ -210,7 +212,7 @@ function isRealpathInside(root: string, candidate: string): boolean {
   return candidateReal.startsWith(prefix);
 }
 
-/** 只读包根内的常规文件；绝对路径、逃逸、符号链接一律视为不可验证。 */
+/** 只读包根内的单链接常规文件；绝对路径、逃逸、符号链接、硬链接一律视为不可验证。 */
 function readContainedPackageEntry(packageRoot: string, entry: string): string {
   if (path.isAbsolute(entry)) throw new Error("absolute Pi extension entry");
   const root = path.resolve(packageRoot);

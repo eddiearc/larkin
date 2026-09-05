@@ -199,8 +199,13 @@ test("injection resolvers never open the user's Pi auth.json", async () => {
 
 function trackFsOpens() {
   const opened = [];
-  const track = (orig) => function tracked(...args) {
-    if (args[0] !== undefined && args[0] !== null) opened.push(path.resolve(String(args[0])));
+  const reads = [];
+  const track = (orig, read) => function tracked(...args) {
+    if (args[0] !== undefined && args[0] !== null) {
+      const resolved = path.resolve(String(args[0]));
+      opened.push(resolved);
+      if (read) reads.push(resolved);
+    }
     return orig.apply(this, args);
   };
   const originals = {
@@ -212,9 +217,12 @@ function trackFsOpens() {
     lstatSync: fs.lstatSync,
     realpathSync: fs.realpathSync,
   };
-  for (const [name, orig] of Object.entries(originals)) fs[name] = track(orig);
+  for (const [name, orig] of Object.entries(originals)) {
+    fs[name] = track(orig, name === "readFileSync" || name === "openSync" || name === "accessSync");
+  }
   return {
     opened,
+    reads,
     restore() {
       for (const [name, orig] of Object.entries(originals)) fs[name] = orig;
     },
@@ -261,6 +269,44 @@ test("manifest extension escapes and symlink entries are unverifiable and never 
         () => "/tmp/fake/pi-subagents.bundle.js",
       ), /WARNING: refusing external Pi.*unbounded or unverifiable/, fixture.name);
       assert.equal(spy.opened.some((file) => path.basename(file) === "auth.json"), false, `${fixture.name}: ${JSON.stringify(spy.opened)}`);
+    } finally {
+      spy.restore();
+      try { fs.chmodSync(canary, 0o600); } catch { /* cleanup */ }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("hard-linked settings, manifest, and entry are unverifiable and never read auth.json", async () => {
+  const { resolvePiSubagentExtensionArg } = await import("../../../dist/runtime/pi-subagent-injection.mjs");
+  const cases = [
+    { name: "settings", extensions: ["./src/index.ts"], link: "settings.json" },
+    { name: "manifest", extensions: ["./src/index.ts"], link: "package.json" },
+    { name: "entry", extensions: ["./evil.js"], link: "evil.js" },
+  ];
+  for (const fixture of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-subagents-hardlink-${fixture.name}-`));
+    const agentDir = path.join(root, ".pi", "agent");
+    fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    const canary = path.join(agentDir, "auth.json");
+    fs.writeFileSync(canary, `${JSON.stringify({ canary: "do-not-read" })}\n`, { mode: 0o600 });
+    const packageDir = writeInstalledPiSubagentsPackage(agentDir, fixture.extensions);
+    fs.writeFileSync(path.join(packageDir, "src", "index.ts"),
+      "larkin-pi-subagents-bounded-wait-v1\nlarkin-pi-supervised-command-v1");
+    const linked = fixture.link === "settings.json" ? path.join(agentDir, "settings.json")
+      : path.join(packageDir, fixture.link);
+    fs.rmSync(linked, { force: true });
+    fs.linkSync(canary, linked);
+    fs.chmodSync(canary, 0o000);
+    const spy = trackFsOpens();
+    try {
+      assert.throws(() => resolvePiSubagentExtensionArg(
+        { distribution: "external", piCommand: "pi", env: { HOME: root, PI_CODING_AGENT_DIR: agentDir } },
+        () => ({ major: 0, minor: 84 }),
+        () => "/tmp/fake/pi-subagents.bundle.js",
+      ), /WARNING: refusing external Pi.*unbounded or unverifiable/, fixture.name);
+      const readCanary = spy.reads.some((file) => file === canary || file === linked);
+      assert.equal(readCanary, false, `${fixture.name}: ${JSON.stringify(spy.reads)}`);
     } finally {
       spy.restore();
       try { fs.chmodSync(canary, 0o600); } catch { /* cleanup */ }

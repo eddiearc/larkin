@@ -16,7 +16,6 @@ import {
   requirePiResumeSessionFile,
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
-import { classifyPiMissingCredentialRejection } from "../../../dist/runtime/runtime-readiness.mjs";
 import {
   buildCanonicalPiSubagentAssistantMessage,
   buildCanonicalPiSubagentNotificationContent,
@@ -886,20 +885,7 @@ test("Pi adapter maps prompt, steer and abort to its process backend", async () 
   assert.deepEqual(calls, [["prompt", "one"], ["steer", "two"], ["abort"]]);
 });
 
-test.each(["win32", "linux"])("builtin Pi resolves no -e extension args on simulated %s", (platform) => {
-  let resolverCalls = 0;
-  const args = resolvePiProcessExtensionArgs({
-    distribution: "builtin", piCommand: "builtin-pi", env: {}, platform,
-  }, {
-    subagents: () => { resolverCalls += 1; return "/must/not/resolve-subagents.js"; },
-    bashTimeout: () => { resolverCalls += 1; return "/must/not/resolve-bash-timeout.js"; },
-    recordWatchdog: () => { resolverCalls += 1; return "/must/not/resolve-record-watchdog.js"; },
-  });
-  assert.deepEqual(args, []);
-  assert.equal(resolverCalls, 0, "builtin must not resolve file-based extensions");
-});
-
-test.each(["win32", "linux"])("external Pi retains all -e extension args on simulated %s", (platform) => {
+test.each(["win32", "linux"])("Pi retains all -e extension args on simulated %s", (platform) => {
   const args = resolvePiProcessExtensionArgs({
     distribution: "external", piCommand: "external-pi", env: {}, platform,
   }, {
@@ -914,8 +900,8 @@ test.each(["win32", "linux"])("external Pi retains all -e extension args on simu
   ], "watchdog must precede the subagent extension so shutdown can still read getRecord");
 });
 
-test.each(["external", "builtin"])("%s Pi launches one shared append standing-prompt path without replacement", async (distribution) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-pi-single-prompt-${distribution}-`));
+test("Pi launches one shared append standing-prompt path without replacement", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-single-prompt-"));
   const child = new FakeProcess();
   child.kill = (signal) => {
     child.killed.push(signal);
@@ -926,8 +912,7 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
   try {
     const input = create({
       workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "default",
-      resumeSessionId: `resume-${distribution}`,
-      env: distribution === "builtin" ? { LARKIN_PI_DISTRIBUTION: "builtin", LARKIN_CONFIG_DIR: path.join(root, "config") } : {},
+      resumeSessionId: "resume-pi",
     });
     fs.mkdirSync(input.workspaceDir, { recursive: true });
     const sessionDir = path.join(input.stateDir, "runtime", "pi-sessions");
@@ -935,16 +920,15 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     const sessionFile = path.join(sessionDir, `${input.resumeSessionId}.jsonl`);
     fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: input.resumeSessionId })}\n`);
     const piCommand = "/fixture/external-pi";
-    const inheritedPackageDir = path.join(root, ".larkin-official-pi-package");
     const pending = createNativeRuntimeAdapter("pi", {
-      env: { LARKIN_PI_COMMAND: piCommand, PI_PACKAGE_DIR: inheritedPackageDir },
+      env: { LARKIN_PI_COMMAND: piCommand },
       resolvePiProcessExtensionArgs: () => [],
       spawn: (command, args, options) => { launch = { command, args: [...args], options }; return child; },
     }).createSession(input);
     await new Promise((resolve) => setImmediate(resolve));
     for (const request of child.writes.slice(0, 2)) {
       const data = request.type === "get_state"
-        ? { sessionId: `session-${distribution}`, model: { provider: "fixture", id: "model" }, thinkingLevel: "off" }
+        ? { sessionId: "session-pi", model: { provider: "fixture", id: "model" }, thinkingLevel: "off" }
         : { models: [{ provider: "fixture", id: "model" }] };
       child.stdout.write(`${JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data })}\n`);
     }
@@ -958,29 +942,20 @@ test.each(["external", "builtin"])("%s Pi launches one shared append standing-pr
     const promptFile = launch.args[appendIndex + 1];
     assert.equal(fs.readFileSync(promptFile, "utf8"), "standing");
     if (process.platform !== "win32") assert.equal(fs.statSync(promptFile).mode & 0o777, 0o600);
-    if (distribution === "external") {
-      assert.equal(launch.command, piCommand);
-      assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
-      assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
-      assert.equal(launch.options.env.PI_PACKAGE_DIR, undefined);
-    } else {
-      assert.ok(launch.args.includes("__internal") && launch.args.includes("pi-rpc"));
-      assert.equal(launch.args.includes("-e"), false, "builtin extensions are passed inline by binary-entry");
-      assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, "builtin");
-      assert.equal(launch.options.env.PI_TELEMETRY, "0");
-      assert.equal(launch.options.env.PI_PACKAGE_DIR, inheritedPackageDir);
-    }
+    assert.equal(launch.command, piCommand);
+    assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
+    assert.equal(launch.options.env.LARKIN_PI_DISTRIBUTION, undefined);
     await session.close("test complete");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("inherited builtin PI_PACKAGE_DIR does not drop production extension version probes", async () => {
+test("inherited PI_PACKAGE_DIR does not drop production extension version probes", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-inherited-ext-"));
-  const packageDir = path.join(root, ".larkin-official-pi-package");
-  fs.mkdirSync(path.join(packageDir, "theme"), { recursive: true });
-  fs.writeFileSync(path.join(packageDir, "theme", "dark.json"), "{}\n");
+  const packageDir = path.join(root, "pi-package");
+  fs.mkdirSync(path.join(packageDir, "dist", "modes", "interactive", "theme"), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "dist", "modes", "interactive", "theme", "dark.json"), "{}\n");
   const { command, commandArgs, log } = makeProductionPiCommand(root);
   const input = create({
     workspaceDir: path.join(root, "workspace"), stateDir: path.join(root, "state"), model: "test-provider/test-model",
@@ -998,7 +973,6 @@ test("inherited builtin PI_PACKAGE_DIR does not drop production extension versio
     const rows = readProductionPiLog(log);
     const versions = rows.filter((row) => row.kind === "argv" && row.args.includes("--version"));
     assert.ok(versions.length >= 1, JSON.stringify(rows));
-    assert.equal(versions.every((row) => row.packageDir == null), true, JSON.stringify(versions));
     const sessionLaunch = rows.find((row) => row.kind === "argv" && row.args.includes("--session-dir"));
     assert.ok(sessionLaunch, JSON.stringify(rows));
     const extensionPaths = [];
@@ -1235,7 +1209,7 @@ test("bundled Pi emits content-free RPC timing phases while preserving normalize
   assert.deepEqual(observations.map((event) => event.phase), [
     "rpc_submit", "rpc_accepted", "turn_start", "first_output", "tool_call", "agent_end", "completed", "tool_result", "settled",
   ]);
-  assert.ok(observations.every((event) => event.runtime === "pi" && event.distribution === "builtin"));
+  assert.ok(observations.every((event) => event.runtime === "pi" && event.distribution === "external"));
   assert.equal(events.filter((event) => event.type === "turn-start").length, 1);
   assert.equal(events.filter((event) => event.type === "turn-end").length, 1);
   assert.doesNotMatch(JSON.stringify(observations), /answer|read|out-of-order|FORBIDDEN|toolName|toolResult|message|text/);
@@ -1389,8 +1363,6 @@ test("Pi provider failures preserve safe actionable categories", () => {
     [{ status: 429, message: "too many requests" }, "rate_limit"],
     [{ status: 401, message: "credentials rejected Bearer fixture-secret" }, "auth"],
     [{ provider: "bigmodel-anthropic", code: "key_command_failed", message: "API key auth failed: resolver command exited nonzero at /Users/example/cc-switch-token" }, "auth"],
-    [{ provider: "zai-coding-cn", message: "No API key found for zai-coding-cn" }, "auth", { distribution: "builtin" }],
-    [{ message: "Pi RPC prompt failed: No login found for zai-coding-cn" }, "auth", { distribution: "builtin" }],
     [{ status: 403, message: "billing policy review" }, "provider"],
   ]) {
     const result = classifyPiProviderError(upstream, scope);
@@ -1408,14 +1380,12 @@ test("Pi provider failures preserve safe actionable categories", () => {
   ]) {
     assert.equal(classifyPiProviderError(upstream).category, "provider");
   }
-  const missing = classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "builtin" });
-  assert.match(missing.reason, /zai-coding-cn.*missing/i);
-  assert.match(missing.nextAction, /pi-auth login zhipu --agent <App ID>/);
-  assert.match(missing.nextAction, /Provider Credentials/);
-  assert.doesNotMatch(missing.reason + missing.nextAction, /larkin setup|profile import|import-external-profile|fixture-secret/i);
-  assert.doesNotMatch(missing.nextAction, /zai-coding-cn/);
   assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }).category, "provider");
   assert.equal(classifyPiProviderError({ message: "No API key found for zai-coding-cn" }, { distribution: "external" }).category, "provider");
+  assert.doesNotMatch(
+    classifyPiProviderError({ message: "No API key found for zai-coding-cn" }).nextAction,
+    /pi-auth|Provider Credentials|import-external-profile/,
+  );
   const unknown = classifyPiProviderError({ provider: "gateway", code: "server_error", status: 502,
     message: "unusual failure Authorization: Bearer auth-secret Cookie=session-secret request body: {\"description\":\"useful detail\",\"api_key\":\"private\"}" });
   assert.equal(unknown.category, "provider");
@@ -1452,40 +1422,7 @@ test("Pi carries the structured 0.82 provider fixture without flattening fields 
   }
 });
 
-test("Pi prompt rejection of an explicit missing credential is terminal auth", async () => {
-  const fixture = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "../../fixtures/runtime/pi-missing-credential.json"), "utf8"));
-  for (const message of [fixture.absentKey, fixture.rpcWrappedAbsentKey, fixture.absentLogin]) {
-    const sdk = { sessionId: "pi-missing-key", prompt() { throw new Error(message); }, steer() {}, abort() {},
-      subscribe() { return () => {}; } };
-    const session = await createNativeRuntimeAdapter("pi", {
-      createPiSession: async () => sdk, env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-    }).createSession(create({ env: { LARKIN_PI_DISTRIBUTION: "builtin" } }));
-    const events = [];
-    session.subscribe((event) => events.push(event));
-    const result = await session.prompt({ inputId: "pi-missing-a", kind: "user", text: "work", attempt: 0 });
-    assert.deepEqual(result, {
-      status: "rejected", inputId: "pi-missing-a", retryable: false,
-      reason: "Provider zai-coding-cn is missing from this Agent's official credential store.",
-    });
-    const failure = events.find((event) => event.type === "input-error");
-    assert.equal(failure.errorCategory, "auth");
-    assert.equal(failure.retryable, false);
-    assert.equal(failure.willRetry, false);
-    assert.equal(failure.upstream.provider, "zai-coding-cn");
-    assert.match(failure.nextAction, /pi-auth login zhipu --agent <App ID>/);
-    assert.doesNotMatch(JSON.stringify(failure), /fixture-secret|larkin setup|profile import|import-external-profile/i);
-    assert.doesNotMatch(failure.nextAction, /zai-coding-cn/);
-    assert.equal(classifyPiMissingCredentialRejection(message)?.provider, "zai-coding-cn");
-  }
-  const transientSdk = { sessionId: "pi-transient", prompt() { throw new Error("fetch failed: provider overloaded"); },
-    steer() {}, abort() {}, subscribe() { return () => {}; } };
-  const transient = await createNativeRuntimeAdapter("pi", { createPiSession: async () => transientSdk }).createSession(create());
-  assert.deepEqual(await transient.prompt({ inputId: "pi-transient-a", kind: "user", text: "work", attempt: 0 }), {
-    status: "rejected", inputId: "pi-transient-a", retryable: true, reason: "fetch failed: provider overloaded",
-  });
-});
-
-test("external Pi keeps a matching missing-key prompt rejection retryable", async () => {
+test("Pi keeps a matching missing-key prompt rejection retryable", async () => {
   const sdk = { sessionId: "pi-external-missing-key", prompt() { throw new Error("No API key found for zai-coding-cn"); },
     steer() {}, abort() {}, subscribe() { return () => {}; } };
   const session = await createNativeRuntimeAdapter("pi", {

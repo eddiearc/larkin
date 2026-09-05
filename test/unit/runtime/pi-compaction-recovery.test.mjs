@@ -129,10 +129,10 @@ test("external capability guard fails closed and accepts only the required Pi pr
     distribution: "external", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
   }), /external|trusted|unproven/i);
-  assert.doesNotThrow(() => verifyPiCapabilities({
+  assert.throws(() => verifyPiCapabilities({
     distribution: "builtin", version: "0.84.2", contextWindow: 272_000, autoCompactionEnabled: true,
     compactRpc: true, trustedProtocol: true,
-  }));
+  }), /external|trusted|unproven/i);
 });
 
 test("breaker refuses operations without an explicit canonical lock", () => {

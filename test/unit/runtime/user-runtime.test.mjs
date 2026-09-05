@@ -5,24 +5,25 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const {
-  RUNTIME_OPTIONS, fromUserRuntime, isAdapterRuntime, isUserRuntime, piCatalogDistributionForUserRuntime,
+  RUNTIME_OPTIONS, fromUserRuntime, isAdapterRuntime, isUserRuntime,
   runtimeOptionOf, runtimeOptionTarget, toUserRuntime,
 } = await import(pathToFileURL(path.join(ROOT, "dist/runtime/user-runtime.mjs")).href);
 
-test("user-facing siblings project to stored adapter id plus distribution", () => {
-  assert.deepEqual([...RUNTIME_OPTIONS], ["codex", "claude", "pi", "builtin-pi"]);
-  assert.deepEqual(fromUserRuntime("builtin-pi"), { runtime: "pi", piDistribution: "builtin" });
-  assert.deepEqual(runtimeOptionTarget("pi"), { runtime: "pi", piDistribution: "external" });
+test("user-facing runtimes are the three external ids", () => {
+  assert.deepEqual([...RUNTIME_OPTIONS], ["codex", "claude", "pi"]);
+  assert.deepEqual(fromUserRuntime("pi"), { runtime: "pi" });
+  assert.deepEqual(runtimeOptionTarget("pi"), { runtime: "pi" });
   assert.deepEqual(fromUserRuntime("codex"), { runtime: "codex" });
   assert.deepEqual(fromUserRuntime("claude"), { runtime: "claude" });
-  assert.equal(toUserRuntime("pi", "builtin"), "builtin-pi");
-  assert.equal(runtimeOptionOf({ runtime: "pi", piDistribution: "external" }), "pi");
   assert.equal(toUserRuntime("pi"), "pi");
-  assert.equal(toUserRuntime("pi", null), "pi");
+  assert.equal(runtimeOptionOf({ runtime: "pi" }), "pi");
   assert.equal(toUserRuntime("codex"), "codex");
-  assert.equal(piCatalogDistributionForUserRuntime("builtin-pi"), "builtin");
-  assert.equal(piCatalogDistributionForUserRuntime("pi"), "external");
-  assert.equal(isUserRuntime("builtin-pi"), true);
+  assert.equal(isUserRuntime("pi"), true);
+  assert.equal(isUserRuntime("codex"), true);
+  assert.equal(isUserRuntime("claude"), true);
+  assert.equal(isUserRuntime("builtin-pi"), false);
   assert.equal(isAdapterRuntime("builtin-pi"), false);
   assert.equal(isAdapterRuntime("pi"), true);
+  assert.throws(() => fromUserRuntime("builtin-pi"), /未知 runtime：builtin-pi/);
+  assert.throws(() => runtimeOptionTarget("builtin-pi"), /未知 runtime：builtin-pi/);
 });

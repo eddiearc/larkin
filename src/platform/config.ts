@@ -726,7 +726,7 @@ function assertConfigRoot(root: string): void {
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("config root owner is unsafe");
 }
 
-function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
+function acquireConfigLock(layout: TargetRootLayout): { release: () => void } {
   assertNoSymlinkAncestors(layout.root);
   fs.mkdirSync(layout.root, { recursive: true, mode: 0o700 });
   const rootStat = fs.lstatSync(layout.root);
@@ -754,15 +754,40 @@ function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
     }
   }
   if (!acquired) throw new Error("配置正被其他进程修改，请稍后重试");
+  return {
+    release() {
+      const current = readLockRecord(lock);
+      if (current?.record?.nonce === owner.nonce && current.record.pid === owner.pid) {
+        try { fs.unlinkSync(lock); fsyncDirectoryOf(lock); } catch { /* best effort */ }
+      }
+    },
+  };
+}
+
+function withConfigLock<T>(layout: TargetRootLayout, action: () => T): T {
+  const held = acquireConfigLock(layout);
   try {
     recoverMigrationJournal(layout.root);
     recoverRollbackJournal(layout.root);
     return action();
   } finally {
-    const current = readLockRecord(lock);
-    if (current?.record?.nonce === owner.nonce && current.record.pid === owner.pid) {
-      try { fs.unlinkSync(lock); fsyncDirectoryOf(lock); } catch { /* best effort */ }
-    }
+    held.release();
+  }
+}
+
+export function withConfigMutationLock<T>(env: Env, action: () => T): T {
+  return withConfigLock(TargetRootLayout.fromConfigDir(resolveConfigDir(env)), action);
+}
+
+export async function withConfigMutationLockAsync<T>(env: Env, action: () => Promise<T>): Promise<T> {
+  const layout = TargetRootLayout.fromConfigDir(resolveConfigDir(env));
+  const held = acquireConfigLock(layout);
+  try {
+    recoverMigrationJournal(layout.root);
+    recoverRollbackJournal(layout.root);
+    return await action();
+  } finally {
+    held.release();
   }
 }
 

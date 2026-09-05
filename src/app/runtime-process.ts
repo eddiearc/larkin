@@ -6,35 +6,95 @@ import { ContextPromptBuilder } from "../agent/context-prompt.js";
 import { createNativeRuntimeAdapter } from "../runtime/runtime-adapters.js";
 import { createRuntimeHost, type RuntimeHost } from "../runtime/runtime-host.js";
 import { createAgentStateStore } from "../agent/agent-state-store.js";
-import { loadConfig, markConfigApplied, runtimeConfigSignature } from "../platform/config.js";
+import {
+  loadConfig, markConfigApplied, runtimeConfigSignature,
+  withConfigMutationLock, withConfigMutationLockAsync,
+} from "../platform/config.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
 import { createAgentControlServer, requestSupervisorAgentUpsert } from "./local-control.js";
-import { hydrateRuntimeAgent, syncAgentProfile, type RuntimeAgentConfigDependencies } from "./runtime-agent-config.js";
+import {
+  hydrateRuntimeAgent, syncAgentProfile,
+  type RuntimeAgentConfig, type RuntimeAgentConfigDependencies,
+} from "./runtime-agent-config.js";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
 import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
 import { packageVersion } from "../platform/build-info.js";
 
 type HostShellOptions = Parameters<typeof createHostShell>[0];
+type LoadedRuntimeConfig = ReturnType<typeof loadConfig>;
+
+export interface RuntimeAgentApplyOptions {
+  expectedSignature?: string;
+  /** 测试缝：签名校验已通过、尚未 hydrate/profile/Host upsert。不是兼容回退。 */
+  afterCanonicalValidate?: () => void;
+}
+
+function readRuntimeAgent(
+  env: NodeJS.ProcessEnv,
+  agentId: string,
+  expectedSignature?: string,
+): { loaded: LoadedRuntimeConfig; stored: LoadedRuntimeConfig["config"]["agents"][string] } {
+  const loaded = loadConfig(env);
+  const stored = loaded.config.agents[agentId];
+  if (!stored) throw new Error(`Agent ${agentId} 不存在于 canonical config`);
+  if (expectedSignature) {
+    const current = runtimeConfigSignature(loaded.config, agentId);
+    if (current !== expectedSignature) {
+      throw new Error("配置在 apply 期间发生变化；未热加载已切换的 Agent");
+    }
+  }
+  return { loaded, stored };
+}
+
+function hydrateAndSyncRuntimeAgent(
+  env: NodeJS.ProcessEnv,
+  loaded: LoadedRuntimeConfig,
+  stored: LoadedRuntimeConfig["config"]["agents"][string],
+  dependencies: RuntimeAgentConfigDependencies,
+): RuntimeAgentConfig {
+  const agent = hydrateRuntimeAgent(loaded.configDir, stored);
+  syncAgentProfile(agent, { ...env, LARKIN_CONFIG_DIR: loaded.configDir }, dependencies);
+  return agent;
+}
 
 export function loadAndSyncRuntimeAgent(
   env: NodeJS.ProcessEnv,
   agentId: string,
   dependencies: RuntimeAgentConfigDependencies = {},
-  options: { expectedSignature?: string } = {},
+  options: RuntimeAgentApplyOptions = {},
 ) {
-  const loaded = loadConfig(env);
-  const stored = loaded.config.agents[agentId];
-  if (!stored) throw new Error(`Agent ${agentId} 不存在于 canonical config`);
-  // 先对权威签名 CAS，再 hydrate/sync，避免热加载已切换 runtime 的 Agent。
-  if (options.expectedSignature) {
-    const current = runtimeConfigSignature(loaded.config, agentId);
-    if (current !== options.expectedSignature) {
-      throw new Error("配置在 apply 期间发生变化；未热加载已切换的 Agent");
-    }
+  const snapshot = readRuntimeAgent(env, agentId, options.expectedSignature);
+  options.afterCanonicalValidate?.();
+  if (!options.expectedSignature) {
+    return hydrateAndSyncRuntimeAgent(env, snapshot.loaded, snapshot.stored, dependencies);
   }
-  const agent = hydrateRuntimeAgent(loaded.configDir, stored);
-  syncAgentProfile(agent, { ...env, LARKIN_CONFIG_DIR: loaded.configDir }, dependencies);
-  return agent;
+  return withConfigMutationLock(env, () => {
+    const locked = readRuntimeAgent(env, agentId, options.expectedSignature);
+    return hydrateAndSyncRuntimeAgent(env, locked.loaded, locked.stored, dependencies);
+  });
+}
+
+/** 签名校验贯穿实际 Host upsert；并发 config mutation 不能热挂载已失效的 snapshot。 */
+export async function applyRuntimeAgentUpsert(
+  env: NodeJS.ProcessEnv,
+  agentId: string,
+  dependencies: RuntimeAgentConfigDependencies = {},
+  options: RuntimeAgentApplyOptions = {},
+  upsert: (agent: RuntimeAgentConfig) => unknown = () => undefined,
+): Promise<RuntimeAgentConfig> {
+  const snapshot = readRuntimeAgent(env, agentId, options.expectedSignature);
+  options.afterCanonicalValidate?.();
+  if (!options.expectedSignature) {
+    const agent = hydrateAndSyncRuntimeAgent(env, snapshot.loaded, snapshot.stored, dependencies);
+    await upsert(agent);
+    return agent;
+  }
+  return withConfigMutationLockAsync(env, async () => {
+    const locked = readRuntimeAgent(env, agentId, options.expectedSignature);
+    const agent = hydrateAndSyncRuntimeAgent(env, locked.loaded, locked.stored, dependencies);
+    await upsert(agent);
+    return agent;
+  });
 }
 
 export async function markConfigAppliedAfterRuntimeReady(
@@ -119,12 +179,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
     larkinHome: env.LARKIN_HOME,
     authorityToken: env.LARKIN_CONTROL_AUTHORIZATION,
     async upsert(request) {
-      const agent = loadAndSyncRuntimeAgent(env, request.agentId, {}, {
+      const agent = await applyRuntimeAgentUpsert(env, request.agentId, {}, {
         ...(request.expectedSignature ? { expectedSignature: request.expectedSignature } : {}),
-      });
+      }, (candidate) => hostShell.upsertAgent(candidate));
       // Only the selected profile is synchronized; active profiles and their directory
       // are never quarantined or rebuilt during hot attach.
-      await hostShell.upsertAgent(agent);
       const tracked = await requestSupervisorAgentUpsert({
         larkinHome: env.LARKIN_HOME as string, agentId: agent.agentId, operationId: request.operationId,
       });

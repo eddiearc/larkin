@@ -323,6 +323,66 @@ test("a post-mutation runtime switch cannot hot-reload the switched Agent", asyn
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test("a post-validation switch before Host upsert cannot hot-attach stale builtin config", async () => {
+  const { configureBuiltinPiProvider } = await loadLogin();
+  const { mutateConfig, runtimeConfigSignature } = await import(`${pathToFileURL(path.join(ROOT, "dist/platform/config.mjs")).href}?t=${Date.now()}`);
+  const { applyRuntimeAgentUpsert } = await import(`${pathToFileURL(path.join(ROOT, "dist/app/runtime-process.mjs")).href}?t=${Date.now()}`);
+  const { temp, target, other, env } = seedHome();
+  const secret = "post-validate-host-upsert-secret";
+  const hostUpserts = [];
+  const appliedMarks = [];
+  let expectedAfterMutate;
+  try {
+    const result = await configureBuiltinPiProvider({
+      agentId: target, preset: "deepseek", apiKey: secret, env,
+    }, {
+      createRuntime: async () => ({}),
+      runLogin: async (_runtime, providerId) => {
+        writeLogin(path.join(temp, "providers", "pi", target, "auth.json"), providerId, secret);
+        return { type: "api_key", key: secret };
+      },
+      mutateConfig: (mutateEnv, mutation, authority) => {
+        const mutated = mutateConfig(mutateEnv, mutation, authority);
+        expectedAfterMutate = runtimeConfigSignature(mutated.config, target);
+        return mutated;
+      },
+      readProcessState: () => ({ daemon: { state: "owned" }, supervisor: { state: "owned" } }),
+      requestUpsert: async (input) => {
+        try {
+          await applyRuntimeAgentUpsert(env, input.agentId, {
+            runOfficialCli: () => { throw new Error("profile sync must not run after a post-validation switch"); },
+          }, {
+            expectedSignature: input.expectedSignature,
+            afterCanonicalValidate: () => {
+              mutateConfig(env, { kind: "set-agent-pi-distribution", agentId: target, distribution: "external" }, { kind: "user" });
+            },
+          }, (agent) => {
+            hostUpserts.push({ agentId: agent.agentId, runtime: agent.runtime, piDistribution: agent.piDistribution });
+          });
+          return { ok: true, operationId: "op", agentId: input.agentId };
+        } catch (error) {
+          return { ok: false, operationId: "op", agentId: input.agentId,
+            error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      markApplied: (_env, agentId, signature) => { appliedMarks.push({ agentId, signature }); },
+    });
+    assert.equal(result.applyState, "pending");
+    assert.match(result.applyError, /配置在 apply 期间发生变化|未热加载/);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(secret));
+    assert.match(expectedAfterMutate, /^sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(hostUpserts, []);
+    assert.deepEqual(appliedMarks, []);
+    const config = JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8"));
+    assert.equal(config.agents[target].runtime, "pi");
+    assert.equal(config.agents[target].piDistribution, "external");
+    assert.equal(config.agents[target].model, "deepseek/deepseek-v4-pro");
+    assert.equal(config.agents[other].model, "kimi/kimi-k2.6");
+    const auth = JSON.parse(fs.readFileSync(path.join(temp, "providers", "pi", target, "auth.json"), "utf8"));
+    assert.equal(auth.deepseek.key, secret);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("a concurrent runtime switch cannot bind a builtin model or upsert the switched Agent", async () => {
   const { configureBuiltinPiProvider } = await loadLogin();
   const { mutateConfig } = await import(`${pathToFileURL(path.join(ROOT, "dist/platform/config.mjs")).href}?t=${Date.now()}`);

@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "purpose": "Single mechanism removal patches for the inbox audit ablation matrix.",
+  "variants": [
+    {
+      "patch": "195-no-eligibility.patch",
+      "baseSHA": "8e82546dcbe85d9a3056b6f9db7ac4e2f9aae610",
+      "mechanism": "Eligibility gate",
+      "expected_change": "Allows audit target observation without requiring event.wake=true; authoritative human group/topic, sender, and scan-authority checks remain.",
+      "scope": ["src/agent/missed-outbound-scan.ts"]
+    },
+    {
+      "patch": "195-no-empty.patch",
+      "baseSHA": "8e82546dcbe85d9a3056b6f9db7ac4e2f9aae610",
+      "mechanism": "Nonempty dispatch gate",
+      "expected_change": "Makes the Host heartbeat dispatch predicate always true, while retaining the existing heartbeat timer and Agent iteration.",
+      "scope": ["src/feishu/host-shell.ts"]
+    },
+    {
+      "patch": "combined-no-completion.patch",
+      "baseSHA": "132d80ceb90eb3126400d3ef22951f43ee639768",
+      "mechanism": "Completion on audit read",
+      "expected_change": "Removes the Agent CLI completion call so an audit read no longer marks pending rows completed; the normal audit JSON output remains.",
+      "scope": ["src/app/agent-cli.ts"]
+    },
+    {
+      "patch": "combined-keep-v1.patch",
+      "baseSHA": "132d80ceb90eb3126400d3ef22951f43ee639768",
+      "mechanism": "v1 discard",
+      "expected_change": "Admits legacy v1 rows as pending v2 rows for measurement. This deliberately removes the provenance safety boundary and is an unsafe experiment.",
+      "scope": ["src/agent/missed-outbound-scan.ts"],
+      "unsafe_experiment": true
+    },
+    {
+      "patch": "combined-no-io-bounds.patch",
+      "baseSHA": "132d80ceb90eb3126400d3ef22951f43ee639768",
+      "mechanism": "Bounded registry I/O",
+      "expected_change": "Restores readFileSync loading and removes byte/row write and load caps while preserving v2 parsing, eligibility, pending lifecycle, and bounded diagnostics.",
+      "scope": ["src/agent/missed-outbound-scan.ts"]
+    }
+  ],
+  "verification": {
+    "method": "git apply --check against a clean temporary tree at each variant baseSHA",
+    "production_flags_added": false,
+    "live_services_used": false
+  }
+}

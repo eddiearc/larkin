@@ -1,0 +1,71 @@
+diff --git a/src/agent/missed-outbound-scan.ts b/src/agent/missed-outbound-scan.ts
+index ffb813b..339dd36 100644
+--- a/src/agent/missed-outbound-scan.ts
++++ b/src/agent/missed-outbound-scan.ts
+@@ -11,10 +11,6 @@ export const INBOX_AUDIT_LEGACY_MIGRATION_NON_GOAL = "New versions no longer cre
+ // Pending audits are bounded so a heartbeat cannot accumulate an unbounded work list.
+ export const MAX_INBOX_AUDIT_TARGETS = 96;
+ const MAX_STORED_TARGETS = MAX_INBOX_AUDIT_TARGETS;
+-// Periodic heartbeat reads this file through a cap+1 fd buffer. Fail closed
+-// instead of parsing, slicing, or rewriting an oversized registry.
+-export const MAX_INBOX_AUDIT_REGISTRY_BYTES = 64 * 1024;
+-export const MAX_INBOX_AUDIT_REGISTRY_ROWS = MAX_INBOX_AUDIT_TARGETS;
+ const CHAT = /^oc_[A-Za-z0-9]+$/;
+ const THREAD = /^omt_[A-Za-z0-9]+$/;
+ const ANCHOR = /^om_[A-Za-z0-9_-]+$/;
+@@ -52,35 +48,15 @@ function emptyRegistry(): AuditRegistry {
+ 
+ function load(file: string): AuditRegistry {
+   let value: { version?: unknown; targets?: unknown };
+-  let fd: number | undefined;
+-  let bytes: Buffer;
+-  try {
+-    fd = fs.openSync(file, fs.constants.O_RDONLY
+-      | (fs.constants.O_NOFOLLOW || 0)
+-      | (fs.constants.O_NONBLOCK || 0));
+-    const stat = fs.fstatSync(fd);
+-    if (!stat.isFile()) throw new Error("inbox audit registry is not a regular file");
+-    const buffer = Buffer.alloc(MAX_INBOX_AUDIT_REGISTRY_BYTES + 1);
+-    let offset = 0;
+-    while (offset < buffer.length) {
+-      const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+-      if (read === 0) break;
+-      offset += read;
+-    }
+-    if (offset > MAX_INBOX_AUDIT_REGISTRY_BYTES) throw new Error("inbox audit registry exceeds the bounded byte limit");
+-    bytes = buffer.subarray(0, offset);
+-  } catch (error) {
++  try { value = JSON.parse(fs.readFileSync(file, "utf8")) as { version?: unknown; targets?: unknown }; }
++  catch (error) {
+     if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyRegistry();
+     throw error;
+-  } finally {
+-    if (fd !== undefined) fs.closeSync(fd);
+   }
+-  value = JSON.parse(bytes.toString("utf8")) as { version?: unknown; targets?: unknown };
+   // v1 rows were recorded without wake eligibility, so they cannot prove a
+   // missed originally-wake=true outbound. Discard rather than re-scan them.
+   if (value?.version === 1) return emptyRegistry();
+   if (value?.version !== 2 || !Array.isArray(value.targets)) return emptyRegistry();
+-  if (value.targets.length > MAX_INBOX_AUDIT_REGISTRY_ROWS) throw new Error("inbox audit registry exceeds the bounded row limit");
+   return { version: 2, targets: value.targets.flatMap((row): StoredTarget[] => {
+     if (!row || typeof row !== "object") return [];
+     const candidate = row as Partial<StoredTarget>;
+@@ -106,16 +82,9 @@ function load(file: string): AuditRegistry {
+ }
+ 
+ function save(file: string, registry: AuditRegistry): void {
+-  if (registry.targets.length > MAX_INBOX_AUDIT_REGISTRY_ROWS) {
+-    throw new Error("inbox audit registry exceeds the bounded row limit");
+-  }
+-  const serialized = `${JSON.stringify(registry)}\n`;
+-  if (Buffer.byteLength(serialized) > MAX_INBOX_AUDIT_REGISTRY_BYTES) {
+-    throw new Error("inbox audit registry exceeds the bounded byte limit");
+-  }
+   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+-  fs.writeFileSync(temporary, serialized, { mode: 0o600 });
++  fs.writeFileSync(temporary, `${JSON.stringify(registry)}\n`, { mode: 0o600 });
+   fs.renameSync(temporary, file);
+   fs.chmodSync(file, 0o600);
+ }

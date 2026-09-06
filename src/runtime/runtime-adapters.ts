@@ -18,14 +18,8 @@ import type {
 import { isPiThinkingLevel } from "./pi-model-catalog.js";
 import { PiRpcClient, type PiRpcClientOptions } from "./pi-rpc-client.js";
 import { traceProcessBoundary } from "../platform/process-boundary-trace.js";
-import { resolvePiSubagentExtensionArg } from "./pi-subagent-injection.js";
-import {
-  extractCanonicalPiSubagentNotification,
-  ledgerStatusFromPiNotificationStatus,
-} from "./pi-subagents-notification.js";
-import { resolvePiSubagentRecordWatchdogExtensionArg } from "./pi-subagent-record-watchdog-injection.js";
-import { effectivePiStateDir, extractBackgroundPiSubagentDispatch } from "./pi-subagent-ledger.js";
-import { resolvePiBashTimeoutExtensionArg } from "./pi-bash-timeout-injection.js";
+import { effectivePiStateDir, writePrivateAtomic } from "./pi-state-dir.js";
+import { resolvePiTmuxExtensionArg } from "./pi-tmux-injection.js";
 import {
   classifyPiMissingCredentialRejection,
   classifyRuntimePrerequisite,
@@ -558,9 +552,6 @@ class PiSession extends EventSession {
   private readonly observedSubmitEpochs = new Set<number>();
   private readonly observedAcceptedEpochs = new Set<number>();
   private readonly observedCompletedEpochs = new Set<number>();
-  private readonly observedBackgroundCompletionKeys = new Set<string>();
-  private readonly pendingUnownedCompletionKeys = new Set<string>();
-  private readonly pendingUnownedCompletionStatuses = new Map<string, Record<string, "completed" | "failed" | "cancelled" | "timed_out">>();
   private readonly observedAgentEndEpochs = new Set<number>();
   private firstOutputObserved = false;
   private toolCallOpen = false;
@@ -604,8 +595,8 @@ class PiSession extends EventSession {
   async close(_reason: string): Promise<void> { this.unsubscribe?.(); await this.sdk.dispose?.(); }
 
   private async enqueue(input: RuntimeInput, operation: () => Promise<unknown> | unknown): Promise<RuntimeInputResult> {
-    if (this.ownedInputIds.size === 0) this.requestEpoch += 1;
-    const epoch = this.requestEpoch;
+    if (this.ownedInputIds.size === 0 && this.activeEpoch === null) this.requestEpoch += 1;
+    const epoch = this.activeEpoch ?? this.requestEpoch;
     this.ownedInputIds.add(input.inputId);
     this.inputEpochs.set(input.inputId, epoch);
     this.awaitingAcknowledgement.add(input.inputId);
@@ -667,9 +658,6 @@ class PiSession extends EventSession {
       this.observedSubmitEpochs.clear();
       this.observedAcceptedEpochs.clear();
       this.observedCompletedEpochs.clear();
-      this.observedBackgroundCompletionKeys.clear();
-      this.pendingUnownedCompletionKeys.clear();
-      this.pendingUnownedCompletionStatuses.clear();
       this.observedAgentEndEpochs.clear();
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
@@ -685,10 +673,17 @@ class PiSession extends EventSession {
       || String(event?.type || "").startsWith("summarization_retry_")) && this.awaitingAcknowledgement.size > 0) {
       this.emitObservation("retry_progress");
     } else if (event?.type === "turn_start") {
-      const epoch = this.oldestOwnedEpoch();
-      if (epoch === null || this.activeEpoch !== null) return;
-      this.activeEpoch = epoch;
-      this.settleArmedEpoch = null;
+      if (this.activeEpoch !== null) return;
+      const owned = this.oldestOwnedEpoch();
+      if (owned === null) {
+        // Native Pi triggerTurn / extension follow-up: occupy busy without a host prompt.
+        this.requestEpoch += 1;
+        this.activeEpoch = this.requestEpoch;
+        this.settleArmedEpoch = this.activeEpoch;
+      } else {
+        this.activeEpoch = owned;
+        this.settleArmedEpoch = null;
+      }
       this.firstOutputObserved = false;
       this.toolCallOpen = false;
       this.emitObservation("turn_start");
@@ -714,44 +709,10 @@ class PiSession extends EventSession {
         this.observedCompletedEpochs.add(this.activeEpoch);
         this.emitObservation("completed");
       }
-      const completionNotification = extractCanonicalPiSubagentNotification(event.messages);
-      if (completionNotification && !this.observedBackgroundCompletionKeys.has(completionNotification.key)) {
-        const completionStatuses = Object.fromEntries(completionNotification.notifications.map((notification) => [
-          notification.taskId,
-          ledgerStatusFromPiNotificationStatus(notification.status),
-        ]));
-        const owningTurnFailed = event.willRetry === true
-          || this.finalAssistantStopReason === "error"
-          || this.finalAssistantStopReason === "aborted";
-        if (this.activeEpoch === null || owningTurnFailed) {
-          // Unowned agent_end still has an active Pi session, so prompting
-          // before settle is rejected as "Agent is already processing".
-          // A failed or retrying owned turn also did not process the
-          // notification; do not emit handledInTurn so RuntimeHost can still
-          // wake after input-error, retry, or restart.
-          this.pendingUnownedCompletionKeys.add(completionNotification.key);
-          this.pendingUnownedCompletionStatuses.set(completionNotification.key, completionStatuses);
-        } else {
-          // Already visible in the owned turn. Persist as acknowledged; do not
-          // schedule another wake after the parent turn settles.
-          this.observedBackgroundCompletionKeys.add(completionNotification.key);
-          this.emitObservation("completed", {
-            completionKey: completionNotification.key,
-            completionStatuses,
-            handledInTurn: true,
-          });
-        }
-      }
     } else if (event?.type === "agent_settled") {
       const epoch = this.activeEpoch;
-      if (epoch === null) {
-        this.flushPendingUnownedCompletions();
-        return;
-      }
-      if (this.settleArmedEpoch !== epoch) {
-        this.flushPendingUnownedCompletions();
-        return;
-      }
+      if (epoch === null) return;
+      if (this.settleArmedEpoch !== epoch) return;
       this.activeEpoch = null;
       this.settleArmedEpoch = null;
       const error = this.finalAssistantError;
@@ -785,7 +746,6 @@ class PiSession extends EventSession {
       this.observedAcceptedEpochs.delete(epoch);
       this.observedCompletedEpochs.delete(epoch);
       this.observedAgentEndEpochs.delete(epoch);
-      this.flushPendingUnownedCompletions();
     }
     else if (event?.type === "tool_execution_start") {
       if (!this.firstOutputObserved) {
@@ -803,13 +763,6 @@ class PiSession extends EventSession {
         this.toolCallOpen = false;
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_result" });
       }
-      const dispatched = extractBackgroundPiSubagentDispatch(event);
-      if (dispatched) {
-        this.emitObservation("background_dispatched", {
-          taskId: dispatched.taskId,
-          ...(dispatched.outputFile ? { outputFile: dispatched.outputFile } : {}),
-        });
-      }
     }
     else if (event?.type === "message_update" && event.assistantMessageEvent?.delta) {
       if (!this.firstOutputObserved) {
@@ -821,25 +774,8 @@ class PiSession extends EventSession {
     }
   }
 
-  private flushPendingUnownedCompletions(): void {
-    for (const completionKey of this.pendingUnownedCompletionKeys) {
-      if (this.observedBackgroundCompletionKeys.has(completionKey)) continue;
-      this.observedBackgroundCompletionKeys.add(completionKey);
-      const completionStatuses = this.pendingUnownedCompletionStatuses.get(completionKey);
-      this.emitObservation("completed", {
-        completionKey,
-        ...(completionStatuses ? { completionStatuses } : {}),
-      });
-    }
-    this.pendingUnownedCompletionKeys.clear();
-    this.pendingUnownedCompletionStatuses.clear();
-  }
-
   private emitObservation(phase: Extract<NormalizedRuntimeEvent, { type: "runtime-observation" }>['phase'], fields: {
-    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; completionKey?: string;
-    completionStatuses?: Record<string, "completed" | "failed" | "cancelled" | "timed_out">;
-    handledInTurn?: boolean;
-    taskId?: string; outputFile?: string;
+    reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean;
   } = {}): void {
     const inputId = this.oldestOwnedInput();
     const observation = { type: "runtime-observation" as const, runtime: "pi" as const,
@@ -847,7 +783,6 @@ class PiSession extends EventSession {
     // Correlation is host-internal metadata, not telemetry payload.
     if (this.sessionId) Object.defineProperty(observation, "sessionId", { value: this.sessionId, enumerable: false });
     if (inputId) Object.defineProperty(observation, "inputId", { value: inputId, enumerable: false });
-    if (fields.completionKey) Object.defineProperty(observation, "completionKey", { value: fields.completionKey, enumerable: false });
     this.emit(observation as NormalizedRuntimeEvent);
   }
 
@@ -1022,17 +957,6 @@ async function discoverEffectivePiContextWindow(input: RuntimeSessionCreate, com
   }
 }
 
-function writePrivateAtomic(file: string, content: string): void {
-  try { if (fs.lstatSync(file).isSymbolicLink()) throw new Error("standing prompt must not be a symlink"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
-    fs.renameSync(temporary, file);
-    fs.chmodSync(file, 0o600);
-  } finally { try { fs.unlinkSync(temporary); } catch { /* renamed or absent */ } }
-}
-
 class PiRpcBackend implements PiSessionProcessLike {
   readonly policyManaged: boolean;
   sessionId: string | null;
@@ -1081,27 +1005,15 @@ class PiRpcBackend implements PiSessionProcessLike {
   }
 }
 
+/** Inject only the Larkin-owned tmux extension. Skip native Windows so stock Pi bash remains. */
 export function resolvePiProcessExtensionArgs(input: {
   distribution?: "external";
   piCommand: string;
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
-}, resolvers: {
-  subagents?: typeof resolvePiSubagentExtensionArg;
-  bashTimeout?: typeof resolvePiBashTimeoutExtensionArg;
-  recordWatchdog?: typeof resolvePiSubagentRecordWatchdogExtensionArg;
-} = {}): string[] {
-  const resolverInput = { distribution: "external" as const, piCommand: input.piCommand, env: input.env };
-  const args: string[] = [];
-  // Watchdog must load before the subagent extension so session_shutdown still
-  // sees AgentManager.getRecord and can bridge consumed or terminal state.
-  const recordWatchdog = (resolvers.recordWatchdog ?? resolvePiSubagentRecordWatchdogExtensionArg)(resolverInput);
-  if (recordWatchdog) args.push("-e", recordWatchdog);
-  const subagents = (resolvers.subagents ?? resolvePiSubagentExtensionArg)(resolverInput);
-  if (subagents) args.push("-e", subagents);
-  const bashTimeout = (resolvers.bashTimeout ?? resolvePiBashTimeoutExtensionArg)(resolverInput);
-  if (bashTimeout) args.push("-e", bashTimeout);
-  return args;
+}): string[] {
+  const bundle = resolvePiTmuxExtensionArg({ env: input.env, platform: input.platform });
+  return bundle ? ["-e", bundle] : [];
 }
 
 async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: NativeRuntimeAdapterDependencies,
@@ -1110,6 +1022,9 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
   const stateRoot = effectivePiStateDir(input);
   const mergedEnv = stripPiCodingAgentDir({ ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" });
   if (mergedEnv.LARKIN_PI_DISTRIBUTION === "builtin") delete mergedEnv.LARKIN_PI_DISTRIBUTION;
+  mergedEnv.LARKIN_AGENT_ID = input.agentId;
+  mergedEnv.LARKIN_STATE_DIR = stateRoot;
+  if (!mergedEnv.LARKIN_TMUX_INSTANCE_ID) mergedEnv.LARKIN_TMUX_INSTANCE_ID = crypto.randomUUID();
   const projectSettings = projectPiSettingsFile(input.workspaceDir);
   traceProcessBoundary(mergedEnv, "pi-rpc:child-env", { configDir: mergedEnv.LARKIN_CONFIG_DIR, agentId: input.agentId, targetDir: projectSettings, childEnvConfigDir: mergedEnv.LARKIN_CONFIG_DIR || null, childEnvHome: mergedEnv.HOME || null });
   const runtimeDir = path.join(stateRoot, "runtime");

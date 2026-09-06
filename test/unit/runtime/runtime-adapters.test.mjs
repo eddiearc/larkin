@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { tmuxAvailable } from "../../../dist/runtime/pi-tmux.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,10 +17,6 @@ import {
   requirePiResumeSessionFile,
   resolvePiProcessExtensionArgs,
 } from "../../../dist/runtime/runtime-adapters.mjs";
-import {
-  buildCanonicalPiSubagentAssistantMessage,
-  buildCanonicalPiSubagentNotificationContent,
-} from "../../../dist/runtime/pi-subagents-notification.mjs";
 import { classifyStrictProviderError } from "../../../dist/runtime/provider-error-classifier.mjs";
 import { RuntimePrerequisiteError } from "../../../dist/runtime/runtime-readiness.mjs";
 
@@ -188,14 +185,15 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v29");
+  assert.equal(prompt.version, "larkin-standing-v31");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
   assert.match(prompt.content, /Never infer recipients from a reminder title/);
-  assert.match(prompt.content, /at most one bounded wait call per turn/);
-  assert.match(prompt.content, /do not loop or call wait again in the same turn/);
+  assert.doesNotMatch(prompt.content, /at most one bounded wait call per turn/);
+  assert.doesNotMatch(prompt.content, /do not loop or call wait again in the same turn/);
+  assert.match(prompt.content, /tmux-backed bash.*wait timeout|wait timeout.*not process failure/);
   assert.match(prompt.content, /larkin reminder cancel/);
   assert.match(prompt.content, /larkin interaction resolve/);
   assert.match(prompt.content, /larkin comment reply --message-id/);
@@ -402,10 +400,10 @@ test("Codex native notifications normalize start, intermediate output, and termi
   ["turn-start", "activity:thinking", "activity:text", "turn-end"]);
 });
 
-test("Pi canonical late completion notifications bridge once and ignore assistant lookalikes", async () => {
+test("Pi unowned turn_start occupies busy and settles on agent_settled", async () => {
   let listener;
   const sdk = {
-    sessionId: "pi-late-complete", prompt() {}, steer() {}, abort() {},
+    sessionId: "pi-native-followup", prompt() {}, steer() {}, abort() {},
     subscribe(next) { listener = next; return () => {}; },
   };
   const session = await createNativeRuntimeAdapter("pi", {
@@ -414,370 +412,33 @@ test("Pi canonical late completion notifications bridge once and ignore assistan
   }).createSession(create());
   const events = [];
   session.subscribe((event) => events.push(event));
-  const canonical = buildCanonicalPiSubagentAssistantMessage({
-    taskId: "task-bridge-1",
-    toolUseId: "tool-use-bridge-1",
-    outputFile: "/tmp/task-bridge-1.output",
-    summary: "Agent \"fixture\" completed",
-    result: "Fixture result.",
-  });
-  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events.filter((event) => ["turn-start", "turn-end"].includes(event.type)), []);
-  assert.deepEqual(events.filter((event) => event.type === "runtime-observation"), [],
-    "unowned agent_end must not emit the completion bridge while Pi can still reject prompts");
+  listener({ type: "turn_start", turnIndex: 3 });
   listener({ type: "agent_settled" });
   await new Promise((resolve) => setImmediate(resolve));
-  const observations = events.filter((event) => event.type === "runtime-observation");
-  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
-  assert.equal(observations[0].completionKey, "task-bridge-1");
+  assert.deepEqual(events.filter((event) => event.type === "turn-start" || event.type === "turn-end").map((event) => event.type),
+    ["turn-start", "turn-end"]);
 });
 
-test("Pi in-turn completion notifications emit immediately as handled without a second settle bridge", async () => {
+test("Pi busy steer during an unowned turn attaches to that turn instead of opening another epoch", async () => {
   let listener;
+  const calls = [];
   const sdk = {
-    sessionId: "pi-in-turn-complete", prompt() {}, steer() {}, abort() {},
+    sessionId: "pi-unowned-busy-steer",
+    prompt(text) { calls.push(["prompt", text]); },
+    steer(text) { calls.push(["steer", text]); },
+    abort() {},
     subscribe(next) { listener = next; return () => {}; },
   };
   const session = await createNativeRuntimeAdapter("pi", {
     createPiSession: async () => sdk,
     env: { LARKIN_PI_DISTRIBUTION: "builtin" },
   }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  await session.prompt({ inputId: "pi-in-turn-input", kind: "user", text: "work", attempt: 0 });
   listener({ type: "turn_start" });
-  const canonical = buildCanonicalPiSubagentAssistantMessage({
-    taskId: "task-in-turn-1",
-    toolUseId: "tool-use-in-turn-1",
-    outputFile: "/tmp/task-in-turn-1.output",
-    summary: "Agent \"fixture\" completed",
-    result: "Fixture result.",
-  });
-  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
-  await new Promise((resolve) => setImmediate(resolve));
-  const beforeSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
-  assert.deepEqual(beforeSettle.map((event) => event.phase), ["completed"]);
-  assert.equal(beforeSettle[0].completionKey, "task-in-turn-1");
-  assert.equal(beforeSettle[0].handledInTurn, true);
-  assert.deepEqual(beforeSettle[0].completionStatuses, { "task-in-turn-1": "completed" });
+  const result = await session.busyInput({ inputId: "inbox-1", kind: "inbox_update", text: "new inbox", attempt: 0 });
+  assert.deepEqual(result, { status: "accepted", inputId: "inbox-1" });
   listener({ type: "agent_settled" });
   await new Promise((resolve) => setImmediate(resolve));
-  const afterSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
-  assert.equal(afterSettle.length, 1, "in-turn completion must not emit a second wake bridge after settle");
-});
-
-test("Pi failed owning turn does not mark in-turn completions handled so retry can still wake", async () => {
-  for (const stopReason of ["error", "aborted"]) {
-    let listener;
-    const sdk = {
-      sessionId: `pi-failed-owning-${stopReason}`,
-      prompt() {}, steer() {}, abort() {},
-      subscribe(next) { listener = next; return () => {}; },
-    };
-    const session = await createNativeRuntimeAdapter("pi", {
-      createPiSession: async () => sdk,
-      env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-    }).createSession(create());
-    const events = [];
-    session.subscribe((event) => events.push(event));
-    await session.prompt({ inputId: `pi-failed-owning-${stopReason}`, kind: "user", text: "work", attempt: 0 });
-    listener({ type: "turn_start" });
-    const canonical = buildCanonicalPiSubagentAssistantMessage({
-      taskId: `task-failed-owning-${stopReason}`,
-      toolUseId: `tool-use-failed-owning-${stopReason}`,
-      outputFile: `/tmp/task-failed-owning-${stopReason}.output`,
-      summary: "Agent \"fixture\" completed",
-      result: "Fixture result.",
-    });
-    listener({
-      type: "agent_end",
-      willRetry: false,
-      messages: [
-        canonical,
-        {
-          role: "assistant",
-          stopReason,
-          ...(stopReason === "error" ? { errorMessage: "provider failed" } : {}),
-        },
-      ],
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    const beforeSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
-    assert.deepEqual(beforeSettle, [], `${stopReason} owning turn must not emit handledInTurn before input-error`);
-    listener({ type: "agent_settled" });
-    await new Promise((resolve) => setImmediate(resolve));
-    const afterSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
-    assert.equal(afterSettle.length, 1, `${stopReason} owning turn must still bridge the completion after settle`);
-    assert.equal(afterSettle[0].phase, "completed");
-    assert.equal(afterSettle[0].completionKey, `task-failed-owning-${stopReason}`);
-    assert.equal(afterSettle[0].handledInTurn, undefined);
-    const errorIndex = events.findIndex((event) => event.type === "input-error");
-    assert.ok(errorIndex >= 0, `${stopReason} owning turn must emit input-error`);
-    assert.ok(errorIndex < events.indexOf(afterSettle[0]), "completion bridge must not precede input-error on a failed owning turn");
-  }
-});
-
-test("Pi retrying owning turn can still handle the completion after a later successful agent_end", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-retry-owning-complete",
-    prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  await session.prompt({ inputId: "pi-retry-owning-input", kind: "user", text: "work", attempt: 0 });
-  listener({ type: "turn_start" });
-  const canonical = buildCanonicalPiSubagentAssistantMessage({
-    taskId: "task-retry-owning-1",
-    toolUseId: "tool-use-retry-owning-1",
-    outputFile: "/tmp/task-retry-owning-1.output",
-    summary: "Agent \"fixture\" completed",
-    result: "Fixture result.",
-  });
-  listener({
-    type: "agent_end",
-    willRetry: true,
-    messages: [canonical, { role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events.filter((event) => event.type === "runtime-observation" && event.completionKey), [],
-    "retrying owning turn must not ack the completion before a successful agent_end");
-  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
-  await new Promise((resolve) => setImmediate(resolve));
-  const handled = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
-  assert.equal(handled.length, 1);
-  assert.equal(handled[0].handledInTurn, true);
-  listener({ type: "agent_settled" });
-  await new Promise((resolve) => setImmediate(resolve));
-  const afterSettle = events.filter((event) => event.type === "runtime-observation" && event.completionKey);
-  assert.equal(afterSettle.length, 1, "successful retry must not emit a second wake bridge after settle");
-});
-
-test("Pi assistant text lookalikes do not trigger the late completion bridge", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-late-complete-lookalike", prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  for (const content of ["ordinary assistant text mentioning subagent-notification", "ordinary assistant text mentioning not-subagent-notification"]) {
-    listener({ type: "agent_end", willRetry: false, messages: [{ role: "assistant", stopReason: "stop", content }] });
-    listener({ type: "agent_settled" });
-  }
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events.filter((event) => event.type !== "session-init"), []);
-});
-
-test("Pi failed and aborted late notifications still bridge a completion key", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-late-complete-failed",
-    prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  listener({
-    type: "agent_end",
-    willRetry: false,
-    messages: [buildCanonicalPiSubagentAssistantMessage({
-      taskId: "task-aborted-bridge",
-      status: "Aborted (max turns exceeded)",
-      summary: "Agent \"fixture\" aborted (aborted — hit the turn limit before completion; output may be incomplete)",
-      result: "partial",
-    })],
-  });
-  listener({ type: "agent_settled" });
-  listener({
-    type: "agent_end",
-    willRetry: false,
-    messages: [buildCanonicalPiSubagentAssistantMessage({
-      taskId: "task-error-bridge",
-      status: "Error: provider failed",
-      summary: "Agent \"fixture\" error",
-      result: "failed",
-    })],
-  });
-  listener({ type: "agent_settled" });
-  await new Promise((resolve) => setImmediate(resolve));
-  const observations = events.filter((event) => event.type === "runtime-observation");
-  assert.deepEqual(observations.map((event) => event.phase), ["completed", "completed"]);
-  assert.deepEqual(observations.map((event) => event.completionKey), ["task-aborted-bridge", "task-error-bridge"]);
-  assert.deepEqual(observations.map((event) => event.completionStatuses), [
-    { "task-aborted-bridge": "timed_out" },
-    { "task-error-bridge": "failed" },
-  ]);
-});
-
-test("Pi mixed-status late notification groups keep terminal successes", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-late-complete-mixed",
-    prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  listener({
-    type: "agent_end",
-    willRetry: false,
-    messages: [{
-      role: "assistant",
-      content: [{
-        type: "custom",
-        customType: "subagent-notification",
-        content: [
-          buildCanonicalPiSubagentNotificationContent({
-            taskId: "task-running",
-            status: "running",
-            summary: "Agent \"still\" running",
-            result: "not done",
-          }),
-          buildCanonicalPiSubagentNotificationContent({
-            taskId: "task-mixed-ok",
-            status: "Done",
-            summary: "Agent \"ok\" completed",
-            result: "success",
-          }),
-          buildCanonicalPiSubagentNotificationContent({
-            taskId: "task-mixed-error",
-            status: "error",
-            summary: "Agent \"fail\" error",
-            result: "failed",
-          }),
-        ].join("\n"),
-      }],
-    }],
-  });
-  listener({ type: "agent_settled" });
-  await new Promise((resolve) => setImmediate(resolve));
-  const observations = events.filter((event) => event.type === "runtime-observation");
-  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
-  assert.equal(observations[0].completionKey, "task-mixed-ok|task-mixed-error");
-  assert.deepEqual(observations[0].completionStatuses, {
-    "task-mixed-ok": "completed",
-    "task-mixed-error": "failed",
-  });
-});
-
-test("Pi batched agent_end messages bridge every canonical notification", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-late-complete-batch",
-    prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  listener({
-    type: "agent_end",
-    willRetry: false,
-    messages: [
-      buildCanonicalPiSubagentAssistantMessage({
-        taskId: "task-batch-a",
-        status: "Done",
-        summary: "Agent \"a\" completed",
-        result: "a",
-      }),
-      buildCanonicalPiSubagentAssistantMessage({
-        taskId: "task-batch-b",
-        status: "Error: boom",
-        summary: "Agent \"b\" error",
-        result: "b",
-      }),
-    ],
-  });
-  listener({ type: "agent_settled" });
-  await new Promise((resolve) => setImmediate(resolve));
-  const observations = events.filter((event) => event.type === "runtime-observation");
-  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
-  assert.equal(observations[0].completionKey, "task-batch-a|task-batch-b");
-});
-
-test("Pi repeated canonical late completion notifications only bridge once", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-late-complete-repeat", prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  const canonical = buildCanonicalPiSubagentAssistantMessage({
-    taskId: "task-bridge-repeat",
-    toolUseId: "tool-use-bridge-repeat",
-    outputFile: "/tmp/task-bridge-repeat.output",
-    summary: "Agent \"repeat fixture\" completed",
-    result: "Repeat result.",
-  });
-  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
-  listener({ type: "agent_settled" });
-  listener({ type: "agent_end", willRetry: false, messages: [canonical] });
-  listener({ type: "agent_settled" });
-  await new Promise((resolve) => setImmediate(resolve));
-  const observations = events.filter((event) => event.type === "runtime-observation");
-  assert.deepEqual(observations.map((event) => event.phase), ["completed"]);
-  assert.equal(observations[0].completionKey, "task-bridge-repeat");
-});
-
-test("Pi background Agent tool results emit a dispatched-task observation", async () => {
-  let listener;
-  const sdk = {
-    sessionId: "pi-dispatch-observe", prompt() {}, steer() {}, abort() {},
-    subscribe(next) { listener = next; return () => {}; },
-  };
-  const session = await createNativeRuntimeAdapter("pi", {
-    createPiSession: async () => sdk,
-    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
-  }).createSession(create());
-  const events = [];
-  session.subscribe((event) => events.push(event));
-  listener({
-    type: "tool_execution_start",
-    toolName: "Agent",
-    args: { prompt: "do work", run_in_background: true, description: "work" },
-  });
-  listener({
-    type: "tool_execution_end",
-    toolName: "Agent",
-    args: { prompt: "do work", run_in_background: true, description: "work" },
-    result: {
-      content: [{ type: "text", text: "Agent started in background.\nAgent ID: task-dispatch-1\nOutput file: /tmp/task-dispatch-1.output\n" }],
-      details: { agentId: "task-dispatch-1", outputFile: "/tmp/task-dispatch-1.output", status: "background" },
-    },
-    isError: false,
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  const dispatched = events.filter((event) => event.type === "runtime-observation" && event.phase === "background_dispatched");
-  assert.equal(dispatched.length, 1);
-  assert.equal(dispatched[0].taskId, "task-dispatch-1");
-  assert.equal(dispatched[0].outputFile, "/tmp/task-dispatch-1.output");
+  assert.deepEqual(calls, [["steer", "new inbox"]]);
 });
 
 test("Codex resume failure falls back to a fresh thread with the same standing prompt", async () => {
@@ -923,19 +584,17 @@ test("Pi initialization caps eight concurrent adapters and releases a failed per
   assert.equal(results.filter((result) => result.status === "fulfilled").length, 7);
 });
 
-test.each(["win32", "linux"])("Pi retains all -e extension args on simulated %s", (platform) => {
-  const args = resolvePiProcessExtensionArgs({
-    distribution: "external", piCommand: "external-pi", env: {}, platform,
-  }, {
-    subagents: () => "/fixture/pi-subagents.bundle.js",
-    bashTimeout: () => "/fixture/pi-bash-timeout.bundle.js",
-    recordWatchdog: () => "/fixture/pi-subagent-record-watchdog.bundle.js",
+test("Pi injects its tmux extension only when the host capability is available", () => {
+  const linux = resolvePiProcessExtensionArgs({
+    distribution: "external", piCommand: "external-pi", env: process.env, platform: process.platform,
   });
-  assert.deepEqual(args, [
-    "-e", "/fixture/pi-subagent-record-watchdog.bundle.js",
-    "-e", "/fixture/pi-subagents.bundle.js",
-    "-e", "/fixture/pi-bash-timeout.bundle.js",
-  ], "watchdog must precede the subagent extension so shutdown can still read getRecord");
+  if (tmuxAvailable(process.env, process.platform)) {
+    assert.equal(linux[0], "-e");
+    assert.match(linux[1], /pi-tmux\.bundle\.js$/);
+  } else assert.deepEqual(linux, []);
+  assert.deepEqual(resolvePiProcessExtensionArgs({
+    distribution: "external", piCommand: "external-pi", env: {}, platform: "win32",
+  }), []);
 });
 
 test("Pi launches one shared append standing-prompt path without replacement", async () => {
@@ -1023,13 +682,9 @@ test("inherited PI_PACKAGE_DIR does not drop production extension version probes
     for (let index = 0; index < sessionLaunch.args.length; index += 1) {
       if (sessionLaunch.args[index] === "-e") extensionPaths.push(sessionLaunch.args[index + 1]);
     }
-    assert.equal(extensionPaths.length, 3, JSON.stringify(sessionLaunch.args));
-    const expected = [
-      path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-bash-timeout.bundle.js"),
-      path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-subagent-record-watchdog.bundle.js"),
-      path.join(ADAPTERS_ROOT, "dist", "runtime", "pi-subagents.bundle.js"),
-    ].map((entry) => fs.realpathSync(entry)).sort();
-    assert.deepEqual(extensionPaths.map((entry) => fs.realpathSync(entry)).sort(), expected);
+    const supported = tmuxAvailable({ ...process.env, ...input.env }, process.platform);
+    assert.equal(extensionPaths.length, supported ? 1 : 0, JSON.stringify(sessionLaunch.args));
+    if (supported) assert.match(extensionPaths[0], /pi-tmux\.bundle\.js$/);
     assert.equal(session.effectiveModel, "test-provider/test-model");
   } finally {
     await session?.close("inherited extension probe test complete").catch(() => {});

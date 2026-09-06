@@ -77,7 +77,7 @@ function validateProviderWrite(event) {
 
 export function loadImBodyModeEval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (value.dataset !== "im-body-mode" || value.version !== 1 || value.standing_prompt_version !== "larkin-standing-v29") {
+  if (value.dataset !== "im-body-mode" || value.version !== 1 || value.standing_prompt_version !== "larkin-standing-v31") {
     throw new Error("eval dataset/version mismatch");
   }
   if (value.threshold !== 1 || value.grader?.name !== "im-body-mode-final-payload-grader" || value.grader.version !== 1 || value.grader.threshold !== 1) {
@@ -132,8 +132,8 @@ export function summarizeImBodyModeEval(dataset, tracesById) {
 }
 
 export function v26PlainMultilineCounterfactual(standingPrompt) {
-  if (standingPrompt?.version !== "larkin-standing-v29" || typeof standingPrompt.content !== "string") {
-    throw new Error("v26 counterfactual requires a v27 standing prompt");
+  if (standingPrompt?.version !== "larkin-standing-v31" || typeof standingPrompt.content !== "string") {
+    throw new Error("v26 counterfactual requires the current standing prompt");
   }
   let content = standingPrompt.content;
   for (let index = 0; index < PLAIN_MULTILINE_V27_GUIDANCE.length; index += 1) {

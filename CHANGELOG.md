@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.5
+
+Pi uses a small Larkin-owned tmux Bash extension when tmux is available on macOS/Linux. Commands preserve their working directory, including non-Git paths with spaces; a foreground wait can return while the same command continues. The returned task ID supports inspection and cancellation, and background completion resumes the Agent. Native Windows and environments without tmux retain Pi's native Bash.
+
+Removed the injected subagent plugin, its ledger/watchdog and supervised-command infrastructure, the 60-second Bash hard-kill rule, and mandatory delegation guidance. Pi-owned turns now occupy Runtime busy state without a second host prompt. Historical subagent files are left untouched. Background commands survive Pi shutdown in tmux; notification recovery across Pi restarts is not provided. No third-party tmux plugin is installed or redistributed.
+
 ## 0.5.4
 
 Inbox Audit is now optional and off by default. The Dashboard and CLI support global and per-Agent switches and inspection gaps. Saving a gap updates scheduling without replacing Runtime sessions; editing a gap alone does not enable auditing. Only originally wake-eligible human group/topic work is audited.

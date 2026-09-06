@@ -10,7 +10,8 @@ test("runtime notices exclude the host Pi package and still ship the redistribut
   const notice = generateRuntimeNotices();
   assert.doesNotMatch(notice, /@earendil-works\/pi-coding-agent/);
   assert.doesNotMatch(notice, /@earendil-works\/pi-agent-core/);
-  assert.match(notice, /@tintinweb\/pi-subagents/);
+  assert.doesNotMatch(notice, /@tintinweb\/pi-subagents/);
+  assert.doesNotMatch(notice, /@richardgill\/pi-tmux-bash/);
   assert.match(notice, /Permission is hereby granted, free of charge|Apache License/);
 
   for (const relative of ["scripts/release/build.ts", "scripts/release/assemble.ts"]) {

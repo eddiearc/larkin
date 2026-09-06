@@ -16,7 +16,7 @@ const DATASET = loadAgentExperienceV6Eval(path.join(ROOT, "evals/agent-experienc
 
 test("fixed Agent Experience v6 eval starts every selected scenario from an empty session", () => {
   assert.equal(DATASET.session.initial_turns, 0);
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v29");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v31");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",
@@ -160,7 +160,7 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
   assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
 });
 
-test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v29 contract passes all three", () => {
+test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v31 contract passes all three", () => {
   const ids = [
     "explicit-silent-envelope-exactly-one-poll",
     "ordinary-reminder-scoped-history-after-poll",

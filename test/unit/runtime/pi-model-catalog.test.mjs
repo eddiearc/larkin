@@ -202,7 +202,9 @@ test("production graph does not ship a host Pi package and speaks only the share
   assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], undefined);
   assert.equal(pkg.devDependencies["@earendil-works/pi-coding-agent"], "0.84.2");
   assert.equal(pkg.dependencies["@mariozechner/pi-coding-agent"], undefined);
-  assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], "0.14.3");
+  assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], undefined);
+  assert.equal(pkg.dependencies["@richardgill/pi-tmux-bash"], undefined);
+  assert.equal(pkg.patchedDependencies, undefined);
   assert.equal(pkg.packageManager, "bun@1.3.14");
   assert.equal(pkg.engines, undefined);
   assert.equal(pkg.scripts.preinstall, undefined);
@@ -215,7 +217,8 @@ test("production graph does not ship a host Pi package and speaks only the share
   assert.match(adapter, /--mode["'],\s*["']rpc/);
   assert.match(adapter, /"get_state"/);
   assert.doesNotMatch(adapter, /available\s*\[\s*0\s*\]/);
-  assert.match(lock, /@tintinweb\/pi-subagents/);
+  assert.doesNotMatch(lock, /@tintinweb\/pi-subagents/);
+  assert.doesNotMatch(lock, /@richardgill\/pi-tmux-bash/);
 });
 
 test("Bun preflight requires the exact pinned runtime", () => {

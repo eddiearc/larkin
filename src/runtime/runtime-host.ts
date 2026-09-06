@@ -34,26 +34,7 @@ import {
   PiCompactionBreaker,
   PiCompactionRecoveryMachine,
 } from "./pi-compaction-recovery.js";
-import {
-  type DispatchedSubagentLedger,
-  type DispatchedSubagentRecord,
-  type PiSubagentRecordPresence,
-  getDispatchedSubagent as lookupDispatchedSubagent,
-  ledgerFilePath,
-  noteDispatchedSubagent,
-  noteDispatchedSubagentTerminal,
-  noteDispatchedSubagentWakeAcknowledged,
-  probePiSubagentRecord,
-  readDispatchedSubagentLedger,
-  reconcileDispatchedSubagents,
-  taskIdsFromCompletionKey,
-  undeliveredTerminalWakeKeys,
-  PI_SUBAGENT_SESSION_OWNER_ENV,
-  retirePiSubagentRecord,
-  effectivePiStateDir,
-  writeDispatchedSubagentLedger,
-  writeDispatchedSubagentRecordFile,
-} from "./pi-subagent-ledger.js";
+import { effectivePiStateDir } from "./pi-state-dir.js";
 
 export interface AgentRuntimeConfig {
   agentId: string; name: string; displayName?: string | null; description?: string | null;
@@ -132,13 +113,6 @@ interface ManagedAgent {
   authFailureProvider: string | null;
   /** Delivery ids already promoted from accepted inbox_update to a wake while idle. */
   promotedInboxUpdateIds: Set<string>;
-  backgroundCompletionQueue: string[]; backgroundCompletionKeys: Set<string>;
-  backgroundCompletionInFlight: string | null; backgroundCompletionWakeInputId: string | null;
-  backgroundCompletionRejectStreak: number;
-  backgroundCompletionRetryTimer: NodeJS.Timeout | null;
-  subagentLedger: DispatchedSubagentLedger;
-  subagentReconcileTimer: NodeJS.Timeout | null;
-  piSessionOwner?: string;
 }
 
 export interface RuntimeHost {
@@ -156,7 +130,6 @@ export interface RuntimeHost {
   recoverSession?(agentId: string, reason: "context-overflow"): Promise<RuntimeSessionRecoveryResult>;
   /** Internal recovery boundary for Pi compaction failures; never exposed as session reset. */
   recoverContextOverflow?(agentId: string, deliveryKey: string, reason: string): Promise<RuntimeSessionRecoveryResult>;
-  getDispatchedSubagent(agentId: string, taskId: string): DispatchedSubagentRecord | null;
 }
 
 export interface RuntimeSessionResetResult {
@@ -200,8 +173,6 @@ export interface StagedRuntimeCandidate {
 }
 
 const MAX_DELIVERIES = 2048;
-const BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT = 5;
-const DEFAULT_SUBAGENT_RECONCILE_INTERVAL_MS = 15_000;
 const now = (): string => new Date().toISOString();
 const isActiveDelivery = (status: DeliveryStatus): boolean => ["pending", "submitting", "accepted"].includes(status);
 
@@ -446,8 +417,6 @@ export function createRuntimeHost(options: {
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
   compactTimeoutMs?: number;
   telemetry?: TelemetryRuntime;
-  subagentRecordProbe?: (record: DispatchedSubagentRecord) => PiSubagentRecordPresence;
-  subagentReconcileIntervalMs?: number;
 }): RuntimeHost {
   const managed = new Map<string, ManagedAgent>();
   const listeners = new Set<(event: RuntimeHostEvent) => void>();
@@ -461,10 +430,6 @@ export function createRuntimeHost(options: {
     maxAttempts: options.retryPolicy?.maxAttempts ?? 6,
     stableWindowMs: options.retryPolicy?.stableWindowMs ?? 30_000,
   };
-  const subagentReconcileIntervalMs = options.subagentReconcileIntervalMs ?? DEFAULT_SUBAGENT_RECONCILE_INTERVAL_MS;
-  if (!Number.isFinite(subagentReconcileIntervalMs) || subagentReconcileIntervalMs < 0) {
-    throw new Error("subagentReconcileIntervalMs must be >= 0");
-  }
   const emit = (event: RuntimeHostEvent): void => {
     if (event.type === "delivery") telemetry?.delivery(event.agentId, event.messageId, event.status);
     for (const listener of listeners) listener(event);
@@ -474,7 +439,6 @@ export function createRuntimeHost(options: {
       LARKIN_AGENT_ID: config.agentId,
     ...(generation ? {
       LARKIN_RUNTIME_OBSERVATION_GENERATION: generation,
-      [PI_SUBAGENT_SESSION_OWNER_ENV]: generation,
     } : {}),
     LARKIN_CONFIG_DIR: process.env.LARKIN_CONFIG_DIR,
     LARKIN_HOME: process.env.LARKIN_HOME,
@@ -851,12 +815,6 @@ export function createRuntimeHost(options: {
         queueMicrotask(() => { void retryPending(agent); });
       }
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
-      // A completion queued during this submit has no turn-end if prompt
-      // rejected/threw before turn-start. Drain now that submitting is clear.
-      if (!agent.busy && !agent.turnInProgress && agent.backgroundCompletionQueue.length > 0
-        && !agent.backgroundCompletionRetryTimer) {
-        scheduleBackgroundCompletionDrain(agent);
-      }
     }
   };
 
@@ -917,314 +875,6 @@ export function createRuntimeHost(options: {
     await retryPending(agent);
   };
 
-  const clearBackgroundCompletionRetryTimer = (agent: ManagedAgent): void => {
-    if (!agent.backgroundCompletionRetryTimer) return;
-    clearTimeout(agent.backgroundCompletionRetryTimer);
-    agent.backgroundCompletionRetryTimer = null;
-  };
-
-  const scheduleBackgroundCompletionDrain = (agent: ManagedAgent, delayMs = 0): void => {
-    if (agent.stopped) return;
-    if (delayMs > 0) {
-      if (agent.backgroundCompletionRetryTimer) return;
-      agent.backgroundCompletionRetryTimer = setTimeout(() => {
-        agent.backgroundCompletionRetryTimer = null;
-        if (agent.stopped) return;
-        void drainBackgroundCompletionQueue(agent);
-      }, delayMs);
-      agent.backgroundCompletionRetryTimer.unref?.();
-      return;
-    }
-    clearBackgroundCompletionRetryTimer(agent);
-    queueMicrotask(() => { void drainBackgroundCompletionQueue(agent); });
-  };
-
-  const dropBackgroundCompletion = (agent: ManagedAgent, completionKey: string | null): void => {
-    if (!completionKey) return;
-    if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
-    else {
-      const index = agent.backgroundCompletionQueue.indexOf(completionKey);
-      if (index >= 0) agent.backgroundCompletionQueue.splice(index, 1);
-    }
-    agent.backgroundCompletionKeys.add(completionKey);
-    if (agent.backgroundCompletionInFlight === completionKey) {
-      agent.backgroundCompletionInFlight = null;
-      agent.backgroundCompletionWakeInputId = null;
-    }
-    agent.backgroundCompletionRejectStreak = 0;
-    clearBackgroundCompletionRetryTimer(agent);
-    // Leave the durable wake pending so a later restart can requeue it.
-  };
-
-  const scheduleBackgroundCompletionRetry = (agent: ManagedAgent): void => {
-    const streak = agent.backgroundCompletionRejectStreak;
-    if (streak < BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT) {
-      scheduleBackgroundCompletionDrain(agent);
-      return;
-    }
-    const delayedAttempt = streak - BACKGROUND_COMPLETION_IMMEDIATE_RETRY_LIMIT;
-    if (delayedAttempt >= retryPolicy.maxAttempts) {
-      const exhausted = agent.backgroundCompletionQueue[0];
-      if (exhausted) {
-        log("background completion wake retries exhausted", exhausted);
-        dropBackgroundCompletion(agent, exhausted);
-      }
-      if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
-      return;
-    }
-    const delay = Math.min(retryPolicy.maxDelayMs, retryPolicy.baseDelayMs * 2 ** delayedAttempt);
-    scheduleBackgroundCompletionDrain(agent, delay);
-  };
-
-  const isPersistentBackgroundWakeFailure = (event?: {
-    retryable?: boolean; errorCategory?: string;
-  }): boolean => {
-    if (!event) return false;
-    const category = event.errorCategory;
-    if (category === "auth" || category === "billing" || category === "quota") return true;
-    return category === "provider" && event.retryable === false;
-  };
-
-  const failBackgroundCompletionWake = (agent: ManagedAgent, event?: {
-    retryable?: boolean; errorCategory?: string;
-  }): void => {
-    const completionKey = agent.backgroundCompletionInFlight ?? agent.backgroundCompletionQueue[0];
-    if (!completionKey) return;
-    rearmBackgroundCompletion(agent, completionKey);
-    if (isPersistentBackgroundWakeFailure(event)) {
-      log("background completion wake dropped", event?.errorCategory ?? "persistent");
-      dropBackgroundCompletion(agent, completionKey);
-      if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
-      return;
-    }
-    agent.backgroundCompletionRejectStreak += 1;
-    scheduleBackgroundCompletionRetry(agent);
-  };
-
-  const rearmBackgroundCompletion = (agent: ManagedAgent, completionKey = agent.backgroundCompletionInFlight): void => {
-    if (!completionKey) return;
-    agent.backgroundCompletionKeys.delete(completionKey);
-    if (agent.backgroundCompletionInFlight === completionKey) {
-      agent.backgroundCompletionInFlight = null;
-      agent.backgroundCompletionWakeInputId = null;
-    }
-    if (!agent.backgroundCompletionQueue.includes(completionKey)) {
-      agent.backgroundCompletionQueue.unshift(completionKey);
-    }
-  };
-
-  const commitBackgroundCompletion = (agent: ManagedAgent): void => {
-    const completionKey = agent.backgroundCompletionInFlight;
-    if (!completionKey) return;
-    if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
-    agent.backgroundCompletionInFlight = null;
-    agent.backgroundCompletionWakeInputId = null;
-    agent.backgroundCompletionRejectStreak = 0;
-    clearBackgroundCompletionRetryTimer(agent);
-    acknowledgeSubagentWake(agent, completionKey);
-  };
-
-  const wakeOnBackgroundCompletion = async (agent: ManagedAgent): Promise<
-    { status: "accepted"; inputId: string } | { status: "retry" } | { status: "dropped" }
-  > => {
-    // Caller already reserved submitting/busy so a concurrent idle drain cannot
-    // dequeue another head while ensureSession/prompt yields.
-    try {
-      const session = await ensureSession(agent);
-      if (agent.session !== session || agent.stopped) return { status: "dropped" };
-      const headKey = agent.backgroundCompletionQueue[0];
-      const tasks = taskIdsFromCompletionKey(headKey ?? "")
-        .map((taskId) => lookupDispatchedSubagent(agent.subagentLedger, taskId))
-        .filter((task): task is DispatchedSubagentRecord => Boolean(task));
-      const details = tasks.map((task) => `task ${task.taskId} status=${task.status}`).join("; ");
-      const wakeReason = details
-        ? `background subagent completed; ${details}`
-        : "background subagent completed";
-      const input = options.promptBuilder.buildRuntimeInput("wake", crypto.randomUUID(), { wakeReason });
-      const result = await session.prompt(input);
-      if (agent.session !== session || agent.stopped) return { status: "dropped" };
-      if (result.status === "accepted") {
-        markSessionStable(agent, session);
-        return { status: "accepted", inputId: input.inputId };
-      }
-      agent.busy = false;
-      return { status: "retry" };
-    } catch (error) {
-      agent.busy = false;
-      log("background completion wake failed", error instanceof Error ? error.message : String(error));
-      return { status: "retry" };
-    }
-  };
-
-  const drainBackgroundCompletionQueue = async (agent: ManagedAgent): Promise<void> => {
-    if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
-    if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
-    clearBackgroundCompletionRetryTimer(agent);
-    const proactive = agent.piProactiveCompaction
-      && agent.piProactiveCompactionGeneration === agent.generation
-      && agent.piProactiveCompactionSession === agent.session
-      ? agent.piProactiveCompaction : null;
-    if (proactive) await proactive;
-    if (agent.adapter.id === "pi" && !agent.busy && !agent.turnInProgress && agent.session) {
-      const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
-      if (idleGate) await idleGate;
-    }
-    if (agent.stopped || agent.busy || agent.turnInProgress || agent.submitting) return;
-    if (agent.backgroundCompletionInFlight || !agent.backgroundCompletionQueue.length) return;
-    agent.submitting = true;
-    agent.busy = true;
-    const completionKey = agent.backgroundCompletionQueue[0];
-    try {
-      const outcome = await wakeOnBackgroundCompletion(agent);
-      if (outcome.status === "accepted") {
-        agent.backgroundCompletionKeys.add(completionKey);
-        agent.backgroundCompletionInFlight = completionKey;
-        agent.backgroundCompletionWakeInputId = outcome.inputId;
-        // Keep the reject streak until the wake turn actually succeeds. An accepted
-        // prompt that later terminal-fails must not reset the bounded retry budget.
-        clearBackgroundCompletionRetryTimer(agent);
-      } else if (outcome.status === "dropped") {
-        if (agent.stopped) {
-          if (agent.backgroundCompletionQueue[0] === completionKey) agent.backgroundCompletionQueue.shift();
-          agent.backgroundCompletionKeys.delete(completionKey);
-          clearBackgroundCompletionRetryTimer(agent);
-        } else {
-          rearmBackgroundCompletion(agent, completionKey);
-          agent.busy = false;
-        }
-      } else {
-        agent.busy = false;
-        agent.backgroundCompletionRejectStreak += 1;
-        // Leave the item queued+deduped. Immediate microtask retries cover a
-        // brief reject; after that a bounded timer still drains because Pi will
-        // not re-emit the same completion.
-        scheduleBackgroundCompletionRetry(agent);
-      }
-    } finally {
-      agent.submitting = false;
-    }
-  };
-
-  const persistSubagentLedger = (agent: ManagedAgent): void => {
-    writeDispatchedSubagentLedger(ledgerFilePath(effectivePiStateDir(agent.config)), agent.subagentLedger);
-  };
-
-  const dropQueuedBackgroundCompletionFallback = (agent: ManagedAgent, completionKey: string): void => {
-    const keys = new Set([completionKey, ...taskIdsFromCompletionKey(completionKey)]);
-    for (let index = agent.backgroundCompletionQueue.length - 1; index >= 0; index -= 1) {
-      const queued = agent.backgroundCompletionQueue[index];
-      if (queued && keys.has(queued)) agent.backgroundCompletionQueue.splice(index, 1);
-    }
-    for (const key of keys) agent.backgroundCompletionKeys.add(key);
-  };
-
-  const acknowledgeSubagentWake = (agent: ManagedAgent, completionKey: string): void => {
-    const next = noteDispatchedSubagentWakeAcknowledged(agent.subagentLedger, { completionKey });
-    if (next === agent.subagentLedger) return;
-    agent.subagentLedger = next;
-    persistSubagentLedger(agent);
-    for (const taskId of taskIdsFromCompletionKey(completionKey)) {
-      retirePiSubagentRecord(lookupDispatchedSubagent(agent.subagentLedger, taskId)?.recordFile);
-    }
-  };
-
-  const enqueueUndeliveredTerminalWakes = (agent: ManagedAgent): void => {
-    for (const key of undeliveredTerminalWakeKeys(agent.subagentLedger)) {
-      agent.backgroundCompletionKeys.delete(key);
-      for (const taskId of taskIdsFromCompletionKey(key)) agent.backgroundCompletionKeys.delete(taskId);
-      noteBackgroundCompletion(agent, key);
-    }
-  };
-
-  const reconcileAfterSessionSwap = (agent: ManagedAgent): void => {
-    reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
-    enqueueUndeliveredTerminalWakes(agent);
-    if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
-  };
-
-  const loadSubagentLedger = (config: AgentRuntimeConfig): DispatchedSubagentLedger => {
-    return readDispatchedSubagentLedger(ledgerFilePath(effectivePiStateDir(config)));
-  };
-
-  const clearSubagentReconcileTimer = (agent: ManagedAgent): void => {
-    if (!agent.subagentReconcileTimer) return;
-    clearInterval(agent.subagentReconcileTimer);
-    agent.subagentReconcileTimer = null;
-  };
-
-  const hasActiveDispatchedSubagent = (agent: ManagedAgent): boolean =>
-    agent.subagentLedger.tasks.some((task) => task.status === "dispatched");
-
-  const noteBackgroundCompletion = (agent: ManagedAgent, completionKey: string): void => {
-    const taskIds = taskIdsFromCompletionKey(completionKey);
-    if (agent.backgroundCompletionKeys.has(completionKey)) return;
-    if (taskIds.length > 0 && taskIds.every((taskId) => agent.backgroundCompletionKeys.has(taskId))) return;
-    agent.backgroundCompletionKeys.add(completionKey);
-    for (const taskId of taskIds) agent.backgroundCompletionKeys.add(taskId);
-    if (!agent.backgroundCompletionQueue.includes(completionKey)) {
-      agent.backgroundCompletionQueue.push(completionKey);
-    }
-    if (!agent.busy && !agent.turnInProgress && !agent.submitting && !agent.backgroundCompletionInFlight) {
-      scheduleBackgroundCompletionDrain(agent);
-    }
-  };
-
-  const recordDispatchedSubagent = (agent: ManagedAgent, taskId: string, outputFile?: string): void => {
-    const recordFile = writeDispatchedSubagentRecordFile(effectivePiStateDir(agent.config), taskId, agent.piSessionOwner);
-    agent.subagentLedger = noteDispatchedSubagent(agent.subagentLedger, { taskId, outputFile, recordFile });
-    persistSubagentLedger(agent);
-    armSubagentReconcileTimer(agent);
-  };
-
-  const recordTerminalSubagentNotification = (agent: ManagedAgent, completionKey: string, statuses?: Record<string, DispatchedSubagentRecord["status"]>): void => {
-    let next = agent.subagentLedger;
-    for (const taskId of taskIdsFromCompletionKey(completionKey)) {
-      const status = statuses?.[taskId];
-      next = noteDispatchedSubagentTerminal(next, {
-        taskId,
-        status: status && status !== "dispatched" && status !== "orphaned" ? status : "completed",
-        wakeKey: completionKey,
-      });
-    }
-    agent.subagentLedger = next;
-    persistSubagentLedger(agent);
-    if (!hasActiveDispatchedSubagent(agent)) clearSubagentReconcileTimer(agent);
-  };
-
-  const reconcileSubagentLedger = (agent: ManagedAgent, input: {
-    forceMissing?: boolean; missingReason?: string;
-  } = {}): void => {
-    if (agent.stopped) return;
-    const result = reconcileDispatchedSubagents(agent.subagentLedger, {
-      probe: options.subagentRecordProbe ?? probePiSubagentRecord,
-      forceMissing: input.forceMissing === true,
-      missingReason: input.missingReason,
-    });
-    const previousLedger = agent.subagentLedger;
-    agent.subagentLedger = result.ledger;
-    if (result.orphaned.length > 0 || result.terminals.length > 0 || result.ledger !== previousLedger) {
-      persistSubagentLedger(agent);
-    }
-    for (const record of [...result.orphaned, ...result.terminals]) {
-      noteBackgroundCompletion(agent, record.wakeKey ?? record.taskId);
-    }
-    if (!hasActiveDispatchedSubagent(agent)) clearSubagentReconcileTimer(agent);
-    else armSubagentReconcileTimer(agent);
-  };
-
-  const armSubagentReconcileTimer = (agent: ManagedAgent): void => {
-    if (agent.stopped || agent.subagentReconcileTimer || subagentReconcileIntervalMs === 0) return;
-    if (!hasActiveDispatchedSubagent(agent)) return;
-    agent.subagentReconcileTimer = setInterval(() => {
-      if (agent.stopped) {
-        clearSubagentReconcileTimer(agent);
-        return;
-      }
-      reconcileSubagentLedger(agent);
-    }, subagentReconcileIntervalMs);
-    agent.subagentReconcileTimer.unref?.();
-  };
-
   const scheduleRecreate = (agent: ManagedAgent, reason: string): void => {
     if (agent.stopped || agent.retryTimer || agent.starting || agent.session) return;
     if (agent.recreateAttempts >= retryPolicy.maxAttempts) {
@@ -1243,10 +893,7 @@ export function createRuntimeHost(options: {
         const session = agent.session;
         const proactive = session ? proactivelyCompactPiAtIdle(agent, session) : null;
         if (proactive) await proactive;
-        reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "pi session gone" });
-        enqueueUndeliveredTerminalWakes(agent);
         await retryPending(agent);
-        if (agent.backgroundCompletionQueue.length > 0) scheduleBackgroundCompletionDrain(agent);
       }).catch((error) => {
         const readiness = error instanceof RuntimePrerequisiteError ? error.readiness
           : classifyRuntimePrerequisite(agent.adapter.id as RuntimeReadiness["runtime"], error);
@@ -1265,20 +912,16 @@ export function createRuntimeHost(options: {
   const replaceSession = (agent: ManagedAgent, session: RuntimeSession, reason: string): void => {
     if (agent.session !== session || agent.stopped) return;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
-    rearmBackgroundCompletion(agent);
     agent.recreateReason = reason;
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
     for (const record of agent.records.values()) if (isActiveDelivery(record.status)) record.status = "pending";
     emitConsumed(agent, persist(agent));
     emit({ type: "agent-status", agentId: agent.config.agentId, status: "error", error: reason });
-    // Close first so the shutdown sweep can bridge consumed or terminal state
-    // before force-missing reconcile treats a plain sidecar as orphaned.
     void session.close(`replace after ${reason}`)
       .catch((error) => log("runtime close after replacement failed", String(error)))
       .finally(() => {
         if (agent.stopped) return;
-        reconcileAfterSessionSwap(agent);
         scheduleRecreate(agent, reason);
       });
   };
@@ -1287,7 +930,6 @@ export function createRuntimeHost(options: {
     if (agent.session !== session || agent.stopped) return;
     agent.disabledReason = `runtime configuration recovery in progress: ${message}`;
     agent.session = null; agent.busy = false; agent.submitting = false; agent.generation += 1;
-    rearmBackgroundCompletion(agent);
     if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
     agent.stabilityTimer = null;
     for (const record of agent.records.values()) {
@@ -1300,7 +942,6 @@ export function createRuntimeHost(options: {
     const recovery = (async () => {
       try {
         await session.close("runtime configuration error");
-        if (!agent.stopped) reconcileAfterSessionSwap(agent);
         const result = agent.adapter.recoverConfigurationError
           ? await agent.adapter.recoverConfigurationError(message)
           : { recovered: false, reason: "runtime adapter does not support automatic configuration recovery" };
@@ -1549,14 +1190,6 @@ export function createRuntimeHost(options: {
       // closed instead of inheriting a previous turn's chat or reminder.
       agent.stateStore?.clearCurrentInboxSource?.();
       finalizeReminderContexts(agent, "Runtime turn ended without a matching Feishu write");
-      if (agent.backgroundCompletionInFlight) {
-        if (agent.turnHadFailure) failBackgroundCompletionWake(agent);
-        else commitBackgroundCompletion(agent);
-      }
-      if (agent.backgroundCompletionQueue.length > 0 && !agent.backgroundCompletionRetryTimer) {
-        scheduleBackgroundCompletionDrain(agent);
-      }
-      reconcileSubagentLedger(agent);
       telemetry?.runtimeEvent(agent.config.agentId, event);
       if (recoveredAuthentication) {
         clearAuthFailure(agent);
@@ -1573,29 +1206,10 @@ export function createRuntimeHost(options: {
       const proactive = proactivelyCompactPiAtIdle(agent, session);
       void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
       queueMicrotask(() => { void scanAndPromoteAcceptedInboxUpdates(agent); });
-    } else if (event.type === "runtime-observation") {
-      if (event.phase === "background_dispatched" && typeof event.taskId === "string" && event.taskId) {
-        recordDispatchedSubagent(agent, event.taskId, typeof event.outputFile === "string" ? event.outputFile : undefined);
-      } else if (event.phase === "completed" && typeof event.completionKey === "string") {
-        recordTerminalSubagentNotification(agent, event.completionKey, event.completionStatuses);
-        if (event.handledInTurn === true) {
-          acknowledgeSubagentWake(agent, event.completionKey);
-          dropQueuedBackgroundCompletionFallback(agent, event.completionKey);
-        } else {
-          noteBackgroundCompletion(agent, event.completionKey);
-        }
-      }
     } else if (event.type === "activity") {
       if (agent.turnInProgress && event.activity !== "internal") agent.turnHadAuthenticatedOutput = true;
       emit({ type: "activity", agentId: agent.config.agentId, activity: event.activity, activityKind: event.activity });
     } else if (event.type === "input-error") {
-      if (agent.backgroundCompletionInFlight
-        && (!event.inputId || !agent.backgroundCompletionWakeInputId
-          || event.inputId === agent.backgroundCompletionWakeInputId)
-        && event.willRetry !== true) {
-        agent.turnHadFailure = true;
-        failBackgroundCompletionWake(agent, event);
-      }
       const record = event.inputId
         ? agent.records.get(event.inputId) ?? [...agent.records.values()].find((candidate) => candidate.input.inputId === event.inputId)
         : undefined;
@@ -1709,7 +1323,6 @@ export function createRuntimeHost(options: {
         throw new Error("stale runtime session creation");
       }
       agent.session = session;
-      agent.piSessionOwner = sessionEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
       session.subscribe((event) => observe(agent, session, event));
       if (agent.session !== session) return session;
       if (session.sessionId) {
@@ -1835,9 +1448,7 @@ export function createRuntimeHost(options: {
         ...(agent.previousSession ? { previousSession: agent.previousSession } : {}) });
     }
     emit({ type: "agent-status", agentId, status: "active", readiness });
-    agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
     await oldSession.close("Pi context fallback committed").catch((error) => log("previous Pi session close after fallback failed", String(error)));
-    reconcileAfterSessionSwap(agent);
     const proactive = proactivelyCompactPiAtIdle(agent, fresh);
     void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
     return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
@@ -1901,8 +1512,6 @@ export function createRuntimeHost(options: {
           if (previous.poller) clearInterval(previous.poller);
           if (previous.retryTimer) clearTimeout(previous.retryTimer);
           if (previous.stabilityTimer) clearTimeout(previous.stabilityTimer);
-          if (previous.backgroundCompletionRetryTimer) clearTimeout(previous.backgroundCompletionRetryTimer);
-          if (previous.subagentReconcileTimer) clearInterval(previous.subagentReconcileTimer);
           const previousFailure = currentAuthFailure(previous);
           const scoped = Boolean(previousFailure
             && authFailureAppliesTo({
@@ -1914,7 +1523,6 @@ export function createRuntimeHost(options: {
             ...previous, config, adapter, session, launchId: crypto.randomUUID(), busy: false, submitting: false,
             starting: null, retryAfterSubmit: false, generation: 0, poller: null, retryTimer: null,
             recreateAttempts: 0, stabilityTimer: null, recreateReason: null, stopped: false,
-            backgroundCompletionRetryTimer: null, subagentReconcileTimer: null,
             disabledReason: null, configurationRecovery: null,
             authFailureActive: scoped && previous.authFailureActive,
             authFailureKind: scoped ? previous.authFailureKind : null,
@@ -1935,14 +1543,8 @@ export function createRuntimeHost(options: {
           if (!candidate.authFailureActive) {
             emit({ type: "agent-status", agentId: config.agentId, status: "active", readiness: candidate.readiness ?? readiness });
           }
-          candidate.piSessionOwner = stageEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
-          // Close first so the old session's shutdown sweep can bridge consumed
-          // terminals before force-missing reconcile. Commit also clears any
-          // inherited backoff timer; reschedule so a queued completion still
-          // drains on the new session.
           await previous.session?.close("runtime candidate committed")
             .catch((error) => log("previous runtime close after candidate commit failed", String(error)));
-          reconcileAfterSessionSwap(candidate);
         },
         rollback,
       };
@@ -2031,10 +1633,8 @@ export function createRuntimeHost(options: {
         ...(agent.authFailureActive ? { error: `${agent.readiness?.reason} ${agent.readiness?.nextAction}` } : {}),
         readiness: agent.authFailureActive ? agent.readiness ?? readiness : readiness,
       });
-      agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
       await oldSession.close("fresh session reset committed")
         .catch((error) => log("previous runtime close after fresh reset failed", String(error)));
-      reconcileAfterSessionSwap(agent);
       return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
         runtimeReady: true, pendingCount: 0, sessionId: fresh.sessionId };
     },
@@ -2175,10 +1775,8 @@ export function createRuntimeHost(options: {
           readiness: agent.authFailureActive ? agent.readiness ?? readiness : readiness,
         });
         durableRollback = null;
-        agent.piSessionOwner = probeEnv[PI_SUBAGENT_SESSION_OWNER_ENV];
         await oldSession.close("context-window recovery committed")
           .catch((error) => log("previous runtime close after context-window recovery failed", String(error)));
-        reconcileAfterSessionSwap(agent);
         const proactive = proactivelyCompactPiAtIdle(agent, fresh);
         void (proactive ?? Promise.resolve("noop" as const)).then(() => retryPending(agent));
         return { generationChanged: true, sessionChanged: oldSessionId !== fresh.sessionId, turns: 0,
@@ -2248,11 +1846,7 @@ export function createRuntimeHost(options: {
           previousSession: loadPersistedPreviousSession(config, stateStore), readiness: null,
           turnInProgress: false, turnHadFailure: false, turnHadAuthenticatedOutput: false, authFailureActive: false,
           authFailureKind: null, authFailureProvider: null,
-          promotedInboxUpdateIds: new Set(),
-          backgroundCompletionQueue: [], backgroundCompletionKeys: new Set(),
-          backgroundCompletionInFlight: null, backgroundCompletionWakeInputId: null,
-          backgroundCompletionRejectStreak: 0, backgroundCompletionRetryTimer: null,
-          subagentLedger: loadSubagentLedger(config), subagentReconcileTimer: null };
+          promotedInboxUpdateIds: new Set() };
         restoreAuthFailure(agent);
         const startupConsumed: DeliveryRecord[] = [];
         const startupQuarantined: Array<{ record: DeliveryRecord; code: ReplayFailureCode }> = [];
@@ -2283,8 +1877,6 @@ export function createRuntimeHost(options: {
         try {
           await ensureSession(agent);
           if (agent.stopped) return;
-          reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "runtime restarted" });
-          enqueueUndeliveredTerminalWakes(agent);
           await recoverStalePiCompaction(agent);
           const startupSession = agent.session;
           const proactive = startupSession ? proactivelyCompactPiAtIdle(agent, startupSession) : null;
@@ -2297,8 +1889,6 @@ export function createRuntimeHost(options: {
           const reason = error instanceof Error ? error.message : String(error);
           const transient = error instanceof RuntimePrerequisiteError && error.readiness.state === "unavailable";
           agent.disabledReason = transient ? null : reason;
-          reconcileSubagentLedger(agent, { forceMissing: true, missingReason: "runtime restarted" });
-          enqueueUndeliveredTerminalWakes(agent);
           if (transient) { recoveringCount += 1; scheduleRecreate(agent, reason); }
           startupFailures.push(`${config.agentId}: ${reason}`);
           emit({ type: "agent-status", agentId: config.agentId, status: "error", error: reason,
@@ -2389,8 +1979,6 @@ export function createRuntimeHost(options: {
       if (agent.poller) clearInterval(agent.poller);
       if (agent.retryTimer) clearTimeout(agent.retryTimer);
       if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
-      if (agent.backgroundCompletionRetryTimer) clearTimeout(agent.backgroundCompletionRetryTimer);
-      if (agent.subagentReconcileTimer) clearInterval(agent.subagentReconcileTimer);
       if (agent.busy) await agent.session?.cancel(reason);
       await agent.session?.close(reason);
       // A queued Pi initializer cannot be cancelled through the public adapter
@@ -2402,9 +1990,5 @@ export function createRuntimeHost(options: {
     },
     async shutdown(reason): Promise<void> { await Promise.allSettled([...managed.keys()].map((id) => this.stop(id, reason))); },
     subscribe(listener): () => void { listeners.add(listener); return () => listeners.delete(listener); },
-    getDispatchedSubagent(agentId, taskId): DispatchedSubagentRecord | null {
-      const agent = managed.get(agentId);
-      return agent ? lookupDispatchedSubagent(agent.subagentLedger, taskId) : null;
-    },
   };
 }

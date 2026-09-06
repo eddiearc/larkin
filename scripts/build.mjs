@@ -198,98 +198,6 @@ function compile(args) {
   return true;
 }
 
-const PI_SUBAGENTS_PACKAGE = "@tintinweb/pi-subagents";
-
-// Bundle the pi-subagents extension into a single file that a pi runtime process
-// can load via `--extension/-e`. The pi-* packages stay external because the
-// extension always runs inside a pi process that provides them.
-function bundlePiSubagentExtension(outFile) {
-  const entry = path.join(ROOT, "node_modules", PI_SUBAGENTS_PACKAGE, "src", "index.ts");
-  if (!fs.existsSync(entry)) {
-    process.stderr.write(`[build] ${PI_SUBAGENTS_PACKAGE} not installed (expected ${entry})\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  const result = spawnSync("bun", ["build", entry, "--outfile", outFile, "--external", "@earendil-works/pi-*", "--target", "bun"], {
-    cwd: ROOT,
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) {
-    process.stderr.write(result.stderr || result.stdout || `[build] pi-subagents bundle failed: ${result.error?.message || result.status}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  process.stderr.write(result.stderr || result.stdout || "");
-  console.error(`[build] pi-subagents bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
-  return true;
-}
-
-// Bundle the larkin-owned bash 60s timeout guard extension into a single file
-// that a pi runtime process can load via `--extension/-e` (issue #55/#56).
-// pi-* stays external because the extension always runs inside a pi process.
-function bundlePiBashTimeoutExtension(outFile) {
-  const entry = path.join(ROOT, "src", "runtime", "pi-bash-timeout-extension.ts");
-  if (!fs.existsSync(entry)) {
-    process.stderr.write(`[build] pi-bash-timeout extension entry missing: ${entry}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  const result = spawnSync("bun", ["build", entry, "--outfile", outFile, "--external", "@earendil-works/pi-*", "--target", "bun"], {
-    cwd: ROOT,
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) {
-    process.stderr.write(result.stderr || result.stdout || `[build] pi-bash-timeout bundle failed: ${result.error?.message || result.status}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  process.stderr.write(result.stderr || result.stdout || "");
-  console.error(`[build] pi-bash-timeout bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
-  return true;
-}
-
-function bundlePiSupervisedCommandExtension(outFile) {
-  const entry = path.join(ROOT, "src", "runtime", "pi-supervised-command-extension.ts");
-  if (!fs.existsSync(entry)) {
-    process.stderr.write(`[build] pi-supervised-command extension entry missing: ${entry}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  const result = spawnSync("bun", ["build", entry, "--outfile", outFile, "--external", "@earendil-works/pi-*", "--target", "bun"], {
-    cwd: ROOT,
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) {
-    process.stderr.write(result.stderr || result.stdout || `[build] pi-supervised-command bundle failed: ${result.error?.message || result.status}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  process.stderr.write(result.stderr || result.stdout || "");
-  console.error(`[build] pi-supervised-command bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
-  return true;
-}
-
-function bundlePiSubagentRecordWatchdogExtension(outFile) {
-  const entry = path.join(ROOT, "src", "runtime", "pi-subagent-record-watchdog.ts");
-  if (!fs.existsSync(entry)) {
-    process.stderr.write(`[build] pi-subagent-record-watchdog extension entry missing: ${entry}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  const result = spawnSync("bun", ["build", entry, "--outfile", outFile, "--external", "@earendil-works/pi-*", "--target", "bun"], {
-    cwd: ROOT,
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) {
-    process.stderr.write(result.stderr || result.stdout || `[build] pi-subagent-record-watchdog bundle failed: ${result.error?.message || result.status}\n`);
-    process.exitCode = 1;
-    return false;
-  }
-  process.stderr.write(result.stderr || result.stdout || "");
-  console.error(`[build] pi-subagent-record-watchdog bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
-  return true;
-}
-
 function buildDashboardWeb(outDir) {
   const viteEnv = { ...process.env, LARKIN_DASHBOARD_OUT_DIR: outDir, NODE_DISABLE_COMPILE_CACHE: "1" };
   delete viteEnv.NODE_COMPILE_CACHE;
@@ -308,6 +216,32 @@ function buildDashboardWeb(outDir) {
 }
 
 class CompilationFailed extends Error {}
+
+function bundlePiTmuxExtension(outFile) {
+  const entry = path.join(ROOT, "src", "runtime", "pi-tmux-extension.ts");
+  if (!fs.existsSync(entry)) {
+    process.stderr.write(`[build] pi-tmux extension entry missing: ${entry}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  const result = spawnSync("bun", [
+    "build", entry, "--outfile", outFile,
+    "--external", "@earendil-works/pi-*",
+    "--external", "typebox",
+    "--target", "bun",
+  ], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    process.stderr.write(result.stderr || result.stdout || `[build] pi-tmux bundle failed: ${result.error?.message || result.status}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  process.stderr.write(result.stderr || result.stdout || "");
+  console.error(`[build] pi-tmux bundle → ${path.relative(process.cwd(), outFile) || outFile}`);
+  return true;
+}
 
 const rewriteSpecifiers = (file, code, extension) => {
   const { sourceFile, nodes } = moduleSpecifierNodes(file);
@@ -355,10 +289,8 @@ try {
     fs.writeFileSync(destination, data, { mode: ["app/cli.mjs", "app/lark-cli.mjs"].includes(name) ? 0o755 : 0o644 });
   }
   if (!buildDashboardWeb(path.join(outputStage, "dashboard", "web"))) throw new CompilationFailed();
-  if (!bundlePiSubagentExtension(path.join(outputStage, "runtime", "pi-subagents.bundle.js"))) throw new CompilationFailed();
-  if (!bundlePiBashTimeoutExtension(path.join(outputStage, "runtime", "pi-bash-timeout.bundle.js"))) throw new CompilationFailed();
-  if (!bundlePiSubagentRecordWatchdogExtension(path.join(outputStage, "runtime", "pi-subagent-record-watchdog.bundle.js"))) throw new CompilationFailed();
-  if (!bundlePiSupervisedCommandExtension(path.join(outputStage, "runtime", "pi-supervised-command.bundle.js"))) throw new CompilationFailed();
+  fs.mkdirSync(path.join(outputStage, "runtime"), { recursive: true });
+  if (!bundlePiTmuxExtension(path.join(outputStage, "runtime", "pi-tmux.bundle.js"))) throw new CompilationFailed();
 
   // Materialize the whole graph before touching the active dist tree. Failed builds
   // preserve the prior output; successful builds replace it wholesale, removing stale files.

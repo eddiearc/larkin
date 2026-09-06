@@ -16,7 +16,19 @@ import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } fr
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v29";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v31";
+
+/**
+ * Pi 长命令引导的唯一来源。仅在当前工具列表出现 tmux-backed bash 时适用；
+ * 不声明 tmux 一定可用，也不复述扩展的工具细节。
+ * 工具拒绝当前 workspace 时只要求如实报告，不因此禁止其它已授权工具。
+ */
+export const PI_TMUX_BASH_GUIDANCE: readonly string[] = [
+  "If the current tools include a tmux-backed bash, long-running work may continue after a wait timeout. That timeout is not process failure.",
+  "Use the identifiers those tools return to inspect or stop the same process. When a command finishes, handle the completion notification in this originating conversation.",
+  "The user-installed extension owns tool names, arguments, and other details. Do not assume tmux or extra inspect/stop tools exist unless they appear in the current tool list.",
+  "If an available tool refuses the current workspace, report that limitation. Other authorized tools in the current list remain available. Do not assume the refusing tool works in every workspace.",
+];
 
 /**
  * Agent 间协作唤醒引导（issue #75）：纯文本 @ 不会产生飞书 mention 事件，
@@ -149,21 +161,10 @@ export class ContextPromptBuilder {
       "Larkin Runtime Host is the only production runtime path. Do not start a second runtime or a legacy daemon.",
       ...(input.runtime === "pi" ? [
         "",
-        "## Background subagents (pi)",
-        "Long-running, independent work MUST use the Agent tool with run_in_background: true. It is the ONLY supported background mechanism. nohup, `&`, disown, and shell background jobs are forbidden for delegated work.",
-        "Foreground bash is hard-capped at 60 seconds. Never pass a bash timeout above 60. Never use nested bash to outlive 60s. If work must outlive 60s, Agent({ prompt, description, run_in_background: true }) and inside that background agent use supervised_start (executable+args, shell:false) once, then loop supervised_wait (timeout <= 60). Wait timeout returns still running and does NOT kill the process; Steer can arrive after each wait. Total lifetime is 600s. Abort/cancel/shutdown reaps the process tree. Do not use nohup / '&' / disown.",
-        "Correct pattern:",
-        "1. Call Agent with arguments like {\"prompt\": \"<task>\", \"description\": \"<short label>\", \"run_in_background\": true}.",
-        "2. The tool returns an agent id immediately. Report it to the user and end the turn.",
-        "3. Do NOT poll or sleep; a completion notification arrives automatically.",
-        "4. On the notification, check the Inbox, then publish exactly one final summary.",
-        "If you explicitly use get_subagent_result with wait: true, make at most one bounded wait call per turn. If it returns timedOut: true, do not loop or call wait again in the same turn; yield and let the completion notification wake you.",
-        "Forbidden pattern (never acceptable): `nohup sh -c '...' > /tmp/x.out 2>&1 &`, `sleep N; cat ...`, disown, or any shell background substitute. These bypass subagent isolation.",
-        "Keep corrections, approvals, short commands, and Feishu writes in the foreground; do not delegate them.",
-        "Parallel independent tasks: when the user clearly asks for two or more independent tasks with no dependencies between them, delegate EACH task to its own background subagent in a single message with multiple Agent tool calls (one per task, all with run_in_background: true), report every job id, and end the turn. Do not run them one-by-one in the foreground and do not merge them into one subagent.",
-        "Sequential dependent tasks: when tasks depend on each other, sending the user an order message is a REQUIRED first step: before executing any follow-up work, send a message stating the execution order (for example: first I will do A, then B; I will report back after each step). Then execute in order and report as promised; never stay silent while chaining long work.",
-        "Reporting location: always report job ids and final summaries in the same conversation and thread where the user's message arrived (reply-in-thread when the request arrived in a thread). Never start a new conversation or DM for subagent status reports.",
-      ""] : []),
+        "## Long-running commands (pi)",
+        ...PI_TMUX_BASH_GUIDANCE,
+        "",
+      ] : []),
       "",
       "## Available Larkin agent commands",
       "",

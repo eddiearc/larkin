@@ -48,7 +48,7 @@ test("public CLI exposes package version and complete nested config help without
     for (const args of [["config", "--help"], ["config", "-h"], ["help", "config"]]) {
       const result = run(...args);
       assert.equal(result.status, 0, result.stderr);
-      for (const token of ["config runtime", "config model", "config effort", "config mention global", "config mention agent", "config mention chat", "config apply", "--agent", "--chat", "--json", "inherit", "default", "clear"]) {
+      for (const token of ["config runtime", "config model", "config effort", "config mention global", "config mention agent", "config mention chat", "config inbox-audit global", "config inbox-audit agent", "config apply", "--agent", "--chat", "--interval", "--json", "inherit", "default", "clear"]) {
         assert.match(result.stdout, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${args.join(" ")} missing ${token}`);
       }
       for (const operation of AGENT_CLI_CAPABILITIES.commands.config) assert.match(result.stdout, new RegExp(`config ${operation}`));

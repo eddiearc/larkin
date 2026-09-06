@@ -1,4 +1,4 @@
-export const CONFIG_CLI_OPERATIONS = Object.freeze(["show", "runtime", "model", "effort", "mention", "apply"] as const);
+export const CONFIG_CLI_OPERATIONS = Object.freeze(["show", "runtime", "model", "effort", "mention", "inbox-audit", "apply"] as const);
 
 export const CONFIG_CLI_USAGE = Object.freeze([
   "larkin config show [--agent <App ID>] [--chat <oc_id>] [--json]",
@@ -8,6 +8,8 @@ export const CONFIG_CLI_USAGE = Object.freeze([
   "larkin config mention global <require|free>",
   "larkin config mention agent <inherit|require|free> [--agent <App ID>]",
   "larkin config mention chat <oc_id> <inherit|require|free> [--agent <App ID>]",
+  "larkin config inbox-audit global <on|off> [--interval <15m|1h>]",
+  "larkin config inbox-audit agent <inherit|on|off> [--agent <App ID>] [--interval <15m|inherit>]",
   "larkin config apply [--agent <App ID>]",
 ]);
 

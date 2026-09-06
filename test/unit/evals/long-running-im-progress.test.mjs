@@ -26,13 +26,17 @@ const grade = (scenario, trace, toolAttempts = controlledToolAttempts(trace)) =>
 test("versioned scenario set stays intentionally small and validates on load", () => {
   const scenarios = loadLongRunningImScenarios(CASES);
   assert.deepEqual(scenarios.map((scenario) => scenario.id), [
+    "clean-audit-stays-silent",
     "complex-phased-task",
     "explicit-single-response",
     "poll-then-stay-silent",
+    "promised-outbound-audit-hit",
+    "reminder-preserves-owed-reply",
     "repeated-tool-failure",
     "sensitive-tool-output",
     "short-answer",
     "successful-long-task",
+    "waiting-review-without-promise-stays-silent",
   ]);
   assert.ok(scenarios.every((scenario) => scenario.version === 1));
 });
@@ -62,6 +66,24 @@ test("grader accepts golden traces for every scenario", () => {
     ],
     "poll-then-stay-silent": [
       event(1, "work", { step_id: "canonical-poll", slow: false, outcome: "success" }),
+    ],
+    "clean-audit-stays-silent": [
+      event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
+      event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
+    ],
+    "promised-outbound-audit-hit": [
+      event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
+      event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
+      event(3, "im", { body: "实现已完成，现提交 review。" }),
+    ],
+    "reminder-preserves-owed-reply": [
+      event(1, "work", { step_id: "canonical-reminder-poll", slow: false, outcome: "success" }),
+      event(2, "im", { body: "原任务已完成。" }),
+      event(3, "work", { step_id: "ordinary-reminder-payload", slow: false, outcome: "success" }),
+    ],
+    "waiting-review-without-promise-stays-silent": [
+      event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
+      event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
     ],
     "short-answer": [event(1, "im", { body: "4" })],
     "successful-long-task": [
@@ -131,6 +153,38 @@ test("poll-then-stay-silent budget rejects get_goal, history reads, and writes a
     event(2, "im", { body: "收到，等待 B。" }),
   ]);
   assert.ok(extraWrite.failures.some((failure) => failure.rule === "im_message_limit"));
+});
+
+test("issue 171 scenarios lock owed-reply precedence and audit hit/silence boundaries", () => {
+  const scenarios = Object.fromEntries(loadLongRunningImScenarios(CASES).map((scenario) => [scenario.id, scenario]));
+  assert.deepEqual(scenarios["reminder-preserves-owed-reply"].expectations.progress_before_steps,
+    ["ordinary-reminder-payload"]);
+  assert.equal(scenarios["reminder-preserves-owed-reply"].expectations.max_im_messages, 1);
+  assert.equal(scenarios["promised-outbound-audit-hit"].expectations.terminal_im_after_work, true);
+  assert.equal(scenarios["clean-audit-stays-silent"].expectations.max_im_messages, 0);
+  assert.equal(scenarios["waiting-review-without-promise-stays-silent"].expectations.max_im_messages, 0);
+
+  const lateOwedReply = grade(scenarios["reminder-preserves-owed-reply"], [
+    event(1, "work", { step_id: "canonical-reminder-poll", slow: false, outcome: "success" }),
+    event(2, "work", { step_id: "ordinary-reminder-payload", slow: false, outcome: "success" }),
+    event(3, "im", { body: "原任务已完成。" }),
+  ]);
+  assert.ok(lateOwedReply.failures.some((failure) => failure.rule === "progress_before_step"));
+
+  const missingPromisedStatus = grade(scenarios["promised-outbound-audit-hit"], [
+    event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
+    event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
+  ]);
+  assert.ok(missingPromisedStatus.failures.some((failure) => failure.rule === "terminal_im_after_work"));
+
+  for (const id of ["clean-audit-stays-silent", "waiting-review-without-promise-stays-silent"]) {
+    const noisy = grade(scenarios[id], [
+      event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
+      event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
+      event(3, "im", { body: "无必要状态。" }),
+    ]);
+    assert.ok(noisy.failures.some((failure) => failure.rule === "im_message_limit"), id);
+  }
 });
 
 test("ordinary long tasks retain the mandatory first-response contract", () => {

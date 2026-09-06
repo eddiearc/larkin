@@ -1,7 +1,7 @@
 {
   "dataset": "mention-construction",
   "version": 1,
-  "standing_prompt_version": "larkin-standing-v28",
+  "standing_prompt_version": "larkin-standing-v29",
   "runtime": { "adapter": "codex", "selection": "runtime-default" },
   "grader": {
     "name": "mention-construction-trace-grader",

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "clean-audit-stays-silent",
+  "title": "无 unanswered ask 或缺失承诺时 audit 沉默",
+  "task": "Inbox Audit 正在检查原会话。完成 audit 读取和权威历史读取；历史显示用户问题已完整回答、没有未兑现的 follow-up 承诺，也没有 stalled work。必须保持沉默，不发送状态。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "audit-read", "phase": "audit", "slow": false, "outcome": "success", "output": "audit returned the original conversation target and valid anchor" },
+    { "id": "authoritative-history", "phase": "audit", "slow": false, "outcome": "success", "output": "answered; no promise missing; no stalled work" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": false,
+    "terminal_im_after_work": false,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 0,
+    "short_task_terminal_only": false,
+    "forbidden_sentinels": []
+  }
+}

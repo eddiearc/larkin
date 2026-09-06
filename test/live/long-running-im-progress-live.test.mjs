@@ -30,14 +30,17 @@ if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 10) {
 const scenarioFilter = new Set((process.env.LARKIN_LONG_RUNNING_IM_EVAL_SCENARIOS || "")
   .split(",").map((item) => item.trim()).filter(Boolean));
 const omitExplicitResponseRule = process.env.LARKIN_LONG_RUNNING_IM_EVAL_OMIT_EXPLICIT_RESPONSE_RULE === "1";
+const omitIssue171Rules = process.env.LARKIN_LONG_RUNNING_IM_EVAL_OMIT_ISSUE171_RULES === "1";
 const expectedRedScenarios = new Set((process.env.LARKIN_LONG_RUNNING_IM_EVAL_EXPECT_RED_SCENARIOS || "")
   .split(",").map((item) => item.trim()).filter(Boolean));
-if (!omitExplicitResponseRule && expectedRedScenarios.size > 0) {
+const counterfactualMode = omitExplicitResponseRule || omitIssue171Rules;
+if (!counterfactualMode && expectedRedScenarios.size > 0) {
   throw new Error("LARKIN_LONG_RUNNING_IM_EVAL_EXPECT_RED_SCENARIOS requires counterfactual mode");
 }
-if (omitExplicitResponseRule && expectedRedScenarios.size === 0) {
+if (counterfactualMode && expectedRedScenarios.size === 0) {
   throw new Error("counterfactual mode requires LARKIN_LONG_RUNNING_IM_EVAL_EXPECT_RED_SCENARIOS");
 }
+if (omitExplicitResponseRule && omitIssue171Rules) throw new Error("select only one counterfactual mode");
 
 function readTrace(file) {
   try {
@@ -62,7 +65,10 @@ function waitFor(controlEvents, predicate, timeoutMs = 180_000) {
 }
 
 function createEvalAdapter() {
-  if (runtime === "pi") return createNativeRuntimeAdapter("pi");
+  if (runtime === "pi") return createNativeRuntimeAdapter("pi", {
+    ...(process.env.LARKIN_PI_COMMAND?.trim() ? { piCommand: process.env.LARKIN_PI_COMMAND.trim() } : {}),
+    piRpcClientOptions: { requestTimeoutMs: 30_000 },
+  });
   const codexCommand = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).trim();
   assert.ok(codexCommand, "codex executable is required");
   return createNativeRuntimeAdapter("codex", { codexCommand });
@@ -108,6 +114,13 @@ async function runScenario(scenario, repetition) {
       assert.notEqual(content, prompt.content, "counterfactual must remove the standing prompt response/call budget rule");
       prompt = { ...prompt, content, hash: createHash("sha256").update(content).digest("hex") };
     }
+    if (omitIssue171Rules) {
+      const content = prompt.content
+        .replace(/An unrelated Inbox event does not cancel or supersede an already-owed user-visible reply[^\n]*\n/, "")
+        .replace(/For Inbox Audit, completed work whose promised status, delivery, or real @mention[^\n]*\n/, "");
+      assert.notEqual(content, prompt.content, "counterfactual must remove the issue 171 standing prompt rules");
+      prompt = { ...prompt, content, hash: createHash("sha256").update(content).digest("hex") };
+    }
     const adapter = createEvalAdapter();
     const isolatedMessagingEnv = Object.fromEntries(Object.keys(process.env)
       .filter((key) => /(?:LARK|FEISHU)/i.test(key))
@@ -125,6 +138,8 @@ async function runScenario(scenario, repetition) {
         PATH: [runtime === "pi" && process.env.LARKIN_PI_COMMAND
           ? path.dirname(process.env.LARKIN_PI_COMMAND) : null, path.dirname(process.execPath), "/usr/bin", "/bin"]
           .filter(Boolean).join(":"),
+        ...(runtime === "pi" && process.env.LARKIN_PI_COMMAND
+          ? { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND } : {}),
         LARKIN_EVAL_SCENARIO_FILE: scenarioFile,
         LARKIN_EVAL_TRACE_FILE: traceFile,
         LARKIN_CONFIG_DIR: path.join(root, "no-feishu-config"),

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "waiting-review-without-promise-stays-silent",
+  "title": "仅等待 review 且无承诺缺口时不催促",
+  "task": "Inbox Audit 正在检查原会话。完成 audit 读取和权威历史读取；历史显示 PR 已报告且正在等待 review，没有 unanswered human ask，也没有承诺稍后再次 @mention 或回报。必须保持沉默，不要为了等待 review 再次 ping 人或 Agent。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "audit-read", "phase": "audit", "slow": false, "outcome": "success", "output": "audit returned the original conversation target and valid anchor" },
+    { "id": "authoritative-history", "phase": "audit", "slow": false, "outcome": "success", "output": "PR already reported; waiting for review; no unanswered ask or promised follow-up" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": false,
+    "terminal_im_after_work": false,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 0,
+    "short_task_terminal_only": false,
+    "forbidden_sentinels": []
+  }
+}

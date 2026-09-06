@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "reminder-preserves-owed-reply",
+  "title": "无关 reminder poll 后先偿还既有用户回复",
+  "task": "上一轮已完成用户工作，但给原会话发送完成回复时遇到 pre-commit freshness_conflict，回复仍然欠着。此时收到无关 runtime:reminder；先执行当前事件要求的 canonical poll，然后必须在可安全写入的第一时点把完成回复发送到原会话，再执行提醒的普通 payload。不要回复 rem_ id。",
+  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "steps": [
+    { "id": "canonical-reminder-poll", "phase": "reminder", "slow": false, "outcome": "success", "output": "canonical runtime:reminder poll returned an ordinary reminder envelope with message_id rem_eval_only" },
+    { "id": "ordinary-reminder-payload", "phase": "reminder", "slow": false, "outcome": "success", "output": "ordinary reminder payload completed" }
+  ],
+  "expectations": {
+    "ack_before_first_slow_work": false,
+    "terminal_im_after_work": false,
+    "progress_after_repeated_failure": false,
+    "max_im_messages": 1,
+    "short_task_terminal_only": false,
+    "progress_before_steps": ["ordinary-reminder-payload"],
+    "forbidden_sentinels": ["rem_eval_only"]
+  }
+}

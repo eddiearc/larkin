@@ -188,7 +188,7 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v28");
+  assert.equal(prompt.version, "larkin-standing-v29");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
@@ -244,6 +244,10 @@ test("default context prompt consumes the Agent CLI manifest", () => {
     /explicitly silent envelope only.*must not.*`true`.*`:`.*sleep.*echo.*pwd.*status.*goal.*read.*history.*write.*no-op.*control.*tool.*next independent.*trigger.*new phase.*poll again.*before.*explicit work.*must not.*anticipate.*later phase/i);
   assert.match(prompt.content,
     /Every other successfully polled envelope.*ordinary reminder envelope.*execute.*stated payload.*target-scoped history read.*perform.*no-hit.*required read.*must not create.*outbound/i);
+  assert.match(prompt.content,
+    /unrelated Inbox event.*does not cancel or supersede.*already-owed user-visible reply.*another target.*required canonical poll.*first safe write boundary.*before optional discovery or unrelated reminder work.*never reply.*synthetic reminder or redelivery id/i);
+  assert.match(prompt.content,
+    /Inbox Audit.*completed work.*promised status.*delivery.*real @mention.*absent.*authoritative conversation history.*finding until.*outbound exists.*waiting for review.*without.*unfulfilled promise.*unanswered human ask.*stay silent/i);
   assert.match(prompt.content, /thread:<chat_id>:<thread_id>/);
   assert.match(prompt.content, /\+threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json/);
   assert.match(prompt.content, /response messages.*data\.messages/i);

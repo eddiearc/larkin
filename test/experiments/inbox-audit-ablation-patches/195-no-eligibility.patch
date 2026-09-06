@@ -1,0 +1,13 @@
+diff --git a/src/agent/missed-outbound-scan.ts b/src/agent/missed-outbound-scan.ts
+index eaecc7f..cdcac7e 100644
+--- a/src/agent/missed-outbound-scan.ts
++++ b/src/agent/missed-outbound-scan.ts
+@@ -108,7 +108,7 @@ export function observeInboxAuditTarget(file: string, agentId: string, event: {
+   _sender_is_bot?: boolean;
+   _scan_authority?: boolean;
+ }, now = new Date()): boolean {
+-  if (event.wake !== true || event._scan_authority !== true || event._sender_is_bot !== false || event.chat_type !== "group") return false;
++  if (event._scan_authority !== true || event._sender_is_bot !== false || event.chat_type !== "group") return false;
+   const parsed = parseTarget(event);
+   if (!parsed) return false;
+   const registry = load(file);

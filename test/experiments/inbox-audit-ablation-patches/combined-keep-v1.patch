@@ -1,0 +1,21 @@
+diff --git a/src/agent/missed-outbound-scan.ts b/src/agent/missed-outbound-scan.ts
+index ffb813b..a18cae9 100644
+--- a/src/agent/missed-outbound-scan.ts
++++ b/src/agent/missed-outbound-scan.ts
+@@ -76,9 +76,13 @@ function load(file: string): AuditRegistry {
+     if (fd !== undefined) fs.closeSync(fd);
+   }
+   value = JSON.parse(bytes.toString("utf8")) as { version?: unknown; targets?: unknown };
+-  // v1 rows were recorded without wake eligibility, so they cannot prove a
+-  // missed originally-wake=true outbound. Discard rather than re-scan them.
+-  if (value?.version === 1) return emptyRegistry();
++  // Ablation only: admit legacy v1 rows as pending v2 work, despite their
++  // missing wake-eligibility provenance. This is intentionally unsafe.
++  if (value?.version === 1 && Array.isArray(value.targets)) {
++    value = { version: 2, targets: value.targets.map((row) => (
++      row && typeof row === "object" ? { ...row, status: "pending" } : row
++    )) };
++  }
+   if (value?.version !== 2 || !Array.isArray(value.targets)) return emptyRegistry();
+   if (value.targets.length > MAX_INBOX_AUDIT_REGISTRY_ROWS) throw new Error("inbox audit registry exceeds the bounded row limit");
+   return { version: 2, targets: value.targets.flatMap((row): StoredTarget[] => {

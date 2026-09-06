@@ -1,0 +1,21 @@
+diff --git a/src/app/agent-cli.ts b/src/app/agent-cli.ts
+index 24815fb..adb894e 100644
+--- a/src/app/agent-cli.ts
++++ b/src/app/agent-cli.ts
+@@ -8,7 +8,7 @@ import * as path from "node:path";
+ import { createAgentStateStore, type AgentStateStore } from "../agent/agent-state-store.js";
+ import * as larkinConfig from "../platform/config.js";
+ import { projectInboxCheck, projectInboxEvents, type InboxEnvelope } from "../agent/inbox-projection.js";
+-import { completeInboxAuditTargets, inboxAuditRegistryFile, readInboxAuditTargets } from "../agent/missed-outbound-scan.js";
++import { inboxAuditRegistryFile, readInboxAuditTargets } from "../agent/missed-outbound-scan.js";
+ import { createReminderRoutes } from "../agent/reminder-routes.js";
+ import { InteractionStateMachine } from "../agent/interaction-state-machine.js";
+ import { issueCallbackProbe, readCallbackCapability } from "../platform/callback-capability.js";
+@@ -520,7 +520,6 @@ export function runAgentCli(
+         }
+         const file = inboxAuditRegistryFile(config.larkinHome);
+         const audit = readInboxAuditTargets(file, agent.agentId);
+-        completeInboxAuditTargets(file, agent.agentId);
+         emitJson(io, audit);
+         return 0;
+       }

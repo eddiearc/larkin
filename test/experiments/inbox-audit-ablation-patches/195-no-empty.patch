@@ -1,0 +1,13 @@
+diff --git a/src/feishu/host-shell.ts b/src/feishu/host-shell.ts
+index 17e1cdf..660b7f9 100644
+--- a/src/feishu/host-shell.ts
++++ b/src/feishu/host-shell.ts
+@@ -521,7 +521,7 @@ export function createHostShell({
+     agents,
+     stateStore,
+     runtimeHost,
+-    shouldDispatch: (agent) => hasInboxAuditTargets(auditRegistry, agent.agentId),
++    shouldDispatch: () => true,
+     log,
+   });
+   const seenEventIds = new Set<string>();

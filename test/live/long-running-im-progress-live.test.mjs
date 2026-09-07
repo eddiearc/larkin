@@ -65,10 +65,7 @@ function waitFor(controlEvents, predicate, timeoutMs = 180_000) {
 }
 
 function createEvalAdapter() {
-  if (runtime === "pi") return createNativeRuntimeAdapter("pi", {
-    ...(process.env.LARKIN_PI_COMMAND?.trim() ? { piCommand: process.env.LARKIN_PI_COMMAND.trim() } : {}),
-    piRpcClientOptions: { requestTimeoutMs: 30_000 },
-  });
+  if (runtime === "pi") return createNativeRuntimeAdapter("pi");
   const codexCommand = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).trim();
   assert.ok(codexCommand, "codex executable is required");
   return createNativeRuntimeAdapter("codex", { codexCommand });
@@ -140,8 +137,6 @@ async function runScenario(scenario, repetition) {
         PATH: [runtime === "pi" && process.env.LARKIN_PI_COMMAND
           ? path.dirname(process.env.LARKIN_PI_COMMAND) : null, path.dirname(process.execPath), "/usr/bin", "/bin"]
           .filter(Boolean).join(":"),
-        ...(runtime === "pi" && process.env.LARKIN_PI_COMMAND
-          ? { LARKIN_PI_COMMAND: process.env.LARKIN_PI_COMMAND } : {}),
         LARKIN_EVAL_SCENARIO_FILE: scenarioFile,
         LARKIN_EVAL_TRACE_FILE: traceFile,
         LARKIN_CONFIG_DIR: path.join(root, "no-feishu-config"),

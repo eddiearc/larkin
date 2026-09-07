@@ -163,7 +163,7 @@ test("pi-tmux-bash eval starts from the fixed scenario dataset", () => {
   assert.deepEqual(DATASET.model.not_available_locally, ["opencode-go/deepseek-v4-flash"]);
   assert.equal(LOCAL_PI_MODELS.includes(DATASET.model.selection), true);
   assert.match(INTENDED_EVAL_COMMAND, /LARKIN_PI_TMUX_BASH_EVAL_MODEL=openai-codex\/gpt-5\.6-luna/);
-  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v31");
+  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v32");
   assert.equal(DATASET.workspace.success_path, "non-git-cwd");
   assert.equal(DATASET.workspace.cwd_preservation, "exact");
   assert.equal(DATASET.workspace.spaces_in_path, true);

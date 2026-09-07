@@ -2,8 +2,15 @@
   "version": 1,
   "id": "promised-outbound-audit-hit",
   "title": "已完成但承诺回报缺失属于 audit finding",
-  "task": "Inbox Audit 正在检查原会话。权威历史显示：工作已经完成，Agent 曾明确承诺完成后发送状态，但该 outbound 不存在。完成 audit 读取和权威历史读取后，发送一条简短完成状态到原会话；不要把等待 review 当作沉默理由。",
-  "im_target": { "type": "chat_id", "id": "oc_eval" },
+  "task": "Inbox Audit 正在检查原话题。权威历史显示：工作已经完成，Agent 曾明确承诺完成后 @请求者发送状态，但该 outbound 不存在。完成 audit 读取和权威历史读取后，向原话题 anchor om_eval_audit_anchor 回复：使用 --reply-in-thread，真实 mention ou_eval_requester，正文严格为“实现已完成，现提交 review。”；不要把等待 review 当作沉默理由。",
+  "im_target": {
+    "type": "thread_reply",
+    "chat_id": "oc_eval",
+    "thread_id": "omt_eval_audit",
+    "anchor_message_id": "om_eval_audit_anchor",
+    "mention_open_id": "ou_eval_requester",
+    "body": "实现已完成，现提交 review。"
+  },
   "steps": [
     { "id": "audit-read", "phase": "audit", "slow": false, "outcome": "success", "output": "audit returned the original conversation target and valid anchor" },
     { "id": "authoritative-history", "phase": "audit", "slow": false, "outcome": "success", "output": "work complete; promised completion status is absent" }

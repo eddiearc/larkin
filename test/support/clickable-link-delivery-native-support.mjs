@@ -8,7 +8,7 @@ export const CLICKABLE_LINK_V20_GUIDANCE = [
 ];
 
 export function v19Counterfactual(standingPrompt) {
-  if (standingPrompt?.version !== "larkin-standing-v31" || typeof standingPrompt.content !== "string") {
+  if (standingPrompt?.version !== "larkin-standing-v32" || typeof standingPrompt.content !== "string") {
     throw new Error("v19 counterfactual requires the current standing prompt");
   }
   let content = standingPrompt.content;

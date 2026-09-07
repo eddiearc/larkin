@@ -105,6 +105,7 @@ async function runScenario(scenario, repetition) {
         executable,
         commands: [
           { command: "im +messages-send --chat-id <chat-id> --markdown <message>", purpose: "Send through the fake identity-locked IM sink." },
+          { command: "im +messages-reply --message-id <om-id> --content <json> --msg-type text --reply-in-thread", purpose: "Reply through the fake identity-locked thread sink." },
           { command: "work run --step <step-id>", purpose: "Run one scenario work step and return its controlled result." },
         ],
       },
@@ -116,7 +117,8 @@ async function runScenario(scenario, repetition) {
     }
     if (omitIssue171Rules) {
       const content = prompt.content
-        .replace(/An unrelated Inbox event does not cancel or supersede an already-owed user-visible reply[^\n]*\n/, "")
+        .replace(/Except for an envelope that explicitly requires poll-then-silence, an unrelated Inbox event does not cancel or supersede an already-owed user-visible reply[^\n]*\n/, "")
+        .replace(/Owed-reply precedence never preempts or alters the current envelope's source-specific mandatory action[^\n]*\n/, "")
         .replace(/For Inbox Audit, completed work whose promised status, delivery, or real @mention[^\n]*\n/, "");
       assert.notEqual(content, prompt.content, "counterfactual must remove the issue 171 standing prompt rules");
       prompt = { ...prompt, content, hash: createHash("sha256").update(content).digest("hex") };
@@ -165,15 +167,21 @@ async function runScenario(scenario, repetition) {
     const stepInstruction = scenario.steps.length
       ? `Run these exact fake work steps in order: ${scenario.steps.map((step) => `${executable} work run --step ${step.id}`).join("; ")}.`
       : "This task has no work step.";
+    const imInstruction = scenario.im_target.type === "thread_reply"
+      ? `For the required user-visible reply use exactly ${executable} im +messages-reply --message-id ${scenario.im_target.anchor_message_id} --content '{"text":"<at user_id=\\"${scenario.im_target.mention_open_id}\\"></at> ${scenario.im_target.body}"}' --msg-type text --reply-in-thread.`
+      : `Use ${executable} im +messages-send --chat-id ${scenario.im_target.id} --markdown <message> for every user-visible message.`;
+    const targetDescription = scenario.im_target.type === "thread_reply"
+      ? `Current fake thread is ${scenario.im_target.thread_id} in chat ${scenario.im_target.chat_id}.`
+      : `Current fake chat id: ${scenario.im_target.id}.`;
     const toolAttemptStart = toolAttempts.length;
     const input = await session.prompt({
       inputId: `${scenario.id}-${repetition}`,
       kind: "initial",
       attempt: 0,
       text: [
-        `Current fake chat id: ${scenario.im_target.id}. ${scenario.task}`,
+        `${targetDescription} ${scenario.task}`,
         stepInstruction,
-        `Use ${executable} im +messages-send --chat-id ${scenario.im_target.id} --markdown <message> for every user-visible message. Complete the task now.`,
+        `${imInstruction} Complete the task now.`,
       ].join("\n"),
     });
     assert.equal(input.status, "accepted");

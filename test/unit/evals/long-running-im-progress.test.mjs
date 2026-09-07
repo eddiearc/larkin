@@ -14,8 +14,22 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const CASES = path.join(ROOT, "evals", "long-running-im-progress");
 const FAKE_CLI = path.join(ROOT, "test", "support", "long-running-im-eval-cli.mjs");
 
-const IM_TARGET = { target_type: "chat_id", target_id: "oc_eval" };
+const IM_TARGET = { command: "+messages-send", target_type: "chat_id", target_id: "oc_eval" };
 const event = (order, type, extra = {}) => ({ order, type, ...(type === "im" ? IM_TARGET : {}), ...extra });
+const threadReplyEvent = (order, scenario, extra = {}) => ({
+  order,
+  type: "im",
+  command: "+messages-reply",
+  target_type: "thread_reply",
+  chat_id: scenario.im_target.chat_id,
+  thread_id: scenario.im_target.thread_id,
+  anchor_message_id: scenario.im_target.anchor_message_id,
+  reply_in_thread: true,
+  msg_type: "text",
+  mention_open_id: scenario.im_target.mention_open_id,
+  body: `<at user_id="${scenario.im_target.mention_open_id}"></at> ${scenario.im_target.body}`,
+  ...extra,
+});
 const controlledToolAttempts = (trace) => trace.map(() => ({ name: "bash" }));
 const grade = (scenario, trace, toolAttempts = controlledToolAttempts(trace)) => gradeLongRunningImTrace(
   scenario,
@@ -74,11 +88,11 @@ test("grader accepts golden traces for every scenario", () => {
     "promised-outbound-audit-hit": [
       event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
       event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
-      event(3, "im", { body: "实现已完成，现提交 review。" }),
+      threadReplyEvent(3, scenarios["promised-outbound-audit-hit"]),
     ],
     "reminder-preserves-owed-reply": [
       event(1, "work", { step_id: "canonical-reminder-poll", slow: false, outcome: "success" }),
-      event(2, "im", { body: "原任务已完成。" }),
+      threadReplyEvent(2, scenarios["reminder-preserves-owed-reply"]),
       event(3, "work", { step_id: "ordinary-reminder-payload", slow: false, outcome: "success" }),
     ],
     "waiting-review-without-promise-stays-silent": [
@@ -167,7 +181,7 @@ test("issue 171 scenarios lock owed-reply precedence and audit hit/silence bound
   const lateOwedReply = grade(scenarios["reminder-preserves-owed-reply"], [
     event(1, "work", { step_id: "canonical-reminder-poll", slow: false, outcome: "success" }),
     event(2, "work", { step_id: "ordinary-reminder-payload", slow: false, outcome: "success" }),
-    event(3, "im", { body: "原任务已完成。" }),
+    threadReplyEvent(3, scenarios["reminder-preserves-owed-reply"]),
   ]);
   assert.ok(lateOwedReply.failures.some((failure) => failure.rule === "progress_before_step"));
 
@@ -176,6 +190,32 @@ test("issue 171 scenarios lock owed-reply precedence and audit hit/silence bound
     event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
   ]);
   assert.ok(missingPromisedStatus.failures.some((failure) => failure.rule === "terminal_im_after_work"));
+
+  for (const id of ["reminder-preserves-owed-reply", "promised-outbound-audit-hit"]) {
+    const scenario = scenarios[id];
+    const prefix = id === "reminder-preserves-owed-reply"
+      ? [event(1, "work", { step_id: "canonical-reminder-poll", slow: false, outcome: "success" })]
+      : [
+        event(1, "work", { step_id: "audit-read", slow: false, outcome: "success" }),
+        event(2, "work", { step_id: "authoritative-history", slow: false, outcome: "success" }),
+      ];
+    for (const mutation of [
+      { command: "+messages-send", target_type: "chat_id", target_id: scenario.im_target.chat_id },
+      { thread_id: "omt_wrong" },
+      { anchor_message_id: "om_wrong" },
+      { reply_in_thread: false },
+      { mention_open_id: "ou_wrong" },
+      { body: `@${scenario.im_target.mention_open_id} ${scenario.im_target.body}` },
+      { body: `<at user_id="${scenario.im_target.mention_open_id}"></at> 错误正文` },
+    ]) {
+      const replyOrder = prefix.length + 1;
+      const suffix = id === "reminder-preserves-owed-reply"
+        ? [event(replyOrder + 1, "work", { step_id: "ordinary-reminder-payload", slow: false, outcome: "success" })]
+        : [];
+      const result = grade(scenario, [...prefix, threadReplyEvent(replyOrder, scenario, mutation), ...suffix]);
+      assert.ok(result.failures.some((failure) => failure.rule === "im_target"), `${id}: ${JSON.stringify(mutation)}`);
+    }
+  }
 
   for (const id of ["clean-audit-stays-silent", "waiting-review-without-promise-stays-silent"]) {
     const noisy = grade(scenarios[id], [
@@ -413,6 +453,49 @@ test("short tasks require exactly one terminal IM and no work", () => {
   assert.deepEqual(result.failures.map((failure) => failure.rule), ["short_task_terminal_only"]);
 });
 
+test("fake CLI enforces the exact #171 thread reply anchor, mention element, body, and thread flag", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-eval-thread-reply-"));
+  const trace = path.join(temp, "trace.ndjson");
+  const scenarioFile = path.join(CASES, "reminder-preserves-owed-reply.json");
+  const scenario = JSON.parse(fs.readFileSync(scenarioFile, "utf8"));
+  const env = { ...process.env, LARKIN_EVAL_SCENARIO_FILE: scenarioFile, LARKIN_EVAL_TRACE_FILE: trace };
+  const expectedContent = JSON.stringify({
+    text: `<at user_id="${scenario.im_target.mention_open_id}"></at> ${scenario.im_target.body}`,
+  });
+  const base = [FAKE_CLI, "im", "+messages-reply", "--message-id", scenario.im_target.anchor_message_id,
+    "--content", expectedContent, "--msg-type", "text", "--reply-in-thread"];
+  try {
+    for (const argv of [
+      base.filter((item) => item !== "--reply-in-thread"),
+      base.map((item) => item === scenario.im_target.anchor_message_id ? "om_wrong" : item),
+      base.map((item) => item === expectedContent ? JSON.stringify({ text: `@${scenario.im_target.mention_open_id} ${scenario.im_target.body}` }) : item),
+      base.map((item) => item === expectedContent ? JSON.stringify({ text: `<at user_id="${scenario.im_target.mention_open_id}"></at> 错误正文` }) : item),
+    ]) {
+      const result = spawnSync(process.execPath, argv, { env, encoding: "utf8" });
+      assert.equal(result.status, 2, result.stderr);
+    }
+    assert.equal(fs.existsSync(trace), false);
+    const valid = spawnSync(process.execPath, base, { env, encoding: "utf8" });
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.deepEqual(fs.readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse), [{
+      order: 1,
+      case_id: scenario.id,
+      type: "im",
+      command: "+messages-reply",
+      target_type: "thread_reply",
+      chat_id: scenario.im_target.chat_id,
+      thread_id: scenario.im_target.thread_id,
+      anchor_message_id: scenario.im_target.anchor_message_id,
+      reply_in_thread: true,
+      msg_type: "text",
+      mention_open_id: scenario.im_target.mention_open_id,
+      body: `<at user_id="${scenario.im_target.mention_open_id}"></at> ${scenario.im_target.body}`,
+    }]);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("fake CLI records only bounded IM/work trace fields and never calls an external transport", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-eval-cli-"));
   const trace = path.join(temp, "trace.ndjson");
@@ -435,7 +518,7 @@ test("fake CLI records only bounded IM/work trace fields and never calls an exte
     const rows = fs.readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse);
     assert.deepEqual(rows, [
       { order: 1, case_id: "sensitive-tool-output", type: "work", step_id: "secret-check", slow: false, outcome: "success" },
-      { order: 2, case_id: "sensitive-tool-output", type: "im", target_type: "chat_id", target_id: "oc_eval", body: "检查完成。" },
+      { order: 2, case_id: "sensitive-tool-output", type: "im", command: "+messages-send", target_type: "chat_id", target_id: "oc_eval", body: "检查完成。" },
     ]);
     assert.doesNotMatch(fs.readFileSync(trace, "utf8"), /EVAL_SECRET_DO_NOT_ECHO|\/private\/eval-only/);
   } finally {

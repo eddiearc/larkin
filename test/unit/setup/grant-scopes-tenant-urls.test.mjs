@@ -30,6 +30,7 @@ module.exports = {
     fs.writeFileSync(process.env.REGISTER_MARKER, JSON.stringify({
       appId: opts.appId,
       domain: opts.domain,
+      addons: opts.addons ?? null,
     }));
     opts.onQRCodeReady({ url: process.env.GRANT_READY_URL || ("https://" + opts.domain + "/oauth/grant"), expireIn: 60 });
     return { client_id: opts.appId };
@@ -108,5 +109,14 @@ test("Feishu credential / default still uses accounts.feishu.cn", () => {
     const opts = JSON.parse(fs.readFileSync(marker, "utf8"));
     assert.equal(opts.domain, "accounts.feishu.cn");
     assert.doesNotMatch(JSON.stringify(opts), /larksuite\.com/);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("grant-scopes tenant scopes include search:message", () => {
+  const { temp, marker, result } = runGrant({ tenant: "feishu" });
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    const opts = JSON.parse(fs.readFileSync(marker, "utf8"));
+    assert.equal(opts.addons.scopes.tenant.includes("search:message"), true);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

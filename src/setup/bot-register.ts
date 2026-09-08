@@ -529,6 +529,7 @@ const TENANT_SCOPES = [
   "im:message.group_at_msg:readonly",
   "im:message.group_msg",
   "im:message:send_as_bot",
+  "search:message",
   "im:chat:readonly",
   "im:chat:create",
   "im:chat:update",

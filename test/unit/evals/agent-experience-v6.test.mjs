@@ -16,7 +16,7 @@ const DATASET = loadAgentExperienceV6Eval(path.join(ROOT, "evals/agent-experienc
 
 test("fixed Agent Experience v6 eval starts every selected scenario from an empty session", () => {
   assert.equal(DATASET.session.initial_turns, 0);
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v28");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v32");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",
@@ -106,6 +106,14 @@ test("standing prompt makes silence envelope-specific and preserves ordinary rem
     /Every other successfully polled envelope.*ordinary reminder envelope.*execute.*stated payload.*target-scoped history read.*perform.*no-hit.*required read.*must not create.*outbound/i);
 });
 
+test("owed replies defer to source-specific interaction and document-comment actions", () => {
+  const prompt = new ContextPromptBuilder().build({ agentId: "cli_eval", runtime: "pi" }).content;
+  assert.match(prompt, /owed-reply precedence never preempts or alters.*source-specific mandatory action/i);
+  assert.match(prompt, /interaction.*required get and resolve.*before.*owed IM write/i);
+  assert.match(prompt,
+    /document_comment.*turn remains exclusively bound.*required comment reply.*preserve.*owed IM.*next eligible non-comment wake/i);
+});
+
 test("eval loader rejects drift in the fixed authoritative group-count dataflow contract", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-group-count-eval-"));
   try {
@@ -160,7 +168,7 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
   assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
 });
 
-test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v28 contract passes all three", () => {
+test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v32 contract passes all three", () => {
   const ids = [
     "explicit-silent-envelope-exactly-one-poll",
     "ordinary-reminder-scoped-history-after-poll",

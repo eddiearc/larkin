@@ -146,8 +146,8 @@ export function loadPiTmuxBashEval(file) {
   const repoRoot = path.resolve(path.dirname(file), "../..");
   if (raw.dataset !== "pi-tmux-bash") throw new Error("pi-tmux-bash eval dataset id mismatch");
   if (raw.version !== 1) throw new Error("pi-tmux-bash eval version must be 1");
-  if (raw.standing_prompt_version !== "larkin-standing-v30") {
-    throw new Error("pi-tmux-bash standing prompt version must be larkin-standing-v30");
+  if (raw.standing_prompt_version !== "larkin-standing-v32") {
+    throw new Error("pi-tmux-bash standing prompt version must be larkin-standing-v32");
   }
   assertOwnExtensionMetadata(raw, repoRoot);
   if (raw.workspace?.success_path !== "non-git-cwd") {

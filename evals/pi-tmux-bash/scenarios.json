@@ -1,7 +1,7 @@
 {
   "dataset": "pi-tmux-bash",
   "version": 1,
-  "standing_prompt_version": "larkin-standing-v30",
+  "standing_prompt_version": "larkin-standing-v32",
   "extension": {
     "name": "larkin-pi-tmux",
     "distribution": "larkin-owned-bundle",
@@ -51,7 +51,7 @@
     "not_available_locally": [
       "opencode-go/deepseek-v4-flash"
     ],
-    "standing_prompt_version": "larkin-standing-v30"
+    "standing_prompt_version": "larkin-standing-v32"
   },
   "threshold": 0.6,
   "core_acceptance_rate": 1,

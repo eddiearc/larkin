@@ -36,7 +36,42 @@ if (argv[0] === "im" && argv[1] === "+messages-send") {
     process.stderr.write(`fake IM requires --chat-id ${scenario.im_target?.id || "<scenario chat>"}\n`);
     process.exit(2);
   }
-  append({ type: "im", target_type: "chat_id", target_id: chatId, body });
+  append({ type: "im", command: "+messages-send", target_type: "chat_id", target_id: chatId, body });
+  process.stdout.write(`${JSON.stringify({ ok: true, data: { message_id: `om_eval_${Date.now()}` } })}\n`);
+  process.exit(0);
+}
+
+if (argv[0] === "im" && argv[1] === "+messages-reply" && scenario.im_target?.type === "thread_reply") {
+  const anchorMessageId = option("--message-id");
+  const content = option("--content");
+  const msgType = option("--msg-type");
+  const replyInThread = argv.includes("--reply-in-thread");
+  let text;
+  try {
+    const parsed = JSON.parse(content);
+    text = parsed?.text;
+  } catch {}
+  const expectedText = `<at user_id="${scenario.im_target.mention_open_id}"></at> ${scenario.im_target.body}`;
+  const mention = typeof text === "string"
+    ? text.match(/^<at user_id="([^"]+)"><\/at> /)?.[1]
+    : undefined;
+  if (anchorMessageId !== scenario.im_target.anchor_message_id || !replyInThread
+      || msgType !== "text" || text !== expectedText || mention !== scenario.im_target.mention_open_id) {
+    process.stderr.write("fake thread reply requires the exact anchor, --reply-in-thread, real mention element, msg type, and body\n");
+    process.exit(2);
+  }
+  append({
+    type: "im",
+    command: "+messages-reply",
+    target_type: "thread_reply",
+    chat_id: scenario.im_target.chat_id,
+    thread_id: scenario.im_target.thread_id,
+    anchor_message_id: anchorMessageId,
+    reply_in_thread: true,
+    msg_type: msgType,
+    mention_open_id: mention,
+    body: text,
+  });
   process.stdout.write(`${JSON.stringify({ ok: true, data: { message_id: `om_eval_${Date.now()}` } })}\n`);
   process.exit(0);
 }
@@ -58,5 +93,5 @@ if (argv[0] === "work" && argv[1] === "run") {
   process.exit(0);
 }
 
-process.stderr.write("fake eval CLI only supports im +messages-send and work run\n");
+process.stderr.write("fake eval CLI only supports im +messages-send, im +messages-reply, and work run\n");
 process.exit(2);

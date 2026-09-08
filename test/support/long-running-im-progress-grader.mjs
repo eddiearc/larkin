@@ -10,11 +10,24 @@ export function parseLongRunningImScenario(value, source = "scenario") {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${source} must be an object`);
   if (value.version !== 1) throw new Error(`${source}.version must be 1`);
   if (!Array.isArray(value.steps)) throw new Error(`${source}.steps must be an array`);
-  if (!value.im_target || typeof value.im_target !== "object" || Array.isArray(value.im_target)
-      || value.im_target.type !== "chat_id") {
-    throw new Error(`${source}.im_target.type must be chat_id`);
+  if (!value.im_target || typeof value.im_target !== "object" || Array.isArray(value.im_target)) {
+    throw new Error(`${source}.im_target must be an object`);
   }
-  const imTarget = { type: "chat_id", id: requiredString(value.im_target.id, `${source}.im_target.id`) };
+  let imTarget;
+  if (value.im_target.type === "chat_id") {
+    imTarget = { type: "chat_id", id: requiredString(value.im_target.id, `${source}.im_target.id`) };
+  } else if (value.im_target.type === "thread_reply") {
+    imTarget = {
+      type: "thread_reply",
+      chat_id: requiredString(value.im_target.chat_id, `${source}.im_target.chat_id`),
+      thread_id: requiredString(value.im_target.thread_id, `${source}.im_target.thread_id`),
+      anchor_message_id: requiredString(value.im_target.anchor_message_id, `${source}.im_target.anchor_message_id`),
+      mention_open_id: requiredString(value.im_target.mention_open_id, `${source}.im_target.mention_open_id`),
+      body: requiredString(value.im_target.body, `${source}.im_target.body`),
+    };
+  } else {
+    throw new Error(`${source}.im_target.type must be chat_id or thread_reply`);
+  }
   const steps = value.steps.map((step, index) => {
     if (!step || typeof step !== "object" || Array.isArray(step)) throw new Error(`${source}.steps[${index}] must be an object`);
     if (typeof step.slow !== "boolean") throw new Error(`${source}.steps[${index}].slow must be boolean`);
@@ -117,8 +130,22 @@ export function gradeLongRunningImTrace(scenario, trace, toolAttempts) {
   }
   const imEvents = ordered.filter((item) => item.type === "im");
   const nonemptyImEvents = imEvents.filter((item) => typeof item.body === "string" && item.body.trim().length > 0);
-  const targetedImEvents = imEvents.filter((item) =>
-    item.target_type === scenario.im_target.type && item.target_id === scenario.im_target.id);
+  const expectedThreadContent = scenario.im_target.type === "thread_reply"
+    ? `<at user_id="${scenario.im_target.mention_open_id}"></at> ${scenario.im_target.body}`
+    : null;
+  const matchesImTarget = (item) => scenario.im_target.type === "chat_id"
+    ? item.command === "+messages-send"
+      && item.target_type === "chat_id" && item.target_id === scenario.im_target.id
+    : item.command === "+messages-reply"
+      && item.target_type === "thread_reply"
+      && item.chat_id === scenario.im_target.chat_id
+      && item.thread_id === scenario.im_target.thread_id
+      && item.anchor_message_id === scenario.im_target.anchor_message_id
+      && item.reply_in_thread === true
+      && item.msg_type === "text"
+      && item.mention_open_id === scenario.im_target.mention_open_id
+      && item.body === expectedThreadContent;
+  const targetedImEvents = imEvents.filter(matchesImTarget);
   const eligibleImEvents = targetedImEvents.filter((item) => typeof item.body === "string" && item.body.trim().length > 0);
   const workEvents = ordered.filter((item) => item.type === "work");
   if (toolAttempts.length !== workEvents.length + imEvents.length) {
@@ -139,7 +166,9 @@ export function gradeLongRunningImTrace(scenario, trace, toolAttempts) {
     fail("nonempty_im_body", "every IM used for feedback must have a non-empty body after trimming");
   }
   if (targetedImEvents.length !== imEvents.length) {
-    fail("im_target", `every IM must target ${scenario.im_target.type}:${scenario.im_target.id}`);
+    fail("im_target", scenario.im_target.type === "chat_id"
+      ? `every IM must use +messages-send for chat_id:${scenario.im_target.id}`
+      : `every IM must use +messages-reply with the exact thread, anchor, real mention, text body, and --reply-in-thread contract`);
   }
   if (scenario.expectations.short_task_terminal_only && (imEvents.length !== 1 || eligibleImEvents.length !== 1 || workEvents.length !== 0)) {
     fail("short_task_terminal_only", "short task must use exactly one terminal IM and no work call");

@@ -78,11 +78,11 @@ function completionEvent(marker, taskId = "task-done") {
   };
 }
 
-test("pi-tmux-bash dataset pins own bundle revision, non-git cwd, and standing v30", () => {
+test("pi-tmux-bash dataset pins own bundle revision, non-git cwd, and standing v32", () => {
   assert.equal(DATASET.dataset, "pi-tmux-bash");
   assert.equal(DATASET.version, 1);
-  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v30");
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v30");
+  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v32");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v32");
   assert.equal(DATASET.workspace.success_path, "non-git-cwd");
   assert.equal(DATASET.workspace.cwd_preservation, "exact");
   assert.equal(DATASET.workspace.spaces_in_path, true);
@@ -135,10 +135,10 @@ test("pi-tmux-bash dataset pins own bundle revision, non-git cwd, and standing v
   assert.doesNotMatch(prose, /subagent|Agent tool|timeout|tmux|Feishu|bash tool|run_in_background|identifier/i);
 });
 
-test("standing prompt v30 replaces forced subagent rules with conditional tmux-backed bash guidance", () => {
-  assert.equal(LARKIN_STANDING_PROMPT_VERSION, "larkin-standing-v30");
+test("standing prompt v32 replaces forced subagent rules with conditional tmux-backed bash guidance", () => {
+  assert.equal(LARKIN_STANDING_PROMPT_VERSION, "larkin-standing-v32");
   const pi = buildPrompt("pi");
-  assert.equal(pi.version, "larkin-standing-v30");
+  assert.equal(pi.version, "larkin-standing-v32");
   assert.match(pi.content, /## Long-running commands \(pi\)/);
   for (const line of PI_TMUX_BASH_GUIDANCE) {
     assert.equal(pi.content.includes(line), true, line);

@@ -41,7 +41,7 @@ function writePiOriginal(root) {
   fs.writeFileSync(path.join(dir, "models-store.json"), "{}\n", { mode: 0o600 });
 }
 
-function writeFixture(temp, scopesStdout, scopesStatus = 0) {
+function writeFixture(temp, scopesStdout, scopesStatus = 0, tenant = "feishu") {
   const fixture = path.join(temp, "fixture.cjs");
   fs.writeFileSync(fixture, `const fs = require("node:fs");
 const path = require("node:path");
@@ -69,13 +69,16 @@ function writeBoundConfig() {
   }) + "\\n", { mode: 0o600 });
 }
 module.exports = {
-  registerApp: async () => ({ client_id: ${JSON.stringify(APP)}, client_secret: "canary-secret", user_info: { tenant_brand: "feishu", open_id: "ou_owner" } }),
+  registerApp: async () => ({ client_id: ${JSON.stringify(APP)}, client_secret: "canary-secret", user_info: { tenant_brand: ${JSON.stringify(tenant)}, open_id: "ou_owner" } }),
   qrcode: { generate() {} },
   resolveOfficialLarkCli: () => ({ command: "lark-cli", argsPrefix: [], version: "1.0.80" }),
   wait: async () => {},
-  spawn(command, args) {
+  spawn(command, args, options) {
     if (args.includes("+chat-list")) return fakeChild(0, JSON.stringify({ ok: true, identity: "bot" }));
-    if (args.some((a) => String(a).includes("application/v6/scopes"))) return fakeChild(${scopesStatus}, ${JSON.stringify(scopesStdout)});
+    if (args.some((a) => String(a).includes("application/v6/scopes"))) {
+      if (!options.env.LARKSUITE_CLI_CONFIG_DIR.includes(${JSON.stringify(APP)})) throw new Error("scope read lost selected agent environment");
+      return fakeChild(${scopesStatus}, ${JSON.stringify(scopesStdout)});
+    }
     if (args.includes("setup-bind")) { writeBoundConfig(); return fakeChild(0, ""); }
     return fakeChild(0, "");
   },
@@ -103,8 +106,8 @@ module.exports = {
   return fixture;
 }
 
-function runRegister(root, temp, fixture, resultFile) {
-  return spawnSync(process.execPath, [path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--result-file", resultFile], {
+function runRegister(root, temp, fixture, resultFile, tenant = "feishu") {
+  return spawnSync(process.execPath, [path.join(ROOT, "dist/setup/bot-register.mjs"), "--auto", "--tenant", tenant, "--result-file", resultFile], {
     cwd: ROOT,
     encoding: "utf8",
     timeout: 15_000,
@@ -176,3 +179,39 @@ test("injected agent-choice retries after grant and keeps Pi setup credential", 
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+for (const [scenario, payload, status] of [
+  ["absent", '{"data":{"scopes":[]}}', 0],
+  ["pending", DENIED_SCOPES, 0],
+  ["malformed", "not-json", 0],
+  ["api-failure", GRANTED_SCOPES, 1],
+  ["api-error-envelope", '{"code":999,"data":{"scopes":[{"scope_name":"im:message.group_msg","grant_status":1}]}}', 0],
+]) {
+  test(`Lark setup ${scenario} preserves same-app recovery and retry accepts required grant with optional warnings`, { timeout: 20_000 }, () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-lark-scope-"));
+    const root = path.join(temp, "root");
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    const resultFile = path.join(root, ".setup-result-210.json");
+    try {
+      const first = runRegister(root, temp, writeFixture(temp, payload, status, "lark"), resultFile, "lark");
+      const text = first.stdout + first.stderr;
+      assert.notEqual(first.status, 0, text);
+      assert.equal(fs.existsSync(resultFile), false);
+      assert.match(text, /https:\/\/open\.larksuite\.com\/app\//, text);
+      const recovery = new URL(text.match(/https:\/\/open\.larksuite\.com\/app\/[^\s]+/)[0]);
+      assert.equal(recovery.pathname, `/app/${APP}/auth`);
+      assert.equal(recovery.searchParams.get("token_type"), "tenant");
+      assert.ok(recovery.searchParams.get("q").split(",").includes("im:message.group_msg"));
+      assert.match(text, /larkin setup --tenant lark --no-start/);
+      assert.match(text, /同一个已有机器人/);
+      assert.doesNotMatch(text, /canary-secret|GRANTED_APP_ID/);
+      const state = path.join(root, "agents", APP, "keep-state.txt");
+      fs.writeFileSync(state, "retain existing state");
+      const second = runRegister(root, temp, writeFixture(temp, GRANTED_SCOPES, 0, "lark"), resultFile, "lark");
+      assert.equal(second.status, 0, second.stderr);
+      assert.match(second.stdout + second.stderr, /必需未授予=无；可选未授予=.*search:message/);
+      assert.equal(JSON.parse(fs.readFileSync(resultFile, "utf8")).agentId, APP);
+      assert.equal(fs.readFileSync(state, "utf8"), "retain existing state");
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  });
+}

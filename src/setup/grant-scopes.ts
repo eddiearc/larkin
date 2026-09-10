@@ -12,6 +12,7 @@ import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { loadValidatedBotCredential } from "./run-credential-preflight.js";
 import { parseLarkinTenant, registerAppAccountsHost, type LarkinTenant } from "../feishu/platform-hosts.js";
 import { presentAuthorizationUrl } from "./setup-authorization-url.js";
+import { reconcileTenantScopes, tenantScopeRecoveryMessage } from "./tenant-scope-grant.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -138,6 +139,7 @@ export async function main(): Promise<void> {
       const presented = presentAuthorizationUrl(info.url, {
         tenant: TENANT,
         larkCliVersion: official.command.version,
+        expectedAppId: APP_ID,
       });
       if (TENANT === "lark" && /\/page\/launcher(?:\?|$)/.test(presented)) {
         throw new Error("Lark 租户拒绝把 /page/launcher 交给浏览器");
@@ -163,11 +165,12 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
   clearTimeout(timeout);
-  log(`\n✓ 权限增补已确认，appId=${result?.client_id || APP_ID}`);
+  if (result?.client_id !== APP_ID) throw new Error("授权回传 App ID 与既有应用不匹配；未记录权限或能力状态");
+  log(`\n✓ 既有应用授权凭证已回传，appId=${APP_ID}；实际权限仍需核验`);
   log(`  已请求增补: ${TENANT_SCOPES.join(", ")}`);
   log(`  已请求事件: ${TENANT_EVENTS.join(", ")}（仍需发布并用真实文档 @Bot 验证）`);
   try {
-    markSetupCapabilitiesRequested(config.larkinHome, result?.client_id || APP_ID);
+    markSetupCapabilitiesRequested(config.larkinHome, APP_ID);
     log("  card.action.trigger 仍是 requested-unverified；请确认发布后执行 interaction callback-probe 并真实点击，验证前不会创建业务交互卡片。");
     log("  document comment capability=publish_or_event_unverified reason=publication_and_real_event_unverified；配置发布与真实事件到达均未验证，不声明生效。");
     log("  document comment reply scope=docs:document.comment:create requested-unverified；同时覆盖 in-thread reply 与 whole-document create_v2 fallback。");
@@ -175,7 +178,20 @@ export async function main(): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     log("  本机没有该 App 的 bot credential，无法记录 callback readiness；能力保持 missing，请先运行 larkin setup 后再执行 callback-probe。");
   }
-  console.log(`GRANTED_APP_ID=${result?.client_id || APP_ID}`);
+  const managed = resolveManagedOfficialCli(selected, process.env);
+  const response = spawnSync(managed.command.command,
+    [...managed.command.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes"],
+    { encoding: "utf8", env: managed.env, timeout: 30_000 });
+  let payload: unknown;
+  try { payload = JSON.parse(response.stdout || ""); } catch { payload = null; }
+  const grants = reconcileTenantScopes(response.status === 0 ? payload : null, TENANT_SCOPES);
+  log(grants.verified
+    ? `Tenant scopes 对账：必需未授予=${grants.missingRequired.join(", ") || "无"}；可选未授予=${grants.missingOptional.join(", ") || "无"}`
+    : "Tenant scopes 对账未验证：权威 API 失败或响应无效。");
+  const missing = [...grants.missingRequired, ...grants.missingOptional];
+  if (missing.length) log(tenantScopeRecoveryMessage(TENANT, APP_ID, missing));
+  if (grants.missingRequired.length) throw new Error(`Bot tenant scope 未就绪，缺 ${grants.missingRequired.join(", ")}`);
+  if (!missing.length) console.log(`GRANTED_APP_ID=${APP_ID}`);
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {

@@ -32,12 +32,19 @@ module.exports = {
       domain: opts.domain,
       addons: opts.addons ?? null,
     }));
-    opts.onQRCodeReady({ url: process.env.GRANT_READY_URL || ("https://" + opts.domain + "/oauth/grant"), expireIn: 60 });
-    return { client_id: opts.appId };
+    opts.onQRCodeReady({ url: process.env.GRANT_READY_URL || ("https://" + opts.domain + "/oauth/grant?clientID=" + opts.appId), expireIn: 60 });
+    return { client_id: process.env.GRANT_RETURN_APP_ID ?? opts.appId };
   },
   qrcode: { generate() {} },
-  managedOfficialCli: () => ({ command: { command: "/verified/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} }),
-  spawnSync() { return { status: 0, stdout: "{}", stderr: "" }; },
+  managedOfficialCli: () => ({ command: { command: "/verified/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: { GRANT_BOT_ONLY: "1" } }),
+  spawnSync(command, args, options) {
+    if (args.includes("/open-apis/application/v6/scopes")) {
+      if (options.env.GRANT_BOT_ONLY !== "1") throw new Error("managed identity lost");
+      fs.writeFileSync(process.env.REGISTER_MARKER + ".scope-read", JSON.stringify(args));
+      return { status: Number(process.env.GRANT_SCOPE_STATUS || 0), stdout: process.env.GRANT_SCOPES || JSON.stringify({ data: { scopes: [{ scope_name: "im:message.group_msg", grant_status: 1 }] } }), stderr: "" };
+    }
+    return { status: 0, stdout: "{}", stderr: "" };
+  },
 };
 `);
   const result = spawnSync(process.execPath, [ENTRY, "--wait-min", "1", ...extraArgs], {
@@ -86,7 +93,7 @@ test("--tenant lark rewrites launcher to /page/cli and keeps addons", () => {
     tenant: "lark",
     extraArgs: ["--tenant", "lark", "--url-file", urlFile],
     extraEnv: {
-      GRANT_READY_URL: "https://open.larksuite.com/page/launcher?user_code=YKDY-TZ7Q&from=sdk&addons=H4sI",
+      GRANT_READY_URL: "https://open.larksuite.com/page/launcher?user_code=YKDY-TZ7Q&from=sdk&addons=H4sI&clientID=cli_grantTenantA1",
     },
   });
   try {
@@ -95,6 +102,7 @@ test("--tenant lark rewrites launcher to /page/cli and keeps addons", () => {
     assert.match(presented, /^https:\/\/open\.larksuite\.com\/page\/cli\?/);
     assert.match(presented, /user_code=YKDY-TZ7Q/);
     assert.match(presented, /[?&]addons=H4sI/);
+    assert.equal(new URL(presented).searchParams.get("clientID"), "cli_grantTenantA1");
     assert.doesNotMatch(presented, /\/page\/launcher/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
@@ -118,5 +126,30 @@ test("grant-scopes tenant scopes include search:message", () => {
     assert.equal(result.status, 0, result.stderr);
     const opts = JSON.parse(fs.readFileSync(marker, "utf8"));
     assert.equal(opts.addons.scopes.tenant.includes("search:message"), true);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+for (const appId of ["cli_other", ""]) {
+  test(`existing-app update rejects returned target ${appId || "missing"}`, () => {
+    const { temp, marker, result } = runGrant({ extraEnv: { GRANT_RETURN_APP_ID: appId } });
+    try {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /App ID.*不匹配/);
+      assert.doesNotMatch(result.stdout, /GRANTED_APP_ID/);
+      assert.equal(fs.existsSync(marker + ".scope-read"), false);
+      const credential = JSON.parse(fs.readFileSync(path.join(temp, "root/bots/cli_grantTenantA1.json"), "utf8"));
+      assert.equal(credential.capabilities, undefined);
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  });
+}
+
+test("existing-app credential return is not a grant; missing required scope fails with same-app recovery", () => {
+  const { temp, marker, result } = runGrant({ tenant: "lark", extraEnv: { GRANT_SCOPES: '{"data":{"scopes":[]}}' } });
+  try {
+    assert.notEqual(result.status, 0);
+    assert.equal(fs.existsSync(marker + ".scope-read"), true);
+    assert.match(result.stderr, /缺 im:message.group_msg/);
+    assert.match(result.stderr, /open.larksuite.com\/app\/cli_grantTenantA1\/auth/);
+    assert.doesNotMatch(result.stdout, /GRANTED_APP_ID/);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

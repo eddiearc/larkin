@@ -62,10 +62,10 @@ test("grant-scopes selects only explicit App ID, explicit --agent App ID, or act
     const spawnMarker = path.join(temp, "spawn.ndjson");
     const preload = path.join(temp, "preload.cjs");
     fs.writeFileSync(preload, `module.exports={
-  registerApp:async(opts)=>{require("node:fs").writeFileSync(process.env.REGISTER_MARKER,JSON.stringify(opts));opts.onQRCodeReady({url:"https://mock.invalid/grant",expireIn:60});return {client_id:opts.appId}},
+  registerApp:async(opts)=>{require("node:fs").writeFileSync(process.env.REGISTER_MARKER,JSON.stringify(opts));opts.onQRCodeReady({url:"https://mock.invalid/grant?clientID="+opts.appId,expireIn:60});return {client_id:opts.appId}},
   qrcode:{generate(){}},
   managedOfficialCli:()=>({command:{command:"/verified/official-lark-cli",argsPrefix:[],version:"1.0.80"},env:{}}),
-  spawnSync(command,args){require("node:fs").appendFileSync(process.env.SPAWN_MARKER,JSON.stringify({command,args})+"\\n");return {status:0,stdout:"{}",stderr:""}}
+  spawnSync(command,args){if(args.includes("/open-apis/application/v6/scopes"))return {status:0,stdout:JSON.stringify({data:{scopes:[{scope_name:"im:message.group_msg",grant_status:1}]}}),stderr:""};require("node:fs").appendFileSync(process.env.SPAWN_MARKER,JSON.stringify({command,args})+"\\n");return {status:0,stdout:"{}",stderr:""}}
 };`);
     const run = (args = [], extra = {}) => spawnSync(process.execPath, [path.join(ROOT, "dist/setup/grant-scopes.mjs"), "--wait-min", "1", ...args], {
       cwd: ROOT, encoding: "utf8", env: { ...process.env, HOME: path.join(temp, "home"), LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKSUITE_CLI_CONFIG_DIR: path.join(temp, "lark-cli"), LARKIN_TEST_GRANT_SCOPES_MODULE: preload, REGISTER_MARKER: marker, SPAWN_MARKER: spawnMarker, ...extra },

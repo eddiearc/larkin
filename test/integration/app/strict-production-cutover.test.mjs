@@ -303,7 +303,7 @@ for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["s
 for (const [mode, needle] of [
   ["scope-denied", /缺 im:message\.group_msg/],
   ["scope-network", /scopes API 失败/],
-  ["scope-malformed", /缺 im:message\.group_msg/],
+  ["scope-malformed", /scopes API 响应无效/],
 ]) {
   test(`bot-register fail-closes ${mode} and keeps the actionable scope diagnostic`, { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-register-${mode}-`));

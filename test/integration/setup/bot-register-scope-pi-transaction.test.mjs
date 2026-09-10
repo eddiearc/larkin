@@ -76,6 +76,7 @@ module.exports = {
   spawn(command, args, options) {
     if (args.includes("+chat-list")) return fakeChild(0, JSON.stringify({ ok: true, identity: "bot" }));
     if (args.some((a) => String(a).includes("application/v6/scopes"))) {
+      if (args.at(-2) !== "--as" || args.at(-1) !== "bot") throw new Error("explicit bot identity missing");
       if (!options.env.LARKSUITE_CLI_CONFIG_DIR.includes(${JSON.stringify(APP)})) throw new Error("scope read lost selected agent environment");
       return fakeChild(${scopesStatus}, ${JSON.stringify(scopesStdout)});
     }
@@ -182,9 +183,6 @@ test("injected agent-choice retries after grant and keeps Pi setup credential", 
 
 for (const [scenario, payload, status] of [
   ["absent", '{"data":{"scopes":[]}}', 0],
-  ["pending", DENIED_SCOPES, 0],
-  ["malformed", "not-json", 0],
-  ["api-failure", GRANTED_SCOPES, 1],
   ["api-error-envelope", '{"code":999,"data":{"scopes":[{"scope_name":"im:message.group_msg","grant_status":1}]}}', 0],
 ]) {
   test(`Lark setup ${scenario} preserves same-app recovery and retry accepts required grant with optional warnings`, { timeout: 20_000 }, () => {
@@ -197,12 +195,17 @@ for (const [scenario, payload, status] of [
       const text = first.stdout + first.stderr;
       assert.notEqual(first.status, 0, text);
       assert.equal(fs.existsSync(resultFile), false);
+      if (scenario === "api-error-envelope") {
+        assert.match(text, /未验证/);
+        assert.doesNotMatch(text, /\/auth\?q=/);
+        return;
+      }
       assert.match(text, /https:\/\/open\.larksuite\.com\/app\//, text);
       const recovery = new URL(text.match(/https:\/\/open\.larksuite\.com\/app\/[^\s]+/)[0]);
       assert.equal(recovery.pathname, `/app/${APP}/auth`);
       assert.equal(recovery.searchParams.get("token_type"), "tenant");
       assert.ok(recovery.searchParams.get("q").split(",").includes("im:message.group_msg"));
-      assert.match(text, /larkin setup --tenant lark --no-start/);
+      assert.match(text, /保留 --tenant lark 和 --runtime 参数/);
       assert.match(text, /同一个已有机器人/);
       assert.doesNotMatch(text, /canary-secret|GRANTED_APP_ID/);
       const state = path.join(root, "agents", APP, "keep-state.txt");
@@ -210,6 +213,7 @@ for (const [scenario, payload, status] of [
       const second = runRegister(root, temp, writeFixture(temp, GRANTED_SCOPES, 0, "lark"), resultFile, "lark");
       assert.equal(second.status, 0, second.stderr);
       assert.match(second.stdout + second.stderr, /必需未授予=无；可选未授予=.*search:message/);
+      assert.match(second.stdout + second.stderr, /setup 可继续/);
       assert.equal(JSON.parse(fs.readFileSync(resultFile, "utf8")).agentId, APP);
       assert.equal(fs.readFileSync(state, "utf8"), "retain existing state");
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }

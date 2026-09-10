@@ -31,9 +31,17 @@ test("grant reconciliation distinguishes required and optional while rejecting i
   assert.deepEqual(reconcileTenantScopes(payload, requested), {
     verified: true, missingRequired: [], missingOptional: ["search:message", "drive:drive"],
   });
-  for (const invalid of [null, {}, { ...payload, code: 999 }, { ...payload, ok: false }]) {
+  for (const invalid of [null, {}, { ...payload, code: 999 }, { ...payload, ok: false }, { ...payload, ok: "false" }, { ...payload, identity: "user" }]) {
     assert.deepEqual(reconcileTenantScopes(invalid, requested), {
-      verified: false, missingRequired: ["im:message.group_msg"], missingOptional: ["search:message", "drive:drive"],
+      verified: false, missingRequired: [], missingOptional: [],
     });
   }
+});
+
+test("explicit user and unknown scope types never satisfy tenant readiness", () => {
+  for (const scope_type of ["user", "unknown", null]) {
+    const payload = { code: 0, data: { scopes: [{ scope_name: "im:message.group_msg", grant_status: 1, scope_type }] } };
+    assert.deepEqual(reconcileTenantScopes(payload, ["im:message.group_msg"]).missingRequired, ["im:message.group_msg"]);
+  }
+  assert.deepEqual(reconcileTenantScopes({ code: 0, data: { scopes: [{ scope_name: "im:message.group_msg", grant_status: 1, scope_type: "tenant" }] } }, []).missingRequired, []);
 });

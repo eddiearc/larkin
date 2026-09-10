@@ -747,7 +747,7 @@ try {
   if (!verified) throw new Error("Bot identity verification failed");
   const scopeResult = await runIdentityProcess(
     official.command,
-    [...official.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes"],
+    [...official.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes", "--as", "bot"],
     cliEnv,
   );
   let scopePayload: unknown;
@@ -757,8 +757,10 @@ try {
   say(grants.verified
     ? `Tenant scopes 对账：必需未授予=${grants.missingRequired.join(", ") || "无"}；可选未授予=${grants.missingOptional.join(", ") || "无"}`
     : "Tenant scopes 对账未验证：权威 API 失败或响应无效，不能确认任何申请项已授予。");
+  if (!grants.verified) say("请检查所选 Agent 的受管 bot CLI 与网络后重跑原 larkin setup 命令，保留 --tenant/--runtime 参数；不要重建 Agent，也不要据此修改应用权限。");
+  if (grants.verified && !grants.missingRequired.length && grants.missingOptional.length) say("! 可选权限未授予，setup 可继续；相关能力仍不可用或未验证。");
   if (missing.length) say(tenantScopeRecoveryMessage(tenant, id, missing));
-  if (grants.missingRequired.length > 0) {
+  if (!grants.verified || grants.missingRequired.length > 0) {
     const reason = scopeResult.status !== 0
       ? `scopes API 失败 status=${scopeResult.status}`
       : !grants.verified ? "scopes API 响应无效" : `缺 ${grants.missingRequired.join(", ")}`;

@@ -17,7 +17,7 @@ test.skipIf(!enabled)("real selected Lark bot has authoritative required tenant 
   assert.equal(loadValidatedBotCredential(path.join(config.larkinHome, "bots"), agent.feishuAppId).tenant, "lark");
   const managed = managedOfficialLarkCli(agent, process.env);
   const result = spawnSync(managed.command.command,
-    [...managed.command.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes"],
+    [...managed.command.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes", "--as", "bot"],
     { env: managed.env, encoding: "utf8", timeout: 30_000 });
   assert.equal(result.status, 0, "managed bot scope API request failed; inspect privately");
   const grants = reconcileTenantScopes(JSON.parse(result.stdout), ["im:message.group_msg"]);

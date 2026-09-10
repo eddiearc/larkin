@@ -332,7 +332,8 @@ for (const [mode, needle] of [
       const text = `${result.stderr || ""}\n${result.stdout || ""}`;
       assert.notEqual(result.status, 0, text);
       assert.match(text, needle);
-      assert.match(text, /开发者后台/);
+      if (mode === "scope-denied") assert.match(text, /开发者后台/);
+      else assert.doesNotMatch(text, /\/auth\?q=/);
       assert.match(text, /不要重建 Agent/);
       assert.doesNotMatch(text, /身份授权\/评论订阅核验失败/);
       assert.doesNotMatch(text, /canary-secret/);

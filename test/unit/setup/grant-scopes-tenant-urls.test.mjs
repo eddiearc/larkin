@@ -39,6 +39,7 @@ module.exports = {
   managedOfficialCli: () => ({ command: { command: "/verified/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: { GRANT_BOT_ONLY: "1" } }),
   spawnSync(command, args, options) {
     if (args.includes("/open-apis/application/v6/scopes")) {
+      if (args.at(-2) !== "--as" || args.at(-1) !== "bot") throw new Error("explicit bot identity missing");
       if (options.env.GRANT_BOT_ONLY !== "1") throw new Error("managed identity lost");
       fs.writeFileSync(process.env.REGISTER_MARKER + ".scope-read", JSON.stringify(args));
       return { status: Number(process.env.GRANT_SCOPE_STATUS || 0), stdout: process.env.GRANT_SCOPES || JSON.stringify({ data: { scopes: [{ scope_name: "im:message.group_msg", grant_status: 1 }] } }), stderr: "" };
@@ -151,5 +152,14 @@ test("existing-app credential return is not a grant; missing required scope fail
     assert.match(result.stderr, /缺 im:message.group_msg/);
     assert.match(result.stderr, /open.larksuite.com\/app\/cli_grantTenantA1\/auth/);
     assert.doesNotMatch(result.stdout, /GRANTED_APP_ID/);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("failed authoritative read does not prescribe permission changes", () => {
+  const { temp, result } = runGrant({ extraEnv: { GRANT_SCOPE_STATUS: "1" } });
+  try {
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /未验证/);
+    assert.doesNotMatch(result.stderr, /\/auth\?q=/);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

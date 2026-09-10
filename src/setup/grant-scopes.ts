@@ -180,7 +180,7 @@ export async function main(): Promise<void> {
   }
   const managed = resolveManagedOfficialCli(selected, process.env);
   const response = spawnSync(managed.command.command,
-    [...managed.command.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes"],
+    [...managed.command.argsPrefix, "api", "GET", "/open-apis/application/v6/scopes", "--as", "bot"],
     { encoding: "utf8", env: managed.env, timeout: 30_000 });
   let payload: unknown;
   try { payload = JSON.parse(response.stdout || ""); } catch { payload = null; }
@@ -189,9 +189,10 @@ export async function main(): Promise<void> {
     ? `Tenant scopes 对账：必需未授予=${grants.missingRequired.join(", ") || "无"}；可选未授予=${grants.missingOptional.join(", ") || "无"}`
     : "Tenant scopes 对账未验证：权威 API 失败或响应无效。");
   const missing = [...grants.missingRequired, ...grants.missingOptional];
+  if (!grants.verified) throw new Error("Bot tenant scope 未验证；请检查所选 Agent 的受管 bot CLI 与网络，再重跑原 setup 命令并保留 --tenant/--runtime；不要据此修改应用权限。");
+  if (!grants.missingRequired.length && grants.missingOptional.length) log("! 可选权限未授予，setup 可继续；相关能力仍不可用或未验证。");
   if (missing.length) log(tenantScopeRecoveryMessage(TENANT, APP_ID, missing));
   if (grants.missingRequired.length) throw new Error(`Bot tenant scope 未就绪，缺 ${grants.missingRequired.join(", ")}`);
-  if (!missing.length) console.log(`GRANTED_APP_ID=${APP_ID}`);
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.8
+
+Lark setup now reconciles requested tenant permissions with actual grants and links missing scopes to the same application in the developer console. Required permissions still block setup until granted; optional permissions and event/callback verification are reported separately. Existing-application authorization preserves and checks its App ID before recording any capability state.
+
 ## 0.5.5
 
 Pi uses a small Larkin-owned tmux Bash extension when tmux is available on macOS/Linux. Commands preserve their working directory, including non-Git paths with spaces; a foreground wait can return while the same command continues. The returned task ID supports inspection and cancellation, and background completion resumes the Agent. Native Windows and environments without tmux retain Pi's native Bash.

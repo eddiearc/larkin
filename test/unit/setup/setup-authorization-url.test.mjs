@@ -94,3 +94,16 @@ test("bot-register wires Lark to /page/cli QR and keeps Feishu on launcher regis
   assert.match(feishuBranch, /presentUrl\(url, expireIn\)/);
   assert.doesNotMatch(feishuBranch, /presentAuthorizationUrl|page\/cli/);
 });
+
+test("existing-app authorization retains its target and addons and rejects a different target", () => {
+  for (const tenant of ["lark", "feishu"]) {
+    const host = tenant === "lark" ? "open.larksuite.com" : "open.feishu.cn";
+    const raw = `https://${host}/page/launcher?user_code=AB12-CD34&clientID=cli_fixture123&addons=H4sI%2B%2F%3D`;
+    const input = { tenant, larkCliVersion: "1.0.94", expectedAppId: "cli_fixture123" };
+    const presented = new URL(mod.presentAuthorizationUrl(raw, input));
+    assert.equal(presented.searchParams.get("clientID"), "cli_fixture123");
+    assert.equal(presented.searchParams.get("addons"), "H4sI+/=");
+    assert.throws(() => mod.presentAuthorizationUrl(raw.replace("clientID=cli_fixture123", "clientID=cli_other"), input), /clientID/);
+    assert.throws(() => mod.presentAuthorizationUrl(raw.replace("&clientID=cli_fixture123", ""), input), /clientID/);
+  }
+});

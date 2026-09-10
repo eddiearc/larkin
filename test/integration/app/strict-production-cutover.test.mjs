@@ -303,7 +303,7 @@ for (const [mode, expectedCalls, expectedStatus] of [["sync-network", 2, 0], ["s
 for (const [mode, needle] of [
   ["scope-denied", /缺 im:message\.group_msg/],
   ["scope-network", /scopes API 失败/],
-  ["scope-malformed", /缺 im:message\.group_msg/],
+  ["scope-malformed", /scopes API 响应无效/],
 ]) {
   test(`bot-register fail-closes ${mode} and keeps the actionable scope diagnostic`, { timeout: TRANSIENT_VERIFY_TEST_TIMEOUT_MS }, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-strict-register-${mode}-`));
@@ -332,7 +332,8 @@ for (const [mode, needle] of [
       const text = `${result.stderr || ""}\n${result.stdout || ""}`;
       assert.notEqual(result.status, 0, text);
       assert.match(text, needle);
-      assert.match(text, /开发者后台/);
+      if (mode === "scope-denied") assert.match(text, /开发者后台/);
+      else assert.doesNotMatch(text, /\/auth\?q=/);
       assert.match(text, /不要重建 Agent/);
       assert.doesNotMatch(text, /身份授权\/评论订阅核验失败/);
       assert.doesNotMatch(text, /canary-secret/);

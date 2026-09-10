@@ -23,10 +23,13 @@ export function officialCliSetupUrl(input: OfficialCliSetupUrlInput): string {
 
 export function presentAuthorizationUrl(
   rawUrl: string,
-  input: { tenant: LarkinTenant; larkCliVersion: string },
+  input: { tenant: LarkinTenant; larkCliVersion: string; expectedAppId?: string },
 ): string {
   let parsed: URL;
   try { parsed = new URL(rawUrl); } catch { throw new Error("授权 URL 非法"); }
+  if (input.expectedAppId && parsed.searchParams.get("clientID") !== input.expectedAppId) {
+    throw new Error("既有应用授权 URL 的 clientID 与目标 App ID 不匹配；未继续授权");
+  }
   const userCode = parsed.searchParams.get("user_code") || "";
   // Feishu China still authorizes on /page/launcher. Only International Lark
   // must leave launcher (open.larksuite.com ack 10074 / 链接已失效).
@@ -38,6 +41,8 @@ export function presentAuthorizationUrl(
     // still requests the same Larkin addons Feishu already sends.
     const addons = parsed.searchParams.get("addons");
     if (addons) presented.searchParams.set("addons", addons);
+    const clientID = parsed.searchParams.get("clientID");
+    if (clientID) presented.searchParams.set("clientID", clientID);
     return presented.toString();
   }
   return parsed.toString();

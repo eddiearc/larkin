@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "private": false,
   "larkinPackageRole": "npm-published",
   "files": [

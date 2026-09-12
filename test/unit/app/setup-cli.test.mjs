@@ -42,6 +42,19 @@ test("non-TTY setup requires --runtime before contacting lark-cli", () => {
   }
 });
 
+test("public setup rejects --reuse-credentials with --from-cli-profile before touching lark-cli", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-reuse-exclusive-"));
+  try {
+    const result = run(["--reuse-credentials", "--from-cli-profile", "profile-a"], { LARKIN_CONFIG_DIR: temp });
+    assert.notEqual(result.status, 0);
+    const text = `${result.stdout}\n${result.stderr}`;
+    assert.match(text, /--reuse-credentials 与 --from-cli-profile 不能同时使用/);
+    assert.doesNotMatch(text, /lark-cli|官方/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("non-TTY setup rejects builtin-pi as an unknown runtime", () => {
   const result = run(["--runtime", "builtin-pi"]);
   assert.notEqual(result.status, 0);

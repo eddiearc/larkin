@@ -515,9 +515,34 @@ if (argv.some((arg) => arg === "--app-id" || arg.startsWith("--app-id="))) {
 const fromCliProfile = flag("--from-cli-profile") || "";
 if (fromCliProfile && !/^[A-Za-z0-9._-]{1,64}$/.test(fromCliProfile)) die("--from-cli-profile 非法");
 if (!autoSelect) die("setup 注册阶段必须由交互式选择流程启动");
-let selectedTenant = await resolveSelectedTenant();
 const reuseCredentials = has("--reuse-credentials");
+// 互斥检查前置：在任何交互（选平台 / 授权页）之前失败。
 if (reuseCredentials && fromCliProfile) die("--reuse-credentials 与 --from-cli-profile 不能同时使用");
+// --reuse-credentials：先读存量凭证、由其推断租户，不弹「选择平台」，也不静默覆盖用户选择。
+const reusedCredential = reuseCredentials ? (() => {
+  const { config } = larkinConfig.loadConfig(process.env);
+  // 两个 catch 都以 die()（never）结束，因此兜底 cast 与既有代码（如授权返回值的 `as string`）一致。
+  const selectedAgent = (() => {
+    try { return larkinConfig.selectAgent(config, process.env); }
+    catch (error) { die(`--reuse-credentials 需要已配置的 Agent：${errorMessage(error)}`); }
+  })() as ReturnType<typeof larkinConfig.selectAgent>;
+  const stored = (() => {
+    try { return loadValidatedBotCredential(ensureSecureBotsDir(), selectedAgent.agentId); }
+    catch (error) {
+      die(`--reuse-credentials 未找到 ${selectedAgent.agentId} 的可用既有凭证（${errorMessage(error)}）；请先完成一次授权，或改用 --from-cli-profile`);
+    }
+  })() as ReturnType<typeof loadValidatedBotCredential>;
+  const explicitTenant = flag("--tenant");
+  if (explicitTenant !== undefined) {
+    const parsed = parseLarkinTenant(explicitTenant);
+    if (!parsed) die("--tenant 只支持 feishu 或 lark");
+    if (parsed !== stored.tenant) {
+      die(`--reuse-credentials 复用 ${stored.appId}（租户 ${stored.tenant}），与 --tenant ${explicitTenant} 不一致；未执行任何写入`);
+    }
+  }
+  return stored;
+})() : null;
+let selectedTenant: LarkinTenant = reusedCredential ? reusedCredential.tenant : await resolveSelectedTenant();
 if (!reuseCredentials) {
   say(`[setup 1/5] 在${selectedTenant === "lark" ? " International Lark" : "中国飞书 Feishu"}网页选择已有机器人或创建新机器人`);
 }
@@ -588,24 +613,10 @@ if (fromCliProfile) {
     say(`[setup 1/5] 复用官方 lark-cli profile ${fromCliProfile} → ${matched.appId}`);
   }
 } else if (reuseCredentials) {
-  // 复用本机既有凭证：跳过平台授权页，但下游全部平台核验（Bot 身份、grant_status 门禁、
-  // 评论订阅 reconcile）与 fail-closed 语义保持不变；缺必需权限时仍按原路径拦截。
-  const { config } = larkinConfig.loadConfig(process.env);
-  // 两个 catch 都以 die()（never）结束，因此兜底 cast 与既有代码（如授权返回值的 `as string`）一致。
-  const selectedAgent = (() => {
-    try { return larkinConfig.selectAgent(config, process.env); }
-    catch (error) { die(`--reuse-credentials 需要已配置的 Agent：${errorMessage(error)}`); }
-  })() as ReturnType<typeof larkinConfig.selectAgent>;
-  const stored = (() => {
-    try { return loadValidatedBotCredential(ensureSecureBotsDir(), selectedAgent.agentId); }
-    catch (error) {
-      die(`--reuse-credentials 未找到 ${selectedAgent.agentId} 的可用既有凭证（${errorMessage(error)}）；请先完成一次授权，或改用 --from-cli-profile`);
-    }
-  })() as ReturnType<typeof loadValidatedBotCredential>;
-  if (has("--tenant") && selectedTenant !== stored.tenant) {
-    die(`--reuse-credentials 复用 ${stored.appId}（租户 ${stored.tenant}），与 --tenant ${selectedTenant} 不一致；未执行任何写入`);
-  }
-  selectedTenant = stored.tenant;
+  // 复用本机既有凭证：跳过平台授权页（不重跑 registerApp / LARKIN_REGISTER_ADDONS），
+  // 但下游全部平台核验（Bot 身份、grant_status 门禁、评论订阅 reconcile）与
+  // fail-closed 语义保持不变；缺必需权限时仍按原路径拦截。
+  const stored = reusedCredential as ReturnType<typeof loadValidatedBotCredential>;
   say(`[setup 1/5] 复用既有凭证 ${stored.appId}（租户 ${stored.tenant}，不重新授权）`);
   result = { client_id: stored.appId, client_secret: stored.appSecret, user_info: { tenant_brand: stored.tenant } };
 } else if (selectedTenant === "lark") {

@@ -78,6 +78,9 @@ Options:
                                           Use \`larkin model\` after setup to inspect or switch.
   --from-cli-profile <name>            Optional: reuse an existing official lark-cli profile
                                           (requires LARKIN_SETUP_APP_SECRET)
+  --reuse-credentials                  Reuse the selected Agent's stored bot credential instead of
+                                          re-authorizing in the browser. Platform verification
+                                          (bot identity, required scopes) still runs and fails closed.
   --tenant feishu|lark                  Choose the brand before the authorization QR. Default feishu
                                           (scan /page/launcher). Lark uses --tenant lark: scan /page/cli,
                                           then credentials return; do not open /page/launcher.
@@ -163,6 +166,7 @@ export async function main(): Promise<void> {
     const value = flag(name);
     if (value) registerArgs.push(name, value);
   }
+  if (has("--reuse-credentials")) registerArgs.push("--reuse-credentials");
   const result = await runForeground("bot-register", registerArgs);
   delete process.env.LARKIN_SETUP_APP_SECRET;
   if (result.code !== 0) die("机器人授权或 Agent 配置未完成");

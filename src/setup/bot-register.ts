@@ -28,6 +28,7 @@ import {
   type LarkinTenant,
 } from "../feishu/platform-hosts.js";
 import { authorizationUrlFailureMessage, presentAuthorizationUrl } from "./setup-authorization-url.js";
+import { loadValidatedBotCredential } from "./run-credential-preflight.js";
 import { reconcileTenantScopes, tenantScopeRecoveryMessage } from "./tenant-scope-grant.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
@@ -515,7 +516,11 @@ const fromCliProfile = flag("--from-cli-profile") || "";
 if (fromCliProfile && !/^[A-Za-z0-9._-]{1,64}$/.test(fromCliProfile)) die("--from-cli-profile 非法");
 if (!autoSelect) die("setup 注册阶段必须由交互式选择流程启动");
 let selectedTenant = await resolveSelectedTenant();
-say(`[setup 1/5] 在${selectedTenant === "lark" ? " International Lark" : "中国飞书 Feishu"}网页选择已有机器人或创建新机器人`);
+const reuseCredentials = has("--reuse-credentials");
+if (reuseCredentials && fromCliProfile) die("--reuse-credentials 与 --from-cli-profile 不能同时使用");
+if (!reuseCredentials) {
+  say(`[setup 1/5] 在${selectedTenant === "lark" ? " International Lark" : "中国飞书 Feishu"}网页选择已有机器人或创建新机器人`);
+}
 if (commentSubscription === "application") {
   say(`! 已显式选择 ${commentSubscription} 维度评论订阅：一旦平台状态验证为已订阅，Bot 可见文档中实际送达的每条支持评论都会进入 Inbox 并唤醒 Agent，不要求 @Bot。`);
   say("! setup 将通过官方 lark-cli 的结构化 API 请求创建该订阅，并以只读 subscription_status 二次核验；不会从意图或事件配置推断订阅已生效。");
@@ -582,6 +587,27 @@ if (fromCliProfile) {
     result = { client_id: matched.appId, client_secret: importedSecret, user_info: { tenant_brand: brand } };
     say(`[setup 1/5] 复用官方 lark-cli profile ${fromCliProfile} → ${matched.appId}`);
   }
+} else if (reuseCredentials) {
+  // 复用本机既有凭证：跳过平台授权页，但下游全部平台核验（Bot 身份、grant_status 门禁、
+  // 评论订阅 reconcile）与 fail-closed 语义保持不变；缺必需权限时仍按原路径拦截。
+  const { config } = larkinConfig.loadConfig(process.env);
+  // 两个 catch 都以 die()（never）结束，因此兜底 cast 与既有代码（如授权返回值的 `as string`）一致。
+  const selectedAgent = (() => {
+    try { return larkinConfig.selectAgent(config, process.env); }
+    catch (error) { die(`--reuse-credentials 需要已配置的 Agent：${errorMessage(error)}`); }
+  })() as ReturnType<typeof larkinConfig.selectAgent>;
+  const stored = (() => {
+    try { return loadValidatedBotCredential(ensureSecureBotsDir(), selectedAgent.agentId); }
+    catch (error) {
+      die(`--reuse-credentials 未找到 ${selectedAgent.agentId} 的可用既有凭证（${errorMessage(error)}）；请先完成一次授权，或改用 --from-cli-profile`);
+    }
+  })() as ReturnType<typeof loadValidatedBotCredential>;
+  if (has("--tenant") && selectedTenant !== stored.tenant) {
+    die(`--reuse-credentials 复用 ${stored.appId}（租户 ${stored.tenant}），与 --tenant ${selectedTenant} 不一致；未执行任何写入`);
+  }
+  selectedTenant = stored.tenant;
+  say(`[setup 1/5] 复用既有凭证 ${stored.appId}（租户 ${stored.tenant}，不重新授权）`);
+  result = { client_id: stored.appId, client_secret: stored.appSecret, user_info: { tenant_brand: stored.tenant } };
 } else if (selectedTenant === "lark") {
   // Official lark-cli always begins on Feishu accounts, then presents
   // open.larksuite.com/page/cli. Beginning on Lark accounts yields /page/launcher

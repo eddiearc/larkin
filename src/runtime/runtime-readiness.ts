@@ -237,6 +237,19 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
       nextAction: runtimeInstallNextAction(options.runtime),
     };
   }
+  // A missing working directory makes every native runtime spawn fail before the
+  // control handshake starts (child_process reports ENOENT for the cwd, not the
+  // executable). Report it as its own cause so a fresh Agent workspace gets
+  // provisioned instead of being diagnosed as a runtime failure.
+  if (!fs.existsSync(options.cwd)) {
+    return {
+      runtime: options.runtime,
+      state: "unavailable",
+      executable,
+      reason: `Agent workspace directory does not exist: ${options.cwd}`,
+      nextAction: "Provision the Agent workspace (re-run setup or start Larkin), then retry.",
+    };
+  }
   let version = executableVersion(executable, env, options.commandArgs);
   if (options.runtime === "pi") {
     try {

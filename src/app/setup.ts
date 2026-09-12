@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import * as larkinConfig from "../platform/config.js";
 import { isUserRuntime, type RuntimeOption } from "../runtime/user-runtime.js";
 import { acquireProcessLock, readProcessState } from "../platform/process-state.js";
+import { reconcileAgentWorkspace } from "../platform/workspace-service.js";
 import { requestAgentUpsert } from "./local-control.js";
 import { openOwnedDashboardWhenReady } from "./setup-dashboard.js";
 import { probeNativeRuntimeReadiness, resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
@@ -180,6 +181,15 @@ export async function main(): Promise<void> {
   // external-pi 绑定已在 setup-bind 内做非交互 Pi RPC catalog discovery（RPC over pipes 不需要 TTY）；
   // daemon attach 探测仍是权威校验。其余真实阻塞（缺 runtime 可执行文件 / 缺登录 / 缺 lark-cli）一律 fast-fail。
   if (!OPT.nonInteractive) {
+    // 首次 setup 时 daemon 尚未运行，<root>/agents/<id> 还不存在；探测以 workspaceDir 为
+    // cwd spawn runtime，缺目录会让 spawn 直接失败。按 daemon host-shell 的同一路径先
+    // reconcile，让探测跑在真实工作区里，而不是把“目录未创建”诊断为 runtime 故障。
+    reconcileAgentWorkspace({
+      workspaceDir: configuredAgent.workspaceDir,
+      trustedWorkspaceRoot: path.join(CFG_DIR, "agents"),
+      lockDir: configuredAgent.stateDir,
+      agentId: selectedAgentId,
+    });
     const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
       agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
       env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR } });

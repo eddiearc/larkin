@@ -226,3 +226,22 @@ test("Pi readiness does not require Agent identity or an owned provider director
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const runtime of ["codex", "claude", "pi"]) {
+  test(`${runtime} readiness keeps a resolved executable out of the not-installed diagnosis`, () => {
+    // Pi already surfaces the spawn errno as "Pi RPC process failed: ..."; the
+    // claude/codex catalogs append it after their own prefix. Either way a
+    // still-existing resolved executable must keep the raw reason.
+    const message = runtime === "pi"
+      ? `Pi RPC process failed: spawn ${process.execPath} ENOENT`
+      : `spawn ${process.execPath} ENOENT`;
+    const readiness = classifyRuntimePrerequisite(runtime, new Error(message), process.execPath);
+    assert.equal(readiness.state, "unavailable");
+    assert.match(readiness.reason || "", /ENOENT/);
+    assert.doesNotMatch(readiness.nextAction || "", /install/i);
+    assert.doesNotMatch(readiness.nextAction || "", FORBIDDEN);
+    const missing = classifyRuntimePrerequisite(runtime, new Error(`spawn ${runtime} ENOENT`));
+    assert.equal(missing.state, "missing");
+    assert.equal(missing.reason, `${runtime} is not installed`);
+  });
+}

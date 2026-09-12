@@ -245,3 +245,13 @@ for (const runtime of ["codex", "claude", "pi"]) {
     assert.equal(missing.reason, `${runtime} is not installed`);
   });
 }
+
+test("readiness reports a missing Agent workspace directory instead of a masked spawn failure", async () => {
+  const missingCwd = path.join(os.tmpdir(), `larkin-readiness-missing-workspace-${Date.now()}`);
+  const readiness = await probeNativeRuntimeReadiness({ runtime: "claude", cwd: missingCwd, command: process.execPath });
+  assert.equal(readiness.state, "unavailable");
+  assert.match(readiness.reason || "", /workspace directory does not exist/i);
+  assert.ok((readiness.reason || "").includes(missingCwd));
+  assert.equal(readiness.executable, process.execPath);
+  assert.doesNotMatch(JSON.stringify(readiness), FORBIDDEN);
+});

@@ -180,8 +180,15 @@ export async function main(): Promise<void> {
   // external-pi 绑定已在 setup-bind 内做非交互 Pi RPC catalog discovery（RPC over pipes 不需要 TTY）；
   // daemon attach 探测仍是权威校验。其余真实阻塞（缺 runtime 可执行文件 / 缺登录 / 缺 lark-cli）一律 fast-fail。
   if (!OPT.nonInteractive) {
+    // 首次 setup 时 daemon 尚未运行，<root>/agents/<id> 尚未由 host-shell reconcile 创建。
+    // 探测需要一个必然存在的 cwd——缺目录会让 spawn 直接失败并被伪装成 runtime 故障（#212）
+    // ——因此工作区缺失时回退到配置根目录。工作区的创建与校验保持 host-shell 单一所有权。
+    const probeCwd = fs.existsSync(configuredAgent.workspaceDir) ? configuredAgent.workspaceDir : CFG_DIR;
+    if (probeCwd !== configuredAgent.workspaceDir) {
+      say(`! Agent 工作区尚未创建（daemon 启动时会 reconcile）：运行时探测改用 ${CFG_DIR}`);
+    }
     const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
-      agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
+      agentId: selectedAgentId, cwd: probeCwd,
       env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR } });
     if (runtimeReadiness.state !== "ready") {
       die(`Runtime ${configuredAgent.runtime} ${runtimeReadiness.state}：${runtimeReadiness.reason || "prerequisite unavailable"}；${runtimeReadiness.nextAction || "修复后重试"}`);

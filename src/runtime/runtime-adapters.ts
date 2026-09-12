@@ -65,6 +65,7 @@ interface ProcessLike {
   stdout: ReadableLike | null;
   stderr: ReadableLike | null;
   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  once(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
   once(event: "error", listener: (error: Error) => void): unknown;
   kill(signal?: NodeJS.Signals): boolean;
 }

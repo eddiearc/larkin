@@ -188,7 +188,9 @@ function releaseInventory(repo) {
       }
     });
 
+  const releaseIds = new Set();
   const byTag = new Map();
+  const inventory = [];
   for (const release of releases) {
     if (!Number.isSafeInteger(release.id) || release.id <= 0) {
       throw new Error("GitHub Releases list returned an invalid release id");
@@ -196,13 +198,17 @@ function releaseInventory(repo) {
     if (typeof release.tagName !== "string" || release.tagName.length === 0 || typeof release.isDraft !== "boolean") {
       throw new Error(`GitHub Releases list returned invalid metadata for release ${release.id}`);
     }
+    if (releaseIds.has(release.id)) continue;
+
     const previous = byTag.get(release.tagName);
     if (previous !== undefined) {
       throw new Error(`duplicate GitHub Releases for ${release.tagName}: ${previous} and ${release.id}`);
     }
+    releaseIds.add(release.id);
     byTag.set(release.tagName, release.id);
+    inventory.push(release);
   }
-  return releases;
+  return inventory;
 }
 
 function releaseState(repo, tag) {

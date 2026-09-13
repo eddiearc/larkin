@@ -439,7 +439,24 @@ describe("release intent executable command boundary", () => {
     }
   });
 
-  test("prepare fails closed when the releases list contains duplicate records for one tag", () => {
+  test("prepare tolerates a repeated release inventory record with the same id", () => {
+    const f = fixture({
+      tags: { "v0.2.36": { type: "commit", sha: SOURCE_SHA } },
+      releases: { "v0.2.36": "draft" },
+      duplicateReleases: [{ id: 1001, tagName: "v0.2.36", isDraft: true }],
+    });
+    try {
+      const run = f.execute("prepare");
+      assert.equal(run.result.status, 0, run.result.stderr);
+      assert.equal(run.outputs.should_publish, "true");
+      assert.equal(commandCount(run.state, ["api", "--method", "POST"]), 0);
+      assert.equal(commandCount(run.state, ["release", "create"]), 0);
+    } finally {
+      fs.rmSync(f.directory, { recursive: true, force: true });
+    }
+  });
+
+  test("prepare fails closed when distinct release ids claim the same tag", () => {
     const f = fixture({
       tags: { "v0.2.36": { type: "commit", sha: SOURCE_SHA } },
       releases: { "v0.2.36": "draft" },

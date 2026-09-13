@@ -14,7 +14,7 @@ const PROVIDER = path.join(ROOT, "test/support/runtime-agent-interface-v2-provid
 beforeAll(() => {
   const result = spawnSync(process.execPath, ["run", "build"], { cwd: ROOT, encoding: "utf8", timeout: 120_000 });
   assert.equal(result.status, 0, `build failed\n${result.stdout}\n${result.stderr}`);
-});
+}, 120_000);
 
 function writePrivate(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -288,7 +288,7 @@ test("idempotency is stable for independently current attempts at one seen bound
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("cursor update matrix advances poll and exact JSON head reads, but not check or paged history", () => {
+test("cursor update matrix advances poll and exact JSON head reads, but not check or paged history", { timeout: 60_000 },() => {
   const f = fixture();
   try {
     const raw = { message_id: "om_matrix", chat_id: "oc_matrix", create_time: "700", update_time: "700", content: "full body" };

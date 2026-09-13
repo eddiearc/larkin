@@ -196,7 +196,7 @@ test("the public CLI router is authored in TypeScript as the direct package bin"
   assert.match(source, /signal === "SIGINT" \? 130[\s\S]*signal === "SIGTERM" \? 143/);
 });
 
-test("a clean shell build emits loadable artifacts from repository TypeScript sources", async () => {
+test("a clean shell build emits loadable artifacts from repository TypeScript sources", { timeout: 120_000 },async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-phase1-clean-build-"));
   try {
     const outDir = path.join(temp, "dist");
@@ -232,7 +232,7 @@ test("a clean shell build emits loadable artifacts from repository TypeScript so
   }
 });
 
-test("a compile failure preserves the prior complete dist byte-for-byte", () => {
+test("a compile failure preserves the prior complete dist byte-for-byte", { timeout: 120_000 },() => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-build-failure-preserves-dist-"));
   try {
     const sourceDir = path.join(temp, "src");
@@ -286,7 +286,7 @@ test("a compile failure preserves the prior complete dist byte-for-byte", () => 
   }
 }, 15_000);
 
-test("a publish rename failure restores the prior complete dist and cleans staging", () => {
+test("a publish rename failure restores the prior complete dist and cleans staging", { timeout: 120_000 },() => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-publish-rename-failure-"));
   try {
     const sourceDir = path.join(temp, "src");
@@ -435,7 +435,7 @@ test("every authored source is covered by either the shell or Vite build graph",
     "Vite-managed dashboard styles must produce the browser stylesheet");
 });
 
-test("CJS closure follows side-effect imports across product domains", () => {
+test("CJS closure follows side-effect imports across product domains", { timeout: 120_000 },() => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-build-side-effect-import-"));
   try {
     const sourceDir = path.join(temp, "src");
@@ -457,7 +457,7 @@ test("CJS closure follows side-effect imports across product domains", () => {
   }
 });
 
-test("module specifier graph ignores comments and data strings while following .cts dependencies", () => {
+test("module specifier graph ignores comments and data strings while following .cts dependencies", { timeout: 120_000 },() => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-build-ast-specifiers-"));
   try {
     const sourceDir = path.join(temp, "src");

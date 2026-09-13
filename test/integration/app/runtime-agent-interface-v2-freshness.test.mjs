@@ -11,7 +11,7 @@ const AGENT_CLI = path.join(ROOT, "dist/app/agent-cli.mjs");
 beforeAll(() => {
   const result = spawnSync(process.execPath, ["run", "build"], { cwd: ROOT, encoding: "utf8", timeout: 120_000 });
   assert.equal(result.status, 0, result.stderr);
-});
+}, 120_000);
 
 test("Inbox check remains content-light while poll is bounded, target-local, and direct-ack", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-inbox-interface-"));

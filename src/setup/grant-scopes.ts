@@ -12,7 +12,7 @@ import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { loadValidatedBotCredential } from "./run-credential-preflight.js";
 import { parseLarkinTenant, registerAppAccountsHost, type LarkinTenant } from "../feishu/platform-hosts.js";
 import { presentAuthorizationUrl } from "./setup-authorization-url.js";
-import { reconcileTenantScopes, tenantScopeRecoveryMessage } from "./tenant-scope-grant.js";
+import { missingOptionalScopeImpacts, reconcileTenantScopes, tenantScopeRecoveryMessage } from "./tenant-scope-grant.js";
 // qrcode-terminal does not publish TypeScript declarations.
 // @ts-expect-error bundled CommonJS dependency
 import qrcodePackage from "qrcode-terminal";
@@ -190,7 +190,10 @@ export async function main(): Promise<void> {
     : "Tenant scopes 对账未验证：权威 API 失败或响应无效。");
   const missing = [...grants.missingRequired, ...grants.missingOptional];
   if (!grants.verified) throw new Error("Bot tenant scope 未验证；请检查所选 Agent 的受管 bot CLI 与网络，再重跑原 setup 命令并保留 --tenant/--runtime；不要据此修改应用权限。");
-  if (!grants.missingRequired.length && grants.missingOptional.length) log("! 可选权限未授予，setup 可继续；相关能力仍不可用或未验证。");
+  if (!grants.missingRequired.length && grants.missingOptional.length) {
+    log("! 可选权限未授予，setup 可继续；以下能力可能受限（实际以平台校验为准）：");
+    for (const impact of missingOptionalScopeImpacts(grants.missingOptional)) log(`  - ${impact}`);
+  }
   if (missing.length) log(tenantScopeRecoveryMessage(TENANT, APP_ID, missing));
   if (grants.missingRequired.length) throw new Error(`Bot tenant scope 未就绪，缺 ${grants.missingRequired.join(", ")}`);
 }

@@ -58,7 +58,7 @@ async function runCodexAppServer(call: CodexCall): Promise<unknown> {
     };
     const timer = setTimeout(() => finish(new Error("Codex model catalog timed out")), call.timeout);
     timer.unref?.();
-    child.on("error", () => finish(new Error("Codex model catalog command failed")));
+    child.on("error", (error) => finish(new Error(`Codex model catalog command failed: ${error.message}`)));
     child.on("exit", () => finish(new Error("Codex model catalog app-server exited before response")));
     child.stderr.resume();
     child.stdout.on("data", (chunk: Buffer) => {

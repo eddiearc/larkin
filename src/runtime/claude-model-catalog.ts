@@ -48,7 +48,7 @@ async function runClaudeControl(call: ClaudeControlCall): Promise<unknown> {
     };
     const timer = setTimeout(() => finish(new Error("Claude model catalog timed out")), call.timeout);
     timer.unref?.();
-    child.on("error", () => finish(new Error("Claude model catalog command failed")));
+    child.on("error", (error) => finish(new Error(`Claude model catalog command failed: ${error.message}`)));
     child.on("exit", () => finish(new Error("Claude model catalog control channel exited before response")));
     child.stderr.resume();
     child.stdout.on("data", (chunk: Buffer) => {

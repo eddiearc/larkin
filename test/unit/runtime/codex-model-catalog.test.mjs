@@ -52,3 +52,15 @@ test("Codex catalog fails closed on malformed, empty, or unbounded catalog shape
     );
   }
 });
+
+test("Codex catalog surfaces the underlying spawn failure instead of a generic message", async () => {
+  const { discoverCodexModelCatalog } = await import(MODULE);
+  await assert.rejects(
+    discoverCodexModelCatalog({ command: "/definitely/missing/larkin-codex-spawn-probe" }),
+    (error) => {
+      assert.match(error.message, /Codex model catalog command failed/);
+      assert.match(error.message, /ENOENT/);
+      return true;
+    },
+  );
+});

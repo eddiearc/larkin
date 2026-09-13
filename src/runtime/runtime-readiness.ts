@@ -164,11 +164,21 @@ export function resolveRuntimeExecutable(command: string, env: NodeJS.ProcessEnv
 export function classifyRuntimePrerequisite(runtime: RuntimeReadiness["runtime"], error: unknown,
   executable?: string): RuntimeReadiness {
   const reason = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").slice(0, 500);
-  if (/ENOENT|not found|no such file|spawn .* failed/i.test(reason)) return {
-    runtime, state: "missing", ...(executable ? { executable } : {}),
-    reason: `${runtime} is not installed`,
-    nextAction: runtimeInstallNextAction(runtime),
-  };
+  if (/ENOENT|not found|no such file|spawn .* failed/i.test(reason)) {
+    // A resolved executable that still exists on disk is not a missing install:
+    // the spawn failure comes from the launch environment (working directory,
+    // interpreter, permissions). Keep the raw reason instead of sending the
+    // user to reinstall the runtime.
+    if (executable && fs.existsSync(executable)) return {
+      runtime, state: "unavailable", executable, reason,
+      nextAction: `Verify the ${runtime} launch environment (working directory, interpreter, permissions), then retry.`,
+    };
+    return {
+      runtime, state: "missing", ...(executable ? { executable } : {}),
+      reason: `${runtime} is not installed`,
+      nextAction: runtimeInstallNextAction(runtime),
+    };
+  }
   if (/no authenticated available models|login|credential|unauthenticated|unauthorized|oauth/i.test(reason)) return {
     runtime, state: "unauthenticated", ...(executable ? { executable } : {}), reason,
     nextAction: runtimeLoginNextAction(runtime),

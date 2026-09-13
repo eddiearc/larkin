@@ -39,3 +39,15 @@ test("Claude catalog fails closed without a valid default and visible model list
     await assert.rejects(discoverClaudeModelCatalog({ async runClaudeControl() { return response; } }), /Claude model catalog|Claude 模型目录/i);
   }
 });
+
+test("Claude catalog surfaces the underlying spawn failure instead of a generic message", async () => {
+  const { discoverClaudeModelCatalog } = await import(MODULE);
+  await assert.rejects(
+    discoverClaudeModelCatalog({ command: "/definitely/missing/larkin-claude-spawn-probe" }),
+    (error) => {
+      assert.match(error.message, /Claude model catalog command failed/);
+      assert.match(error.message, /ENOENT/);
+      return true;
+    },
+  );
+});

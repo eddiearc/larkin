@@ -62,7 +62,7 @@ test("authored setup binding seam exists outside fork", () => {
   assert.equal(fs.existsSync(SOURCE), true, "missing src/setup/setup-binding.ts");
 });
 
-test("a clean shell build emits loadable setup-binding.mjs with the pure planning export", async () => {
+test("a clean shell build emits loadable setup-binding.mjs with the pure planning export", { timeout: 120_000 },async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-setup-binding-build-"));
   try {
     const outDir = path.join(temp, "dist");

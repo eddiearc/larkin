@@ -149,3 +149,23 @@ test("Pi RPC failure and close share one shutdown promise that escalates a stubb
   await first;
   assert.deepEqual(child.killed, ["SIGTERM", "SIGKILL"]);
 });
+
+class FailedSpawnProcess extends FakeProcess {
+  kill(signal) {
+    // A spawn that never started has no process to signal; Node returns false.
+    this.killed.push(signal);
+    return false;
+  }
+}
+
+test("Pi RPC shutdown settles on close when the spawn itself failed", async () => {
+  const child = new FailedSpawnProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 100, shutdownGraceMs: 5_000 });
+  const pending = client.request("get_state");
+  child.emit("error", Object.assign(new Error("spawn pi ENOENT"), { code: "ENOENT" }));
+  child.emit("close", -2, null);
+  await assert.rejects(pending, /spawn pi ENOENT/);
+  const startedAt = Date.now();
+  await client.close();
+  assert.ok(Date.now() - startedAt < 1_000, "shutdown must settle on close, not on the grace timers");
+});

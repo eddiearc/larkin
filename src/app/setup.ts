@@ -35,6 +35,9 @@ if (has("--start") && has("--no-start")) die("--start 与 --no-start 不能同�
 if (has("--comment-subscription")) {
   die("--comment-subscription 已移除：评论订阅默认 application（平台验证的应用级订阅），不需要该 flag");
 }
+if (has("--reuse-credentials") && flag("--from-cli-profile")) {
+  die("--reuse-credentials 与 --from-cli-profile 不能同时使用");
+}
 
 const REMOVED_SETUP_FLAGS = ["--provider", "--api-key", "--base-url", "--pi-distribution", "--api-key-stdin", "--model-from-preset"];
 if (REMOVED_SETUP_FLAGS.some((name) => has(name) || argv.some((arg) => arg.startsWith(`${name}=`)))) {
@@ -78,6 +81,12 @@ Options:
                                           Use \`larkin model\` after setup to inspect or switch.
   --from-cli-profile <name>            Optional: reuse an existing official lark-cli profile
                                           (requires LARKIN_SETUP_APP_SECRET)
+  --reuse-credentials                  Reuse the selected Agent's stored bot credential instead of
+                                          re-authorizing in the browser. Platform verification
+                                          (bot identity, required scopes) still runs and fails closed.
+                                          Does not re-run registerApp or the LARKIN_REGISTER_ADDONS
+                                          grant request, and infers the tenant from the stored
+                                          credential instead of asking.
   --tenant feishu|lark                  Choose the brand before the authorization QR. Default feishu
                                           (scan /page/launcher). Lark uses --tenant lark: scan /page/cli,
                                           then credentials return; do not open /page/launcher.
@@ -163,6 +172,7 @@ export async function main(): Promise<void> {
     const value = flag(name);
     if (value) registerArgs.push(name, value);
   }
+  if (has("--reuse-credentials")) registerArgs.push("--reuse-credentials");
   const result = await runForeground("bot-register", registerArgs);
   delete process.env.LARKIN_SETUP_APP_SECRET;
   if (result.code !== 0) die("机器人授权或 Agent 配置未完成");

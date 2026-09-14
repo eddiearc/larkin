@@ -89,7 +89,14 @@ test("production card registration uses the real SDK dispatcher without its acti
     onMessage() {},
     onCardAction(_subject, event) { calls.push(event.raw.event_id); return { toast: { type: "info", content: event.raw.event_id } }; },
   });
-  const dispatcher = new EventDispatcher({});
+  const dispatchLogs = [];
+  const dispatcher = new EventDispatcher({
+    logger: {
+      error: (...msg) => dispatchLogs.push(["error", ...msg]),
+      warn: (...msg) => dispatchLogs.push(["warn", ...msg]),
+      info: () => {}, debug: () => {}, trace: () => {},
+    },
+  });
   dispatcher.register({ "card.action.trigger": () => ({ swallowed: true }) });
   business.registerCardActions(agent, dispatcher);
   const raw = (eventId) => ({
@@ -106,6 +113,11 @@ test("production card registration uses the real SDK dispatcher without its acti
   const later = await dispatcher.invoke(raw("evt_dispatch_2"), { needCheck: false });
   assert.deepEqual(calls, ["evt_dispatch_1", "evt_dispatch_1", "evt_dispatch_2"]);
   assert.deepEqual([first.toast.content, retry.toast.content, later.toast.content], ["evt_dispatch_1", "evt_dispatch_1", "evt_dispatch_2"]);
+  // The replacement must not surface as a duplicate registration (issue #220).
+  // node-sdk >= 1.74 warns "… handle is already registered and has been
+  // replaced …" when it happens, so no warn/error line may appear at all;
+  // dropping the unregister call must make this assertion fail.
+  assert.deepEqual(dispatchLogs, [], JSON.stringify(dispatchLogs));
 });
 
 test("read receipt and connected identity preserve persistence/status order and shape", async () => {

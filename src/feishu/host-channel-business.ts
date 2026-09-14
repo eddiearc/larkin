@@ -12,7 +12,16 @@ interface BotStateStore {
   readJson<T>(key: "botIdentity", fallback: T): T;
   writeJson(key: "botIdentity", value: unknown): void;
 }
-interface Dispatcher { register(map: Record<string, (raw: unknown) => Promise<unknown> | unknown>): void }
+interface Dispatcher {
+  register(map: Record<string, (raw: unknown) => Promise<unknown> | unknown>): void;
+  /**
+   * node-sdk >= 1.74 (issue #220): remove a handler before replacing it. The
+   * channel package does not publish its dispatcher type; this structural type
+   * describes the node-sdk dispatcher it hands over at runtime, which does
+   * carry unregister() — the card-registration test pins that assumption.
+   */
+  unregister?(...keys: string[]): unknown;
+}
 interface ConnectedChannel {
   botIdentity?: { openId?: string; name?: string | null } | null;
   rawClient?: { request(input: { url: string; method: string }): Promise<unknown> } | null;
@@ -139,8 +148,11 @@ export class HostChannelBusiness {
    * Replace the SDK's action-value TTL dedup handler after channel.connect().
    * Durable callback event_id ownership lives in InteractionStateMachine, so
    * retries receive the same response while later state-version clicks remain legal.
+   * Unregister first (node-sdk >= 1.74, issue #220) so the deliberate replacement
+   * is not reported as a duplicate registration.
    */
   registerCardActions(agent: ChannelAgent, dispatcher: Dispatcher): void {
+    dispatcher.unregister?.("card.action.trigger");
     dispatcher.register({
       "card.action.trigger": async (raw) => {
         const event = normalizeCardAction(raw as Parameters<typeof normalizeCardAction>[0], { includeRaw: true });

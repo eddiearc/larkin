@@ -30,7 +30,7 @@ export class ForeignTmuxTaskError extends Error {
 
 export function tmuxAvailable(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): boolean {
   if (platform === "win32") return false;
-  const result = spawnSync("tmux", ["-V"], { env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000 });
+  const result = spawnSync("tmux", tmuxArgs(tmuxSocketName(env), ["-V"]), { env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000 });
   const version = /tmux\s+(\d+)\.(\d+)/i.exec(`${result.stdout || ""} ${result.stderr || ""}`);
   return result.status === 0 && version !== null
     && (Number(version[1]) > 3 || (Number(version[1]) === 3 && Number(version[2]) >= 2));
@@ -53,7 +53,7 @@ function taskDir(stateDir: string, agentId: string, instanceId: string, taskId: 
   return path.join(taskRoot(stateDir, agentId, instanceId), taskId);
 }
 
-function sessionName(agentId: string, instanceId: string, taskId: string): string {
+export function tmuxSessionName(agentId: string, instanceId: string, taskId: string): string {
   return `lkn-${sanitizeName(agentId, "agent")}-${sanitizeName(instanceId, "inst")}-${taskId}`;
 }
 
@@ -121,12 +121,32 @@ function tmuxClientEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return next;
 }
 
+/**
+ * Optional dedicated tmux server socket (`tmux -L <name>`). Unset keeps the
+ * default server, i.e. today's behavior. A dedicated socket keeps Agent task
+ * sessions off the user's session-id counter and out of `kill-server`'s blast
+ * radius; the value is a tmux socket *name*, not a path.
+ */
+export function tmuxSocketName(env: NodeJS.ProcessEnv = process.env): string | null {
+  const value = String(env.LARKIN_TMUX_SOCKET || "").trim();
+  if (!value) return null;
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(value) || value === "." || value === "..") {
+    throw new Error("LARKIN_TMUX_SOCKET 非法：只允许 [A-Za-z0-9._-]，长度 1-64，且不能是 . 或 ..");
+  }
+  return value;
+}
+
+/** tmux client argv with the optional dedicated socket in front. */
+function tmuxArgs(socket: string | null, args: readonly string[]): string[] {
+  return socket ? ["-L", socket, ...args] : [...args];
+}
+
 function tmuxHasSession(name: string, env: NodeJS.ProcessEnv): boolean {
-  return spawnSync("tmux", ["has-session", "-t", `=${name}`], { env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000 }).status === 0;
+  return spawnSync("tmux", tmuxArgs(tmuxSocketName(env), ["has-session", "-t", `=${name}`]), { env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000 }).status === 0;
 }
 
 function killSession(name: string, env: NodeJS.ProcessEnv): void {
-  spawnSync("tmux", ["kill-session", "-t", `=${name}`], { env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000 });
+  spawnSync("tmux", tmuxArgs(tmuxSocketName(env), ["kill-session", "-t", `=${name}`]), { env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000 });
 }
 
 function parseExitCode(raw: string | null): number | null {
@@ -154,7 +174,7 @@ function processTable(): ProcessRow[] {
 
 function liveOwnedPanePid(session: string, env: NodeJS.ProcessEnv): number | null {
   if (!tmuxHasSession(session, env)) return null;
-  const listed = spawnSync("tmux", ["list-panes", "-t", `=${session}`, "-F", "#{pane_pid}"], {
+  const listed = spawnSync("tmux", tmuxArgs(tmuxSocketName(env), ["list-panes", "-t", `=${session}`, "-F", "#{pane_pid}"]), {
     env: tmuxClientEnv(env), encoding: "utf8", timeout: 5_000,
   });
   if (listed.status !== 0) return null;
@@ -233,10 +253,11 @@ function snapshotFromDir(dir: string, taskId: string, env: NodeJS.ProcessEnv, se
   return { taskId, status, exitCode, output, startedAt, endedAt };
 }
 
-export function formatTmuxTaskText(snapshot: TmuxTaskSnapshot): string {
+export function formatTmuxTaskText(snapshot: TmuxTaskSnapshot, options: { attachHint?: string | null } = {}): string {
   const exit = snapshot.exitCode === null ? "null" : String(snapshot.exitCode);
+  const hint = options.attachHint ? `\nattach: ${options.attachHint}` : "";
   const body = snapshot.output ? `\n${snapshot.output}` : "";
-  return `taskId=${snapshot.taskId} status=${snapshot.status} exitCode=${exit}${body}`;
+  return `taskId=${snapshot.taskId} status=${snapshot.status} exitCode=${exit}${hint}${body}`;
 }
 
 export function createLarkinTmux(input: {
@@ -252,7 +273,7 @@ export function createLarkinTmux(input: {
   const ownedParts = ["pi-tmux", sanitizeName(agentId, "agent"), sanitizeName(instanceId, "inst")] as const;
   const root = taskRoot(stateDir, agentId, instanceId);
 
-  const expectedSession = (taskId: string): string => sessionName(agentId, instanceId, taskId);
+  const expectedSession = (taskId: string): string => tmuxSessionName(agentId, instanceId, taskId);
 
   const assertPrivateScripts = (dir: string): void => {
     for (const name of ["env.sh", "command.sh", "run.sh", "meta.json"]) {
@@ -339,7 +360,7 @@ export function createLarkinTmux(input: {
       `printf '%s\\n' "$status" > ${posixQuote(exitFile)}`,
       "",
     ].join("\n"));
-    const created = spawnSync("tmux", ["new-session", "-d", "-s", session, "-n", "bash", "-e", "BASH_ENV=", "/usr/bin/env", "-u", "BASH_ENV", "/bin/bash", path.join(dir, "run.sh")], {
+    const created = spawnSync("tmux", tmuxArgs(tmuxSocketName(env), ["new-session", "-d", "-s", session, "-n", "bash", "-e", "BASH_ENV=", "/usr/bin/env", "-u", "BASH_ENV", "/bin/bash", path.join(dir, "run.sh")]), {
       env: tmuxClientEnv(env),
       encoding: "utf8",
       timeout: 5_000,

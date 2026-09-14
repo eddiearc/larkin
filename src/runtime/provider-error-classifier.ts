@@ -63,3 +63,28 @@ export function classifyStrictProviderError(error: StrictProviderErrorInput): "c
   }
   return undefined;
 }
+
+/**
+ * Finish reasons we are willing to quote into user-visible status. The list is
+ * deliberately closed: Runtime/provider text is never echoed, so only a token
+ * validated against this vocabulary can reach `status`.
+ */
+const SURFACED_FINISH_REASONS = new Set([
+  "stop", "length", "content_filter", "tool_calls", "function_call",
+  "end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal",
+  "safety", "recitation", "blocklist", "prohibited_content", "spii", "malformed_function_call", "other",
+  "error", "timeout", "rate_limit", "overloaded", "cancelled", "aborted",
+]);
+
+/**
+ * Narrow, allow-listed extraction of a provider finish reason from Runtime text
+ * (e.g. "Provider finish_reason: content_filter"). Returns the validated token
+ * only — the surrounding payload never leaves this function, so a status line
+ * can say why a reply was withheld without echoing raw Runtime data.
+ */
+export function providerFinishReason(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 8_192) return null;
+  const match = /(?:finish[_-]?reason|rawstopreason)\s*[:=]\s*"?([A-Za-z_]{2,32})"?/i.exec(value);
+  const token = match?.[1]?.toLowerCase() ?? "";
+  return SURFACED_FINISH_REASONS.has(token) ? token : null;
+}

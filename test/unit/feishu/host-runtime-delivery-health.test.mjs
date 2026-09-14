@@ -15,6 +15,7 @@ for (const { mode, explicitReadiness, runtimeError } of [
   { mode: "generic-error", explicitReadiness: null },
   { mode: "provider-403-delivery", explicitReadiness: null,
     runtimeError: "provider request failed with HTTP 403 Authorization: Bearer issue124-status-token\nCookie: session=issue124-status-cookie\n/Users/issue124/private/settings.json" },
+  { mode: "content-filter-input-error", explicitReadiness: null },
 ]) {
   test(`HostShell ${mode} keeps Inbox durable and degrades visible health without raw Runtime error data`, { timeout: 10_000 }, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-host-delivery-health-${mode}-`));
@@ -79,6 +80,11 @@ for (const { mode, explicitReadiness, runtimeError } of [
         listener({ type: "delivery", agentId, deliveryId: "delivery-async", messageId: event.message_id,
           status: "error", reason: `raw asynchronous delivery reason ${secret}` });
       }
+      if (mode === "content-filter-input-error") {
+        listener({ type: "runtime", agentId, event: { type: "input-error", inputId: "delivery-filter",
+          retryable: false, willRetry: false, errorCategory: "provider",
+          message: `Provider finish_reason: content_filter; ${secret}` } });
+      }
       const rows = store.readNdjson("inbox");
       assert.equal(rows.length, 1);
       assert.deepEqual({ message_id: rows[0].message_id, target: rows[0].target }, {
@@ -102,6 +108,10 @@ for (const { mode, explicitReadiness, runtimeError } of [
         assert.match(status.runtimeReadiness.nextAction, /inspect.*retry/i);
       } else {
         assert.match(status.runtimeReadiness.nextAction, /inspect.*restart.*replay/i);
+      }
+      if (mode === "content-filter-input-error") {
+        const lastError = (status.recentErrors || []).at(-1);
+        assert.match(String(lastError?.text || ""), /provider finish_reason=content_filter/);
       }
       const errorDeliveryLog = (status.deliverLog || []).filter((entry) => entry.status === "error");
       const visible = JSON.stringify({ health: status.inboundDeliveryHealth, readiness: status.runtimeReadiness,

@@ -34,7 +34,7 @@ import {
   RuntimePrerequisiteError,
   type PersistedAuthFailure,
 } from "../runtime/runtime-readiness.js";
-import { safeProviderDiagnostic } from "../runtime/provider-error-classifier.js";
+import { providerFinishReason, safeProviderDiagnostic } from "../runtime/provider-error-classifier.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
 import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
@@ -1459,7 +1459,11 @@ export function createHostShell({
         hostState.recordStatusError(agent, `auth: ${readiness.reason}; ${readiness.nextAction}`);
       } else {
         const category = message.event.errorCategory || "provider";
-        hostState.recordStatusError(agent, `${category}: Runtime input failed ${message.event.retryable ? "retryably" : "non-retryably"}; inspect delivery health and Runtime/provider configuration`);
+        // Surface the provider's finish reason when the Runtime text names one we
+        // recognize (allow-listed token only; raw Runtime text never reaches status).
+        const finishReason = providerFinishReason(message.event.message);
+        const detail = finishReason ? ` (provider finish_reason=${finishReason})` : "";
+        hostState.recordStatusError(agent, `${category}: Runtime input failed ${message.event.retryable ? "retryably" : "non-retryably"}${detail}; inspect delivery health and Runtime/provider configuration`);
       }
     }
   };

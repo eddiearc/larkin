@@ -169,3 +169,61 @@ test("Pi RPC shutdown settles on close when the spawn itself failed", async () =
   await client.close();
   assert.ok(Date.now() - startedAt < 1_000, "shutdown must settle on close, not on the grace timers");
 });
+
+class BrokenStdinProcess extends EventEmitter {
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  stdin = { destroyed: true, write: () => true, end: () => {} };
+  kill() { return true; }
+}
+
+test("Pi RPC write failure defers to a real spawn failure instead of masking it", async () => {
+  const { spawn } = await import("node:child_process");
+  // Spawn each child right before its client attaches the error handlers, so a
+  // fast spawn failure can never surface as an unhandled 'error' event.
+  const cases = [
+    ["missing executable", () => spawn("/definitely/missing/larkin-pi-spawn-case", ["--mode", "rpc"], { stdio: ["pipe", "pipe", "pipe"] })],
+    ["missing working directory", () => spawn(process.execPath, ["--version"], { cwd: "/nonexistent-larkin-cwd", stdio: ["pipe", "pipe", "pipe"] })],
+  ];
+  for (const [label, makeChild] of cases) {
+    const child = makeChild();
+    const client = new PiRpcClient(child, { requestTimeoutMs: 5_000 });
+    const startedAt = Date.now();
+    await assert.rejects(client.request("get_available_models"), (error) => {
+      assert.match(error.message, /ENOENT|spawn/i, `${label}: ${error.message}`);
+      assert.doesNotMatch(error.message, /stdin is unavailable/, `${label} must not mask the spawn cause`);
+      return true;
+    });
+    assert.ok(Date.now() - startedAt < 2_000, `${label} must settle on the next turn, not a timer`);
+  }
+});
+
+test("Pi RPC write failure surfaces after one turn when the process stays alive", async () => {
+  const child = new BrokenStdinProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 5_000 });
+  const startedAt = Date.now();
+  await assert.rejects(client.request("get_state"), /write failed: stdin is unavailable/);
+  assert.ok(Date.now() - startedAt < 1_000, "one deferred turn, not a fixed arbitration window");
+});
+
+test("Pi RPC concurrent write failures collapse into one terminal error", async () => {
+  const child = new BrokenStdinProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 5_000 });
+  const failures = [];
+  client.subscribeFailure((error) => failures.push(error.message));
+  const results = await Promise.allSettled([client.request("get_state"), client.request("get_available_models")]);
+  assert.equal(results.length, 2);
+  for (const result of results) assert.equal(result.status, "rejected");
+  assert.equal(failures.length, 1, "exactly one terminal failure");
+  assert.equal(new Set(results.map((result) => result.reason.message)).size, 1);
+});
+
+test("Pi RPC write failure respects a short request deadline and reports once", async () => {
+  const child = new BrokenStdinProcess();
+  const client = new PiRpcClient(child, { requestTimeoutMs: 5 });
+  const failures = [];
+  client.subscribeFailure((error) => failures.push(error.message));
+  await assert.rejects(client.request("get_state"), /timed out|write failed/i);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(failures.length, 1, "the deferred write failure must not double-report after the timeout");
+});

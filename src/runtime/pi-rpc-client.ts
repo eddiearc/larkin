@@ -129,10 +129,10 @@ export class PiRpcClient {
       try {
         if (!this.process.stdin || this.process.stdin.destroyed) throw new Error("stdin is unavailable");
         this.process.stdin.write(`${JSON.stringify({ id, type: command, ...fields })}\n`, (error) => {
-          if (error) this.fail(new Error(`Pi RPC ${command} write failed: ${error.message}`), true);
+          if (error) this.failWrite(command, error);
         });
       } catch (error) {
-        this.fail(new Error(`Pi RPC ${command} write failed: ${error instanceof Error ? error.message : String(error)}`), true);
+        this.failWrite(command, error);
       }
     });
   }
@@ -231,6 +231,23 @@ export class PiRpcClient {
 
   private protocolFailure(detail: string): void {
     this.fail(new Error(`Pi RPC protocol error: ${detail}`), true);
+  }
+
+  /**
+   * A failed write matters less than why the process is gone: a spawn failure or
+   * an early exit explains it, and that verdict is queued on the next tick. Defer
+   * the write error by a single turn (next tick runs before the check phase, so a
+   * real spawn/exit verdict always wins) and report it only if no verdict arrives.
+   * No arbitration timer; concurrent write failures collapse into the client's
+   * single first-error terminal state via `fail`'s idempotence.
+   */
+  private failWrite(command: string, error: unknown): void {
+    if (this.failed) return;
+    const message = `Pi RPC ${command} write failed: ${error instanceof Error ? error.message : String(error)}`;
+    setImmediate(() => {
+      if (this.failed) return;
+      this.fail(new Error(message), true);
+    });
   }
 
   private fail(error: Error, terminate: boolean): void {

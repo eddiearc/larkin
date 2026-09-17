@@ -81,6 +81,66 @@ Standalone binaries for macOS, Linux, and Windows (x64) are attached to every [G
 
 Run `larkin --help` or `larkin config --help` for the available commands and configuration options. `larkin agents` reports event readiness, reply-scope readiness, subscription mode/status/dimension, arrivals, and read failures. Local configuration is stored under `~/.larkin` by default; set `LARKIN_CONFIG_DIR` to use another directory.
 
+<details>
+<summary>Keeping the Runtime Host running (supervisor and restart)</summary>
+
+`larkin start` stays in the foreground and supervises the daemon and the local dashboard. It reuses an already running supervisor instead of starting a second one. Its own recovery budget is bounded (a few daemon restarts per minute with exponential backoff); when that budget is exhausted the supervisor exits so an external process manager can take over as the final respawn layer.
+
+For an always-on host, let the OS supervisor run `larkin start`:
+
+macOS (`launchd`):
+
+```xml
+<!-- ~/Library/LaunchAgents/com.example.larkin.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.larkin</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/larkin</string>
+    <string>start</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.example.larkin.plist
+```
+
+Linux (`systemd` user unit):
+
+```ini
+# ~/.config/systemd/user/larkin.service
+[Unit]
+Description=Larkin Runtime Host
+After=network-online.target
+
+[Service]
+ExecStart=%h/.npm-global/bin/larkin start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now larkin
+loginctl enable-linger "$USER"   # keep running after logout
+```
+
+Adjust the executable path to your install; `npx larkin@latest start` works too but pays the resolver cost on every start.
+
+Restarting means stopping the supervisor and starting it again — `systemctl --user restart larkin`, `launchctl kickstart -k gui/"$(id -u)"/com.example.larkin`, or Ctrl-C followed by `larkin start`. Stopping the supervisor stops every Agent with it: Agent runtimes are children of the Runtime Host and cannot restart the host themselves. Session-level destructive operations (`larkin session reset`, `larkin session recover`) are deliberately limited to a user terminal.
+
+</details>
+
 ### Feishu message links
 
 Feishu clients do not reliably render Markdown links such as `[label](URL)` as clickable in text or Markdown messages. When a recipient must be able to open a link, keep the complete bare HTTPS URL visible, for example: Issue 115 — https://github.com/eddiearc/larkin/issues/115. A label may accompany it, but must not replace the bare URL. Larkin does not rewrite exact, verbatim, or user-authored message bodies to enforce this guidance.

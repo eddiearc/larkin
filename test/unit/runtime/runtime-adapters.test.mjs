@@ -129,9 +129,9 @@ function clearProductionPiLog(log) {
   }
 }
 
-async function startedCodexTurn(inputId = "input-A", turnId = "turn-A") {
+async function startedCodexTurn(inputId = "input-A", turnId = "turn-A", dependencies = {}) {
   const child = new FakeProcess();
-  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create());
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child, ...dependencies }).createSession(create());
   const events = [];
   session.subscribe((event) => events.push(event));
   child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
@@ -1697,4 +1697,130 @@ test("Codex update timeout terminates then kills the child and settles once", as
   assert.equal(result.recovered, false);
   assert.match(result.reason, /timed out/);
   assert.deepEqual(update.killed, ["SIGTERM", "SIGKILL"]);
+});
+
+const capacityMessage = "Selected model is at capacity. Please try a different model.";
+const codexNotify = (child, method, params) => child.stdout.write(`${JSON.stringify({ method, params })}\n`);
+const capacityFail = (child, turnId) => {
+  codexNotify(child, "error", { turnId, willRetry: false, error: { message: capacityMessage } });
+  codexNotify(child, "turn/completed", { turn: { id: turnId, status: "failed", error: { message: capacityMessage } } });
+};
+const retryTick = () => new Promise((resolve) => setTimeout(resolve, 15));
+
+for (const notificationFirst of [true, false]) test(`Codex capacity recovery preserves input ownership and bounds retries (notificationFirst=${notificationFirst})`, async () => {
+  const { child, session, events } = await startedCodexTurn("capacity-input", "capacity-0", { codexCapacityRetryDelaysMs: [1, 1, 1] });
+  for (let i = 0; i < 3; i++) {
+    capacityFail(child, `capacity-${i}`);
+    // A duplicate terminal notification must neither end the logical turn nor schedule another retry.
+    capacityFail(child, `capacity-${i}`);
+    await retryTick();
+    const request = child.writes.at(-1);
+    assert.equal(request.method, "turn/start");
+    assert.equal(request.params.threadId, "thread-owned");
+    assert.match(request.params.input[0].text, /Preserve completed work/);
+    const started = () => codexNotify(child, "turn/started", { turn: { id: `capacity-${i + 1}` } });
+    if (notificationFirst) started();
+    child.stdout.write(`${JSON.stringify({ id: request.id, result: { turn: { id: `capacity-${i + 1}` } } })}\n`);
+    if (!notificationFirst) started();
+    assert.equal(events.filter(e => e.type === "turn-end").length, 0);
+    assert.equal(events.filter(e => e.type === "input-error" && !e.willRetry).length, 0);
+  }
+  capacityFail(child, "capacity-3");
+  await retryTick();
+  assert.equal(child.writes.filter(r => r.method === "turn/start").length, 4);
+  const terminal = events.filter(e => e.type === "input-error" && !e.willRetry);
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].inputId, "capacity-input");
+  assert.equal(terminal[0].retryable, false);
+  assert.equal(events.filter(e => e.type === "turn-end").length, 1);
+  await session.close("done");
+});
+
+test("Codex native retries do not trigger host retries; capacity recovery can succeed", async () => {
+  const { child, session, events } = await startedCodexTurn("capacity-input", "original", { codexCapacityRetryDelaysMs: [1] });
+  codexNotify(child, "error", { turnId: "original", willRetry: true, error: { message: capacityMessage } });
+  await retryTick();
+  assert.equal(child.writes.filter(r => r.method === "turn/start").length, 1);
+  // Also exercise a provider that emits only a failed completion.
+  codexNotify(child, "turn/completed", { turn: { id: "original", status: "failed", error: { message: capacityMessage } } });
+  await retryTick();
+  const request = child.writes.at(-1);
+  child.stdout.write(`${JSON.stringify({ id: request.id, result: { turn: { id: "recovered" } } })}\n`);
+  codexNotify(child, "turn/started", { turn: { id: "recovered" } });
+  codexNotify(child, "turn/completed", { turn: { id: "recovered", status: "completed" } });
+  assert.equal(events.filter(e => e.type === "turn-end").length, 1);
+  assert.equal(events.filter(e => e.type === "input-error" && !e.willRetry).length, 0);
+  await session.close("done");
+});
+
+for (const action of ["cancel", "close"]) test(`Codex ${action} cancels capacity backoff`, async () => {
+  const { child, session } = await startedCodexTurn("cancel-input", "cancel-turn", { codexCapacityRetryDelaysMs: [20] });
+  capacityFail(child, "cancel-turn");
+  await session[action]("user request");
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(child.writes.filter(r => r.method === "turn/start").length, 1);
+});
+
+test("Codex capacity retry submission errors consume the same bounded retry budget", async () => {
+  const { child, session, events } = await startedCodexTurn("rpc-input", "rpc-turn", { codexCapacityRetryDelaysMs: [1, 1, 1] });
+  capacityFail(child, "rpc-turn");
+  for (let i = 0; i < 3; i++) {
+    await retryTick();
+    const request = child.writes.at(-1);
+    child.stdout.write(`${JSON.stringify({ id: request.id, error: { message: capacityMessage } })}\n`);
+  }
+  await retryTick();
+  assert.equal(child.writes.filter(r => r.method === "turn/start").length, 4);
+  assert.equal(events.filter(e => e.type === "input-error" && !e.willRetry).length, 1);
+  assert.equal(events.filter(e => e.type === "turn-end").length, 1);
+  await session.close("done");
+});
+
+test("Codex cancellation interrupts a capacity retry accepted after cancellation", async () => {
+  const { child, session, events } = await startedCodexTurn("cancel-race", "cancel-race-turn", { codexCapacityRetryDelaysMs: [1] });
+  capacityFail(child, "cancel-race-turn");
+  await retryTick();
+  const request = child.writes.at(-1);
+  await session.cancel("user request");
+  child.stdout.write(`${JSON.stringify({ id: request.id, result: { turn: { id: "late-retry" } } })}\n`);
+  codexNotify(child, "turn/started", { turn: { id: "late-retry" } });
+  assert.equal(child.writes.at(-1).method, "turn/interrupt");
+  codexNotify(child, "turn/completed", { turn: { id: "late-retry", status: "interrupted" } });
+  assert.equal(events.filter(e => e.type === "turn-end").length, 1);
+  await session.close("done");
+});
+
+test("Codex capacity rejection before turn acceptance retries the unaccepted input with a finite budget", async () => {
+  const { child, session } = await startedCodexTurn("previous", "previous-turn", { codexCapacityRetryDelaysMs: [1, 1, 1] });
+  codexNotify(child, "turn/completed", { turn: { id: "previous-turn", status: "completed" } });
+  const prompt = session.prompt({ inputId: "unaccepted", kind: "wake", text: "original unaccepted input", attempt: 0 });
+  await new Promise(resolve => setImmediate(resolve));
+  child.stdout.write(`${JSON.stringify({ id: child.writes.at(-1).id, error: { message: capacityMessage } })}\n`);
+  assert.equal((await prompt).status, "accepted");
+  for (let i = 0; i < 3; i++) {
+    await retryTick();
+    const request = child.writes.at(-1);
+    assert.match(JSON.stringify(request.params.input), /original unaccepted input/);
+    child.stdout.write(`${JSON.stringify({ id: request.id, error: { message: capacityMessage } })}\n`);
+  }
+  await retryTick();
+  assert.equal(child.writes.filter(r => r.method === "turn/start").length, 5);
+  await session.close("done");
+});
+
+test("Codex cancellation of a rejected retry does not block a later user prompt", async () => {
+  const { child, session } = await startedCodexTurn("cancel-rejected", "cancel-rejected-turn", { codexCapacityRetryDelaysMs: [1] });
+  capacityFail(child, "cancel-rejected-turn");
+  await retryTick();
+  const request = child.writes.at(-1);
+  await session.cancel("user request");
+  child.stdout.write(`${JSON.stringify({ id: request.id, error: { message: capacityMessage } })}\n`);
+  const next = session.prompt({ inputId: "new-work", kind: "wake", text: "new work", attempt: 0 });
+  await new Promise(resolve => setImmediate(resolve));
+  const nextRequest = child.writes.at(-1);
+  assert.equal(nextRequest.method, "turn/start");
+  assert.notEqual(nextRequest.id, request.id);
+  child.stdout.write(`${JSON.stringify({ id: nextRequest.id, result: { turn: { id: "new-work-turn" } } })}\n`);
+  assert.equal((await next).status, "accepted");
+  await session.close("done");
 });

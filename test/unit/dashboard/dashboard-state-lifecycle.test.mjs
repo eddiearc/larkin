@@ -258,3 +258,62 @@ test("direct dashboard replaces an owned pre-fingerprint process and publishes t
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("dashboard HTTP readiness accepts resumed sessions but rejects stale session and Runtime evidence", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-dashboard-resume-"));
+  const agentId = "cli_ResumeA1";
+  const stateDir = path.join(temp, "state", "agents", agentId);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(temp, "config.json"), JSON.stringify({ version: 4, serverId: "resume-fixture", mentionPolicy: "require",
+    activeAgent: agentId, agents: { [agentId]: { runtime: "codex", model: "default" } } }), { mode: 0o600 });
+  const daemon = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)", "runtime-process"], { stdio: "ignore" });
+  let dashboard;
+  try {
+    const { inspectProcess } = await import(pathToFileURL(path.join(ROOT, "dist/platform/process-state.mjs")).href);
+    const inspected = inspectProcess(daemon.pid);
+    assert.equal(inspected.ok, true, inspected.reason);
+    const epoch = "2026-07-29T01:00:00.000Z", old = "2026-07-29T00:00:00.000Z", fresh = "2026-07-29T01:00:01.000Z";
+    fs.writeFileSync(path.join(temp, "daemon-status.json"), JSON.stringify({ pid: daemon.pid,
+      processStartToken: inspected.startToken, commandToken: "runtime-process", startedAt: epoch, agents: [agentId] }));
+    const statusFile = path.join(stateDir, "status.json");
+    const status = { session: { id: "resumed-session", startedAt: old, lastSeenAt: fresh },
+      runtimeReadiness: { runtime: "codex", state: "ready", observedAt: fresh } };
+    fs.writeFileSync(statusFile, JSON.stringify(status));
+    const port = await freePort();
+    dashboard = spawn(process.execPath, [path.join(ROOT, "dist/app/dashboard.mjs"), "--port", String(port)], {
+      cwd: ROOT, env: { ...process.env, LARKIN_CONFIG_DIR: temp }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    dashboard.stdout.on("data", chunk => { output += chunk; });
+    dashboard.stderr.on("data", chunk => { output += chunk; });
+    const url = `http://127.0.0.1:${port}/api/status`;
+    let initial;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { initial = await fetch(url).then(r => r.json()); break; } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(initial, `Dashboard started: ${output}`);
+    assert.equal(initial.daemon.state, "owned");
+    assert.equal(initial.agents[0].runtimeReadiness.state, "ready", "resumed session is current despite old creation time");
+    for (const [label, session, readiness, expected] of [
+      ["stale session", { ...status.session, lastSeenAt: old }, status.runtimeReadiness, "unavailable"],
+      ["stale readiness", status.session, { ...status.runtimeReadiness, observedAt: old }, "unavailable"],
+      ["missing session", undefined, status.runtimeReadiness, "unavailable"],
+      ["legacy fresh creation", { id: "new-session", startedAt: fresh }, status.runtimeReadiness, "ready"],
+      ["authentication error", status.session, { state: "unauthenticated", observedAt: fresh, reason: "fixture auth failure" }, "unauthenticated"],
+    ]) {
+      fs.writeFileSync(statusFile, JSON.stringify({ session, runtimeReadiness: readiness }));
+      const result = await fetch(url).then(r => r.json());
+      assert.equal(result.agents[0].runtimeReadiness.state, expected, label);
+    }
+  } finally {
+    for (const child of [dashboard, daemon]) {
+      if (child && child.exitCode === null) {
+        const exited = new Promise(resolve => child.once("exit", resolve));
+        child.kill("SIGTERM");
+        await exited;
+      }
+    }
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}, 15_000);

@@ -8,7 +8,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { readJson, readProcessState } from "../platform/process-state.js";
-import { isRuntimeReadinessCurrent } from "../app/agent-readiness.js";
+import { isRuntimeReadinessCurrent, isRuntimeSessionCurrent } from "../app/agent-readiness.js";
 import { isAllowedDashboardAvatarUrl } from "./dashboard-avatar.js";
 import { collectWorkspaceEntry as collectTypedWorkspaceEntry } from "./dashboard-workspace.js";
 import { buildFingerprint, packageVersion } from "../platform/build-info.js";
@@ -538,9 +538,7 @@ async function collectAgentStatus(a: DashboardAgent, configDir: string, daemonSt
   // 本 agent 专属时间线：三路历史合并按时间倒序，不是全局一条汇总——每个 agent 只看自己的故事。
   const { recentErrors, lastActivity, lastDeliver, feed } = projectStatusTimeline(status);
   const statusReadiness = status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string; [key: string]: unknown } | undefined;
-  const sessionStartedAt = finiteTime(status.session?.startedAt);
-  const daemonEpoch = finiteTime(daemonStartedAt);
-  const sessionCurrent = sessionStartedAt !== null && daemonEpoch !== null && sessionStartedAt >= daemonEpoch;
+  const sessionCurrent = isRuntimeSessionCurrent(status.session, daemonStartedAt);
   const runtimeReadiness = sessionCurrent && isRuntimeReadinessCurrent(statusReadiness, daemonStartedAt)
     || statusReadiness?.state !== "ready"
     ? statusReadiness || null

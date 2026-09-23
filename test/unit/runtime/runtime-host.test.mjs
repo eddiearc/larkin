@@ -2259,3 +2259,44 @@ test("RuntimeHost persists the depth-1 previous archive across reset and start()
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("RuntimeHost with the native Codex adapter keeps capacity retries inside one logical delivery", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { PassThrough } = await import("node:stream");
+  const child = new EventEmitter();
+  child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  child.kill = () => true;
+  const writes = [];
+  const notify = (method, params) => child.stdout.write(`${JSON.stringify({ method, params })}\n`);
+  child.stdin = { write(line, cb) {
+    const req = JSON.parse(line); writes.push(req); cb?.();
+    if (req.id) queueMicrotask(() => {
+      const turn = `capacity-host-${writes.filter(r => r.method === "turn/start").length}`;
+      const result = req.method === "thread/start" ? { thread: { id: "capacity-thread" } }
+        : req.method === "turn/start" ? { turn: { id: turn } } : {};
+      child.stdout.write(`${JSON.stringify({ id: req.id, result })}\n`);
+      if (req.method === "turn/start") notify("turn/started", { turn: { id: turn } });
+    });
+    return true;
+  } };
+  const nativeAdapter = createNativeRuntimeAdapter("codex", { spawn: () => child, codexCapacityRetryDelaysMs: [5, 5, 5] });
+  const adapter = { ...nativeAdapter, async probe() { return { runtime: "codex", state: "ready" }; } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  const events = []; host.subscribe(e => events.push(e));
+  try {
+    await host.start([{ agentId: "cli_capacityHost", name: "capacity", runtime: "codex", model: "model", workspaceDir: "/tmp" }]);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await host.deliver("cli_capacityHost", { message_id: "om_capacity_host", content: "do work" });
+    for (let i = 1; i <= 4; i++) {
+      notify("turn/completed", { turn: { id: `capacity-host-${i}`, status: "failed",
+        error: { message: "Selected model is at capacity. Please try a different model." } } });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(writes.filter(r => r.method === "turn/start").length, Math.min(i + 1, 4));
+      if (i < 4) assert.equal(events.filter(e => e.type === "activity" && e.detailKind === "turn_ended").length, 0);
+    }
+    assert.equal(events.filter(e => e.type === "activity" && e.detailKind === "turn_ended").length, 1);
+    assert.equal(events.filter(e => e.type === "delivery" && e.status === "error").length, 1);
+  } finally {
+    await host.shutdown("done"); child.stdout.destroy(); child.stderr.destroy();
+  }
+});

@@ -26,6 +26,16 @@ export function isRuntimeReadinessCurrent(
   return observedAt !== null && epoch !== null && observedAt >= epoch;
 }
 
+export function isRuntimeSessionCurrent(
+  session: AgentReadinessStatus["session"] | null | undefined,
+  daemonStartedAt: unknown,
+): boolean {
+  // Resuming preserves creation time; lastSeenAt proves observation by this daemon.
+  const observedAt = timestamp(session?.lastSeenAt) ?? timestamp(session?.startedAt);
+  const epoch = timestamp(daemonStartedAt);
+  return observedAt !== null && epoch !== null && observedAt >= epoch;
+}
+
 export function isCurrentOwnedDaemon(daemon: OwnedProcessRecord | null | undefined): boolean {
   return daemon?.state === "owned"
     && Number(daemon.pid) > 0
@@ -59,11 +69,6 @@ export function projectAgentReadiness(input: {
   const daemonOwned = isCurrentOwnedDaemon(input.daemon) && daemonHasAgent(input.daemon, input.agentId);
   const daemonStartedAt = timestamp(input.daemon.startedAt);
   const connectedAt = timestamp(status?.connectedAt);
-  // A resumed session deliberately retains its original creation time.  Its
-  // current daemon-epoch proof is the fresh session observation, not that
-  // historic creation timestamp.
-  const sessionObservedAt = timestamp(status?.session?.lastSeenAt) ?? timestamp(status?.session?.startedAt);
-  const sessionCurrent = daemonStartedAt !== null && sessionObservedAt !== null && sessionObservedAt >= daemonStartedAt;
   const channelConnected = daemonOwned
     && status?.connectedVia === "channel"
     && daemonStartedAt !== null
@@ -71,7 +76,7 @@ export function projectAgentReadiness(input: {
     && connectedAt >= daemonStartedAt;
   const readiness = {
     daemon_owned: daemonOwned,
-    runtime_ready: daemonOwned && sessionCurrent && isRuntimeReadinessCurrent(status?.runtimeReadiness, input.daemon.startedAt),
+    runtime_ready: daemonOwned && isRuntimeSessionCurrent(status?.session, input.daemon.startedAt) && isRuntimeReadinessCurrent(status?.runtimeReadiness, input.daemon.startedAt),
     channel_connected: channelConnected,
     channel_not_reconnecting: !isChannelReconnecting(status),
   };

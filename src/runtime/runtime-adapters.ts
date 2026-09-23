@@ -88,6 +88,7 @@ export interface PiSessionProcessLike {
 }
 
 export interface NativeRuntimeAdapterDependencies {
+  codexCapacityRetryDelaysMs?: readonly number[];
   spawn?: (command: string, args: readonly string[], options: Record<string, unknown>) => ProcessLike;
   createPiSession?: (input: RuntimeSessionCreate) => Promise<PiSessionProcessLike>;
   piRpcClientOptions?: PiRpcClientOptions;
@@ -135,6 +136,9 @@ interface CodexTurnOwnership {
   transientKeys: Set<string>;
   configurationTerminal: boolean;
   completedAt: number | null;
+  capacityAttempts?: number;
+  capacityError?: string;
+  capacityInput?: unknown;
   outcome?: { message: string; retryable: boolean; configuration: boolean };
 }
 
@@ -195,7 +199,15 @@ function attachLines(stream: ReadableLike | null, listener: (message: Record<str
   });
 }
 
+const CODEX_CAPACITY_ERROR = "Selected model is at capacity. Please try a different model.";
+const CODEX_CAPACITY_RETRY_DELAYS_MS = [5_000, 15_000, 30_000] as const;
+
 class CodexSession extends EventSession {
+  private capacityTimer: ReturnType<typeof setTimeout> | null = null;
+  private capacityRecovery: { turnId: string; ownership: CodexTurnOwnership } | null = null;
+  private retryAwaitingOwnership: CodexTurnOwnership | null = null;
+  private stopped = false;
+  private readonly cancelledRecoveries = new WeakSet<CodexTurnOwnership>();
   private requestId = 0;
   private threadId: string | null = null;
   private activeTurnId: string | null = null;
@@ -206,20 +218,22 @@ class CodexSession extends EventSession {
   private freshThreadParams: Record<string, unknown> | null = null;
   private resumeFallbackStarted = false;
   private readonly pending = new Map<number, { method: string; inputId?: string; turnId?: string;
-    resolve?: (result: RuntimeInputResult) => void }>();
+    resolve?: (result: RuntimeInputResult) => void; recovery?: CodexTurnOwnership; params?: unknown }>();
 
-  constructor(private readonly process: ProcessLike, private readonly config: RuntimeSessionCreate) {
+  constructor(private readonly process: ProcessLike, private readonly config: RuntimeSessionCreate,
+    private readonly capacityDelays: readonly number[] = CODEX_CAPACITY_RETRY_DELAYS_MS) {
     super();
     attachLines(process.stdout, (message) => this.onMessage(message));
     attachLines(process.stderr, (message) => this.onMessage(message));
-    process.once("exit", (code, signal) => this.emit({ type: "closed", code, signal }));
-    process.once("error", (error) => this.emit({ type: "error", message: `Codex process failed: ${error.message}` }));
+    process.once("exit", (code, signal) => { this.stopCapacityRetry(); this.emit({ type: "closed", code, signal }); });
+    process.once("error", (error) => { this.stopCapacityRetry(); this.emit({ type: "error", message: `Codex process failed: ${error.message}` }); });
     this.request("initialize", { clientInfo: { name: "larkin-runtime", version: "1.0.0" }, capabilities: { experimentalApi: true } });
   }
 
   get sessionId(): string | null { return this.threadId; }
 
   async prompt(input: RuntimeInput): Promise<RuntimeInputResult> {
+    if (this.capacityRecovery || this.retryAwaitingOwnership) return { status: "deferred", inputId: input.inputId, reason: "Codex capacity retry is pending" };
     if (!this.threadId) return { status: "deferred", inputId: input.inputId, reason: "Codex thread is not initialized" };
     return this.sendInput("turn/start", { threadId: this.threadId, input: textInput(input) }, input);
   }
@@ -234,10 +248,70 @@ class CodexSession extends EventSession {
   }
 
   async cancel(_reason: string): Promise<void> {
+    if (this.capacityRecovery) {
+      const { turnId, ownership } = this.capacityRecovery;
+      this.cancelledRecoveries.add(ownership);
+      const awaiting = this.retryAwaitingOwnership;
+      this.stopCapacityRetry();
+      this.retryAwaitingOwnership = awaiting;
+      this.stopped = false;
+      this.completeTurn(turnId);
+      this.finishTurnInputs(turnId, "Codex capacity retry cancelled", false);
+      this.emit({ type: "turn-end", ...(this.threadId ? { sessionId: this.threadId } : {}) });
+    }
     if (this.threadId && this.activeTurnId) this.request("turn/interrupt", { threadId: this.threadId, turnId: this.activeTurnId });
   }
 
-  async close(_reason: string): Promise<void> { this.process.kill("SIGTERM"); }
+  async close(_reason: string): Promise<void> { this.stopCapacityRetry(); this.process.kill("SIGTERM"); }
+
+  private stopCapacityRetry(): void {
+    if (this.capacityTimer) clearTimeout(this.capacityTimer);
+    this.capacityTimer = null;
+    this.capacityRecovery = null;
+    this.retryAwaitingOwnership = null;
+    this.stopped = true;
+  }
+
+  // Recover only this exact provider failure. Keep the logical turn open and its
+  // input ownership intact; do not replay the original user input or completed tools.
+  private scheduleCapacityRetry(turnId: string, message: string): boolean {
+    const ownership = this.ownershipFor(turnId);
+    const attempt = ownership.capacityAttempts ?? 0;
+    if (this.stopped || message !== CODEX_CAPACITY_ERROR || ownership.outcome
+      || attempt >= Math.min(3, this.capacityDelays.length)) return false;
+    if (this.capacityRecovery) return true;
+    ownership.capacityAttempts = attempt + 1;
+    ownership.capacityError = undefined;
+    ownership.transientKeys.clear();
+    this.capacityRecovery = { turnId, ownership };
+    this.activeTurnId = null;
+    this.emitTurnInputErrors(turnId, message, true, true);
+    this.capacityTimer = setTimeout(() => {
+      this.capacityTimer = null;
+      if (this.stopped || !this.capacityRecovery) return;
+      this.retryAwaitingOwnership = ownership;
+      const id = ++this.requestId;
+      this.pending.set(id, { method: "turn/start", recovery: ownership });
+      void writeLine(this.process.stdin, { jsonrpc: "2.0", id, method: "turn/start", params: {
+        threadId: this.threadId,
+        input: ownership.capacityInput ?? [{ type: "text", text: "Continue the interrupted task from the existing conversation after the temporary model capacity error. Preserve completed work and do not repeat completed actions." }],
+      } }, `capacity-retry:${attempt + 1}`).then((result) => {
+        if (result.status !== "accepted" && this.pending.delete(id)) this.failCapacityRetry(result.reason);
+      });
+    }, this.capacityDelays[attempt]);
+    this.capacityTimer.unref?.();
+    return true;
+  }
+
+  private failCapacityRetry(message: string): void {
+    const recovery = this.capacityRecovery;
+    this.capacityRecovery = null;
+    this.retryAwaitingOwnership = null;
+    if (!recovery) return;
+    this.finishTurnInputs(recovery.turnId, message, false);
+    this.completeTurn(recovery.turnId);
+    this.emit({ type: "turn-end", ...(this.threadId ? { sessionId: this.threadId } : {}) });
+  }
 
   private request(method: string, params: unknown, inputId?: string): number {
     const id = ++this.requestId;
@@ -251,7 +325,7 @@ class CodexSession extends EventSession {
     const turnId = method === "turn/steer" ? String((params as Record<string, unknown>).expectedTurnId || "") || undefined : undefined;
     return new Promise((resolve) => {
       const id = ++this.requestId;
-      this.pending.set(id, { method, inputId: input.inputId, ...(turnId ? { turnId } : {}), resolve });
+      this.pending.set(id, { method, inputId: input.inputId, ...(turnId ? { turnId } : {}), resolve, params });
       void writeLine(this.process.stdin, { jsonrpc: "2.0", id, method, params }, input.inputId).then((result) => {
         if (result.status !== "accepted") {
           this.pending.delete(id);
@@ -274,8 +348,46 @@ class CodexSession extends EventSession {
     if (message.id != null && this.pending.has(Number(message.id))) {
       const pending = this.pending.get(Number(message.id))!;
       this.pending.delete(Number(message.id));
+      if (pending.recovery) {
+        if (this.stopped) return;
+        if (this.cancelledRecoveries.has(pending.recovery)) {
+          if (message.error && this.retryAwaitingOwnership === pending.recovery) this.retryAwaitingOwnership = null;
+          return;
+        }
+        if (message.error) {
+          const reason = String(message.error.message || "Codex capacity retry submission failed");
+          const recovery = this.capacityRecovery;
+          this.capacityRecovery = null;
+          this.retryAwaitingOwnership = null;
+          if (recovery && this.scheduleCapacityRetry(recovery.turnId, reason)) return;
+          this.capacityRecovery = recovery;
+          this.failCapacityRetry(reason);
+          return;
+        }
+        const id = message.result?.turn?.id;
+        if (id) {
+          pending.recovery.capacityInput = undefined;
+          this.turnOwnership.set(String(id), pending.recovery);
+        }
+        else { this.failCapacityRetry("Codex capacity retry returned no turn id"); return; }
+        return;
+      }
       if (message.error) {
         const errorMessage = String(message.error.message || `${pending.method} failed`);
+        if (pending.method === "turn/start" && pending.inputId && errorMessage === CODEX_CAPACITY_ERROR) {
+          const turnId = `rejected-request:${message.id}`;
+          this.assignTurnInput(turnId, pending.inputId);
+          this.ownershipFor(turnId).capacityInput = (pending.params as { input?: unknown })?.input;
+          if (this.scheduleCapacityRetry(turnId, errorMessage)) {
+            this.completeTurn(turnId);
+            this.emit({ type: "turn-start" });
+            pending.resolve?.({ status: "accepted", inputId: pending.inputId });
+          } else {
+            pending.resolve?.({ status: "rejected", inputId: pending.inputId, retryable: false, reason: errorMessage });
+            this.finishTurnInputs(turnId, errorMessage, false);
+          }
+          return;
+        }
         const replaceableResumeFailure = pending.method === "thread/resume"
           && /(?:not found|missing|stale|does not exist|unknown (?:session|thread)|rollout)/i.test(errorMessage);
         if (replaceableResumeFailure && this.freshThreadParams && !this.resumeFallbackStarted) {
@@ -336,6 +448,20 @@ class CodexSession extends EventSession {
     if (message.method === "thread/started" && message.params?.thread?.id) this.adoptThread(String(message.params.thread.id));
     if (message.method === "turn/started") {
       this.activeTurnId = String(message.params?.turn?.id || "") || null;
+      if (this.activeTurnId && this.retryAwaitingOwnership) {
+        if (this.cancelledRecoveries.has(this.retryAwaitingOwnership)) {
+          this.request("turn/interrupt", { threadId: this.threadId, turnId: this.activeTurnId });
+          this.completeTurn(this.activeTurnId);
+          this.retryAwaitingOwnership = null;
+          this.activeTurnId = null;
+          return;
+        }
+        this.retryAwaitingOwnership.capacityInput = undefined;
+        this.retryAwaitingOwnership.completedAt = null;
+        this.turnOwnership.set(this.activeTurnId, this.retryAwaitingOwnership);
+        this.retryAwaitingOwnership = null;
+        this.capacityRecovery = null;
+      }
       if (this.activeTurnId && !this.turnOwnership.has(this.activeTurnId)) {
         const inputId = this.unassignedTurnInputs.shift();
         if (inputId) this.assignTurnInput(this.activeTurnId, inputId);
@@ -346,8 +472,14 @@ class CodexSession extends EventSession {
       const status = String(message.params?.turn?.status || "completed").toLowerCase();
       const turnError = message.params?.turn?.error;
       const errorMessage = String(turnError?.message || turnError || `Codex turn ${status}`);
+      if (turnId && this.recentTurnIds.includes(turnId)) return;
+      if (turnId && status === "failed"
+        && this.scheduleCapacityRetry(turnId, this.turnOwnership.get(turnId)?.capacityError ?? errorMessage)) {
+        this.completeTurn(turnId);
+        return;
+      }
       if (turnId && (status === "failed" || status === "interrupted")) {
-        this.finishTurnInputs(turnId, errorMessage, status === "interrupted");
+        this.finishTurnInputs(turnId, this.turnOwnership.get(turnId)?.capacityError ?? errorMessage, status === "interrupted");
       }
       this.activeTurnId = null;
       if (turnId) this.completeTurn(turnId);
@@ -367,8 +499,12 @@ class CodexSession extends EventSession {
       if (fatal) {
         this.emit({ type: "error", message: errorMessage });
       } else if (errorTurnId) {
+        if (this.recentTurnIds.includes(errorTurnId) && errorMessage === CODEX_CAPACITY_ERROR) return;
         if (willRetry) this.emitTurnInputErrors(errorTurnId, errorMessage, true, true);
-        else this.finishTurnInputs(errorTurnId, errorMessage, false);
+        else if (errorMessage === CODEX_CAPACITY_ERROR && !this.recentTurnIds.includes(errorTurnId)) {
+          this.ownershipFor(errorTurnId).capacityError = errorMessage;
+          // Wait for turn/completed before starting another turn on this thread.
+        } else this.finishTurnInputs(errorTurnId, errorMessage, false);
       } else if (/model requires a newer version of Codex/i.test(errorMessage)) {
         this.activeTurnId = null;
         this.emit({ type: "configuration-error", message: errorMessage });
@@ -1245,7 +1381,7 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
           env: { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" },
           stdio: ["pipe", "pipe", "pipe"],
         });
-        return new CodexSession(process, codexInput);
+        return new CodexSession(process, codexInput, dependencies.codexCapacityRetryDelaysMs);
       }
       const runtimeDir = path.join(input.stateDir ?? path.join(input.workspaceDir, ".larkin"), "runtime");
       (dependencies.mkdir ?? fs.mkdirSync)(runtimeDir, { recursive: true });

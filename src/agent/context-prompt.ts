@@ -16,7 +16,7 @@ import type { AgentCliCapabilities, RuntimeId, RuntimeInput, StandingPrompt } fr
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v32";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v33";
 
 /**
  * Pi 长命令引导的唯一来源。仅在当前工具列表出现 tmux-backed bash 时适用；
@@ -46,6 +46,9 @@ const FEISHU_IM_COMMAND_GROUPS = [
   ["Messages", ["im +messages-send", "im +messages-reply", "im messages delete", "im +chat-messages-list", "im +threads-messages-list", "im +messages-mget"]],
   ["Chats", ["im +chat-list", "im +chat-search", "im chats get"]],
 ] as const;
+
+// 云文档 shortcut 与 IM 一样是官方 lark-cli 直通，不属于 Agent CLI 自有命令清单。
+const FEISHU_DOCS_COMMANDS = ["docs +create", "docs +update", "docs +fetch"] as const;
 
 /** Depth-1 archive of the session closed by the latest replacement. Older archives stay on disk. */
 export interface PreviousSessionRef {
@@ -211,6 +214,15 @@ export class ContextPromptBuilder {
       "For multiline `--markdown` or `--text` content in zsh or bash, prefer shell ANSI-C quoting so the command passes one argument with real newline characters: `--markdown $'First line\\nSecond line'` or `--text $'First line\\nSecond line'`. Putting `\"First line\\nSecond line\"` in ordinary double quotes is wrong: ordinary quotes do not decode `\\n`, so lark-cli and Feishu receive a backslash followed by the letter `n`. A literal multiline argument containing real newline characters is also valid. If ANSI-C-quoted content contains an apostrophe, use a safe shell single-quote splice or the literal-newline form; never use `eval`, `echo`, a temporary file, or unsafe variable interpolation to construct the body.",
       ...FEISHU_IM_COMMAND_GROUPS.map(([label, suffixes]) => `- ${label}: ${suffixes.map((suffix) => `\`${executable} ${suffix}\``).join(", ")}.`),
       `- Attachments: for an attachment-only send/reply, use its native attachment flag without a text body flag; download with \`${executable} im +messages-resources-download\`.`,
+      "",
+      "## Feishu docs command map",
+      "",
+      `Create, read, or update a Feishu cloud document only through these Larkin-owned shortcuts. Identity stays Runtime-locked: use \`${executable}\`, never invoke bare \`lark-cli\`, and never pass \`--agent\`, \`--as user\`, \`--profile\`, or \`--config-dir\`. If a docs command reports a missing scope, relay that error unchanged and ask the user to authorize it; do not bypass the scope boundary or invent a scope grant.`,
+      "A missing document URL or token is fail-closed: stop and report the missing locator. Do not guess a token, and do not call any docs shortcut that is absent from this map.",
+      `To create a document from supplied Markdown or plain text, run \`${executable} docs +create --doc-format markdown --content '<exact_markdown_body>' --json\`. Pass \`--content\` as one literal argument, using the same ANSI-C quoting rule as message bodies when the body is multiline. For a local file, use \`--content @<file>\` instead of inlining it. Create an empty document only with \`${executable} docs +create --title '<exact_title>' --json\` and no \`--content\`. \`--parent-token\` and \`--parent-position\` are optional and mutually exclusive. Official default \`--doc-format\` is \`xml\`; use \`markdown\` for this ordinary supplied-text recipe.`,
+      `To read an existing document, run \`${executable} docs +fetch --doc <doc_url_or_token> --json\`. Add \`--scope outline|range|keyword|section\` only for a partial read. Add \`--detail with-ids\` before an update that needs block ids. Omit \`--scope\` only when the whole document is required.`,
+      `To change an existing document, fetch its current content first, then run \`${executable} docs +update --doc <doc_url_or_token> --command <command> --json\`. For a simple inline replacement use \`--command str_replace --pattern '<exact_old>' --content '<exact_new>'\`. To append, use \`--command append --content '<exact_body>'\`. Use \`--command overwrite\` only when the user explicitly asks to replace the whole document. If the fetch fails or the scope is missing, fail closed and do not write from memory.`,
+      `- Documents: ${FEISHU_DOCS_COMMANDS.map((suffix) => `\`${executable} ${suffix}\``).join(", ")}.`,
       "",
       "Do not invent Larkin commands that are absent from this list. Project instructions and memory remain owned by the runtime's native workspace discovery.",
     ].filter((line, index, all) => line !== "" || (index > 0 && all[index - 1] !== ""));

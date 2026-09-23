@@ -185,7 +185,7 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v32");
+  assert.equal(prompt.version, "larkin-standing-v33");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
@@ -208,7 +208,12 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   for (const command of [
     "im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +messages-mget",
     "im +chat-list", "im +chat-search", "im chats get", "im +messages-resources-download",
+    "docs +create", "docs +update", "docs +fetch",
   ]) assert.match(prompt.content, new RegExp(command.replace(/[+.]/g, "\\$&")), command);
+  assert.match(prompt.content, /`larkin docs \+create`/);
+  assert.match(prompt.content, /`larkin docs \+update`/);
+  assert.match(prompt.content, /`larkin docs \+fetch`/);
+  assert.match(prompt.content, /Do not invent Larkin commands that are absent from this list/);
   assert.doesNotMatch(prompt.content, /larkin (?:message|channel|attachment|server|task claim)\b/);
   assert.match(prompt.content, /Only a real Feishu `message_id` beginning with `om_`/);
   assert.match(prompt.content, /`rem_`, `redeliver_`.*synthetic ID must never be replied to/);

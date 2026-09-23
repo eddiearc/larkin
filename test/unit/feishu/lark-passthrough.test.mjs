@@ -424,7 +424,16 @@ test("standing prompt owns collaboration, delivery, safety, and the sole larkin 
   assert.match(prompt, /only the Larkin-owned.*never invoke bare `lark-cli`/i);
   assert.match(prompt, /Never pass `--agent`, `--as user`, `--profile`, or `--config-dir`/i);
   assert.match(prompt, /missing scope.*error unchanged.*authorize.*do not bypass/i);
-  assert.doesNotMatch(prompt, /larkin message|larkin task claim|larkin docs/);
+  assert.doesNotMatch(prompt, /larkin (?:message|channel|attachment|server|task claim)\b/);
+  for (const command of ["docs +create", "docs +update", "docs +fetch"]) {
+    assert.match(prompt, new RegExp(`\`larkin ${command.replaceAll("+", "\\+")}\``), command);
+  }
+  assert.match(prompt, /docs \+create --doc-format markdown --content '<exact_markdown_body>'/);
+  assert.match(prompt, /docs \+fetch --doc <doc_url_or_token>/);
+  assert.match(prompt, /docs \+update --doc <doc_url_or_token> --command <command>/);
+  assert.match(prompt, /missing document URL or token is fail-closed/);
+  assert.match(prompt, /If a docs command reports a missing scope, relay that error unchanged/);
+  assert.match(prompt, /Do not invent Larkin commands that are absent from this list/);
   assert.match(prompt, /commentary and final_answer.*not visible.*do not count as outbound/i);
   assert.match(prompt, /Only a successful Larkin send or reply is user-visible/i);
   assert.match(prompt, /one exact response only.*strict outbound and tool-call budget.*acknowledgement.*progress.*goal\/status/i);

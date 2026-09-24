@@ -284,7 +284,7 @@ test("guarded IM bodies normalize literal escaped newlines and tabs before provi
     for (const [label, body] of [
       ["mixed body", "第一行\n第二行\\n必须保持"],
       ["Windows path", String.raw`路径 C:\tools\notes`],
-      ["fenced code", String.raw` ```js\nprintf("hi\n")\n``` `],
+      ["fenced code", '```js\\nprintf("hi\\n")\\n```'],
     ]) {
       const before = f.calls.length;
       const result = f.run(["im", "+messages-send", "--chat-id", "oc_multiline", "--text", body]);

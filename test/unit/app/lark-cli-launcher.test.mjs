@@ -10,6 +10,7 @@ import { gradeProtectedRecallTrace, loadProtectedMessageRecallEval } from "../..
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const launcher = await import(pathToFileURL(path.join(ROOT, "dist/app/lark-cli.mjs")).href);
 const stateModule = await import(pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href);
+const hostShell = await import(pathToFileURL(path.join(ROOT, "dist/feishu/host-shell.mjs")).href);
 const recallEval = loadProtectedMessageRecallEval(path.join(ROOT, "evals/protected-message-recall/scenarios.json"));
 const recallScenario = (id) => recallEval.scenarios.find((scenario) => scenario.id === id);
 
@@ -260,6 +261,51 @@ test("guarded writes probe with locked Bot identity before preserving provider w
     });
     assert.equal(probe[probe.indexOf("--as") + 1], "bot");
     assert.equal(f.calls[1].args.includes("--idempotency-key"), true);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("guarded IM bodies normalize literal escaped newlines and tabs before provider delivery", () => {
+  const f = fixture();
+  try {
+    const escaped = "第一行\\n第二行\\t缩进";
+    const send = f.run(["im", "+messages-send", "--chat-id", "oc_multiline", "--text", escaped]);
+    assert.equal(send.code, 7);
+    const sendArgs = f.calls.at(-1).args;
+    assert.equal(sendArgs[sendArgs.indexOf("--text") + 1], "第一行\n第二行\t缩进");
+
+    f.store.appendNdjson("inbox", { message_id: "om_multiline", chat_id: "oc_multiline", content: "question" });
+    f.store.pollInbox({ target: "chat:oc_multiline", limit: 1 });
+    const realNewline = "第一行\n第二行";
+    const reply = f.run(["im", "+messages-reply", "--message-id", "om_multiline", "--markdown", realNewline]);
+    assert.equal(reply.code, 7);
+    const replyArgs = f.calls.at(-1).args;
+    assert.equal(replyArgs[replyArgs.indexOf("--markdown") + 1], realNewline);
+
+    for (const [label, body] of [
+      ["mixed body", "第一行\n第二行\\n必须保持"],
+      ["Windows path", String.raw`路径 C:\tools\notes`],
+      ["fenced code", '```js\\nprintf("hi\\n")\\n```'],
+    ]) {
+      const before = f.calls.length;
+      const result = f.run(["im", "+messages-send", "--chat-id", "oc_multiline", "--text", body]);
+      assert.equal(result.code, 7, label);
+      const native = f.calls.slice(before).at(-1).args;
+      assert.equal(native[native.indexOf("--text") + 1], body, label);
+    }
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("guarded outbound marker uses the same canonical target as Host progress suppression", () => {
+  const f = fixture();
+  try {
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, data: { message_id: "om_outbound", chat_id: "oc_progress", create_time: "1786553650354" } }),
+      stderr: "", error: undefined });
+    assert.equal(f.run(["im", "+messages-send", "--chat-id", "oc_progress", "--text", "sent"]).code, 0);
+    const freshness = f.store.readJson("freshnessState", {});
+    assert.ok(freshness.last_outbound_by_target["feishu.im/chat/oc_progress"]);
+    assert.ok(hostShell.lastOutboundAtForTarget(f.store, "chat:oc_progress"));
+    assert.equal(hostShell.lastOutboundAtForTarget(f.store, "chat:oc_other"), null);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

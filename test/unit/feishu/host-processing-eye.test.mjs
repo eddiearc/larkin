@@ -194,13 +194,13 @@ test("long-running progress is skipped after an outbound IM in the same turn", (
       callback(null, JSON.stringify(args.includes("POST") ? { data: { reaction_id: "react_guarded" } } : { ok: true }), "");
       return {};
     },
-    lastOutboundAt: () => now,
+    lastOutboundAt: (_agent, target) => target === "chat:oc_already_replied" ? now : null,
     now: () => now,
     writePending() {},
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
   });
-  guarded.add(agent, "om_already_replied");
+  guarded.add(agent, "om_already_replied", { target: "chat:oc_already_replied" });
   timers.run(timers.active(2 * 60 * 1_000)[0]);
   assert.equal(calls.some(({ args }) => args.includes("+messages-reply")), false);
 });

@@ -436,8 +436,11 @@ export function createHostShell({
     recordStatusError: (agent, text) => hostState.recordStatusError(agent, text),
     readPending: (agent) => stateStore(agent as ConfiguredAgent).readJson<{ items?: Array<{ msgId: string; reactionId: string }> }>("pendingReact", {}).items || [],
     writePending: (agent, items) => stateStore(agent as ConfiguredAgent).writeJson("pendingReact", { items }),
-    lastOutboundAt: (agent) => {
-      const value = stateStore(agent as ConfiguredAgent).readJson<{ last_outbound_at?: unknown }>("freshnessState", {}).last_outbound_at;
+    lastOutboundAt: (agent, target) => {
+      const state = stateStore(agent as ConfiguredAgent).readJson<{
+        last_outbound_at?: unknown; last_outbound_by_target?: Record<string, unknown>;
+      }>("freshnessState", {});
+      const value = target ? state.last_outbound_by_target?.[target] : state.last_outbound_at;
       const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
       return Number.isFinite(timestamp) ? timestamp : null;
     },
@@ -636,6 +639,7 @@ export function createHostShell({
       if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") {
         processingEyes.add(agent, String(inboxEnvelope.message_id || ""), {
           replyInThread: String(inboxEnvelope.target || "").startsWith("thread:"),
+          target: String(inboxEnvelope.target || ""),
         });
       }
       if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${inboxEnvelope.seq}: ${receipt.reason}`);

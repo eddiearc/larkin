@@ -3,7 +3,7 @@ import type { HostAgent } from "./host-business-state.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
 interface EyeAgent extends HostAgent { feishuProfile?: string | null }
-interface Reaction { msgId: string; reactionId: string; replyInThread?: boolean }
+interface Reaction { msgId: string; reactionId: string; replyInThread?: boolean; target?: string }
 interface EyeState {
   sawActive: boolean;
   fallbackTimer: NodeJS.Timeout | null;
@@ -22,7 +22,7 @@ export interface ProcessingEyeOptions {
   recordStatusError?: (agent: EyeAgent, text: string) => void;
   readPending?: (agent: EyeAgent) => Reaction[];
   writePending?: (agent: EyeAgent, items: readonly Reaction[]) => void;
-  lastOutboundAt?: (agent: EyeAgent) => number | null;
+  lastOutboundAt?: (agent: EyeAgent, target?: string) => number | null;
   now?: () => number;
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
@@ -113,7 +113,7 @@ export class ProcessingEyeOrchestrator {
     this.clear(agent, "启动清扫遗留");
   }
 
-  add(agent: EyeAgent, msgId: string, options: { replyInThread?: boolean } = {}): void {
+  add(agent: EyeAgent, msgId: string, options: { replyInThread?: boolean; target?: string } = {}): void {
     if (!agent.feishuProfile || !msgId || !msgId.startsWith("om_")) {
       this.log(`👀 跳过 agent=${agent.name} msg=${msgId || "?"} profile=${agent.feishuProfile || "缺"}（不满足点表情条件）`);
       return;
@@ -143,11 +143,11 @@ export class ProcessingEyeOrchestrator {
       const current = this.state.get(agent.agentId);
       if (current?.gen !== generation || current.progressTimer !== progressTimer) return;
       current.progressTimer = null;
-      const lastOutboundAt = this.options.lastOutboundAt?.(agent) ?? null;
-      if (lastOutboundAt !== null && lastOutboundAt >= current.turnStartedAt) return;
       const pending = this.pending.get(agent.agentId) || [];
       const anchor = pending.at(-1);
       if (!anchor) return;
+      const lastOutboundAt = this.options.lastOutboundAt?.(agent, anchor.target) ?? null;
+      if (lastOutboundAt !== null && lastOutboundAt >= current.turnStartedAt) return;
       this.sendProgress(agent, anchor);
     }, 2 * 60 * 1000);
     state.progressTimer = progressTimer;
@@ -163,7 +163,8 @@ export class ProcessingEyeOrchestrator {
         return;
       }
       const list = this.pending.get(agent.agentId) || [];
-      list.push({ msgId, reactionId, ...(options.replyInThread ? { replyInThread: true } : {}) });
+      list.push({ msgId, reactionId, ...(options.replyInThread ? { replyInThread: true } : {}),
+        ...(options.target ? { target: options.target } : {}) });
       this.pending.set(agent.agentId, list);
       this.save(agent);
     });

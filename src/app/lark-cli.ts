@@ -309,6 +309,7 @@ type ImWriteMemoState = {
   im_write_memo?: Record<string, ImWriteMemoEntry>;
   /** 最近一次成功提交的 IM 写入，用于 Host 的长任务进度兜底。 */
   last_outbound_at?: string;
+  last_outbound_by_target?: Record<string, string>;
 };
 
 const IM_WRITE_MEMO_LIMIT = 512;
@@ -332,9 +333,12 @@ function normalizeImBodyEscapes(argv: readonly string[]): string[] {
   return next;
 }
 
-function recordOutboundAt(store: AgentStateStore): void {
+function recordOutboundAt(store: AgentStateStore, target: string): void {
   store.mutateJson<ImWriteMemoState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
-    state.last_outbound_at = new Date().toISOString();
+    const at = new Date().toISOString();
+    state.last_outbound_at = at;
+    state.last_outbound_by_target ??= {};
+    state.last_outbound_by_target[target] = at;
   });
 }
 
@@ -1256,7 +1260,7 @@ export function runLarkCli(
     const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
     const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
     if (!write.error && write.status === 0 && (decision.operation === "send" || decision.operation === "reply")) {
-      recordOutboundAt(store);
+      recordOutboundAt(store, targetKey);
     }
     if (decision.operation === "urgent-app") {
       try { assertUrgentAppNativeAccepted(write); }

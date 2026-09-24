@@ -307,9 +307,36 @@ type ImWriteMemoState = {
   version: 1;
   cursors?: Record<string, unknown>;
   im_write_memo?: Record<string, ImWriteMemoEntry>;
+  /** 最近一次成功提交的 IM 写入，用于 Host 的长任务进度兜底。 */
+  last_outbound_at?: string;
 };
 
 const IM_WRITE_MEMO_LIMIT = 512;
+
+function normalizeImBodyEscapes(argv: readonly string[]): string[] {
+  const next = [...argv];
+  const boundary = next.indexOf("--");
+  const limit = boundary < 0 ? next.length : boundary;
+  for (let index = 0; index < limit; index += 1) {
+    const argument = next[index]!;
+    const flag = ["--text", "--markdown"].find((candidate) => argument === candidate || argument.startsWith(`${candidate}=`));
+    if (!flag) continue;
+    const valueIndex = argument === flag ? index + 1 : index;
+    if (valueIndex >= limit) continue;
+    const value = argument === flag ? next[valueIndex]! : argument.slice(flag.length + 1);
+    const normalized = value.replace(/\\([nt])/g, (_match, escape: string) => escape === "n" ? "\n" : "\t");
+    if (argument === flag) next[valueIndex] = normalized;
+    else next[index] = `${flag}=${normalized}`;
+    if (argument === flag) index += 1;
+  }
+  return next;
+}
+
+function recordOutboundAt(store: AgentStateStore): void {
+  store.mutateJson<ImWriteMemoState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
+    state.last_outbound_at = new Date().toISOString();
+  });
+}
 
 // 只标注、不拦截：每次成功写把「实际生效的幂等 key → 服务端返回的 message_id」记进备忘。
 // 同 key 再次成功且服务端返回同一个 message_id，说明服务端走了幂等去重（没有产生新消息），
@@ -1116,7 +1143,7 @@ export function runLarkCli(
   argv: readonly string[], env: Env = process.env, dependencies: LarkCliLauncherDependencies = {},
 ): number {
   const io = dependencies.io ?? defaultIo();
-  const effectiveArgv = argv;
+  let effectiveArgv = argv;
   const runtimeAgentId = larkinConfig.resolveRuntimeAuthority(env);
   if (!runtimeAgentId) {
     try {
@@ -1170,6 +1197,9 @@ export function runLarkCli(
     }
   }
   if (decision.kind === "passthrough") return passthroughWithObservation(effectiveArgv, privateEnv, io, nativeDependencies, store);
+  if (decision.kind === "guarded" && (decision.operation === "send" || decision.operation === "reply")) {
+    effectiveArgv = normalizeImBodyEscapes(effectiveArgv);
+  }
   try {
     const recallMessageId = decision.operation === "recall" ? assertRecallSyntax(effectiveArgv) : null;
     const priorRecall = recallMessageId ? recallLedgerEntry(store, recallMessageId) : null;
@@ -1225,6 +1255,9 @@ export function runLarkCli(
     }
     const intentKey = policyFlagValue(effectiveArgv, "--idempotency-key") ?? intentId(targetKey, effectiveArgv);
     const write = callNative(botArgv(effectiveArgv, intentKey, decision), privateEnv, io, nativeDependencies);
+    if (!write.error && write.status === 0 && (decision.operation === "send" || decision.operation === "reply")) {
+      recordOutboundAt(store);
+    }
     if (decision.operation === "urgent-app") {
       try { assertUrgentAppNativeAccepted(write); }
       catch (error) {

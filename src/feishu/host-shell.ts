@@ -436,6 +436,11 @@ export function createHostShell({
     recordStatusError: (agent, text) => hostState.recordStatusError(agent, text),
     readPending: (agent) => stateStore(agent as ConfiguredAgent).readJson<{ items?: Array<{ msgId: string; reactionId: string }> }>("pendingReact", {}).items || [],
     writePending: (agent, items) => stateStore(agent as ConfiguredAgent).writeJson("pendingReact", { items }),
+    lastOutboundAt: (agent) => {
+      const value = stateStore(agent as ConfiguredAgent).readJson<{ last_outbound_at?: unknown }>("freshnessState", {}).last_outbound_at;
+      const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+      return Number.isFinite(timestamp) ? timestamp : null;
+    },
     cliForAgent: (agent) => {
       const managed = managedCliForAgent(agent as ConfiguredAgent);
       return { command: managed.command.command, argsPrefix: managed.command.argsPrefix, env: managed.env };
@@ -628,7 +633,11 @@ export function createHostShell({
         excerpt: safeConversationExcerpt(event.content, 180),
         at: new Date().toISOString(),
       }, 30);
-      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") processingEyes.add(agent, String(inboxEnvelope.message_id || ""));
+      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") {
+        processingEyes.add(agent, String(inboxEnvelope.message_id || ""), {
+          replyInThread: String(inboxEnvelope.target || "").startsWith("thread:"),
+        });
+      }
       if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${inboxEnvelope.seq}: ${receipt.reason}`);
     } catch (error) {
       if (wake) telemetry?.delivery(agent.agentId, telemetryMessageId, "error");

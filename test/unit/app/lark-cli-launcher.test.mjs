@@ -263,6 +263,25 @@ test("guarded writes probe with locked Bot identity before preserving provider w
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("guarded IM bodies normalize literal escaped newlines and tabs before provider delivery", () => {
+  const f = fixture();
+  try {
+    const escaped = "第一行\\n第二行\\t缩进";
+    const send = f.run(["im", "+messages-send", "--chat-id", "oc_multiline", "--text", escaped]);
+    assert.equal(send.code, 7);
+    const sendArgs = f.calls.at(-1).args;
+    assert.equal(sendArgs[sendArgs.indexOf("--text") + 1], "第一行\n第二行\t缩进");
+
+    f.store.appendNdjson("inbox", { message_id: "om_multiline", chat_id: "oc_multiline", content: "question" });
+    f.store.pollInbox({ target: "chat:oc_multiline", limit: 1 });
+    const realNewline = "第一行\n第二行";
+    const reply = f.run(["im", "+messages-reply", "--message-id", "om_multiline", "--markdown", realNewline]);
+    assert.equal(reply.code, 7);
+    const replyArgs = f.calls.at(-1).args;
+    assert.equal(replyArgs[replyArgs.indexOf("--markdown") + 1], realNewline);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("identity switches and raw write bypasses fail before provider invocation", () => {
   const f = fixture();
   try {

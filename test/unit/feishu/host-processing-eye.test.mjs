@@ -171,6 +171,40 @@ test("error and offline clear immediately while fallback remains 15 minutes", ()
   assert.equal(deletes().length, 1);
 });
 
+test("long-running pending eyes send one visible progress reply before continuing", () => {
+  const { eye, calls, timers } = createHarness();
+  eye.add(agent, "om_long_turn", { replyInThread: true });
+  const progress = timers.active(2 * 60 * 1_000)[0];
+  assert.ok(progress);
+  timers.run(progress);
+  const progressCall = calls.find(({ args }) => args.includes("+messages-reply"));
+  assert.ok(progressCall, "a pending 👀 must gain a human-visible progress reply");
+  assert.equal(progressCall.args[progressCall.args.indexOf("--message-id") + 1], "om_long_turn");
+  assert.equal(progressCall.args.includes("--reply-in-thread"), true);
+  assert.equal(progressCall.args[progressCall.args.indexOf("--text") + 1], "我还在处理中，完成后会汇总更新。");
+});
+
+test("long-running progress is skipped after an outbound IM in the same turn", () => {
+  const { eye, calls, timers } = createHarness();
+  const now = Date.now();
+  const guarded = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
+    execFile(_command, args, _options, callback) {
+      calls.push({ args });
+      callback(null, JSON.stringify(args.includes("POST") ? { data: { reaction_id: "react_guarded" } } : { ok: true }), "");
+      return {};
+    },
+    lastOutboundAt: () => now,
+    now: () => now,
+    writePending() {},
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  guarded.add(agent, "om_already_replied");
+  timers.run(timers.active(2 * 60 * 1_000)[0]);
+  assert.equal(calls.some(({ args }) => args.includes("+messages-reply")), false);
+});
+
 test("unknown non-terminal activity preserves the reaction until explicit idle", () => {
   const { eye, deletes, timers } = createHarness();
   eye.add(agent, "om_unknown");

@@ -184,6 +184,38 @@ test("long-running pending eyes send one visible progress reply before continuin
   assert.equal(progressCall.args[progressCall.args.indexOf("--text") + 1], "我还在处理中，完成后会汇总更新。");
 });
 
+test("a human follow-up resets the progress deadline to the newest pending message", () => {
+  const { eye, calls, timers } = createHarness();
+  eye.add(agent, "om_first");
+  const first = timers.active(2 * 60 * 1_000)[0];
+  eye.add(agent, "om_follow_up");
+  assert.equal(first.cancelled, true);
+  timers.run(first, { evenIfCancelled: true });
+  assert.equal(calls.some(({ args }) => args.includes("+messages-reply")), false);
+  timers.run(timers.active(2 * 60 * 1_000)[0]);
+  const progress = calls.find(({ args }) => args.includes("+messages-reply"));
+  assert.equal(progress.args[progress.args.indexOf("--message-id") + 1], "om_follow_up");
+});
+
+test("a successful progress reply records its target as outbound", () => {
+  const recorded = [];
+  const timers = createTimers();
+  const eye = new ProcessingEyeOrchestrator({
+    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
+    execFile(_command, args, _options, callback) {
+      callback(null, JSON.stringify(args.includes("POST") ? { data: { reaction_id: "react_recorded" } } : { ok: true }), "");
+      return {};
+    },
+    recordOutboundAt(_agent, target) { recorded.push(target); },
+    writePending() {},
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  eye.add(agent, "om_progress_recorded", { target: "chat:oc_progress" });
+  timers.run(timers.active(2 * 60 * 1_000)[0]);
+  assert.deepEqual(recorded, ["chat:oc_progress"]);
+});
+
 test("long-running progress is skipped after an outbound IM in the same turn", () => {
   const { eye, calls, timers } = createHarness();
   const now = Date.now();

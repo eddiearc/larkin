@@ -23,6 +23,7 @@ export interface ProcessingEyeOptions {
   readPending?: (agent: EyeAgent) => Reaction[];
   writePending?: (agent: EyeAgent, items: readonly Reaction[]) => void;
   lastOutboundAt?: (agent: EyeAgent, target?: string) => number | null;
+  recordOutboundAt?: (agent: EyeAgent, target?: string) => void;
   now?: () => number;
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
@@ -213,6 +214,7 @@ export class ProcessingEyeOrchestrator {
           this.log(`长任务进度发送失败 agent=${agent.name}: exit=${code ?? "?"}${detail ? ` | ${detail}` : ""}`);
           return;
         }
+        this.options.recordOutboundAt?.(agent, anchor.target);
         this.log(`长任务进度已发送 agent=${agent.name} msg=${anchor.msgId}`);
       });
   }

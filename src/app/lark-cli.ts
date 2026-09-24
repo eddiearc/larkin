@@ -325,7 +325,15 @@ function normalizeImBodyEscapes(argv: readonly string[]): string[] {
     const valueIndex = argument === flag ? index + 1 : index;
     if (valueIndex >= limit) continue;
     const value = argument === flag ? next[valueIndex]! : argument.slice(flag.length + 1);
-    const normalized = value.replace(/\\([nt])/g, (_match, escape: string) => escape === "n" ? "\n" : "\t");
+    const hasEscapedWhitespace = /\\[nt]/.test(value);
+    // 已含真实换行、Windows 路径和 fenced code 的反斜杠均可能是用户的原文；
+    // 仅修复无歧义的单行普通文本，避免破坏代码、正则或路径。
+    const preserveVerbatim = /[\r\n]/.test(value)
+      || value.includes("```")
+      || /(?:^|[\s("'`])[A-Za-z]:\\/.test(value);
+    const normalized = hasEscapedWhitespace && !preserveVerbatim
+      ? value.replace(/\\([nt])/g, (_match, escape: string) => escape === "n" ? "\n" : "\t")
+      : value;
     if (argument === flag) next[valueIndex] = normalized;
     else next[index] = `${flag}=${normalized}`;
     if (argument === flag) index += 1;

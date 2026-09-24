@@ -17,6 +17,7 @@ import {
   shouldPreventiveReconnect,
 } from "./host-business-state.js";
 import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
+import { feishuImTarget, serializeFeishuImTarget } from "./im-freshness-adapter.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
 import { boundedInboxAuditDiagnostic, InboxAuditHeartbeat, INBOX_AUDIT_CADENCE_MS } from "../agent/inbox-audit-heartbeat.js";
@@ -198,6 +199,38 @@ export function memberNamesFromPayloads(payloads: readonly unknown[]): Record<st
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+type OutboundProgressState = {
+  version?: unknown;
+  cursors?: Record<string, unknown>;
+  last_outbound_at?: unknown;
+  last_outbound_by_target?: Record<string, unknown>;
+};
+
+function canonicalImTarget(target?: string): string | null {
+  if (!target) return null;
+  try { return serializeFeishuImTarget(feishuImTarget(target)); }
+  catch { return null; }
+}
+
+export function lastOutboundAtForTarget(store: AgentStateStore, target?: string): number | null {
+  const state = store.readJson<OutboundProgressState>("freshnessState", {});
+  const canonicalTarget = canonicalImTarget(target);
+  const value = canonicalTarget ? state.last_outbound_by_target?.[canonicalTarget] : state.last_outbound_at;
+  const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function recordOutboundAtForTarget(store: AgentStateStore, target?: string): void {
+  const canonicalTarget = canonicalImTarget(target);
+  store.mutateJson<OutboundProgressState, void>("freshnessState", { version: 1, cursors: {} }, (state) => {
+    const at = new Date().toISOString();
+    state.last_outbound_at = at;
+    if (!canonicalTarget) return;
+    state.last_outbound_by_target ??= {};
+    state.last_outbound_by_target[canonicalTarget] = at;
+  });
+}
+
 function safeRuntimeStatusDiagnostic(error: unknown): string {
   return safeProviderDiagnostic(error, "Runtime entered an error state", 500);
 }
@@ -436,14 +469,8 @@ export function createHostShell({
     recordStatusError: (agent, text) => hostState.recordStatusError(agent, text),
     readPending: (agent) => stateStore(agent as ConfiguredAgent).readJson<{ items?: Array<{ msgId: string; reactionId: string }> }>("pendingReact", {}).items || [],
     writePending: (agent, items) => stateStore(agent as ConfiguredAgent).writeJson("pendingReact", { items }),
-    lastOutboundAt: (agent, target) => {
-      const state = stateStore(agent as ConfiguredAgent).readJson<{
-        last_outbound_at?: unknown; last_outbound_by_target?: Record<string, unknown>;
-      }>("freshnessState", {});
-      const value = target ? state.last_outbound_by_target?.[target] : state.last_outbound_at;
-      const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
-      return Number.isFinite(timestamp) ? timestamp : null;
-    },
+    lastOutboundAt: (agent, target) => lastOutboundAtForTarget(stateStore(agent as ConfiguredAgent), target),
+    recordOutboundAt: (agent, target) => recordOutboundAtForTarget(stateStore(agent as ConfiguredAgent), target),
     cliForAgent: (agent) => {
       const managed = managedCliForAgent(agent as ConfiguredAgent);
       return { command: managed.command.command, argsPrefix: managed.command.argsPrefix, env: managed.env };

@@ -76,6 +76,15 @@ for (const shell of ["/bin/bash", "/bin/zsh"]) {
       const staleHistory = JSON.stringify({ ok: true, identity: "bot", data: { messages: [
         { message_id: "om_shell_first", chat_id: chatId, create_time: "1" },
       ] } });
+      writePrivate(path.join(f.root, "state", "agents", f.agents[1], "freshness-state.json"), JSON.stringify({
+        version: 1,
+        cursors: {
+          [`feishu.im/chat/${chatId}`]: {
+            generation: "agent-b",
+            cursor: { schema: 1, revisionTime: "0", messageIds: ["om_before_shell_first"] },
+          },
+        },
+      }));
       const second = spawnSync(shell, ["-lc", `larkin im +messages-send --chat-id ${chatId} --text stale`], {
         cwd: f.root, encoding: "utf8", env: { ...f.baseEnv, LARKIN_AGENT_ID: f.agents[1],
           LARKIN_RUNTIME_OBSERVATION_GENERATION: "agent-b", LARKIN_TEST_PROVIDER_HISTORY: staleHistory },

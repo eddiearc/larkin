@@ -3,7 +3,7 @@
   "version": 6,
   "model": {
     "selection": "deterministic-trace",
-    "standing_prompt_version": "larkin-standing-v33"
+    "standing_prompt_version": "larkin-standing-v34"
   },
   "session": {
     "initial_turns": 0
@@ -18,7 +18,7 @@
       "failed reads do not fall back to memory or produce false success",
       "verbatim punctuation reaches the provider without shell interpolation",
       "an ordinary current-Inbox exact literal reply polls once then directly uses the canonical --text recipe without --reply-in-thread, so the reply stays on the original chat main timeline",
-      "only an explicitly requested topic/in-thread exact reply uses --reply-in-thread, without help or extra discovery: two model calls without conflict, or exactly three when the first write is a pre-commit freshness_conflict followed by one identical safe retry",
+      "only an explicitly requested topic/in-thread exact reply uses --reply-in-thread, without help or extra discovery; a freshness notice after its successful write is advisory and never causes a retry",
       "tool-sourced verbatim text uses exactly one exclusive source selector and flows from one canonical scoped read through native --jq into one guarded --content reply without preview, selector switching, model rewriting, extra discovery, or a failed discriminator retry",
       "for a regular current Inbox event, the event-targeted poll is the first model tool call with no preceding Inbox check or discovery; afterward a known-thread latest-human task makes one composite thread-read/reply call while a known-message-ID task makes one composite mget/reply call",
       "thread-latest-human copies the official sender.sender_type == \"user\" API discriminator literally on its first composite, while thread and message-ID sources preserve Unicode, whitespace, and normalization in the complete text JSON document",
@@ -261,11 +261,11 @@
       ]
     },
     {
-      "id": "precommit-exact-reply-safe-retry",
-      "task": "The current Inbox event directly supplies an exact literal topic reply. Poll first; when the canonical --text --reply-in-thread write receives a pre-commit freshness_conflict, safely retry that identical operation once.",
+      "id": "exact-reply-nonblocking-freshness-notice",
+      "task": "The current Inbox event directly supplies an exact literal topic reply. Poll first, then make the canonical --text --reply-in-thread write once. A later freshness notice is advisory and must not cause a duplicate retry.",
       "expected": {
-        "max_tool_calls": 3,
-        "exact_tool_calls": 3,
+        "max_tool_calls": 2,
+        "exact_tool_calls": 2,
         "provider_writes": 1,
         "write_exit_code": 0,
         "poll_before_write": true,
@@ -280,12 +280,7 @@
         "forbidden_command_fragments": ["--help", " -h", "--markdown", "--idempotency-key"],
         "forbidden_read_path_fragments": ["SKILL.md", "/references/"],
         "exact_text": "收到：“A/B”",
-        "shell_interpolation": false,
-        "precommit_retry": {
-          "allowed_subtypes": ["freshness_conflict"],
-          "provider_reached": false,
-          "same_command": true
-        }
+        "shell_interpolation": false
       },
       "trace": [
         {
@@ -293,13 +288,6 @@
           "command": "larkin inbox poll --target thread:oc_eval_retry:omt_eval_retry --limit 1",
           "exit_code": 0,
           "message_id": "om_eval_retry"
-        },
-        {
-          "action": "tool",
-          "command": "larkin im +messages-reply --message-id om_eval_retry --text '收到：“A/B”' --reply-in-thread --json",
-          "exit_code": 3,
-          "subtype": "freshness_conflict",
-          "provider_reached": false
         },
         {
           "action": "provider_write",
@@ -522,8 +510,7 @@
           "phase_a_poll_command": "larkin inbox poll --target chat:oc_eval_two_stage --limit 1",
           "phase_b_poll_command": "larkin inbox poll --target chat:oc_eval_two_stage --limit 1",
           "phase_b_read_command": "larkin im +chat-messages-list --chat-id oc_eval_two_stage --order desc --page-size 10 --no-reactions --json",
-          "phase_b_write_command": "larkin im +messages-reply --message-id om_eval_stage_b --text 'FXR54-EVAL-04-B：同意；stderr 混入 stdout 会污染 JSON 流。' --json",
-          "allow_identical_precommit_freshness_conflict_retry": true
+          "phase_b_write_command": "larkin im +messages-reply --message-id om_eval_stage_b --text 'FXR54-EVAL-04-B：同意；stderr 混入 stdout 会污染 JSON 流。' --json"
         },
         "forbidden_command_fragments": ["--help", " -h", "2>&1", "--reply-in-thread", "--idempotency-key"],
         "exact_text": "FXR54-EVAL-04-B：同意；stderr 混入 stdout 会污染 JSON 流。",

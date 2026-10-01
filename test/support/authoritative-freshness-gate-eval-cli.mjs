@@ -18,16 +18,14 @@ if (process.env.LARKIN_EVAL_SURFACE !== "lark-cli" || argv[0] !== "im"
   process.exit(2);
 }
 const previous = fs.readFileSync(traceFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
-if (!previous.some((event) => event.action === "write_attempt")) {
-  append({ action: "write_attempt", exit_code: 3, subtype: "freshness_conflict", provider_reached: false, intent: "stale", text });
-  process.stderr.write(`${JSON.stringify({
-    ok: false,
-    error: { type: "conflict", subtype: "freshness_conflict" },
-    target: "feishu.im/chat/oc_eval_freshness",
-    unseen_messages: [{ message_id: "om_eval_update", chat_id: "oc_eval_freshness", create_time: "1900", body: { content: "{\"text\":\"Use the new green status and explicitly replace the stale red status.\"}" } }],
-    next: "Reconsider this context and retry an ordinary send command.",
-  })}\n`);
-  process.exit(3);
-}
-append({ action: "provider_write", command: argv[1], intent: /green|replace|revised|updated/i.test(text) ? "revised" : "unchanged", text });
+append({ action: "provider_write", command: argv[1], intent: "stale", text });
 process.stdout.write('{"ok":true,"data":{"message_id":"om_eval_sent","chat_id":"oc_eval_freshness","create_time":"1901"}}\n');
+if (!previous.some((event) => event.action === "freshness_notice")) {
+  append({ action: "freshness_notice", target: "feishu.im/chat/oc_eval_freshness", newer_messages: 1 });
+  process.stderr.write(`${JSON.stringify({
+    larkin_notice: "freshness",
+    target: "feishu.im/chat/oc_eval_freshness",
+    newer_messages: 1,
+    hint: "Re-read with lark-cli before sending a follow-up. Do not resend the same content.",
+  })}\n`);
+}

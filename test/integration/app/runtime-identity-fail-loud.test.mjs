@@ -32,7 +32,7 @@ test("agent-scoped commands fail loudly without Runtime authority and never ente
   }
 });
 
-test("a Runtime marker without Agent authority cannot fall back to activeAgent for IM or config", () => {
+test("a Runtime marker without Agent authority cannot fall back to activeAgent for IM", () => {
   for (const [marker, value] of [
     ["LARKIN_RUNTIME", "1"],
     ["LARKIN_RUNTIME_OBSERVATION_GENERATION", "launch-1"],
@@ -42,7 +42,6 @@ test("a Runtime marker without Agent authority cannot fall back to activeAgent f
     env[marker] = value;
     for (const [entry, argv] of [
       ["cli.mjs", ["im", "+chat-list"]],
-      ["cli.mjs", ["config", "show"]],
       ["lark.mjs", ["im", "+chat-list"]],
     ]) {
       const result = run(entry, argv, env);

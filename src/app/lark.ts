@@ -7,7 +7,7 @@ import { assessPassthrough, PASSTHROUGH_USAGE } from "../feishu/lark-passthrough
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
 import { isLarkinRuntimeContext } from "./runtime-context.js";
 
-const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment", "config"]);
+const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment"]);
 const requestedCommand = process.argv.slice(2).find((argument) => !argument.startsWith("-"));
 const runtimeContext = isLarkinRuntimeContext(process.env);
 if (!process.env.LARKIN_AGENT_ID && runtimeContext) {

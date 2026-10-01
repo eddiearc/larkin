@@ -44,7 +44,7 @@ const routes: Record<string, Route> = {
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
   && process.env.LARKIN_AGENT_ID.trim().length > 0;
 const runtimeContext = isLarkinRuntimeContext(process.env);
-const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment", "config"]);
+const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment"]);
 const missingRuntimeAuthority = (name: string): never => {
   console.error(`larkin: Runtime Agent authority is missing for "${command}" (LARKIN_AGENT_ID is required). `
     + `Runtime context was detected (${name}); it will not fall back to the active Agent.`);

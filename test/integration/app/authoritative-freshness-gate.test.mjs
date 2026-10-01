@@ -188,6 +188,84 @@ test("the first successful write bootstraps quietly and a later newer message em
   }
 });
 
+test("a first freshness check requests and stores only the latest 20-message window", () => {
+  const f = fixture();
+  try {
+    const messages = Array.from({ length: 20 }, (_, index) => ({
+      message_id: `om_window_${index}`,
+      chat_id: "oc_window",
+      create_time: String(100 + index),
+    }));
+    const result = f.run(["im", "+messages-send", "--chat-id", "oc_window", "--text", "first"], {
+      LARKIN_TEST_PROVIDER_HISTORY: JSON.stringify({ ok: true, identity: "bot", data: { messages } }),
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+        message_id: "om_window_own", chat_id: "oc_window", create_time: "120",
+      } }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /"larkin_notice":"freshness"/);
+    const probe = f.calls().find((call) => call.argv[0] === "api" && call.argv[1] === "GET");
+    assert.ok(probe);
+    assert.deepEqual(JSON.parse(probe.argv[probe.argv.indexOf("--params") + 1]), {
+      container_id_type: "chat", container_id: "oc_window", sort_type: "ByCreateTimeDesc", page_size: 20,
+    });
+    assert.deepEqual(f.store.readFreshnessCursor("feishu.im/chat/oc_window", "external"), {
+      schema: 1, revisionTime: "119", messageIds: ["om_window_19"],
+    });
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("an empty first freshness result saves nothing and the next observed window becomes the baseline", () => {
+  const f = fixture();
+  try {
+    const empty = f.run(["im", "+messages-send", "--chat-id", "oc_empty", "--text", "first"], {
+      LARKIN_TEST_PROVIDER_HISTORY: JSON.stringify({ ok: true, identity: "bot", data: { messages: [] } }),
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+        message_id: "om_empty_own", chat_id: "oc_empty", create_time: "100",
+      } }),
+    });
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.equal(f.store.readFreshnessCursor("feishu.im/chat/oc_empty", "external"), null);
+
+    const next = f.run(["im", "+messages-send", "--chat-id", "oc_empty", "--text", "second"], {
+      LARKIN_TEST_PROVIDER_HISTORY: JSON.stringify({ ok: true, identity: "bot", data: { messages: [{
+        message_id: "om_first_observed", chat_id: "oc_empty", create_time: "101",
+      }] } }),
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+        message_id: "om_empty_second", chat_id: "oc_empty", create_time: "102",
+      } }),
+    });
+    assert.equal(next.status, 0, next.stderr);
+    assert.doesNotMatch(next.stderr, /"larkin_notice":"freshness"/);
+    assert.deepEqual(f.store.readFreshnessCursor("feishu.im/chat/oc_empty", "external"), {
+      schema: 1, revisionTime: "101", messageIds: ["om_first_observed"],
+    });
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a slow post-write freshness probe times out without delaying or failing the send", () => {
+  const f = fixture();
+  try {
+    const startedAt = Date.now();
+    const result = f.run(["im", "+messages-send", "--chat-id", "oc_slow_probe", "--text", "sent"], {
+      LARKIN_TEST_PROVIDER_HISTORY_DELAY_MS: "2000",
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+        message_id: "om_slow_own", chat_id: "oc_slow_probe", create_time: "100",
+      } }),
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(elapsedMs < 1_500, `freshness observation took ${elapsedMs}ms`);
+    assert.doesNotMatch(result.stderr, /"larkin_notice":"freshness"/);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test("unavailable freshness observation cannot reject a successful provider write", () => {
   const f = fixture();
   try {

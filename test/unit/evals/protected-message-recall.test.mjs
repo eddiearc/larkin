@@ -15,6 +15,7 @@ test("protected recall eval is versioned and covers positive, negative, conflict
   ]);
   assert.ok(dataset.scenarios.filter((scenario) => scenario.provider_delete_calls === 0).length >= 5);
   assert.ok(dataset.scenarios.some((scenario) => scenario.target_kind === "thread" && scenario.provider_delete_calls === 1));
+  assert.ok(dataset.grader.rubric.includes("the exact chat or thread is authoritatively probed after a successful recall"));
 
   const scenario = dataset.scenarios.find((row) => row.id === "own-chat-message");
   const valid = {

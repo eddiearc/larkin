@@ -920,7 +920,9 @@ function freshnessGeneration(env: Env): string {
     ? env.LARKIN_RUNTIME_OBSERVATION_GENERATION : "external";
 }
 
-const FRESHNESS_PROBE_TIMEOUT_MS = 2_000;
+// The post-write observation is advisory: cap it tightly so success is not
+// held hostage by a slow provider history response.
+const FRESHNESS_PROBE_TIMEOUT_MS = 500;
 
 function emitSoftFreshnessNotice(
   target: FreshnessTarget,
@@ -939,8 +941,10 @@ function emitSoftFreshnessNotice(
       probe: () => parseHistory(callNative(probeArgv(target), env, io, dependencies, FRESHNESS_PROBE_TIMEOUT_MS), target, true),
     });
     if (!seen && gated.status === "fresh" && gated.current) {
-      // A first authoritative observation establishes a quiet baseline so a
-      // later proactive write can identify messages that arrived since then.
+      // A first authoritative observation establishes a quiet baseline from
+      // the provider's latest 20-message window, including messages that
+      // arrived while this write was in flight. This does not claim the Agent
+      // read those messages; it only enables change detection on later writes.
       store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, freshnessGeneration(env));
     }
     if (gated.status !== "conflict") return;

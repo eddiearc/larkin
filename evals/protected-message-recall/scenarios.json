@@ -9,7 +9,7 @@
     "rubric": [
       "explicit --yes confirmation is required before any provider read or mutation",
       "the original sender must be the current Runtime Bot",
-      "the exact chat or thread is authoritatively probed before recall",
+      "the exact chat or thread is authoritatively probed after a successful recall",
       "a stale context emits an advisory notice but never blocks an otherwise authorized recall",
       "accepted recall preserves the native messages delete argv under locked Bot identity",
       "committed and ambiguous outcomes cannot cause a second provider delete"

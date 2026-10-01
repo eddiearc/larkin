@@ -1731,15 +1731,19 @@ test("session recreation uses bounded exponential retries, reports exhaustion, a
   assert.equal(delayedCreates, 1, "stop cancels a scheduled recreation");
 });
 
-test("turn-end redelivery is capped and exponentially backed off when Inbox consumption never occurs", async () => {
+test("turn-end redelivery waits longer for each retry and stops at its cap", async () => {
   const session = new FakeSession();
   const events = [];
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(),
-    turnEndRetryPolicy: { baseDelayMs: 2, maxDelayMs: 4 },
+    turnEndRetryPolicy: { baseDelayMs: 15, maxDelayMs: 60 },
   });
-  host.subscribe((event) => events.push(event));
+  const deferredAt = [];
+  host.subscribe((event) => {
+    events.push(event);
+    if (event.type === "delivery" && event.status === "deferred") deferredAt.push(Date.now());
+  });
   try {
     await host.start([{ agentId: "cli_turnEndCapA1", name: "turn-end-cap", runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
     const receipt = await host.deliver("cli_turnEndCapA1", { message_id: "om_turn_end_cap" });
@@ -1761,6 +1765,9 @@ test("turn-end redelivery is capped and exponentially backed off when Inbox cons
     const exhausted = events.find((event) => event.type === "delivery" && event.deliveryId === receipt.deliveryId
       && event.status === "error" && /exhausted after 3 attempts/.test(event.reason));
     assert.ok(exhausted, JSON.stringify(events));
+    assert.equal(deferredAt.length, 3);
+    assert.ok(deferredAt[1] - deferredAt[0] >= 10, `first retry interval: ${deferredAt[1] - deferredAt[0]}ms`);
+    assert.ok(deferredAt[2] - deferredAt[1] >= 25, `second retry interval: ${deferredAt[2] - deferredAt[1]}ms`);
   } finally {
     await host.shutdown("turn-end redelivery cap test complete");
   }
@@ -1810,6 +1817,87 @@ test("turn-end redelivery persists its backoff and a restart waits for the same 
   } finally {
     await first.shutdown("turn-end restart fixture cleanup").catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn-end retry timer is cancelled after Inbox acknowledgement", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-turn-end-ack-"));
+  const agentId = "cli_turnEndAckA1";
+  const store = createAgentStateStore(root, agentId);
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+    turnEndRetryPolicy: { baseDelayMs: 450, maxDelayMs: 450 },
+  });
+  const config = { agentId, name: "turn-end-ack", runtime: "codex", model: "g", workspaceDir: "/tmp", stateDir: root };
+  try {
+    await host.start([config]);
+    store.appendNdjson("inbox", { message_id: "om_turn_end_ack", chat_id: "oc_turn_end_ack", content: "acknowledge" });
+    await host.deliver(agentId, { message_id: "om_turn_end_ack", chat_id: "oc_turn_end_ack", content: "acknowledge" });
+    session.emit({ type: "turn-start", turnId: "turn-end-ack" });
+    session.emit({ type: "turn-end", turnId: "turn-end-ack" });
+    store.pollInbox({ target: "chat:oc_turn_end_ack", limit: 1 });
+    await waitForCondition(() => store.readJson("runtimeDeliveries", { records: [] }).records
+      .some((record) => record.messageId === "om_turn_end_ack" && record.status === "consumed"));
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    assert.equal(session.prompts.length, 1, "acknowledgement must cancel the scheduled redelivery");
+  } finally {
+    await host.shutdown("turn-end acknowledgement test complete");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("session reset cancels a scheduled turn-end retry when Inbox state has been acknowledged", async () => {
+  let records = { version: 1, records: [] };
+  let inboxRows = [{ message_id: "om_turn_end_reset", chat_id: "oc_turn_end_reset", content: "reset" }];
+  const stateStore = {
+    withInboxTransaction(operation) { return operation(); },
+    readJson(_key, fallback) { return structuredClone(records ?? fallback); },
+    writeJson(_key, value) { records = structuredClone(value); },
+    readNdjson() { return structuredClone(inboxRows); },
+  };
+  const sessions = [new FakeSession(), new FakeSession()];
+  let creates = 0;
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return sessions[creates++]; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => stateStore,
+    turnEndRetryPolicy: { baseDelayMs: 300, maxDelayMs: 300 },
+  });
+  const config = { agentId: "cli_turnEndResetA1", name: "turn-end-reset", runtime: "codex", model: "g", workspaceDir: "/tmp" };
+  try {
+    await host.start([config]);
+    await host.deliver(config.agentId, inboxRows[0]);
+    sessions[0].emit({ type: "turn-start", turnId: "turn-end-reset" });
+    sessions[0].emit({ type: "turn-end", turnId: "turn-end-reset" });
+    inboxRows = [];
+    await host.resetSession(config.agentId);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(sessions[1].prompts.length, 0, "reset must clear the pending turn-end retry timer");
+  } finally {
+    await host.shutdown("turn-end reset cancellation test complete");
+  }
+});
+
+test("shutdown cancels a scheduled turn-end retry", async () => {
+  const session = new FakeSession();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    turnEndRetryPolicy: { baseDelayMs: 150, maxDelayMs: 150 },
+  });
+  try {
+    await host.start([{ agentId: "cli_turnEndShutdownA1", name: "turn-end-shutdown", runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
+    await host.deliver("cli_turnEndShutdownA1", { message_id: "om_turn_end_shutdown" });
+    session.emit({ type: "turn-start", turnId: "turn-end-shutdown" });
+    session.emit({ type: "turn-end", turnId: "turn-end-shutdown" });
+    await host.shutdown("shutdown before turn-end retry");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(session.prompts.length, 1, "shutdown must prevent the scheduled retry");
+  } finally {
+    await host.shutdown("turn-end shutdown cancellation test cleanup").catch(() => {});
   }
 });
 

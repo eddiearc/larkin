@@ -488,6 +488,7 @@ export function createRuntimeHost(options: {
   const setRecord = (agent: ManagedAgent, record: DeliveryRecord, status: DeliveryStatus): DeliveryRecord => {
     record.status = status; record.updatedAt = now(); agent.records.set(record.deliveryId, record);
     agent.byMessage.set(record.messageId, record.deliveryId);
+    if (status === "consumed" || status === "error") clearPendingRetryTimerWhenIdle(agent);
     emitConsumed(agent, persist(agent));
     return agent.records.get(record.deliveryId) ?? record;
   };
@@ -588,6 +589,7 @@ export function createRuntimeHost(options: {
         emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: next.deliveryId, messageId: next.messageId, status: "consumed" });
       }
     }
+    clearPendingRetryTimerWhenIdle(agent);
   };
 
   const TURN_END_RETRY_REASON = "runtime turn ended before Inbox consumption was observed";
@@ -595,6 +597,12 @@ export function createRuntimeHost(options: {
     Math.min(turnEndRetryPolicy.maxDelayMs, turnEndRetryPolicy.baseDelayMs * 2 ** (attempt - 1));
   const isRetryDue = (record: DeliveryRecord): boolean =>
     !record.retryNotBefore || Number.isNaN(Date.parse(record.retryNotBefore)) || Date.parse(record.retryNotBefore) <= Date.now();
+  function clearPendingRetryTimerWhenIdle(agent: ManagedAgent): void {
+    if (!agent.deliveryRetryTimer) return;
+    if ([...agent.records.values()].some((record) => record.status === "pending" && record.retryNotBefore)) return;
+    clearTimeout(agent.deliveryRetryTimer);
+    agent.deliveryRetryTimer = null;
+  }
   const schedulePendingRetry = (agent: ManagedAgent): void => {
     if (agent.stopped || agent.deliveryRetryTimer) return;
     const next = [...agent.records.values()]

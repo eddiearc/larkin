@@ -90,10 +90,6 @@ test("document comment reply uses body-hash delivery identity for same-locator f
     const messageId = `doc_comment_${"a".repeat(32)}`;
     const target = "document-comment:docx:doc_tokenA1:comment_A1:in-thread";
     f.store.appendInboxOnce({ message_id: messageId, target, kind: "document_comment", content: "question" });
-    const beforePoll = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer", "--json"]);
-    assert.equal(beforePoll.code, 2);
-    assert.match(beforePoll.stderr, /先 poll/);
-    assert.equal(f.calls.length, 0);
     f.store.pollInbox({ target, limit: 1 });
     f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
       stdout: JSON.stringify({ ok: true, identity: "bot", data: {} }) + "\n", stderr: "", error: undefined });
@@ -122,6 +118,22 @@ test("document comment reply uses body-hash delivery identity for same-locator f
     const ledger = f.store.readJson("freshnessState", {}).document_comment_replies;
     assert.equal(Object.keys(ledger).length, 2);
     assert.ok(Object.keys(ledger).every((key) => key.startsWith(`${messageId}::`)));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("document comment freshness is an advisory notice and never blocks the provider", () => {
+  const f = fixture();
+  try {
+    const messageId = `doc_comment_${"c".repeat(32)}`;
+    const target = "document-comment:docx:doc_tokenN1:comment_N1:in-thread";
+    f.store.appendInboxOnce({ message_id: messageId, target, kind: "document_comment", content: "older" });
+    f.store.appendInboxOnce({ message_id: `doc_comment_${"d".repeat(32)}`, target, kind: "document_comment", content: "newer" });
+    f.store.pollInbox({ target, limit: 1 });
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1, stdout: "{}\n", stderr: "", error: undefined });
+    const result = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /"larkin_notice":"freshness"/);
+    assert.equal(f.calls.length, 1);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -247,20 +259,15 @@ test("legacy bare message-id ledger entries migrate by same digest and allow fol
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("guarded writes probe with locked Bot identity before preserving provider write bytes", () => {
+test("guarded writes preserve provider bytes before an advisory freshness observation", () => {
   const f = fixture();
   try {
     const result = f.run(["im", "+messages-send", "--chat-id", "oc_exact", "--text", "current"]);
     assert.deepEqual({ code: result.code, stdout: result.stdout, stderr: result.stderr }, {
       code: 7, stdout: "native-out\n", stderr: "native-err\n",
     });
-    assert.deepEqual(f.calls.map((call) => call.args[2]), ["GET", "+messages-send"]);
-    const probe = f.calls[0].args.slice(1);
-    assert.deepEqual(JSON.parse(probe[probe.indexOf("--params") + 1]), {
-      container_id_type: "chat", container_id: "oc_exact", sort_type: "ByCreateTimeDesc", page_size: 20,
-    });
-    assert.equal(probe[probe.indexOf("--as") + 1], "bot");
-    assert.equal(f.calls[1].args.includes("--idempotency-key"), true);
+    assert.deepEqual(f.calls.map((call) => call.args[2]), ["+messages-send"]);
+    assert.equal(f.calls[0].args.includes("--idempotency-key"), true);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -399,8 +406,8 @@ test("duplicate policy flags and values after -- cannot alter target or identity
     ]) assert.equal(f.run(argv).code, 2, argv.join(" "));
     const bounded = f.run(["im", "+messages-send", "--chat-id", "oc_exact", "--text", "x", "--", "--chat-id", "oc_other", "--as", "user", "--help"]);
     assert.equal(bounded.code, 7);
-    assert.equal(f.calls.length, 2, "only authoritative probe and guarded write may run");
-    const write = f.calls[1].args.slice(1);
+    assert.equal(f.calls.length, 1, "the guarded write must not run a pre-commit freshness probe");
+    const write = f.calls[0].args.slice(1);
     const boundary = write.indexOf("--");
     assert.equal(write[write.indexOf("--chat-id") + 1], "oc_exact");
     assert.equal(write[write.indexOf("--as") + 1], "bot");
@@ -460,7 +467,7 @@ test("protected recall requires explicit confirmation before provider access", (
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("protected recall verifies own sender, probes exact chat, and preserves native delete argv", () => {
+test("protected recall verifies own sender and preserves native delete argv", () => {
   const f = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage()] } });
   try {
     seedRecallCursor(f.store);
@@ -468,11 +475,10 @@ test("protected recall verifies own sender, probes exact chat, and preserves nat
       stdout: `${JSON.stringify({ ok: true, identity: "bot", data: {} })}\n`, stderr: "", error: undefined });
     const result = f.run(recallArgv());
     assert.equal(result.code, 0, result.stderr);
-    const calls = nativeTrace(f.calls);
-    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls },
-      recallScenario("own-chat-message")), { passed: true, failures: [] });
-    const deletion = calls.find((call) => call[0] === "im" && call[1] === "messages" && call[2] === "delete");
-    assert.deepEqual(deletion, ["im", "messages", "delete", "--message-id", "om_recall", "--yes", "--json", "--as", "bot"]);
+    const deletion = f.calls.find((call) => call.args[2] === "messages" && call.args[3] === "delete");
+    assert.ok(deletion);
+    assert.equal(deletion.args[deletion.args.indexOf("--message-id") + 1], "om_recall");
+    assert.equal(deletion.args[deletion.args.indexOf("--as") + 1], "bot");
     assert.equal(f.store.readJson("freshnessState", {}).message_recalls.om_recall.status, "deleted");
     assert.equal(f.store.readFreshnessCursor("feishu.im/chat/oc_recall"), null,
       "deleting the only observed head clears the stale cursor atomically with the recall ledger");
@@ -487,7 +493,7 @@ test("protected recall verifies own sender, probes exact chat, and preserves nat
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("protected recall derives and probes a thread target instead of falling back to chat", () => {
+test("protected recall derives the thread target instead of falling back to chat", () => {
   const message = ownRecallMessage({ thread_id: "omt_recall" });
   const f = fixture({ ok: true, identity: "bot", data: { messages: [message] } });
   try {
@@ -496,8 +502,11 @@ test("protected recall derives and probes a thread target instead of falling bac
       stdout: `${JSON.stringify({ ok: true, identity: "bot", data: {} })}\n`, stderr: "", error: undefined });
     const result = f.run(recallArgv());
     assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls: nativeTrace(f.calls) },
-      recallScenario("own-thread-message")), { passed: true, failures: [] });
+    const probe = f.calls.find((call) => call.args[1] === "api" && call.args[2] === "GET");
+    assert.ok(probe);
+    assert.deepEqual(JSON.parse(probe.args[probe.args.indexOf("--params") + 1]), {
+      container_id_type: "thread", container_id: "omt_recall", sort_type: "ByCreateTimeDesc", page_size: 20,
+    });
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -519,17 +528,16 @@ test("protected recall rejects human and cross-agent senders without freshness p
   }
 });
 
-test("protected recall stops on freshness conflict before provider mutation", () => {
+test("protected recall commits despite stale context and emits an advisory notice", () => {
   const f = fixture({ ok: true, identity: "bot", data: { messages: [ownRecallMessage({ create_time: "1786957010774" })] } });
   try {
     seedRecallCursor(f.store, "feishu.im/chat/oc_recall", "1786957010773", ["om_seen"]);
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1, stdout: "{}\n", stderr: "", error: undefined });
     const result = f.run(recallArgv());
-    assert.equal(result.code, 3, result.stderr);
-    assert.match(result.stderr, /freshness_conflict/);
-    assert.deepEqual(gradeProtectedRecallTrace({ exitCode: result.code, messageId: "om_recall", calls: nativeTrace(f.calls) },
-      recallScenario("freshness-conflict")), { passed: true, failures: [] });
-    assert.equal(f.store.readJson("freshnessState", {}).message_recalls, undefined,
-      "a pre-commit conflict must not claim the destructive recall ledger");
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /"larkin_notice":"freshness"/);
+    assert.ok(f.calls.some((call) => call.args[2] === "messages" && call.args[3] === "delete"));
+    assert.equal(f.store.readJson("freshnessState", {}).message_recalls.om_recall.status, "deleted");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -715,7 +723,7 @@ test("protected urgent-app fails closed when member probe is truncated or native
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("protected urgent-app does not submit after a freshness conflict", () => {
+test("protected urgent-app commits despite stale context and emits an advisory notice", () => {
   const f = fixture({
     ok: true,
     identity: "bot",
@@ -725,10 +733,12 @@ test("protected urgent-app does not submit after a freshness conflict", () => {
     f.store.mergeFreshnessCursor("feishu.im/chat/oc_urgent", {
       schema: 1, revisionTime: "1786957010773", messageIds: ["om_seen"],
     }, (seen, current) => current ?? seen, "gen");
+    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
+      stdout: JSON.stringify({ ok: true, identity: "bot", data: { invalid_user_id_list: [] } }), stderr: "", error: undefined });
     const conflicted = f.run(urgentArgv());
-    assert.equal(conflicted.code, 3, conflicted.stderr);
-    assert.match(conflicted.stderr, /freshness_conflict/);
-    assert.equal(f.calls.some((call) => call.args[2] === "urgent_app"), false);
+    assert.equal(conflicted.code, 0, conflicted.stderr);
+    assert.match(conflicted.stderr, /"larkin_notice":"freshness"/);
+    assert.equal(f.calls.some((call) => call.args.includes("urgent_app")), true);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -791,7 +801,6 @@ test("a recurring reminder provider duplicate is not recorded as success for the
     ] } });
     f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
       stdout: JSON.stringify({ ok: true, data: { message_id: "om_recurring_first" } }), stderr: "", error: undefined });
-    assert.equal(f.run(argv).code, 3, "the new provider head must be reconciled before retrying the write");
     const duplicate = f.run(argv);
     assert.equal(duplicate.code, 0, duplicate.stderr);
     const reminder = JSON.parse(fs.readFileSync(f.store.paths.reminders, "utf8")).reminders[0];
@@ -895,8 +904,8 @@ test("--mention is no longer translated: argv passes through to the native CLI u
     assert.deepEqual({ code: result.code, stdout: result.stdout, stderr: result.stderr }, {
       code: 7, stdout: "native-out\n", stderr: "native-err\n",
     });
-    assert.deepEqual(f.calls.map((call) => call.args[2]), ["GET", "+messages-send"]);
-    const write = f.calls[1].args;
+    assert.deepEqual(f.calls.map((call) => call.args[2]), ["+messages-send"]);
+    const write = f.calls[0].args;
     assert.equal(write.includes("--content"), false);
     assert.equal(write.includes("--msg-type"), false);
     assert.equal(write.includes("--mention"), true);
@@ -926,7 +935,8 @@ test("cursor advancement between attempts keeps the derived idempotency key stab
       stderr: "", error: undefined });
     const sent = f.run(argv);
     assert.equal(sent.code, 0, sent.stderr);
-    const retryKey = f.calls.at(-1).args[f.calls.at(-1).args.indexOf("--idempotency-key") + 1];
+    const retryWrite = f.calls.findLast((call) => call.args.includes("+messages-send"));
+    const retryKey = retryWrite.args[retryWrite.args.indexOf("--idempotency-key") + 1];
     assert.equal(retryKey, firstKey, "水位推进后，同一命令重试的幂等 key 必须不变");
     assert.equal(JSON.parse(sent.stdout).duplicate, undefined, "首次成功不是 duplicate");
 
@@ -948,7 +958,7 @@ test("cursor advancement between attempts keeps the derived idempotency key stab
 
     // 显式传入的 --idempotency-key 被尊重：不注入默认编号。
     f.run(["im", "+messages-send", "--chat-id", "oc_retry", "--text", "same intent", "--idempotency-key", "forced-fresh-key"]);
-    const forced = f.calls.at(-1).args.slice(1);
+    const forced = f.calls.findLast((call) => call.args.includes("+messages-send")).args.slice(1);
     assert.equal(forced[forced.indexOf("--idempotency-key") + 1], "forced-fresh-key");
     assert.equal(forced.filter((argument) => argument === "--idempotency-key").length, 1);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

@@ -754,7 +754,8 @@ test("issue 122 injected former prompt-builder target omission retries while the
       }
       session.emit({ type: "turn-start", turnId: formerPromptOmission ? "former-turn" : "current-turn" });
       session.emit({ type: "turn-end", turnId: formerPromptOmission ? "former-turn" : "current-turn" });
-      await new Promise((resolve) => setImmediate(resolve));
+      if (formerPromptOmission) await waitForCondition(() => session.prompts.length === 2);
+      else await new Promise((resolve) => setImmediate(resolve));
       return { prompts: session.prompts.length, inbox: store.readNdjson("inbox"),
         statuses: store.readJson("runtimeDeliveries", { records: [] }).records.map((record) => record.status) };
     } finally {
@@ -971,7 +972,8 @@ test("turn end re-wakes only accepted canonical rows left by a partial poll, inc
     assert.deepEqual(telemetryOrder.slice(0, 2), ["consumed", "turn-end"],
       "turn-end closes telemetry only after authoritative Inbox reconciliation observes direct consumption");
 
-    assert.equal(session.prompts.length, 2, "remaining canonical rows schedule one replacement wake at the safe boundary");
+    await waitForCondition(() => session.prompts.length === 2);
+    assert.equal(session.prompts.length, 2, "remaining canonical rows schedule one replacement wake after bounded backoff");
     assert.equal(session.prompts[1].inputId, receipts[1].deliveryId, "retry preserves the oldest unconsumed delivery identity");
     assert.deepEqual(store.readNdjson("inbox").map((row) => row.message_id), ["om_partial_2", "om_partial_3", "om_partial_4"]);
     const statusesAfterRetry = Object.fromEntries(store.readJson("runtimeDeliveries", { records: [] }).records
@@ -1018,7 +1020,7 @@ test("turn end retries an accepted wake when the Agent never polls without advan
     const stateBefore = store.readJson("inboxState", {});
     session.emit({ type: "turn-start", turnId: "turn-no-poll" });
     session.emit({ type: "turn-end", turnId: "turn-no-poll" });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitForCondition(() => session.prompts.length === 2);
 
     assert.equal(session.prompts.length, 2);
     assert.equal(session.prompts[1].inputId, receipt.deliveryId);
@@ -1688,9 +1690,11 @@ test("terminal input events during a busy submission coalesce one retry after su
   assert.equal(session.prompts.length, 2, "coalescing does not create an immediate retry spin");
   session.emit({ type: "turn-start", turnId: "turn-coalesced-retry" });
   session.emit({ type: "turn-end", turnId: "turn-coalesced-retry" });
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitForCondition(() => session.prompts.length === 3);
   assert.equal(session.prompts.length, 3, "the second pending input retries at the next real boundary");
-  assert.equal(stored.records.some((record) => record.status === "pending" || record.status === "submitting"), false);
+  assert.equal(stored.records.some((record) => record.status === "submitting"), false);
+  assert.equal(stored.records.some((record) => record.status === "pending" && record.retryNotBefore),
+    true, "an unconsumed accepted delivery waits for its bounded turn-end backoff");
   await host.shutdown("test complete");
 });
 

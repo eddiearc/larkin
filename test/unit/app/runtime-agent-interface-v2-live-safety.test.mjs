@@ -312,6 +312,7 @@ test("direct Bot-only profile materialization keeps the secret local and never c
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   try {
     materializeBotOnlyProfile({
+      agentId: "cli_fixtureA",
       stateDir,
       larkConfigDir,
       feishuAppId: "cli_fixtureA",

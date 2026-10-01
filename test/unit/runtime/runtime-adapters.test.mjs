@@ -185,7 +185,7 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v33");
+  assert.equal(prompt.version, "larkin-standing-v34");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
@@ -217,11 +217,11 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.doesNotMatch(prompt.content, /larkin (?:message|channel|attachment|server|task claim)\b/);
   assert.match(prompt.content, /Only a real Feishu `message_id` beginning with `om_`/);
   assert.match(prompt.content, /`rem_`, `redeliver_`.*synthetic ID must never be replied to/);
-  assert.match(prompt.content, /nonzero `freshness_conflict`.*direct-acks/);
+  assert.match(prompt.content, /Freshness is a non-blocking reminder.*never rejected for freshness.*larkin_notice/i);
   assert.doesNotMatch(prompt.content, /larkin-draft|draft-id|send --draft/);
   assert.match(prompt.content, /ordinary plain-text message bodies.*`--text`.*brief one-line replies.*multiline status lines.*paragraphs.*`--markdown`.*intentional.*headings.*lists.*fenced code.*Markdown links/i);
   assert.match(prompt.content, /native `--text`.*ordinary plain text.*logs.*literal code.*exact whitespace/i);
-  assert.doesNotMatch(prompt.content, /rejected|--literal-text/i);
+  assert.doesNotMatch(prompt.content, /--literal-text/i);
   assert.match(prompt.content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   assert.match(prompt.content, /passes one argument with real newline characters/);
   assert.match(prompt.content, /ordinary (?:double )?quotes.*do not decode.*`\\n`.*backslash.*letter `n`/i);
@@ -285,7 +285,7 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content,
     /Use the .--reply-in-thread. recipe only when the source is a thread or the user or current Inbox event explicitly asks.*topic.*in-thread.*thread reply.*Never invent a topic request from ordinary reply wording or a bare source message id.*thread membership.*thread:.*target.*thread_id.*explicit request.*never from wording alone/i);
   assert.match(prompt.content,
-    /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
+    /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*freshness notice.*advisory.*must not cause a duplicate send/i);
   assert.match(prompt.content,
     /larkin im \+messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content, /complete canonical exact send and reply paths.*must not.*messages-send --help.*messages-reply --help/i);
@@ -297,9 +297,8 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /does not waive.*skill.*safety.*unknown.*high-risk/i);
   assert.match(prompt.content, /exact.*`--text`.*overrides.*ordinary-body guidance/i);
   assert.match(prompt.content, /wrapper derives.*stable.*idempotency key.*do not pass.*--idempotency-key/i);
-  assert.match(prompt.content, /freshness_unavailable.*freshness_conflict.*pre-commit.*provider-not-reached.*retry.*identical.*`--text`.*`--content`.*wrapper reuses/i);
-  assert.match(prompt.content, /target or body changes.*revised ordinary command.*derive a new key/i);
-  assert.match(prompt.content, /`committed=true` must not be repeated.*ambiguous termination.*wrapper same-key recovery/i);
+  assert.match(prompt.content, /`larkin_notice` freshness reminder.*stderr only after.*provider write.*re-read the target.*revised follow-up.*materially changes.*must not be repeated/i);
+  assert.match(prompt.content, /result with `committed=true`.*must not be repeated.*ambiguous termination.*wrapper same-key recovery/i);
   assert.doesNotMatch(prompt.content, /oc_eval_exact|om_eval_anchor|原文：“修复 A\/B”|收到：“A\/B”|引用：“抢到”|消息原文：“保持”/);
 });
 
@@ -315,7 +314,7 @@ test("Codex, Claude and Pi receive the clickable-link and exact-content standing
     assert.match(content, /explicit exact or verbatim direct literal uses `--text`.*overrides.*ordinary-body guidance/i);
     assert.match(content, /tool-sourced exact or verbatim text.*deterministic native `--jq`.*`--content`/i);
     assert.match(content, /native `--text`.*ordinary plain text.*logs.*literal code.*exact whitespace/i);
-    assert.doesNotMatch(content, /rejected|--literal-text/i);
+    assert.doesNotMatch(content, /--literal-text/i);
     assert.match(content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   };
 

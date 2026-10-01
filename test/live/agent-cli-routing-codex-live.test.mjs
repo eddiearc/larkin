@@ -86,7 +86,7 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
     fs.writeFileSync(path.join(workspaceDir, "AGENTS.md"), [
       "# Controlled real Codex routing workflow",
       "Execute only the two exact absolute larkin commands requested. Never invoke bare lark-cli or inspect files/environment.",
-      "Treat a nonzero freshness_conflict as the expected terminal result.", "",
+      "Treat a successful freshness notice as an advisory reminder after the write; do not retry.", "",
     ].join("\n"), { mode: 0o600 });
 
     const codexCommand = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).trim();
@@ -137,16 +137,16 @@ test.skipIf(!RUN)("real setup dependency install and real Codex app-server keep 
     session.subscribe((event) => { events.items.push(event); for (const waiter of events.waiters) waiter(event); });
     const after = events.items.length;
     const accepted = await promptWhenReady(session, { inputId: "real-cli-routing", kind: "initial", attempt: 0,
-      text: `Run exactly ${JSON.stringify(larkin)} --version, then exactly ${JSON.stringify(larkin)} im +messages-send --chat-id oc_realRouting --text stale. Stop after the expected nonzero freshness_conflict.` });
+      text: `Run exactly ${JSON.stringify(larkin)} --version, then exactly ${JSON.stringify(larkin)} im +messages-send --chat-id oc_realRouting --text stale. Stop after that successful write, even if stderr emits a freshness notice.` });
     assert.equal(accepted.status, "accepted");
     await waitForTurnEnd(events, after);
     assert.equal(events.items.slice(after).find((event) => ["error", "configuration-error", "input-error"].includes(event.type)
       && event.retryable !== true && event.willRetry !== true), undefined);
     assert.equal(commandAudit.length, 2, JSON.stringify(commandAudit));
     assert.equal(commandAudit.every((item) => item.command.includes(larkin) && !/(^|\s)lark-cli(?:\s|$)/.test(item.command)), true);
-    assert.deepEqual(commandAudit.map((item) => item.exit_code), [0, 3], JSON.stringify(commandAudit));
+    assert.deepEqual(commandAudit.map((item) => item.exit_code), [0, 0], JSON.stringify(commandAudit));
     const calls = fs.readFileSync(callsFile, "utf8").split("\n").filter(Boolean).map(JSON.parse);
-    assert.equal(calls.filter((call) => call.argv.includes("+messages-send")).length, 0);
+    assert.equal(calls.filter((call) => call.argv.includes("+messages-send")).length, 1);
     assert.equal(calls.filter((call) => call.argv.includes("/open-apis/im/v1/messages")).length, 1);
     const larkConfigDir = path.join(configDir, "state", "agents", agentId, "lark-cli-config");
     assert.equal(calls.every((call) => call.config_dir === larkConfigDir), true);

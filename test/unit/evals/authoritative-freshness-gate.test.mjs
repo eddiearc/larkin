@@ -10,7 +10,7 @@ const dataset = loadAuthoritativeFreshnessEval(path.join(ROOT, "evals/authoritat
 test("authoritative freshness eval is versioned, reproducible, and covers the critical rubric", () => {
   assert.equal(dataset.dataset, "authoritative-freshness-gate");
   assert.equal(dataset.version, 1);
-  assert.equal(dataset.standing_prompt_version, "larkin-standing-v33");
+  assert.equal(dataset.standing_prompt_version, "larkin-standing-v34");
   assert.equal(dataset.threshold, 1);
   assert.deepEqual(dataset.scenarios.map((scenario) => scenario.id), [
     "missing-inbox-history", "direct-ack-retry", "same-ms-new-id", "edited-message",
@@ -18,7 +18,7 @@ test("authoritative freshness eval is versioned, reproducible, and covers the cr
   ]);
   for (const scenario of dataset.scenarios) {
     assert.equal(typeof scenario.provider_write, "boolean");
-    if (scenario.expected.startsWith("freshness_")) assert.equal(scenario.provider_write, false);
+    assert.equal(scenario.provider_write, true);
   }
   assert.equal(dataset.grader.threshold, 1);
   assert.equal(dataset.grader.rubric.length, 5);
@@ -30,8 +30,7 @@ test("authoritative freshness eval is versioned, reproducible, and covers the cr
   assert.equal(gradeConflictRedecision(modelScenario.trace.slice(0, 1)).passed, false);
   const controlled = "/tmp/controlled/bin/larkin";
   const audit = [
-    { item_type: "commandExecution", command: `/bin/zsh -lc "\\"${controlled}\\" im +messages-send --chat-id oc_eval_freshness --text 'stale red status'"`, exit_code: 3 },
-    { item_type: "commandExecution", command: `/bin/zsh -lc "\\"${controlled}\\" im +messages-send --chat-id oc_eval_freshness --text 'green revised status'"`, exit_code: 0 },
+    { item_type: "commandExecution", command: `/bin/zsh -lc "\\"${controlled}\\" im +messages-send --chat-id oc_eval_freshness --text 'stale red status'"`, exit_code: 0 },
   ];
   assert.deepEqual(gradeNativeCommandAudit(audit, controlled), { passed: true, failures: [] });
   assert.equal(gradeNativeCommandAudit([...audit, {

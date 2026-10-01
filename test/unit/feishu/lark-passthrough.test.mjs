@@ -267,7 +267,7 @@ test("terminal larkin <group> honours --agent selector and rejects identity esca
       fs.rmSync(marker, { force: true });
       const management = run(managementArgs);
       assert.equal(management.status, 2, `${managementArgs[0]} must be rejected by the public process`);
-      assert.match(management.stderr, /身份边界|凭证/);
+      assert.match(management.stderr, /身份边界|凭证|Runtime Agent authority is missing/);
       assert.equal(fs.existsSync(marker), false, `${managementArgs[0]} rejection must happen before lark-cli spawn`);
     }
 

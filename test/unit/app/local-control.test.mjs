@@ -319,6 +319,7 @@ test("stale socket cleanup refuses a different server even when the filesystem r
       },
     }, null, 2)}\n`, { mode: 0o600 });
     await close(original);
+    await new Promise((resolve) => setTimeout(resolve, 10));
     replacement = net.createServer();
     await listen(replacement);
     fs.chmodSync(authority.daemonSocketPath, 0o600);

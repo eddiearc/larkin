@@ -52,7 +52,7 @@ When tuning the Larkin standing prompt (`src/agent/context-prompt.ts`), follow t
 - OpenAI Prompt Engineering Guide: <https://platform.openai.com/docs/guides/prompt-engineering>
 - Anthropic Prompt Engineering overview: <https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview>
 
-Standing rules: prefer structural signals (target/source fields) over model inference; give exact recipe templates plus constraints; keep fail-closed/idempotent/freshness semantics; bump `LARKIN_STANDING_PROMPT_VERSION` on every substantive change and update the affected eval datasets, graders, and assertions; validate behavior changes with the fixed-scenario evals. Do not add new Markdown docs; keep guidance as file-header comments or in this file.
+Standing rules: prefer structural signals (target/source fields) over model inference; give exact recipe templates plus constraints; keep identity fail-closed, writes idempotent, and freshness as a non-blocking reminder; bump `LARKIN_STANDING_PROMPT_VERSION` on every substantive change and update the affected eval datasets, graders, and assertions; validate behavior changes with the fixed-scenario evals. Do not add new Markdown docs; keep guidance as file-header comments or in this file.
 
 ## Repository hygiene
 

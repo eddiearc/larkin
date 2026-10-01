@@ -82,7 +82,7 @@ function external(command, values, label) {
   return checked(run(rendered[0], rendered.slice(1)), label);
 }
 
-test.skipIf(!WRITE)("dedicated group proves Inbox absence, authoritative conflict, no stale write, and one revised write", { timeout: 240_000 }, async () => {
+test.skipIf(!WRITE)("dedicated group proves Inbox absence, advisory freshness notice, and one write per intent", { timeout: 240_000 }, async () => {
   const f = fixture();
   const nonce = crypto.randomUUID();
   const updateMarker = `[larkin-authoritative-live:${nonce}:other-bot]`;
@@ -98,22 +98,22 @@ test.skipIf(!WRITE)("dedicated group proves Inbox absence, authoritative conflic
   assert.equal(check.pending_total, 0, "different Bot marker must be absent from this Agent Inbox");
 
   const stale = run(f.larkin, ["im", "+messages-send", "--chat-id", f.chatId, "--text", staleMarker], f.runtimeEnv);
-  assert.notEqual(stale.status, 0);
-  const conflict = JSON.parse(stale.stderr);
-  assert.equal(conflict.error.subtype, "freshness_conflict");
-  assert.equal(conflict.target, `feishu.im/chat/${f.chatId}`);
-  assert.equal(JSON.stringify(conflict.unseen_messages).includes(updateMarker), true);
-  assert.equal(markerCount(history(), staleMarker), 0, "conflicting stale body must not reach Feishu");
+  checked(stale, "stale group send");
+  const notice = JSON.parse(stale.stderr);
+  assert.equal(notice.larkin_notice, "freshness");
+  assert.equal(notice.target, `feishu.im/chat/${f.chatId}`);
+  const staleHistory = await waitFor(history, (payload) => markerCount(payload, staleMarker) === 1, "one stale group marker");
+  assert.equal(markerCount(staleHistory, staleMarker), 1);
 
   checked(run(f.larkin, ["im", "+messages-send", "--chat-id", f.chatId, "--text", revisedMarker], f.runtimeEnv), "revised group send");
   const finalHistory = await waitFor(history, (payload) => markerCount(payload, revisedMarker) === 1, "one revised group marker");
-  assert.equal(markerCount(finalHistory, staleMarker), 0);
+  assert.equal(markerCount(finalHistory, staleMarker), 1);
   assert.equal(markerCount(finalHistory, revisedMarker), 1);
 });
 
 test.skipIf(!WRITE || !process.env.LARKIN_LIVE_THREAD_MESSAGE_ID || !process.env.LARKIN_LIVE_THREAD_ID
   || !process.env.LARKIN_LIVE_ISOLATION_THREAD_MESSAGE_ID || !process.env.LARKIN_LIVE_ISOLATION_THREAD_ID)(
-  "dedicated threads prove Inbox absence, exact target conflict, target isolation, no stale reply, and one revised reply",
+  "dedicated threads prove Inbox absence, advisory freshness notice, target isolation, and one reply per intent",
   { timeout: 240_000 }, async () => {
     const f = fixture();
     const messageId = process.env.LARKIN_LIVE_THREAD_MESSAGE_ID || "";
@@ -147,12 +147,12 @@ test.skipIf(!WRITE || !process.env.LARKIN_LIVE_THREAD_MESSAGE_ID || !process.env
     assert.equal(check.pending_total, 0, "different Bot thread marker must be absent from this Agent Inbox");
 
     const stale = run(f.larkin, ["im", "+messages-reply", "--message-id", messageId, "--reply-in-thread", "--text", staleMarker], f.runtimeEnv);
-    assert.notEqual(stale.status, 0);
-    const conflict = JSON.parse(stale.stderr);
-    assert.equal(conflict.error.subtype, "freshness_conflict");
-    assert.equal(conflict.target, `feishu.im/thread/${f.chatId}/${threadId}`);
-    assert.equal(JSON.stringify(conflict.unseen_messages).includes(updateMarker), true);
-    assert.equal(markerCount(history(), staleMarker), 0, "conflicting stale thread body must not reach Feishu");
+    checked(stale, "stale thread reply");
+    const notice = JSON.parse(stale.stderr);
+    assert.equal(notice.larkin_notice, "freshness");
+    assert.equal(notice.target, `feishu.im/thread/${f.chatId}/${threadId}`);
+    const staleHistory = await waitFor(history, (payload) => markerCount(payload, staleMarker) === 1, "one stale thread marker");
+    assert.equal(markerCount(staleHistory, staleMarker), 1);
 
     checked(run(f.larkin, ["im", "+threads-messages-list", "--thread", isolationThreadId, "--order", "desc", "--json"], f.runtimeEnv),
       "observe isolation thread head");
@@ -166,7 +166,7 @@ test.skipIf(!WRITE || !process.env.LARKIN_LIVE_THREAD_MESSAGE_ID || !process.env
 
     checked(run(f.larkin, ["im", "+messages-reply", "--message-id", messageId, "--reply-in-thread", "--text", revisedMarker], f.runtimeEnv), "revised thread reply");
     const finalHistory = await waitFor(history, (payload) => markerCount(payload, revisedMarker) === 1, "one revised thread marker");
-    assert.equal(markerCount(finalHistory, staleMarker), 0);
+    assert.equal(markerCount(finalHistory, staleMarker), 1);
     assert.equal(markerCount(finalHistory, revisedMarker), 1);
   },
 );

@@ -16,7 +16,7 @@ const DATASET = loadAgentExperienceV6Eval(path.join(ROOT, "evals/agent-experienc
 
 test("fixed Agent Experience v6 eval starts every selected scenario from an empty session", () => {
   assert.equal(DATASET.session.initial_turns, 0);
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v33");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v34");
   assert.deepEqual(DATASET.scenarios.map((scenario) => scenario.id), [
     "target-scoped-thread-read",
     "failed-thread-read-no-false-success",
@@ -25,7 +25,7 @@ test("fixed Agent Experience v6 eval starts every selected scenario from an empt
     "explicit-topic-exact-reply",
     "thread-source-reply-stays-in-thread",
     "same-human-correction-precedence",
-    "precommit-exact-reply-safe-retry",
+    "exact-reply-nonblocking-freshness-notice",
     "tool-sourced-verbatim-thread-reply",
     "tool-sourced-verbatim-message-reply",
     "known-group-user-bot-counts",
@@ -88,7 +88,7 @@ test("standing prompt deletion counterfactual protects the explicitly requested 
   assert.match(prompt,
     /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery/i);
   assert.match(prompt,
-    /without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
+    /freshness.*non-blocking.*never rejected.*larkin_notice.*never resend/i);
 });
 
 test("standing prompt makes silence envelope-specific and preserves ordinary reminder payload execution", () => {
@@ -168,7 +168,7 @@ test("golden fresh-session traces satisfy the full deterministic rubric", () => 
   assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
 });
 
-test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v33 contract passes all three", () => {
+test("old generalized-silence counterfactual fails ordinary reminder final payloads while the v34 contract passes all three", () => {
   const ids = [
     "explicit-silent-envelope-exactly-one-poll",
     "ordinary-reminder-scoped-history-after-poll",
@@ -287,24 +287,16 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   assert.equal(gradeAgentExperienceV6Trace(twoStage, reusedMemoryPhaseAFinal)
     .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
 
-  const twoStageSafeRetry = structuredClone(twoStage.trace);
-  twoStageSafeRetry.splice(4, 0, {
-    action: "tool",
-    command: twoStageSafeRetry[4].command,
-    exit_code: 3,
-    subtype: "freshness_conflict",
-    provider_reached: false,
+  const twoStageDuplicateWrite = structuredClone(twoStage.trace);
+  twoStageDuplicateWrite.splice(4, 0, {
+    action: "provider_write",
+    command: twoStageDuplicateWrite[4].command,
+    message_id: "om_eval_stage_b",
+    transported_text: "FXR54-EVAL-04-B：同意；stderr 混入 stdout 会污染 JSON 流。",
+    shell_interpolation: false,
+    exit_code: 0,
   });
-  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageSafeRetry).passed, true);
-
-  const twoStageNonidenticalRetry = structuredClone(twoStageSafeRetry);
-  twoStageNonidenticalRetry[4].command = twoStageNonidenticalRetry[4].command.replace("同意", "不同意");
-  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageNonidenticalRetry)
-    .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
-
-  const twoStageProviderReachedRetry = structuredClone(twoStageSafeRetry);
-  twoStageProviderReachedRetry[4].provider_reached = true;
-  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageProviderReachedRetry)
+  assert.equal(gradeAgentExperienceV6Trace(twoStage, twoStageDuplicateWrite)
     .failures.some((item) => item.rule === "two_stage_poll_silence"), true);
 
   for (const extra of [
@@ -494,30 +486,17 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
   assert.equal(topicMissingThreadFlagGrade.failures.some((item) => item.rule === "canonical_order"), true);
   assert.equal(topicMissingThreadFlagGrade.failures.some((item) => item.rule === "reply_anchor"), true);
 
-  const conflictRetry = structuredClone(byId["precommit-exact-reply-safe-retry"].trace);
+  const nonblockingFreshness = structuredClone(byId["exact-reply-nonblocking-freshness-notice"].trace);
   assert.equal(byId["exact-reply-no-help"].trace.length, 2);
   assert.equal(byId["explicit-topic-exact-reply"].trace.length, 2);
-  assert.equal(conflictRetry.length, 3);
-  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], conflictRetry).passed, true);
-  const reversedRetry = [conflictRetry[0], conflictRetry[2], conflictRetry[1]];
-  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], reversedRetry)
-    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
-  const zeroExitRetry = structuredClone(conflictRetry);
-  zeroExitRetry[1].exit_code = 0;
-  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], zeroExitRetry)
-    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
-  const committedRetry = structuredClone(conflictRetry);
-  committedRetry[1].provider_reached = true;
-  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], committedRetry)
-    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
-  const nonConflictRetry = structuredClone(conflictRetry);
-  nonConflictRetry[1].subtype = "provider_error";
-  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], nonConflictRetry)
-    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
-  const nonidenticalRetry = structuredClone(conflictRetry);
-  nonidenticalRetry[1].command = nonidenticalRetry[1].command.replace(" --reply-in-thread", "");
-  assert.equal(gradeAgentExperienceV6Trace(byId["precommit-exact-reply-safe-retry"], nonidenticalRetry)
-    .failures.some((item) => item.rule === "safe_precommit_retry"), true);
+  assert.equal(nonblockingFreshness.length, 2);
+  assert.equal(gradeAgentExperienceV6Trace(byId["exact-reply-nonblocking-freshness-notice"], nonblockingFreshness).passed, true);
+  const duplicateAfterNotice = structuredClone(nonblockingFreshness);
+  duplicateAfterNotice.push(structuredClone(nonblockingFreshness[1]));
+  const duplicateAfterNoticeGrade = gradeAgentExperienceV6Trace(
+    byId["exact-reply-nonblocking-freshness-notice"], duplicateAfterNotice);
+  assert.equal(duplicateAfterNoticeGrade.failures.some((item) => item.rule === "bounded_calls"), true);
+  assert.equal(duplicateAfterNoticeGrade.failures.some((item) => item.rule === "provider_write_count"), true);
 
   const normalizedAndRediscovered = structuredClone(byId["tool-sourced-verbatim-thread-reply"].trace);
   normalizedAndRediscovered.splice(1, 0,
@@ -827,7 +806,7 @@ test("grader rejects fallback, false success, text mutation, redundant discovery
       .failures.some((item) => item.rule === "exact_text"), true, id);
   }
 
-  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "explicit-topic-exact-reply", "precommit-exact-reply-safe-retry",
+  for (const id of ["exact-text-punctuation", "exact-reply-no-help", "explicit-topic-exact-reply", "exact-reply-nonblocking-freshness-notice",
     "tool-sourced-verbatim-thread-reply", "tool-sourced-verbatim-message-reply"]) {
     const failedWrite = structuredClone(byId[id].trace);
     failedWrite.find((event) => event.action === "provider_write").exit_code = 9;

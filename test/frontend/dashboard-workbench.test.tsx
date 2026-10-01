@@ -657,7 +657,7 @@ describe("Agent-centric dashboard workbench", () => {
       }));
       render(<App />);
       await screen.findByRole("heading", { level: 1, name: "Builder" });
-      expect(screen.getByText(/^Readiness unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
+      expect(await screen.findByText(/^Readiness unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
       await userEvent.click(screen.getByRole("tab", { name: "概览" }));
       expect(screen.getByText(/^unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
       await userEvent.click(screen.getByRole("tab", { name: "配置" }));

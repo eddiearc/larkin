@@ -3,7 +3,7 @@ import fs from "node:fs";
 export function loadProtectedMessageRecallEval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "protected-message-recall" || value.version !== 1) throw new Error("eval dataset/version mismatch");
-  if (value.standing_prompt_version !== "larkin-standing-v33") throw new Error("standing prompt version mismatch");
+  if (value.standing_prompt_version !== "larkin-standing-v34") throw new Error("standing prompt version mismatch");
   if (value.grader?.name !== "protected-message-recall-provider-trace-grader" || value.grader.version !== 1) {
     throw new Error("grader metadata mismatch");
   }
@@ -64,8 +64,8 @@ export function gradeProtectedRecallTrace(trace, scenario) {
     const lookupIndex = calls.indexOf(lookups[0]);
     const probeIndex = calls.indexOf(probes[0]);
     const deleteIndex = calls.indexOf(deletion);
-    if (!(lookupIndex >= 0 && probeIndex > lookupIndex && deleteIndex > probeIndex)) {
-      failures.push("provider delete did not follow ownership lookup and freshness probe");
+    if (!(lookupIndex >= 0 && deleteIndex > lookupIndex && probeIndex > deleteIndex)) {
+      failures.push("provider delete did not follow ownership lookup before its post-write freshness observation");
     }
   }
   return { passed: failures.length === 0, failures };

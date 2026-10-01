@@ -41,7 +41,7 @@ function correctionBoundaryIssue(scenario) {
 export function loadAgentExperienceV6Eval(file) {
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (value.dataset !== "agent-experience-v6" || value.version !== 6) throw new Error("eval dataset/version mismatch");
-  if (value.model?.standing_prompt_version !== "larkin-standing-v33") throw new Error("standing prompt version mismatch");
+  if (value.model?.standing_prompt_version !== "larkin-standing-v34") throw new Error("standing prompt version mismatch");
   if (value.session?.initial_turns !== 0) throw new Error("eval scenarios must start from a fresh empty session");
   if (value.grader?.name !== "agent-experience-v6-trace-grader" || value.grader.version !== 6 || value.grader.threshold !== 1) {
     throw new Error("eval grader metadata mismatch");
@@ -82,10 +82,9 @@ export function loadAgentExperienceV6Eval(file) {
     const twoStage = scenario.expected.two_stage_poll_silence;
     if (scenario.id === "poll-only-silent-phase-then-next-trigger-work"
       && (!twoStage || typeof twoStage !== "object" || Array.isArray(twoStage)
-        || Object.keys(twoStage).length !== 5
+        || Object.keys(twoStage).length !== 4
         || [twoStage.phase_a_poll_command, twoStage.phase_b_poll_command, twoStage.phase_b_read_command,
-          twoStage.phase_b_write_command].some((command) => typeof command !== "string" || !command)
-        || twoStage.allow_identical_precommit_freshness_conflict_retry !== true)) {
+          twoStage.phase_b_write_command].some((command) => typeof command !== "string" || !command))) {
       throw new Error(`${label}.expected.two_stage_poll_silence contract is invalid`);
     }
     const reminderPayload = scenario.expected.reminder_final_payload;
@@ -210,10 +209,9 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     const phaseBPoll = events[2];
     const phaseBRead = events[3];
     const phaseBWrite = events.at(-1);
-    const retry = events.length === 6 ? events[4] : null;
     const phaseAPollId = phaseAPoll?.message_id;
     const phaseBPollId = phaseBPoll?.message_id;
-    const commonShape = [5, 6].includes(events.length)
+    const commonShape = events.length === 5
       && finalIndexes.length === 1 && finalIndexes[0] === 1
       && phaseAPoll?.action === "tool" && phaseAPoll.command === expected.phase_a_poll_command
       && phaseAPoll.exit_code === 0 && typeof phaseAPollId === "string" && /^om_[A-Za-z0-9_]+$/.test(phaseAPollId)
@@ -227,13 +225,7 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
       && phaseBWrite?.action === "provider_write" && phaseBWrite.command === expected.phase_b_write_command
       && phaseBWrite.message_id === phaseBPollId
       && String(phaseBWrite.command).includes(`--message-id ${phaseBPollId} `);
-    const retryShape = events.length === 5
-      ? retry === null
-      : expected.allow_identical_precommit_freshness_conflict_retry === true
-        && retry?.action === "tool" && retry.command === phaseBWrite?.command
-        && Number.isInteger(retry.exit_code) && retry.exit_code !== 0
-        && retry.subtype === "freshness_conflict" && retry.provider_reached === false;
-    if (!commonShape || !retryShape) {
+    if (!commonShape) {
       fail("two_stage_poll_silence", "phase A did not stop immediately after its sole poll, or phase B did not begin with a fresh poll before its bounded read/reply work");
     }
   }
@@ -406,22 +398,6 @@ export function gradeAgentExperienceV6Trace(scenario, trace) {
     const pollIndex = events.findIndex((event) => event.action === "tool" && String(event.command || "").startsWith("larkin inbox poll "));
     const writeIndex = events.findIndex((event) => event.action === "provider_write");
     if (pollIndex < 0 || writeIndex < 0 || pollIndex >= writeIndex) fail("poll_before_write", `${pollIndex} !< ${writeIndex}`);
-  }
-  if (scenario.expected.precommit_retry) {
-    const expected = scenario.expected.precommit_retry;
-    const precommitAttempts = events
-      .map((event, index) => ({ event, index }))
-      .filter(({ event }) => event.action === "tool" && typeof event.subtype === "string");
-    const precommit = precommitAttempts[0]?.event;
-    const precommitIndex = precommitAttempts[0]?.index ?? -1;
-    const writeIndex = events.findIndex((event) => event.action === "provider_write");
-    const allowed = Array.isArray(expected.allowed_subtypes) ? expected.allowed_subtypes : [];
-    if (precommitAttempts.length !== 1 || !precommit || precommitIndex >= writeIndex
-      || !Number.isInteger(precommit.exit_code) || precommit.exit_code === 0
-      || !allowed.includes(precommit.subtype) || precommit.provider_reached !== expected.provider_reached
-      || (expected.same_command === true && precommit.command !== writes[0]?.command)) {
-      fail("safe_precommit_retry", "retry was not proven pre-commit with the same canonical command");
-    }
   }
   if (scenario.expected.stay_silent === true && events.length !== 0) fail("exclusive_silence", "excluded Agent acted");
   if (scenario.expected.committed_result) {

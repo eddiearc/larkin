@@ -212,7 +212,7 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (USER_ONLY_COMMANDS.has(command)) return { kind: "denied", reason: `${command} 是 user-only identity 域` };
   if (hasCanonicalUnprotectedCommandPath(argv)) return { kind: "passthrough" };
   const protectedPaths = protectedOperations(argv);
-  if (command === "larkin-draft") return { kind: "denied", reason: "larkin-draft 已移除；freshness conflict 后请重新判断并执行普通写命令" };
+  if (command === "larkin-draft") return { kind: "denied", reason: "larkin-draft 已移除；请使用受 Runtime 身份与目标绑定保护的普通写命令" };
   if (exactPath(parsed.commandArgv, ["im", "+messages-send"])) return uniqueProtectedOperation(protectedPaths, "send")
     ? (parsed.flags.has("--thread-id")
       ? { kind: "denied", reason: "+messages-send 不支持 --thread-id；线程内写入请使用 +messages-reply --message-id ... --reply-in-thread" }
@@ -243,21 +243,21 @@ export function classifyLarkCliCommand(argv: readonly string[]): LarkCliCommandD
   if (exactPath(parsed.commandArgv, ["im", "messages", "create"]) || exactPath(parsed.commandArgv, ["im", "messages", "reply"])) {
     const expected = parsed.commandArgv[2] === "create" ? "raw-create" : "raw-reply";
     return uniqueProtectedOperation(protectedPaths, expected)
-      ? { kind: "denied", reason: "该原始 IM 写入口会旁路 target freshness；请使用 +messages-send/+messages-reply" }
+      ? { kind: "denied", reason: "该原始 IM 写入口会旁路 Runtime target binding；请使用 +messages-send/+messages-reply" }
       : noncanonicalProtectedDecision();
   }
   if (["forward", "merge_forward", "urgent_phone", "urgent_sms"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "messages", operation]))) {
     const expected = `raw-${parsed.commandArgv[2]}` as ProtectedOperation;
     return uniqueProtectedOperation(protectedPaths, expected)
-      ? { kind: "denied", reason: "该 IM 写入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" }
+      ? { kind: "denied", reason: "该 IM 写入口无法建立 Runtime target binding；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" }
       : noncanonicalProtectedDecision();
   }
   if (["forward", "merge_forward"]
     .some((operation) => exactPath(parsed.commandArgv, ["im", "threads", operation]))) {
     const expected = `thread-${parsed.commandArgv[2]}` as ProtectedOperation;
     return uniqueProtectedOperation(protectedPaths, expected)
-      ? { kind: "denied", reason: "该 IM forwarding 入口无法建立 target freshness；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" }
+      ? { kind: "denied", reason: "该 IM forwarding 入口无法建立 Runtime target binding；请先用 larkin inbox poll 读取目标，再使用受保护的 +messages-send/+messages-reply" }
       : noncanonicalProtectedDecision();
   }
   if (command === "api") return uniqueProtectedOperation(protectedPaths, "api")
@@ -380,13 +380,7 @@ function runCommentReply(
   const targetKey = store.resolveInboxMessageTarget(input.messageId);
   const target = targetKey ? parseDocumentCommentTarget(targetKey) : null;
   if (!target) throw new Error("comment reply 无法从当前 Agent Inbox 绑定文档评论 locator；先 poll 该消息且不得跨 Agent/评论回复");
-  if (!store.inboxTargetIsFresh(targetKey!)) {
-    io.stderr(`${JSON.stringify({
-      larkin_notice: "freshness",
-      target: targetKey,
-      hint: "Newer Inbox messages exist. Re-read the document comment context with lark-cli before sending a follow-up. Do not resend the same content.",
-    })}\n`);
-  }
+  const staleCommentTarget = !store.inboxTargetIsFresh(targetKey!);
   const digest = createHash("sha256").update(input.text).digest("hex");
   const ledgerKey = `${input.messageId}::${digest}`;
   const claim = store.mutateJson<CommentReplyLedger, "ready" | "sent" | "ambiguous">(
@@ -455,6 +449,13 @@ function runCommentReply(
     });
   }
   const committedWrite = !result.error && result.status === 0;
+  if (committedWrite && staleCommentTarget) {
+    io.stderr(`${JSON.stringify({
+      larkin_notice: "freshness",
+      target: targetKey,
+      hint: "Newer Inbox messages exist. Re-read the document comment context with larkin before sending a follow-up. Do not resend the same content.",
+    })}\n`);
+  }
   const currentReminder = committedWrite
     ? store.resolveCurrentReminders().filter((reminder) => reminder.deliveryTarget === targetKey).at(-1) ?? null
     : null;
@@ -488,13 +489,13 @@ function definitiveProviderRejection(result: SpawnSyncReturns<string>): boolean 
 }
 
 function callNative(
-  argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies,
+  argv: readonly string[], env: Env, io: LarkCliIo, dependencies: LarkCliLauncherDependencies, timeoutMs?: number,
 ): SpawnSyncReturns<string> {
   const native = dependencies.nativeCommand;
   const result = (dependencies.spawn ?? spawnSync)(
     native?.command ?? resolveOfficialLarkCli({ spawn: dependencies.spawn, env }).command,
     [...(native?.argsPrefix ?? []), ...argv],
-    { encoding: "utf8", env: { ...process.env, ...env } },
+    { encoding: "utf8", env: { ...process.env, ...env }, ...(timeoutMs ? { timeout: timeoutMs } : {}) },
   ) as SpawnSyncReturns<string>;
   return result;
 }
@@ -551,14 +552,14 @@ function guardedTarget(decision: Extract<LarkCliCommandDecision, { kind: "guarde
     const chatId = policyFlagValue(argv, "--chat-id");
     const userId = policyFlagValue(argv, "--user-id");
     if (!chatId || userId) {
-      throw new Error("Runtime +messages-send 必须只使用 Inbox 已确认的 --chat-id；--user-id 无法建立 freshness target");
+      throw new Error("Runtime +messages-send 必须使用已确认的 --chat-id；--user-id 无法建立受限 target binding");
     }
     return feishuImTarget(`chat:${chatId}`);
   }
   const messageId = policyFlagValue(argv, "--message-id");
   if (!messageId) throw new Error(`${decision.operation} 写入缺少 --message-id`);
   const target = store.resolveInboxMessageTarget(messageId);
-  if (!target) throw new Error(`无法从 Inbox 状态确定 ${messageId} 的 target；先 poll 对应消息，禁止旁路 freshness`);
+  if (!target) throw new Error(`无法从 Inbox 状态确定 ${messageId} 的 target；先 poll 对应消息，禁止旁路 target binding`);
   return feishuImTarget(target);
 }
 
@@ -910,7 +911,7 @@ function emitFreshnessNotice(io: LarkCliIo, input: {
     target: input.target,
     newer_messages: input.messages.length,
     latest_message_ids: input.messages.map((message) => message.message_id),
-    hint: "Newer messages exist. Re-read this target with lark-cli and send a short follow-up only if they change your answer. Do not resend the same content.",
+    hint: "Newer messages exist. Re-read this target with larkin and send a short follow-up only if they change your answer. Do not resend the same content.",
   })}\n`);
 }
 
@@ -918,6 +919,8 @@ function freshnessGeneration(env: Env): string {
   return typeof env.LARKIN_RUNTIME_OBSERVATION_GENERATION === "string" && env.LARKIN_RUNTIME_OBSERVATION_GENERATION
     ? env.LARKIN_RUNTIME_OBSERVATION_GENERATION : "external";
 }
+
+const FRESHNESS_PROBE_TIMEOUT_MS = 2_000;
 
 function emitSoftFreshnessNotice(
   target: FreshnessTarget,
@@ -933,7 +936,7 @@ function emitSoftFreshnessNotice(
     const gated = evaluateFreshness({
       seen,
       adapter: feishuImFreshnessAdapter,
-      probe: () => parseHistory(callNative(probeArgv(target), env, io, dependencies), target, true),
+      probe: () => parseHistory(callNative(probeArgv(target), env, io, dependencies, FRESHNESS_PROBE_TIMEOUT_MS), target, true),
     });
     if (gated.status !== "conflict") return;
     store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, freshnessGeneration(env));
@@ -1089,20 +1092,6 @@ function writeResponseMessage(result: SpawnSyncReturns<string>): FeishuImMessage
   } catch { return null; }
 }
 
-function observeSuccessfulWrite(
-  result: SpawnSyncReturns<string>, target: FreshnessTarget, targetKey: string, store: AgentStateStore, generation: string,
-): boolean {
-  if (result.error || result.status !== 0) return false;
-  try {
-    const candidate = writeResponseMessage(result);
-    if (!candidate) return false;
-    const snapshot = parseHistory({ ...result, stdout: JSON.stringify({ ok: true, data: { messages: [candidate] } }) }, target);
-    const cursor = feishuImFreshnessAdapter.cursor(snapshot);
-    if (cursor) store.mergeFreshnessCursor(targetKey, cursor, mergeFeishuImCursor, generation);
-    return cursor !== null;
-  } catch { return false; }
-}
-
 function emitNativeResult(result: SpawnSyncReturns<string>, io: LarkCliIo): number {
   if (result.stdout) io.stdout(result.stdout);
   if (result.stderr) io.stderr(result.stderr);
@@ -1142,36 +1131,6 @@ function emitDuplicatedRecall(io: LarkCliIo, messageId: string, target: string):
     duplicate: true,
     message_id: messageId,
     target,
-  })}\n`);
-  return 0;
-}
-
-function emitCommittedUnverified(
-  result: SpawnSyncReturns<string>,
-  io: LarkCliIo,
-  input: { target: string; reason: string; current?: FeishuImCursor; messages?: FeishuImMessage[] },
-): number {
-  let providerResponse: unknown;
-  try { providerResponse = JSON.parse(result.stdout || ""); }
-  catch { providerResponse = { raw_stdout: result.stdout || "" }; }
-  const providerDocument = providerResponse && typeof providerResponse === "object" && !Array.isArray(providerResponse)
-    ? providerResponse as Record<string, unknown>
-    : { provider_response: providerResponse };
-  io.stdout(`${JSON.stringify({
-    ...providerDocument,
-    ok: true,
-    committed: true,
-    verified: false,
-    cursor_advanced: false,
-    target: input.target,
-    verification: {
-      status: "unverified",
-      subtype: "post_write_unverified",
-      message: input.reason,
-      ...(input.current ? { current_cursor: input.current } : {}),
-      ...(input.messages ? { unseen_messages: input.messages } : {}),
-    },
-    ...(result.stderr ? { provider_stderr_present: true } : {}),
   })}\n`);
   return 0;
 }

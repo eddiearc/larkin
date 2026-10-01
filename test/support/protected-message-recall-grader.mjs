@@ -64,8 +64,8 @@ export function gradeProtectedRecallTrace(trace, scenario) {
     const lookupIndex = calls.indexOf(lookups[0]);
     const probeIndex = calls.indexOf(probes[0]);
     const deleteIndex = calls.indexOf(deletion);
-    if (!(lookupIndex >= 0 && probeIndex > lookupIndex && deleteIndex > probeIndex)) {
-      failures.push("provider delete did not follow ownership lookup and freshness probe");
+    if (!(lookupIndex >= 0 && deleteIndex > lookupIndex && probeIndex > deleteIndex)) {
+      failures.push("provider delete did not follow ownership lookup before its post-write freshness observation");
     }
   }
   return { passed: failures.length === 0, failures };

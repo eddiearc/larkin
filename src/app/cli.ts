@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_CLI_USAGE } from "../agent/config-cli-contract.js";
 import { internalCommandSpec, type InternalMode } from "./internal-command.js";
 import { packageVersion } from "../platform/build-info.js";
+import { isLarkinRuntimeContext } from "./runtime-context.js";
 
 const command = process.argv[2] || "help";
 let rest = process.argv.slice(3);
@@ -42,11 +43,15 @@ const routes: Record<string, Route> = {
 };
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
   && process.env.LARKIN_AGENT_ID.trim().length > 0;
-const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment"]);
-if (!runtimeAgentAuthority && runtimeScopedCommands.has(command)) {
+const runtimeContext = isLarkinRuntimeContext(process.env);
+const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment", "config"]);
+const missingRuntimeAuthority = (name: string): never => {
   console.error(`larkin: Runtime Agent authority is missing for "${command}" (LARKIN_AGENT_ID is required). `
-    + "Run this command from the managed Runtime; it will not fall back to the active Agent.");
+    + `Runtime context was detected (${name}); it will not fall back to the active Agent.`);
   process.exit(2);
+};
+if (!runtimeAgentAuthority && runtimeScopedCommands.has(command)) {
+  missingRuntimeAuthority("agent-scoped command");
 }
 const runtimeAgentCommand = runtimeAgentAuthority
   && ["inbox", "reminder", "interaction", "profile", "config"].includes(command);
@@ -123,6 +128,7 @@ const retiredPublicCommands = new Set(["pi-auth", "pi-distribution"]);
 const wantsHelp = command === "help" || command === "--help" || command === "-h"
   || (!runtimeAgentAuthority && command.startsWith("-"));
 if (!routes[command] && !wantsHelp && !retiredPublicCommands.has(command)) {
+  if (runtimeContext && !runtimeAgentAuthority) missingRuntimeAuthority("Runtime marker");
   routes[command] = runtimeAgentAuthority ? ["lark-cli", command] : ["lark", command];
 }
 

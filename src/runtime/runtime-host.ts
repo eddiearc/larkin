@@ -419,6 +419,7 @@ export function createRuntimeHost(options: {
   stateStoreFor?(agentId: string): DeliveryStateStore;
   assertOfficialCliReady?(config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): void | Promise<void>;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
+  turnEndRetryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number };
   compactTimeoutMs?: number;
   telemetry?: TelemetryRuntime;
 }): RuntimeHost {
@@ -434,13 +435,18 @@ export function createRuntimeHost(options: {
     maxAttempts: options.retryPolicy?.maxAttempts ?? 6,
     stableWindowMs: options.retryPolicy?.stableWindowMs ?? 30_000,
   };
-  const TURN_END_RETRY_MAX_ATTEMPTS = 3;
+  const turnEndRetryPolicy = {
+    baseDelayMs: options.turnEndRetryPolicy?.baseDelayMs ?? 1_000,
+    maxDelayMs: options.turnEndRetryPolicy?.maxDelayMs ?? 30_000,
+    maxAttempts: options.turnEndRetryPolicy?.maxAttempts ?? 3,
+  };
   const emit = (event: RuntimeHostEvent): void => {
     if (event.type === "delivery") telemetry?.delivery(event.agentId, event.messageId, event.status);
     for (const listener of listeners) listener(event);
   };
   const runtimeEnv = (config: AgentRuntimeConfig, generation?: string): NodeJS.ProcessEnv => {
     const base: NodeJS.ProcessEnv = {
+      LARKIN_RUNTIME: "1",
       LARKIN_AGENT_ID: config.agentId,
     ...(generation ? {
       LARKIN_RUNTIME_OBSERVATION_GENERATION: generation,
@@ -586,7 +592,7 @@ export function createRuntimeHost(options: {
 
   const TURN_END_RETRY_REASON = "runtime turn ended before Inbox consumption was observed";
   const turnEndRetryDelayMs = (attempt: number): number =>
-    Math.min(retryPolicy.maxDelayMs, retryPolicy.baseDelayMs * 2 ** (attempt - 1));
+    Math.min(turnEndRetryPolicy.maxDelayMs, turnEndRetryPolicy.baseDelayMs * 2 ** (attempt - 1));
   const isRetryDue = (record: DeliveryRecord): boolean =>
     !record.retryNotBefore || Number.isNaN(Date.parse(record.retryNotBefore)) || Date.parse(record.retryNotBefore) <= Date.now();
   const schedulePendingRetry = (agent: ManagedAgent): void => {
@@ -631,8 +637,8 @@ export function createRuntimeHost(options: {
       for (const record of agent.records.values()) {
         if (record.status !== "accepted") continue;
         const attempts = record.turnEndRetryAttempts ?? 0;
-        if (attempts >= TURN_END_RETRY_MAX_ATTEMPTS) {
-          record.reason = `turn-end redelivery exhausted after ${TURN_END_RETRY_MAX_ATTEMPTS} attempts`;
+        if (attempts >= turnEndRetryPolicy.maxAttempts) {
+          record.reason = `turn-end redelivery exhausted after ${turnEndRetryPolicy.maxAttempts} attempts`;
           record.retryable = false;
           const terminal = setRecord(agent, record, "error");
           emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: terminal.deliveryId,
@@ -677,9 +683,9 @@ export function createRuntimeHost(options: {
             return candidate;
           }
           const attempts = candidate.turnEndRetryAttempts ?? 0;
-          if (attempts >= TURN_END_RETRY_MAX_ATTEMPTS) {
+          if (attempts >= turnEndRetryPolicy.maxAttempts) {
             const terminal: DeliveryRecord = { ...candidate, status: "error", updatedAt: now(),
-              reason: `turn-end redelivery exhausted after ${TURN_END_RETRY_MAX_ATTEMPTS} attempts`,
+              reason: `turn-end redelivery exhausted after ${turnEndRetryPolicy.maxAttempts} attempts`,
               retryable: false };
             changed = true;
             pendingUpdates.push(terminal);
@@ -1676,6 +1682,8 @@ export function createRuntimeHost(options: {
         if (pendingAfterCreate > 0) {
           throw new RuntimeSessionResetError("inbox_backlog", `Agent ${agentId} received Inbox backlog during reset`, pendingAfterCreate);
         }
+        if (agent.deliveryRetryTimer) clearTimeout(agent.deliveryRetryTimer);
+        agent.deliveryRetryTimer = null;
         agent.generation += 1;
         agent.launchId = crypto.randomUUID();
         agent.config.sessionId = null;

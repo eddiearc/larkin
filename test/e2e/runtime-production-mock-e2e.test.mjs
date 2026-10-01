@@ -587,7 +587,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       stateStoreFor: () => store,
       assertOfficialCliReady: () => {},
       telemetry,
-      retryPolicy: { baseDelayMs: 10, maxDelayMs: 10 },
+      turnEndRetryPolicy: { baseDelayMs: 10, maxDelayMs: 10 },
     });
     const runtimeEvents = [];
     const memberCalls = [];

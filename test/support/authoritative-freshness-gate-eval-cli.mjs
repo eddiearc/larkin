@@ -26,6 +26,6 @@ if (!previous.some((event) => event.action === "freshness_notice")) {
     larkin_notice: "freshness",
     target: "feishu.im/chat/oc_eval_freshness",
     newer_messages: 1,
-    hint: "Re-read with lark-cli before sending a follow-up. Do not resend the same content.",
+    hint: "Re-read with larkin before sending a follow-up. Do not resend the same content.",
   })}\n`);
 }

@@ -330,6 +330,7 @@ test("direct Bot-only profile materialization keeps the secret local and never c
     assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), false);
     const shim = fs.readFileSync(runtimeShim, "utf8");
     assert.match(shim, /export LARKIN_AGENT_ID='cli_fixtureA'/);
+    assert.match(shim, /export LARKIN_RUNTIME=1/);
     assert.match(shim, new RegExp(`export LARKIN_STATE_DIR='${stateDir.replaceAll("/", "\\/")}'`));
     assert.match(shim, new RegExp(`export LARKIN_CONFIG_DIR='${claim.targetRoot.replaceAll("/", "\\/")}'`));
   } finally {

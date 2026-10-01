@@ -137,6 +137,22 @@ test("document comment freshness is an advisory notice and never blocks the prov
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("document comment freshness notice is emitted only after a successful provider write", () => {
+  const f = fixture();
+  try {
+    const messageId = `doc_comment_${"n".repeat(32)}`;
+    const target = "document-comment:docx:doc_tokenN2:comment_N2:in-thread";
+    f.store.appendInboxOnce({ message_id: messageId, target, kind: "document_comment", content: "older" });
+    f.store.appendInboxOnce({ message_id: `doc_comment_${"o".repeat(32)}`, target, kind: "document_comment", content: "newer" });
+    f.store.pollInbox({ target, limit: 1 });
+    f.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: "provider rejected\n", error: undefined });
+    const result = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]);
+    assert.equal(result.code, 7);
+    assert.doesNotMatch(result.stderr, /"larkin_notice":"freshness"/);
+    assert.equal(f.calls.length, 1);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("whole-document Inbox locators route same-locator follow-ups through create_v2", () => {
   const f = fixture();
   try {
@@ -538,6 +554,9 @@ test("protected recall commits despite stale context and emits an advisory notic
     assert.match(result.stderr, /"larkin_notice":"freshness"/);
     assert.ok(f.calls.some((call) => call.args[2] === "messages" && call.args[3] === "delete"));
     assert.equal(f.store.readJson("freshnessState", {}).message_recalls.om_recall.status, "deleted");
+    assert.deepEqual(gradeProtectedRecallTrace({
+      exitCode: result.code, messageId: "om_recall", calls: nativeTrace(f.calls),
+    }, recallScenario("freshness-conflict")), { passed: true, failures: [] });
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

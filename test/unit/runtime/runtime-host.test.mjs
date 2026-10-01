@@ -1737,7 +1737,7 @@ test("turn-end redelivery is capped and exponentially backed off when Inbox cons
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(),
-    retryPolicy: { baseDelayMs: 2, maxDelayMs: 4 },
+    turnEndRetryPolicy: { baseDelayMs: 2, maxDelayMs: 4 },
   });
   host.subscribe((event) => events.push(event));
   try {
@@ -1763,6 +1763,53 @@ test("turn-end redelivery is capped and exponentially backed off when Inbox cons
     assert.ok(exhausted, JSON.stringify(events));
   } finally {
     await host.shutdown("turn-end redelivery cap test complete");
+  }
+});
+
+test("turn-end redelivery persists its backoff and a restart waits for the same deadline", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-turn-end-restart-"));
+  const agentId = "cli_turnEndRestartA1";
+  const store = createAgentStateStore(root, agentId);
+  const config = { agentId, name: "turn-end-restart", runtime: "codex", model: "g", workspaceDir: "/tmp", stateDir: root };
+  const firstSession = new FakeSession();
+  const first = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return firstSession; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => store,
+    turnEndRetryPolicy: { baseDelayMs: 120, maxDelayMs: 120, maxAttempts: 3 },
+  });
+  try {
+    await first.start([config]);
+    store.appendNdjson("inbox", { message_id: "om_turn_end_restart", chat_id: "oc_turn_end_restart", content: "retry me" });
+    const receipt = await first.deliver(agentId, { message_id: "om_turn_end_restart", chat_id: "oc_turn_end_restart", content: "retry me" });
+    firstSession.emit({ type: "turn-start", turnId: "turn-end-restart" });
+    firstSession.emit({ type: "turn-end", turnId: "turn-end-restart" });
+    const deferred = store.readJson("runtimeDeliveries", { records: [] }).records.find((record) => record.deliveryId === receipt.deliveryId);
+    assert.equal(deferred.status, "pending");
+    assert.equal(deferred.turnEndRetryAttempts, 1);
+    assert.ok(Date.parse(deferred.retryNotBefore) > Date.now());
+    await first.shutdown("restart during turn-end backoff");
+
+    const restartedSession = new FakeSession();
+    const restarted = createRuntimeHost({
+      adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return restartedSession; } }),
+      promptBuilder: new ContextPromptBuilder(),
+      stateStoreFor: () => store,
+      turnEndRetryPolicy: { baseDelayMs: 120, maxDelayMs: 120, maxAttempts: 3 },
+    });
+    try {
+      await restarted.start([config]);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(restartedSession.prompts.length, 0, "restart must retain the persisted retryNotBefore deadline");
+      await waitForCondition(() => restartedSession.prompts.length === 1);
+      assert.equal(restartedSession.prompts[0].deliveryId, receipt.deliveryId);
+      assert.equal(restartedSession.prompts[0].attempt, 1);
+    } finally {
+      await restarted.shutdown("turn-end restart test complete");
+    }
+  } finally {
+    await first.shutdown("turn-end restart fixture cleanup").catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

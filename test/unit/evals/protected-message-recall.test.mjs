@@ -22,10 +22,10 @@ test("protected recall eval is versioned and covers positive, negative, conflict
     messageId: "om_recall",
     calls: [
       ["im", "+messages-mget", "--message-ids", "om_recall", "--no-reactions", "--json", "--as", "bot"],
+      ["im", "messages", "delete", "--message-id", "om_recall", "--yes", "--json", "--as", "bot"],
       ["api", "GET", "/open-apis/im/v1/messages", "--params", JSON.stringify({
         container_id_type: "chat", container_id: "oc_recall", sort_type: "ByCreateTimeDesc", page_size: 20,
       }), "--as", "bot"],
-      ["im", "messages", "delete", "--message-id", "om_recall", "--yes", "--json", "--as", "bot"],
     ],
   };
   assert.deepEqual(gradeProtectedRecallTrace(valid, scenario), { passed: true, failures: [] });

@@ -270,6 +270,7 @@ function expectedRuntimeCommandShim(agent: Pick<RuntimeAgentConfig, "agentId" | 
   const configDir = path.resolve(stateDir, "../../..");
   return [
     "#!/bin/sh",
+    "export LARKIN_RUNTIME=1",
     `export LARKIN_AGENT_ID=${shellQuote(agent.agentId)}`,
     `export LARKIN_STATE_DIR=${shellQuote(stateDir)}`,
     `export LARKIN_CONFIG_DIR=${shellQuote(configDir)}`,

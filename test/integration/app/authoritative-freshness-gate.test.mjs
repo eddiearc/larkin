@@ -3,11 +3,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const LARK_CLI = path.join(ROOT, "dist/app/lark-cli.mjs");
 const PROVIDER = path.join(ROOT, "test/support/runtime-agent-interface-v2-provider.mjs");
+const stateModule = await import(pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href);
 
 function writePrivate(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -19,6 +21,7 @@ function fixture() {
   const agentId = "cli_softFreshnessA1";
   const stateDir = path.join(root, "state", "agents", agentId);
   const callsFile = path.join(root, "provider-calls.ndjson");
+  const store = stateModule.createAgentStateStore(root, agentId);
   writePrivate(path.join(root, "config.json"), `${JSON.stringify({
     version: 4, serverId: "soft-freshness", mentionPolicy: "require", activeAgent: agentId,
     agents: { [agentId]: { runtime: "pi", model: "default" } },
@@ -51,6 +54,7 @@ if [ "$1" = "--version" ]; then printf '1.0.80\\n'; exit 0; fi
 if [ "$1" = "config" ] && [ "$2" = "bind" ] && [ "$3" = "--help" ]; then
   printf '%s\\n' 'Usage: lark-cli config bind --source lark-channel --identity bot-only'; exit 0
 fi
+export LARKIN_TEST_PROVIDER_PARENT_PID="$PPID"
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
 `, { mode: 0o700 });
   fs.symlinkSync(executable, path.join(bin, "lark-cli"));
@@ -75,12 +79,21 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
   const calls = () => fs.existsSync(callsFile)
     ? fs.readFileSync(callsFile, "utf8").split("\n").filter(Boolean).map(JSON.parse)
     : [];
-  return { root, run, calls };
+  return { root, run, calls, store };
 }
 
 test("stale context emits a soft stderr notice after the provider send succeeds", () => {
   const f = fixture();
   try {
+    writePrivate(path.join(f.root, "state", "agents", "cli_softFreshnessA1", "freshness-state.json"), JSON.stringify({
+      version: 1,
+      cursors: {
+        "feishu.im/chat/oc_soft": {
+          generation: "external",
+          cursor: { schema: 1, revisionTime: "99", messageIds: ["om_seen"] },
+        },
+      },
+    }));
     const stale = JSON.stringify({ ok: true, identity: "bot", data: { messages: [{
       message_id: "om_newer", chat_id: "oc_soft", create_time: "100",
     }] } });
@@ -97,7 +110,38 @@ test("stale context emits a soft stderr notice after the provider send succeeds"
     assert.equal(notice.larkin_notice, "freshness");
     assert.equal(notice.target, "feishu.im/chat/oc_soft");
     assert.deepEqual(notice.latest_message_ids, ["om_newer"]);
-    assert.match(notice.hint, /Re-read.*lark-cli/);
+    assert.match(notice.hint, /Re-read.*larkin/);
+    assert.deepEqual(f.calls().map((call) => call.argv[1]), ["+messages-send", "GET"]);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a current freshness cursor does not emit a stale-context notice", () => {
+  const f = fixture();
+  try {
+    writePrivate(path.join(f.root, "state", "agents", "cli_softFreshnessA1", "freshness-state.json"), JSON.stringify({
+      version: 1,
+      cursors: {
+        "feishu.im/chat/oc_current": {
+          generation: "external",
+          cursor: { schema: 1, revisionTime: "100", messageIds: ["om_current"] },
+        },
+      },
+    }));
+    const history = JSON.stringify({ ok: true, identity: "bot", data: { messages: [{
+      message_id: "om_current", chat_id: "oc_current", create_time: "100",
+    }] } });
+    const write = JSON.stringify({ ok: true, data: {
+      message_id: "om_own", chat_id: "oc_current", create_time: "101",
+    } });
+    const result = f.run(["im", "+messages-send", "--chat-id", "oc_current", "--text", "answer"], {
+      LARKIN_TEST_PROVIDER_HISTORY: history,
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: write,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, write);
+    assert.doesNotMatch(result.stderr, /"larkin_notice":"freshness"/);
     assert.deepEqual(f.calls().map((call) => call.argv[1]), ["+messages-send", "GET"]);
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
@@ -118,6 +162,54 @@ test("unavailable freshness observation cannot reject a successful provider writ
     assert.equal(result.stdout, write);
     assert.doesNotMatch(result.stderr, /freshness_(?:conflict|unavailable)/);
     assert.deepEqual(f.calls().map((call) => call.argv[1]), ["+messages-send", "GET"]);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("real shell preserves a quoted multiline reply body as one provider argument", () => {
+  const f = fixture();
+  try {
+    const body = "first line\n\"quoted\" and $literal";
+    f.store.appendInboxOnce({ message_id: "om_shell_reply", chat_id: "oc_shell_reply", content: "question" });
+    f.store.pollInbox({ target: "chat:oc_shell_reply", limit: 1 });
+    const result = f.run(["im", "+messages-reply", "--message-id", "om_shell_reply", "--markdown", body], {
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+        message_id: "om_shell_own", chat_id: "oc_shell_reply", create_time: "101",
+      } }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const reply = f.calls().find((call) => call.argv[1] === "+messages-reply");
+    assert.ok(reply);
+    assert.equal(reply.argv[reply.argv.indexOf("--markdown") + 1], body);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("retrying after a SIGKILL uses the same derived idempotency key and stores no body", () => {
+  const f = fixture();
+  try {
+    const body = "sensitive body that must not be persisted";
+    const first = f.run(["im", "+messages-send", "--chat-id", "oc_killed", "--text", body], {
+      LARKIN_TEST_PROVIDER_WRITE_MODE: "kill-parent",
+    });
+    assert.equal(first.signal, "SIGKILL", first.stderr);
+    const firstCall = f.calls().find((call) => call.argv[1] === "+messages-send");
+    assert.ok(firstCall?.idempotency_key);
+    const statePath = path.join(f.root, "state", "agents", "cli_softFreshnessA1", "freshness-state.json");
+    if (fs.existsSync(statePath)) assert.doesNotMatch(fs.readFileSync(statePath, "utf8"), new RegExp(body));
+
+    const second = f.run(["im", "+messages-send", "--chat-id", "oc_killed", "--text", body], {
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
+        message_id: "om_killed_own", chat_id: "oc_killed", create_time: "101",
+      } }),
+    });
+    assert.equal(second.status, 0, second.stderr);
+    const writes = f.calls().filter((call) => call.argv[1] === "+messages-send");
+    assert.equal(writes.length, 2);
+    assert.equal(writes[0].idempotency_key, writes[1].idempotency_key);
+    if (fs.existsSync(statePath)) assert.doesNotMatch(fs.readFileSync(statePath, "utf8"), new RegExp(body));
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
   }

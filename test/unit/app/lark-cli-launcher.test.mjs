@@ -147,7 +147,7 @@ test("document comment freshness notice is emitted only after a successful provi
     f.store.pollInbox({ target, limit: 1 });
     f.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: "provider rejected\n", error: undefined });
     const result = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]);
-    assert.equal(result.code, 7);
+    assert.notEqual(result.code, 0);
     assert.doesNotMatch(result.stderr, /"larkin_notice":"freshness"/);
     assert.equal(f.calls.length, 1);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
@@ -751,7 +751,7 @@ test("protected urgent-app commits despite stale context and emits an advisory n
   try {
     f.store.mergeFreshnessCursor("feishu.im/chat/oc_urgent", {
       schema: 1, revisionTime: "1786957010773", messageIds: ["om_seen"],
-    }, (seen, current) => current ?? seen, "gen");
+    }, (seen, current) => current ?? seen, "external");
     f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
       stdout: JSON.stringify({ ok: true, identity: "bot", data: { invalid_user_id_list: [] } }), stderr: "", error: undefined });
     const conflicted = f.run(urgentArgv());

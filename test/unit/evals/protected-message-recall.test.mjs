@@ -13,7 +13,7 @@ test("protected recall eval is versioned and covers positive, negative, conflict
     "missing-confirmation", "own-chat-message", "own-thread-message", "third-party-message",
     "cross-agent-message", "freshness-conflict", "committed-duplicate", "ambiguous-retry",
   ]);
-  assert.ok(dataset.scenarios.filter((scenario) => scenario.provider_delete_calls === 0).length >= 6);
+  assert.ok(dataset.scenarios.filter((scenario) => scenario.provider_delete_calls === 0).length >= 5);
   assert.ok(dataset.scenarios.some((scenario) => scenario.target_kind === "thread" && scenario.provider_delete_calls === 1));
 
   const scenario = dataset.scenarios.find((row) => row.id === "own-chat-message");

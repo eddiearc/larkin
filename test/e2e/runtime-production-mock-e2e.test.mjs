@@ -570,7 +570,7 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
 });
 
 for (const runtime of ["codex", "claude", "pi"]) {
-  test(`synthetic Feishu → production HostShell → fake ${runtime} → freshness-gated poll and send`, async () => {
+  test(`synthetic Feishu → production HostShell → fake ${runtime} → freshness-gated poll and send`, { timeout: 15_000 }, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-production-${runtime}-`));
     const agentId = `cli_mock${runtime[0].toUpperCase()}A1`;
     const workspaceDir = path.join(root, "agents", agentId);

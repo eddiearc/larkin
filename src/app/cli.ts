@@ -42,6 +42,12 @@ const routes: Record<string, Route> = {
 };
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
   && process.env.LARKIN_AGENT_ID.trim().length > 0;
+const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment"]);
+if (!runtimeAgentAuthority && runtimeScopedCommands.has(command)) {
+  console.error(`larkin: Runtime Agent authority is missing for "${command}" (LARKIN_AGENT_ID is required). `
+    + "Run this command from the managed Runtime; it will not fall back to the active Agent.");
+  process.exit(2);
+}
 const runtimeAgentCommand = runtimeAgentAuthority
   && ["inbox", "reminder", "interaction", "profile", "config"].includes(command);
 if (runtimeAgentCommand) routes[command] = ["agent-cli", command];

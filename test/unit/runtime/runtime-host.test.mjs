@@ -1727,6 +1727,41 @@ test("session recreation uses bounded exponential retries, reports exhaustion, a
   assert.equal(delayedCreates, 1, "stop cancels a scheduled recreation");
 });
 
+test("turn-end redelivery is capped and exponentially backed off when Inbox consumption never occurs", async () => {
+  const session = new FakeSession();
+  const events = [];
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    retryPolicy: { baseDelayMs: 2, maxDelayMs: 4 },
+  });
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([{ agentId: "cli_turnEndCapA1", name: "turn-end-cap", runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
+    const receipt = await host.deliver("cli_turnEndCapA1", { message_id: "om_turn_end_cap" });
+    assert.equal(receipt.status, "accepted");
+    assert.equal(session.prompts.length, 1);
+
+    for (let retry = 1; retry <= 3; retry += 1) {
+      session.emit({ type: "turn-start", turnId: `turn-end-cap-${retry}` });
+      session.emit({ type: "turn-end", turnId: `turn-end-cap-${retry}` });
+      assert.equal(session.prompts.length, retry, "the retry must wait for its backoff timer");
+      await waitForCondition(() => session.prompts.length === retry + 1);
+      assert.equal(session.prompts.at(-1).attempt, retry);
+    }
+
+    session.emit({ type: "turn-start", turnId: "turn-end-cap-exhausted" });
+    session.emit({ type: "turn-end", turnId: "turn-end-cap-exhausted" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(session.prompts.length, 4, "a fourth turn-end redelivery must be terminal");
+    const exhausted = events.find((event) => event.type === "delivery" && event.deliveryId === receipt.deliveryId
+      && event.status === "error" && /exhausted after 3 attempts/.test(event.reason));
+    assert.ok(exhausted, JSON.stringify(events));
+  } finally {
+    await host.shutdown("turn-end redelivery cap test complete");
+  }
+});
+
 test("accepted persistence racing CLI consumption emits consumed exactly once and not stale accepted", async () => {
   let stored = { version: 1, records: [] };
   let consumeInputId = null;

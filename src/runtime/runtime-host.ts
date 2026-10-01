@@ -52,6 +52,10 @@ export interface DeliveryRecord {
   target?: string;
   wakeReason?: string;
   reason?: string; retryable?: boolean; errorCategory?: string;
+  /** Bounded retries caused specifically by a Runtime turn ending before Inbox consumption. */
+  turnEndRetryAttempts?: number;
+  /** ISO time before which a deferred turn-end redelivery may not be resubmitted. */
+  retryNotBefore?: string;
   /** Bounded provider identity for a terminal auth failure; never a secret. */
   authProvider?: string;
 }
@@ -94,7 +98,7 @@ interface ManagedAgent {
   launchId: string; busy: boolean; submitting: boolean; starting: Promise<RuntimeSession> | null;
   retryAfterSubmit: boolean; retryPendingInFlight: Promise<void> | null;
   records: Map<string, DeliveryRecord>; byMessage: Map<string, string>; generation: number;
-  poller: NodeJS.Timeout | null; retryTimer: NodeJS.Timeout | null; recreateAttempts: number;
+  poller: NodeJS.Timeout | null; retryTimer: NodeJS.Timeout | null; deliveryRetryTimer: NodeJS.Timeout | null; recreateAttempts: number;
   stabilityTimer: NodeJS.Timeout | null; recreateReason: string | null;
   stopped: boolean; disabledReason: string | null; configurationRecovery: Promise<void> | null;
   stateStore?: DeliveryStateStore;
@@ -430,6 +434,7 @@ export function createRuntimeHost(options: {
     maxAttempts: options.retryPolicy?.maxAttempts ?? 6,
     stableWindowMs: options.retryPolicy?.stableWindowMs ?? 30_000,
   };
+  const TURN_END_RETRY_MAX_ATTEMPTS = 3;
   const emit = (event: RuntimeHostEvent): void => {
     if (event.type === "delivery") telemetry?.delivery(event.agentId, event.messageId, event.status);
     for (const listener of listeners) listener(event);
@@ -580,6 +585,25 @@ export function createRuntimeHost(options: {
   };
 
   const TURN_END_RETRY_REASON = "runtime turn ended before Inbox consumption was observed";
+  const turnEndRetryDelayMs = (attempt: number): number =>
+    Math.min(retryPolicy.maxDelayMs, retryPolicy.baseDelayMs * 2 ** (attempt - 1));
+  const isRetryDue = (record: DeliveryRecord): boolean =>
+    !record.retryNotBefore || Number.isNaN(Date.parse(record.retryNotBefore)) || Date.parse(record.retryNotBefore) <= Date.now();
+  const schedulePendingRetry = (agent: ManagedAgent): void => {
+    if (agent.stopped || agent.deliveryRetryTimer) return;
+    const next = [...agent.records.values()]
+      .filter((record) => record.status === "pending" && record.retryNotBefore)
+      .map((record) => Date.parse(record.retryNotBefore!))
+      .filter((at) => Number.isFinite(at))
+      .sort((left, right) => left - right)[0];
+    if (next === undefined) return;
+    const delay = Math.max(0, next - Date.now());
+    agent.deliveryRetryTimer = setTimeout(() => {
+      agent.deliveryRetryTimer = null;
+      void retryPending(agent);
+    }, delay);
+    agent.deliveryRetryTimer.unref?.();
+  };
   const INBOX_UPDATE_PROMOTE_REASON = "accepted inbox_update promoted after Agent became idle";
   const isInboxUpdateKind = (kind: unknown): boolean => kind === "inbox_update" || kind === "inbox-update";
   const agentIsIdleForInboxScan = (agent: ManagedAgent): boolean =>
@@ -606,13 +630,32 @@ export function createRuntimeHost(options: {
       reconcileExternalConsumption(agent);
       for (const record of agent.records.values()) {
         if (record.status !== "accepted") continue;
-        emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: record.deliveryId,
-          messageId: record.messageId, status: "deferred", reason: TURN_END_RETRY_REASON });
+        const attempts = record.turnEndRetryAttempts ?? 0;
+        if (attempts >= TURN_END_RETRY_MAX_ATTEMPTS) {
+          record.reason = `turn-end redelivery exhausted after ${TURN_END_RETRY_MAX_ATTEMPTS} attempts`;
+          record.retryable = false;
+          const terminal = setRecord(agent, record, "error");
+          emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: terminal.deliveryId,
+            messageId: terminal.messageId, status: "error", reason: terminal.reason });
+          continue;
+        }
+        const attempt = attempts + 1;
+        const delay = turnEndRetryDelayMs(attempt);
+        record.turnEndRetryAttempts = attempt;
+        record.retryNotBefore = new Date(Date.now() + delay).toISOString();
+        record.reason = TURN_END_RETRY_REASON;
+        record.retryable = true;
+        record.input = { ...record.input, attempt: (record.input.attempt ?? 0) + 1 };
+        const deferred = setRecord(agent, record, "pending");
+        emit({ type: "delivery", agentId: agent.config.agentId, deliveryId: deferred.deliveryId,
+          messageId: deferred.messageId, status: "deferred", reason: TURN_END_RETRY_REASON });
       }
+      schedulePendingRetry(agent);
       return;
     }
     const consumed: DeliveryRecord[] = [];
     const deferred: DeliveryRecord[] = [];
+    const exhausted: DeliveryRecord[] = [];
     try {
       store.withInboxTransaction(() => {
         const inboxIds = new Set(store.readNdjson!<Record<string, unknown>>("inbox").flatMap((row) =>
@@ -633,8 +676,31 @@ export function createRuntimeHost(options: {
           if (current.status !== "accepted" || candidate.status !== "accepted" || !inboxIds.has(candidate.messageId)) {
             return candidate;
           }
-          const next: DeliveryRecord = { ...candidate, status: "pending", updatedAt: now(),
-            reason: TURN_END_RETRY_REASON, retryable: true };
+          const attempts = candidate.turnEndRetryAttempts ?? 0;
+          if (attempts >= TURN_END_RETRY_MAX_ATTEMPTS) {
+            const terminal: DeliveryRecord = { ...candidate, status: "error", updatedAt: now(),
+              reason: `turn-end redelivery exhausted after ${TURN_END_RETRY_MAX_ATTEMPTS} attempts`,
+              retryable: false };
+            changed = true;
+            pendingUpdates.push(terminal);
+            return terminal;
+          }
+          const attempt = attempts + 1;
+          const delay = turnEndRetryDelayMs(attempt);
+          const staleInput = candidate.input && typeof candidate.input === "object" ? candidate.input : null;
+          const next: DeliveryRecord = {
+            ...candidate,
+            status: "pending",
+            updatedAt: now(),
+            reason: TURN_END_RETRY_REASON,
+            retryable: true,
+            turnEndRetryAttempts: attempt,
+            retryNotBefore: new Date(Date.now() + delay).toISOString(),
+            input: {
+              ...(staleInput ?? { inputId: candidate.deliveryId, deliveryId: candidate.deliveryId, kind: "wake", text: "" }),
+              attempt: (Number.isSafeInteger(staleInput?.attempt) && Number(staleInput?.attempt) >= 0 ? Number(staleInput!.attempt) : 0) + 1,
+            },
+          };
           changed = true;
           pendingUpdates.push(next);
           return next;
@@ -643,7 +709,8 @@ export function createRuntimeHost(options: {
           store.writeJson("runtimeDeliveries", { ...disk, records });
           for (const next of pendingUpdates) {
             agent.records.set(next.deliveryId, next);
-            deferred.push(next);
+            if (next.status === "error") exhausted.push(next);
+            else deferred.push(next);
           }
         }
       });
@@ -654,6 +721,9 @@ export function createRuntimeHost(options: {
     emitConsumed(agent, consumed);
     for (const record of deferred) emit({ type: "delivery", agentId: agent.config.agentId,
       deliveryId: record.deliveryId, messageId: record.messageId, status: "deferred", reason: TURN_END_RETRY_REASON });
+    for (const record of exhausted) emit({ type: "delivery", agentId: agent.config.agentId,
+      deliveryId: record.deliveryId, messageId: record.messageId, status: "error", reason: record.reason });
+    if (deferred.length) schedulePendingRetry(agent);
   };
 
   // Production callers persist the canonical Inbox before calling deliver(). If a
@@ -833,8 +903,10 @@ export function createRuntimeHost(options: {
       const idleGate = proactivelyCompactPiAtIdle(agent, agent.session);
       if (idleGate) await idleGate;
     }
-    const record = [...agent.records.values()].find((candidate) => candidate.status === "pending" || candidate.status === "submitting");
+    const record = [...agent.records.values()].find((candidate) =>
+      (candidate.status === "pending" && isRetryDue(candidate)) || candidate.status === "submitting");
     if (record) await submit(agent, record, false);
+    else schedulePendingRetry(agent);
     })();
     agent.retryPendingInFlight = run;
     try { await run; } finally {
@@ -1511,6 +1583,7 @@ export function createRuntimeHost(options: {
           previous.generation += 1;
           if (previous.poller) clearInterval(previous.poller);
           if (previous.retryTimer) clearTimeout(previous.retryTimer);
+          if (previous.deliveryRetryTimer) clearTimeout(previous.deliveryRetryTimer);
           if (previous.stabilityTimer) clearTimeout(previous.stabilityTimer);
           const previousFailure = currentAuthFailure(previous);
           const scoped = Boolean(previousFailure
@@ -1521,7 +1594,7 @@ export function createRuntimeHost(options: {
             }, previousFailure));
           const candidate: ManagedAgent = {
             ...previous, config, adapter, session, launchId: crypto.randomUUID(), busy: false, submitting: false,
-            starting: null, retryAfterSubmit: false, generation: 0, poller: null, retryTimer: null,
+            starting: null, retryAfterSubmit: false, generation: 0, poller: null, retryTimer: null, deliveryRetryTimer: null,
             recreateAttempts: 0, stabilityTimer: null, recreateReason: null, stopped: false,
             disabledReason: null, configurationRecovery: null,
             authFailureActive: scoped && previous.authFailureActive,
@@ -1833,7 +1906,7 @@ export function createRuntimeHost(options: {
           retryPendingInFlight: null,
           records: new Map(persisted.records.map((record) => [record.deliveryId, record])),
           byMessage: new Map(persisted.records.map((record) => [record.messageId, record.deliveryId])),
-          generation: 0, poller: null, retryTimer: null, recreateAttempts: 0,
+          generation: 0, poller: null, retryTimer: null, deliveryRetryTimer: null, recreateAttempts: 0,
           stabilityTimer: null, recreateReason: null, stopped: false, disabledReason: null,
           configurationRecovery: null, stateStore,
           compactionBreaker: config.runtime === "pi" && stateStore
@@ -1978,6 +2051,7 @@ export function createRuntimeHost(options: {
       const starting = agent.starting;
       if (agent.poller) clearInterval(agent.poller);
       if (agent.retryTimer) clearTimeout(agent.retryTimer);
+      if (agent.deliveryRetryTimer) clearTimeout(agent.deliveryRetryTimer);
       if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
       if (agent.busy) await agent.session?.cancel(reason);
       await agent.session?.close(reason);

@@ -26,6 +26,18 @@ export function isRuntimeReadinessCurrent(
   return observedAt !== null && epoch !== null && observedAt >= epoch;
 }
 
+export function isSessionCurrent(
+  session: { startedAt?: unknown; lastSeenAt?: unknown } | null | undefined,
+  daemonStartedAt: unknown,
+): boolean {
+  // A resumed session deliberately retains its original creation time.  Its
+  // current daemon-epoch proof is the fresh session observation, not that
+  // historic creation timestamp.
+  const epoch = timestamp(daemonStartedAt);
+  const sessionObservedAt = timestamp(session?.lastSeenAt) ?? timestamp(session?.startedAt);
+  return epoch !== null && sessionObservedAt !== null && sessionObservedAt >= epoch;
+}
+
 export function isCurrentOwnedDaemon(daemon: OwnedProcessRecord | null | undefined): boolean {
   return daemon?.state === "owned"
     && Number(daemon.pid) > 0
@@ -59,11 +71,7 @@ export function projectAgentReadiness(input: {
   const daemonOwned = isCurrentOwnedDaemon(input.daemon) && daemonHasAgent(input.daemon, input.agentId);
   const daemonStartedAt = timestamp(input.daemon.startedAt);
   const connectedAt = timestamp(status?.connectedAt);
-  // A resumed session deliberately retains its original creation time.  Its
-  // current daemon-epoch proof is the fresh session observation, not that
-  // historic creation timestamp.
-  const sessionObservedAt = timestamp(status?.session?.lastSeenAt) ?? timestamp(status?.session?.startedAt);
-  const sessionCurrent = daemonStartedAt !== null && sessionObservedAt !== null && sessionObservedAt >= daemonStartedAt;
+  const sessionCurrent = isSessionCurrent(status?.session, input.daemon.startedAt);
   const channelConnected = daemonOwned
     && status?.connectedVia === "channel"
     && daemonStartedAt !== null

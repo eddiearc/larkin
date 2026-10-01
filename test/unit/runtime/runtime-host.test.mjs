@@ -54,6 +54,41 @@ class FakeSession {
   async close(reason) { this.closes.push(reason); }
 }
 
+class FakeTurnEndRetryScheduler {
+  nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+  nextId = 1;
+  timers = new Map();
+  requestedDelays = [];
+  cleared = [];
+  fired = [];
+
+  now = () => this.nowMs;
+  setTimeout = (callback, delayMs) => {
+    const id = this.nextId++;
+    this.requestedDelays.push(delayMs);
+    this.timers.set(id, { callback, dueAt: this.nowMs + delayMs });
+    return id;
+  };
+  clearTimeout = (id) => {
+    if (this.timers.delete(id)) this.cleared.push(id);
+  };
+  pendingCount() { return this.timers.size; }
+  async advance(delayMs) {
+    this.nowMs += delayMs;
+    for (;;) {
+      const due = [...this.timers.entries()].filter(([, timer]) => timer.dueAt <= this.nowMs);
+      if (!due.length) break;
+      for (const [id, timer] of due) {
+        this.timers.delete(id);
+        this.fired.push(id);
+        timer.callback();
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 test("RuntimeHost manually compacts one exact overflow and retries the same stable input once", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-manual-compaction-"));
   const agentId = "cli_piManualA1";
@@ -1734,40 +1769,40 @@ test("session recreation uses bounded exponential retries, reports exhaustion, a
 test("turn-end redelivery waits longer for each retry and stops at its cap", async () => {
   const session = new FakeSession();
   const events = [];
+  const scheduler = new FakeTurnEndRetryScheduler();
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(),
-    turnEndRetryPolicy: { baseDelayMs: 15, maxDelayMs: 60 },
+    turnEndRetryPolicy: { baseDelayMs: 15, maxDelayMs: 60, maxAttempts: 3 },
+    turnEndRetryScheduler: scheduler,
   });
-  const deferredAt = [];
-  host.subscribe((event) => {
-    events.push(event);
-    if (event.type === "delivery" && event.status === "deferred") deferredAt.push(Date.now());
-  });
+  host.subscribe((event) => { events.push(event); });
   try {
     await host.start([{ agentId: "cli_turnEndCapA1", name: "turn-end-cap", runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
     const receipt = await host.deliver("cli_turnEndCapA1", { message_id: "om_turn_end_cap" });
     assert.equal(receipt.status, "accepted");
     assert.equal(session.prompts.length, 1);
 
-    for (let retry = 1; retry <= 3; retry += 1) {
+    for (const [retry, delay] of [15, 30, 60].entries()) {
       session.emit({ type: "turn-start", turnId: `turn-end-cap-${retry}` });
       session.emit({ type: "turn-end", turnId: `turn-end-cap-${retry}` });
-      assert.equal(session.prompts.length, retry, "the retry must wait for its backoff timer");
-      await waitForCondition(() => session.prompts.length === retry + 1);
-      assert.equal(session.prompts.at(-1).attempt, retry);
+      assert.equal(scheduler.requestedDelays.at(-1), delay, `retry ${retry + 1} must use its configured backoff`);
+      assert.equal(scheduler.pendingCount(), 1, "the retry timer must be pending before its deadline");
+      await scheduler.advance(delay - 1);
+      assert.equal(session.prompts.length, retry + 1, "the retry must wait for its precise backoff deadline");
+      await scheduler.advance(1);
+      assert.equal(session.prompts.length, retry + 2);
+      assert.equal(session.prompts.at(-1).attempt, retry + 1);
     }
 
     session.emit({ type: "turn-start", turnId: "turn-end-cap-exhausted" });
     session.emit({ type: "turn-end", turnId: "turn-end-cap-exhausted" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(session.prompts.length, 4, "a fourth turn-end redelivery must be terminal");
     const exhausted = events.find((event) => event.type === "delivery" && event.deliveryId === receipt.deliveryId
       && event.status === "error" && /exhausted after 3 attempts/.test(event.reason));
     assert.ok(exhausted, JSON.stringify(events));
-    assert.equal(deferredAt.length, 3);
-    assert.ok(deferredAt[1] - deferredAt[0] >= 10, `first retry interval: ${deferredAt[1] - deferredAt[0]}ms`);
-    assert.ok(deferredAt[2] - deferredAt[1] >= 25, `second retry interval: ${deferredAt[2] - deferredAt[1]}ms`);
+    assert.deepEqual(scheduler.requestedDelays, [15, 30, 60]);
+    assert.equal(scheduler.pendingCount(), 0, "retry cap must leave no timer behind");
   } finally {
     await host.shutdown("turn-end redelivery cap test complete");
   }
@@ -1820,16 +1855,18 @@ test("turn-end redelivery persists its backoff and a restart waits for the same 
   }
 });
 
-test("turn-end retry timer is cancelled after Inbox acknowledgement", async () => {
+test("turn-end retry timer is explicitly cleared after Inbox acknowledgement", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-turn-end-ack-"));
   const agentId = "cli_turnEndAckA1";
   const store = createAgentStateStore(root, agentId);
   const session = new FakeSession();
+  const scheduler = new FakeTurnEndRetryScheduler();
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(),
     stateStoreFor: () => store,
     turnEndRetryPolicy: { baseDelayMs: 450, maxDelayMs: 450 },
+    turnEndRetryScheduler: scheduler,
   });
   const config = { agentId, name: "turn-end-ack", runtime: "codex", model: "g", workspaceDir: "/tmp", stateDir: root };
   try {
@@ -1838,18 +1875,79 @@ test("turn-end retry timer is cancelled after Inbox acknowledgement", async () =
     await host.deliver(agentId, { message_id: "om_turn_end_ack", chat_id: "oc_turn_end_ack", content: "acknowledge" });
     session.emit({ type: "turn-start", turnId: "turn-end-ack" });
     session.emit({ type: "turn-end", turnId: "turn-end-ack" });
+    const [timerId] = scheduler.timers.keys();
+    assert.ok(timerId, "turn-end must schedule one retry timer");
     store.pollInbox({ target: "chat:oc_turn_end_ack", limit: 1 });
     await waitForCondition(() => store.readJson("runtimeDeliveries", { records: [] }).records
       .some((record) => record.messageId === "om_turn_end_ack" && record.status === "consumed"));
-    await new Promise((resolve) => setTimeout(resolve, 550));
-    assert.equal(session.prompts.length, 1, "acknowledgement must cancel the scheduled redelivery");
+    await waitForCondition(() => scheduler.cleared.includes(timerId));
+    assert.equal(scheduler.pendingCount(), 0, "acknowledgement must clear the scheduled retry handle");
+    await scheduler.advance(450);
+    assert.equal(session.prompts.length, 1, "the cleared callback must never redeliver");
   } finally {
     await host.shutdown("turn-end acknowledgement test complete");
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("session reset cancels a scheduled turn-end retry when Inbox state has been acknowledged", async () => {
+test("acknowledging one deferred delivery preserves and fires another delivery's retry timer", async () => {
+  const agentId = "cli_turnEndMultipleA1";
+  let records = { version: 1, records: [] };
+  let inboxRows = [];
+  const stateStore = {
+    withInboxTransaction(operation) { return operation(); },
+    readJson(_key, fallback) { return structuredClone(records ?? fallback); },
+    writeJson(_key, value) { records = structuredClone(value); },
+    readNdjson() { return structuredClone(inboxRows); },
+  };
+  const session = new FakeSession();
+  const scheduler = new FakeTurnEndRetryScheduler();
+  const host = createRuntimeHost({
+    adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
+    promptBuilder: new ContextPromptBuilder(),
+    stateStoreFor: () => stateStore,
+    turnEndRetryPolicy: { baseDelayMs: 100, maxDelayMs: 100 },
+    turnEndRetryScheduler: scheduler,
+  });
+  const config = { agentId, name: "turn-end-multiple", runtime: "codex", model: "g", workspaceDir: "/tmp" };
+  const events = [];
+  host.subscribe((event) => events.push(event));
+  try {
+    await host.start([config]);
+    const firstEnvelope = { message_id: "om_turn_end_multiple_one", chat_id: "oc_turn_end_multiple_one", content: "first" };
+    const secondEnvelope = { message_id: "om_turn_end_multiple_two", chat_id: "oc_turn_end_multiple_two", content: "second" };
+    inboxRows = [firstEnvelope, secondEnvelope];
+    const first = await host.deliver(agentId, firstEnvelope);
+    session.emit({ type: "turn-start", turnId: "turn-end-multiple-first" });
+    session.emit({ type: "turn-end", turnId: "turn-end-multiple-first" });
+    const [timerId] = scheduler.timers.keys();
+    assert.ok(timerId, "the first deferred record must schedule a retry timer");
+    const second = await host.deliver(agentId, secondEnvelope);
+    assert.equal(session.prompts.length, 2);
+    session.emit({ type: "turn-start", turnId: "turn-end-multiple-second" });
+    session.emit({ type: "turn-end", turnId: "turn-end-multiple-second" });
+    inboxRows = [secondEnvelope];
+    records = { ...records, records: records.records.map((record) =>
+      record.deliveryId === first.deliveryId ? { ...record, status: "consumed" } : record) };
+    await waitForCondition(() => events.some((event) => event.type === "delivery"
+      && event.deliveryId === first.deliveryId && event.status === "consumed"));
+    assert.equal(scheduler.cleared.includes(timerId), false, "the remaining pending record must retain its retry handle");
+    assert.equal(scheduler.pendingCount(), 1);
+    assert.equal(host.isBusy(agentId), false);
+    assert.equal(records.records
+      .find((record) => record.deliveryId === second.deliveryId)?.status, "pending");
+    await scheduler.advance(100);
+    assert.ok(scheduler.fired.includes(timerId), "the remaining delivery's scheduled callback must fire");
+    assert.equal(records.records
+      .find((record) => record.deliveryId === second.deliveryId)?.status, "accepted");
+    assert.equal(session.prompts.length, 3);
+    assert.equal(session.prompts.at(-1).deliveryId, second.deliveryId);
+  } finally {
+    await host.shutdown("turn-end multiple retry test complete");
+  }
+});
+
+test("session reset explicitly clears a scheduled turn-end retry when Inbox state has been acknowledged", async () => {
   let records = { version: 1, records: [] };
   let inboxRows = [{ message_id: "om_turn_end_reset", chat_id: "oc_turn_end_reset", content: "reset" }];
   const stateStore = {
@@ -1860,11 +1958,13 @@ test("session reset cancels a scheduled turn-end retry when Inbox state has been
   };
   const sessions = [new FakeSession(), new FakeSession()];
   let creates = 0;
+  const scheduler = new FakeTurnEndRetryScheduler();
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return sessions[creates++]; } }),
     promptBuilder: new ContextPromptBuilder(),
     stateStoreFor: () => stateStore,
     turnEndRetryPolicy: { baseDelayMs: 300, maxDelayMs: 300 },
+    turnEndRetryScheduler: scheduler,
   });
   const config = { agentId: "cli_turnEndResetA1", name: "turn-end-reset", runtime: "codex", model: "g", workspaceDir: "/tmp" };
   try {
@@ -1872,29 +1972,39 @@ test("session reset cancels a scheduled turn-end retry when Inbox state has been
     await host.deliver(config.agentId, inboxRows[0]);
     sessions[0].emit({ type: "turn-start", turnId: "turn-end-reset" });
     sessions[0].emit({ type: "turn-end", turnId: "turn-end-reset" });
+    const [timerId] = scheduler.timers.keys();
+    assert.ok(timerId, "turn-end must schedule one retry timer");
     inboxRows = [];
     await host.resetSession(config.agentId);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.ok(scheduler.cleared.includes(timerId), "reset must clear the scheduled retry handle");
+    assert.equal(scheduler.pendingCount(), 0);
+    await scheduler.advance(300);
     assert.equal(sessions[1].prompts.length, 0, "reset must clear the pending turn-end retry timer");
   } finally {
     await host.shutdown("turn-end reset cancellation test complete");
   }
 });
 
-test("shutdown cancels a scheduled turn-end retry", async () => {
+test("shutdown explicitly clears a scheduled turn-end retry", async () => {
   const session = new FakeSession();
+  const scheduler = new FakeTurnEndRetryScheduler();
   const host = createRuntimeHost({
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return session; } }),
     promptBuilder: new ContextPromptBuilder(),
     turnEndRetryPolicy: { baseDelayMs: 150, maxDelayMs: 150 },
+    turnEndRetryScheduler: scheduler,
   });
   try {
     await host.start([{ agentId: "cli_turnEndShutdownA1", name: "turn-end-shutdown", runtime: "codex", model: "g", workspaceDir: "/tmp" }]);
     await host.deliver("cli_turnEndShutdownA1", { message_id: "om_turn_end_shutdown" });
     session.emit({ type: "turn-start", turnId: "turn-end-shutdown" });
     session.emit({ type: "turn-end", turnId: "turn-end-shutdown" });
+    const [timerId] = scheduler.timers.keys();
+    assert.ok(timerId, "turn-end must schedule one retry timer");
     await host.shutdown("shutdown before turn-end retry");
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(scheduler.cleared.includes(timerId), "shutdown must clear the scheduled retry handle");
+    assert.equal(scheduler.pendingCount(), 0);
+    await scheduler.advance(150);
     assert.equal(session.prompts.length, 1, "shutdown must prevent the scheduled retry");
   } finally {
     await host.shutdown("turn-end shutdown cancellation test cleanup").catch(() => {});

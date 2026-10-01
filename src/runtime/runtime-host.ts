@@ -420,6 +420,8 @@ export function createRuntimeHost(options: {
   assertOfficialCliReady?(config: AgentRuntimeConfig, env: NodeJS.ProcessEnv): void | Promise<void>;
   retryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number; stableWindowMs?: number };
   turnEndRetryPolicy?: { baseDelayMs?: number; maxDelayMs?: number; maxAttempts?: number };
+  /** Isolated scheduler so persisted turn-end retry deadlines can be tested deterministically. */
+  turnEndRetryScheduler?: { now(): number; setTimeout: typeof setTimeout; clearTimeout: typeof clearTimeout };
   compactTimeoutMs?: number;
   telemetry?: TelemetryRuntime;
 }): RuntimeHost {
@@ -439,6 +441,11 @@ export function createRuntimeHost(options: {
     baseDelayMs: options.turnEndRetryPolicy?.baseDelayMs ?? 1_000,
     maxDelayMs: options.turnEndRetryPolicy?.maxDelayMs ?? 30_000,
     maxAttempts: options.turnEndRetryPolicy?.maxAttempts ?? 3,
+  };
+  const turnEndRetryScheduler = options.turnEndRetryScheduler ?? {
+    now: Date.now,
+    setTimeout,
+    clearTimeout,
   };
   const emit = (event: RuntimeHostEvent): void => {
     if (event.type === "delivery") telemetry?.delivery(event.agentId, event.messageId, event.status);
@@ -596,12 +603,17 @@ export function createRuntimeHost(options: {
   const turnEndRetryDelayMs = (attempt: number): number =>
     Math.min(turnEndRetryPolicy.maxDelayMs, turnEndRetryPolicy.baseDelayMs * 2 ** (attempt - 1));
   const isRetryDue = (record: DeliveryRecord): boolean =>
-    !record.retryNotBefore || Number.isNaN(Date.parse(record.retryNotBefore)) || Date.parse(record.retryNotBefore) <= Date.now();
+    !record.retryNotBefore || Number.isNaN(Date.parse(record.retryNotBefore))
+      || Date.parse(record.retryNotBefore) <= turnEndRetryScheduler.now();
+  const clearDeliveryRetryTimer = (agent: ManagedAgent): void => {
+    if (!agent.deliveryRetryTimer) return;
+    turnEndRetryScheduler.clearTimeout(agent.deliveryRetryTimer);
+    agent.deliveryRetryTimer = null;
+  };
   function clearPendingRetryTimerWhenIdle(agent: ManagedAgent): void {
     if (!agent.deliveryRetryTimer) return;
     if ([...agent.records.values()].some((record) => record.status === "pending" && record.retryNotBefore)) return;
-    clearTimeout(agent.deliveryRetryTimer);
-    agent.deliveryRetryTimer = null;
+    clearDeliveryRetryTimer(agent);
   }
   const schedulePendingRetry = (agent: ManagedAgent): void => {
     if (agent.stopped || agent.deliveryRetryTimer) return;
@@ -611,8 +623,8 @@ export function createRuntimeHost(options: {
       .filter((at) => Number.isFinite(at))
       .sort((left, right) => left - right)[0];
     if (next === undefined) return;
-    const delay = Math.max(0, next - Date.now());
-    agent.deliveryRetryTimer = setTimeout(() => {
+    const delay = Math.max(0, next - turnEndRetryScheduler.now());
+    agent.deliveryRetryTimer = turnEndRetryScheduler.setTimeout(() => {
       agent.deliveryRetryTimer = null;
       void retryPending(agent);
     }, delay);
@@ -656,7 +668,7 @@ export function createRuntimeHost(options: {
         const attempt = attempts + 1;
         const delay = turnEndRetryDelayMs(attempt);
         record.turnEndRetryAttempts = attempt;
-        record.retryNotBefore = new Date(Date.now() + delay).toISOString();
+        record.retryNotBefore = new Date(turnEndRetryScheduler.now() + delay).toISOString();
         record.reason = TURN_END_RETRY_REASON;
         record.retryable = true;
         record.input = { ...record.input, attempt: (record.input.attempt ?? 0) + 1 };
@@ -709,7 +721,7 @@ export function createRuntimeHost(options: {
             reason: TURN_END_RETRY_REASON,
             retryable: true,
             turnEndRetryAttempts: attempt,
-            retryNotBefore: new Date(Date.now() + delay).toISOString(),
+            retryNotBefore: new Date(turnEndRetryScheduler.now() + delay).toISOString(),
             input: {
               ...(staleInput ?? { inputId: candidate.deliveryId, deliveryId: candidate.deliveryId, kind: "wake", text: "" }),
               attempt: (Number.isSafeInteger(staleInput?.attempt) && Number(staleInput?.attempt) >= 0 ? Number(staleInput!.attempt) : 0) + 1,
@@ -1597,7 +1609,7 @@ export function createRuntimeHost(options: {
           previous.generation += 1;
           if (previous.poller) clearInterval(previous.poller);
           if (previous.retryTimer) clearTimeout(previous.retryTimer);
-          if (previous.deliveryRetryTimer) clearTimeout(previous.deliveryRetryTimer);
+          if (previous.deliveryRetryTimer) turnEndRetryScheduler.clearTimeout(previous.deliveryRetryTimer);
           if (previous.stabilityTimer) clearTimeout(previous.stabilityTimer);
           const previousFailure = currentAuthFailure(previous);
           const scoped = Boolean(previousFailure
@@ -1690,8 +1702,7 @@ export function createRuntimeHost(options: {
         if (pendingAfterCreate > 0) {
           throw new RuntimeSessionResetError("inbox_backlog", `Agent ${agentId} received Inbox backlog during reset`, pendingAfterCreate);
         }
-        if (agent.deliveryRetryTimer) clearTimeout(agent.deliveryRetryTimer);
-        agent.deliveryRetryTimer = null;
+        clearDeliveryRetryTimer(agent);
         agent.generation += 1;
         agent.launchId = crypto.randomUUID();
         agent.config.sessionId = null;
@@ -2067,7 +2078,7 @@ export function createRuntimeHost(options: {
       const starting = agent.starting;
       if (agent.poller) clearInterval(agent.poller);
       if (agent.retryTimer) clearTimeout(agent.retryTimer);
-      if (agent.deliveryRetryTimer) clearTimeout(agent.deliveryRetryTimer);
+      clearDeliveryRetryTimer(agent);
       if (agent.stabilityTimer) clearTimeout(agent.stabilityTimer);
       if (agent.busy) await agent.session?.cancel(reason);
       await agent.session?.close(reason);

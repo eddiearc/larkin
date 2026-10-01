@@ -934,12 +934,24 @@ function emitSoftFreshnessNotice(
   dependencies: LarkCliLauncherDependencies,
   store: AgentStateStore,
 ): void {
+  let timedOut = false;
   try {
     const gated = evaluateFreshness({
       seen,
       adapter: feishuImFreshnessAdapter,
-      probe: () => parseHistory(callNative(probeArgv(target), env, io, dependencies, FRESHNESS_PROBE_TIMEOUT_MS), target, true),
+      probe: () => {
+        const result = callNative(probeArgv(target), env, io, dependencies, FRESHNESS_PROBE_TIMEOUT_MS);
+        const error = result.error as NodeJS.ErrnoException | undefined;
+        timedOut = error?.code === "ETIMEDOUT"
+          || error?.message.includes("ETIMEDOUT") === true
+          || (result.status === null && result.signal === "SIGTERM");
+        return parseHistory(result, target, true);
+      },
     });
+    if (gated.status === "unavailable") {
+      if (timedOut) io.stderr(`lark-cli: freshness observation timed out after ${FRESHNESS_PROBE_TIMEOUT_MS}ms; no read position was recorded\n`);
+      return;
+    }
     if (!seen && gated.status === "fresh" && gated.current) {
       // A first authoritative observation establishes a quiet baseline from
       // the provider's latest 20-message window, including messages that
@@ -953,6 +965,7 @@ function emitSoftFreshnessNotice(
     if (newer.length) emitFreshnessNotice(io, { target: targetKey, messages: newer });
   } catch {
     // freshness 仅作提示：观察失败绝不能改变已完成写入的结果。
+    if (timedOut) io.stderr(`lark-cli: freshness observation timed out after ${FRESHNESS_PROBE_TIMEOUT_MS}ms; no read position was recorded\n`);
   }
 }
 

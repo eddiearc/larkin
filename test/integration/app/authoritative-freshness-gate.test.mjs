@@ -250,16 +250,23 @@ test("an empty first freshness result saves nothing and the next observed window
 test("a slow post-write freshness probe times out without delaying or failing the send", () => {
   const f = fixture();
   try {
+    const write = JSON.stringify({ ok: true, data: {
+      message_id: "om_slow_own", chat_id: "oc_slow_probe", create_time: "100",
+    } });
     const startedAt = Date.now();
     const result = f.run(["im", "+messages-send", "--chat-id", "oc_slow_probe", "--text", "sent"], {
       LARKIN_TEST_PROVIDER_HISTORY_DELAY_MS: "2000",
-      LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
-        message_id: "om_slow_own", chat_id: "oc_slow_probe", create_time: "100",
-      } }),
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: write,
     });
     const elapsedMs = Date.now() - startedAt;
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, write);
     assert.ok(elapsedMs < 1_500, `freshness observation took ${elapsedMs}ms`);
+    assert.ok(f.calls().some((call) => call.argv[0] === "api" && call.argv[1] === "GET"),
+      "the advisory history probe must start before its timeout");
+    assert.equal(f.store.readFreshnessCursor("feishu.im/chat/oc_slow_probe", "external"), null,
+      "a timed-out probe must not record a freshness position");
+    assert.match(result.stderr, /freshness observation timed out after 500ms; no read position was recorded/);
     assert.doesNotMatch(result.stderr, /"larkin_notice":"freshness"/);
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });

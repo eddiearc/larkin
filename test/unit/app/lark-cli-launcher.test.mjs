@@ -140,10 +140,10 @@ test("document comment freshness is an advisory notice and never blocks the prov
 test("document comment freshness notice is emitted only after a successful provider write", () => {
   const f = fixture();
   try {
-    const messageId = `doc_comment_${"n".repeat(32)}`;
+    const messageId = `doc_comment_${"a".repeat(32)}`;
     const target = "document-comment:docx:doc_tokenN2:comment_N2:in-thread";
     f.store.appendInboxOnce({ message_id: messageId, target, kind: "document_comment", content: "older" });
-    f.store.appendInboxOnce({ message_id: `doc_comment_${"o".repeat(32)}`, target, kind: "document_comment", content: "newer" });
+    f.store.appendInboxOnce({ message_id: `doc_comment_${"b".repeat(32)}`, target, kind: "document_comment", content: "newer" });
     f.store.pollInbox({ target, limit: 1 });
     f.setWriteResult({ status: 7, signal: null, output: [], pid: 1, stdout: "", stderr: "provider rejected\n", error: undefined });
     const result = f.run(["comment", "reply", "--message-id", messageId, "--text", "answer"]);

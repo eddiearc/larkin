@@ -675,6 +675,9 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
 
       const runtimeEnv = { ...env, LARKIN_AGENT_ID: agentId };
       const target = `chat:oc_${runtime}`;
+      store.mergeFreshnessCursor(`feishu.im/chat/oc_${runtime}`, {
+        schema: 1, revisionTime: "1784159999999", messageIds: [`om_${runtime}_before`],
+      }, (seen, current) => current ?? seen, "external");
       const sent = [];
       let guardedStdout = "", guardedStderr = "";
       const guardedDependencies = {

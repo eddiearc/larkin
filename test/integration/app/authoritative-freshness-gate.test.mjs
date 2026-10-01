@@ -16,6 +16,10 @@ function writePrivate(file, value) {
   fs.writeFileSync(file, value, { mode: 0o600 });
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-soft-freshness-"));
   const agentId = "cli_softFreshnessA1";
@@ -79,7 +83,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
   const calls = () => fs.existsSync(callsFile)
     ? fs.readFileSync(callsFile, "utf8").split("\n").filter(Boolean).map(JSON.parse)
     : [];
-  return { root, run, calls, store };
+  return { root, env, run, calls, store };
 }
 
 test("stale context emits a soft stderr notice after the provider send succeeds", () => {
@@ -148,6 +152,42 @@ test("a current freshness cursor does not emit a stale-context notice", () => {
   }
 });
 
+test("the first successful write bootstraps quietly and a later newer message emits a notice", () => {
+  const f = fixture();
+  try {
+    const firstHistory = JSON.stringify({ ok: true, identity: "bot", data: { messages: [{
+      message_id: "om_baseline", chat_id: "oc_bootstrap", create_time: "100",
+    }] } });
+    const firstWrite = JSON.stringify({ ok: true, data: {
+      message_id: "om_first_own", chat_id: "oc_bootstrap", create_time: "101",
+    } });
+    const first = f.run(["im", "+messages-send", "--chat-id", "oc_bootstrap", "--text", "first"], {
+      LARKIN_TEST_PROVIDER_HISTORY: firstHistory,
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: firstWrite,
+    });
+    assert.equal(first.status, 0, first.stderr);
+    assert.doesNotMatch(first.stderr, /"larkin_notice":"freshness"/);
+
+    const newerHistory = JSON.stringify({ ok: true, identity: "bot", data: { messages: [
+      { message_id: "om_newer", chat_id: "oc_bootstrap", create_time: "102" },
+      { message_id: "om_baseline", chat_id: "oc_bootstrap", create_time: "100" },
+    ] } });
+    const secondWrite = JSON.stringify({ ok: true, data: {
+      message_id: "om_second_own", chat_id: "oc_bootstrap", create_time: "103",
+    } });
+    const second = f.run(["im", "+messages-send", "--chat-id", "oc_bootstrap", "--text", "second"], {
+      LARKIN_TEST_PROVIDER_HISTORY: newerHistory,
+      LARKIN_TEST_PROVIDER_WRITE_STDOUT: secondWrite,
+    });
+    assert.equal(second.status, 0, second.stderr);
+    const notice = JSON.parse(second.stderr);
+    assert.equal(notice.larkin_notice, "freshness");
+    assert.deepEqual(notice.latest_message_ids, ["om_newer"]);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test("unavailable freshness observation cannot reject a successful provider write", () => {
   const f = fixture();
   try {
@@ -167,16 +207,26 @@ test("unavailable freshness observation cannot reject a successful provider writ
   }
 });
 
-test("real shell preserves a quoted multiline reply body as one provider argument", () => {
+test.skipIf(!fs.existsSync("/bin/bash"))("real shell preserves a quoted multiline reply body as one provider argument", () => {
   const f = fixture();
   try {
-    const body = "first line\n\"quoted\" and $literal";
+    const body = "first line\n\"quoted\" and $literal's value";
     f.store.appendInboxOnce({ message_id: "om_shell_reply", chat_id: "oc_shell_reply", content: "question" });
     f.store.pollInbox({ target: "chat:oc_shell_reply", limit: 1 });
-    const result = f.run(["im", "+messages-reply", "--message-id", "om_shell_reply", "--markdown", body], {
+    const command = [
+      shellQuote(process.execPath), shellQuote(LARK_CLI),
+      "im", "+messages-reply", "--message-id", "om_shell_reply", "--markdown", shellQuote(body),
+    ].join(" ");
+    const result = spawnSync("/bin/bash", ["-lc", command], {
+      cwd: f.root,
+      encoding: "utf8",
+      timeout: 30_000,
+      env: {
+        ...f.env,
       LARKIN_TEST_PROVIDER_WRITE_STDOUT: JSON.stringify({ ok: true, data: {
         message_id: "om_shell_own", chat_id: "oc_shell_reply", create_time: "101",
       } }),
+      },
     });
     assert.equal(result.status, 0, result.stderr);
     const reply = f.calls().find((call) => call.argv[1] === "+messages-reply");

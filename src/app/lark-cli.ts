@@ -938,6 +938,11 @@ function emitSoftFreshnessNotice(
       adapter: feishuImFreshnessAdapter,
       probe: () => parseHistory(callNative(probeArgv(target), env, io, dependencies, FRESHNESS_PROBE_TIMEOUT_MS), target, true),
     });
+    if (!seen && gated.status === "fresh" && gated.current) {
+      // A first authoritative observation establishes a quiet baseline so a
+      // later proactive write can identify messages that arrived since then.
+      store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, freshnessGeneration(env));
+    }
     if (gated.status !== "conflict") return;
     store.mergeFreshnessCursor(targetKey, gated.current, mergeFeishuImCursor, freshnessGeneration(env));
     const newer = gated.context.filter((message) => message.message_id !== ownMessageId);

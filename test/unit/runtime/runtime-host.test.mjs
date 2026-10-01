@@ -1776,7 +1776,7 @@ test("turn-end redelivery persists its backoff and a restart waits for the same 
     adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return firstSession; } }),
     promptBuilder: new ContextPromptBuilder(),
     stateStoreFor: () => store,
-    turnEndRetryPolicy: { baseDelayMs: 120, maxDelayMs: 120, maxAttempts: 3 },
+    turnEndRetryPolicy: { baseDelayMs: 700, maxDelayMs: 700, maxAttempts: 3 },
   });
   try {
     await first.start([config]);
@@ -1795,13 +1795,13 @@ test("turn-end redelivery persists its backoff and a restart waits for the same 
       adapterFor: () => ({ id: "codex", capabilities: {}, async createSession() { return restartedSession; } }),
       promptBuilder: new ContextPromptBuilder(),
       stateStoreFor: () => store,
-      turnEndRetryPolicy: { baseDelayMs: 120, maxDelayMs: 120, maxAttempts: 3 },
+      turnEndRetryPolicy: { baseDelayMs: 700, maxDelayMs: 700, maxAttempts: 3 },
     });
     try {
       await restarted.start([config]);
       await new Promise((resolve) => setTimeout(resolve, 25));
       assert.equal(restartedSession.prompts.length, 0, "restart must retain the persisted retryNotBefore deadline");
-      await waitForCondition(() => restartedSession.prompts.length === 1);
+      await waitForCondition(() => restartedSession.prompts.length === 1, 2_000);
       assert.equal(restartedSession.prompts[0].deliveryId, receipt.deliveryId);
       assert.equal(restartedSession.prompts[0].attempt, 1);
     } finally {

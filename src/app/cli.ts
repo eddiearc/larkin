@@ -44,6 +44,8 @@ const routes: Record<string, Route> = {
 const runtimeAgentAuthority = typeof process.env.LARKIN_AGENT_ID === "string"
   && process.env.LARKIN_AGENT_ID.trim().length > 0;
 const runtimeContext = isLarkinRuntimeContext(process.env);
+// `config` deliberately remains a public operator surface: it supports global
+// and cross-Agent configuration, and it never falls through to `activeAgent`.
 const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment"]);
 const missingRuntimeAuthority = (name: string): never => {
   console.error(`larkin: Runtime Agent authority is missing for "${command}" (LARKIN_AGENT_ID is required). `

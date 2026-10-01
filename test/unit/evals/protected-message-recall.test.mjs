@@ -29,7 +29,7 @@ test("protected recall eval is versioned and covers positive, negative, conflict
     ],
   };
   assert.deepEqual(gradeProtectedRecallTrace(valid, scenario), { passed: true, failures: [] });
-  assert.equal(gradeProtectedRecallTrace({ ...valid, calls: [...valid.calls, valid.calls[2]] }, scenario).passed, false,
+  assert.equal(gradeProtectedRecallTrace({ ...valid, calls: [...valid.calls, valid.calls[1]] }, scenario).passed, false,
     "duplicate provider mutation must fail the payload grader");
   assert.equal(gradeProtectedRecallTrace({ ...valid, calls: valid.calls.map((call) => call.filter((value) => value !== "--yes")) }, scenario).passed, false,
     "missing provider confirmation must fail the payload grader");

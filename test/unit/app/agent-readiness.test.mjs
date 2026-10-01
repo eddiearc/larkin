@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
-const { isChannelReconnecting, projectAgentReadiness } = await import(pathToFileURL(path.join(ROOT, "dist/app/agent-readiness.mjs")).href);
+const { isChannelReconnecting, isSessionCurrent, projectAgentReadiness } = await import(pathToFileURL(path.join(ROOT, "dist/app/agent-readiness.mjs")).href);
 
 const daemon = {
   state: "owned",
@@ -89,6 +89,32 @@ test("stale ready is rejected until the current daemon observes Runtime readines
   }, status: { connectedAt: "2026-07-29T01:01:01.000Z", connectedVia: "channel",
     runtimeReadiness: { state: "ready", observedAt: "2026-07-29T01:00:59.999Z" } } });
   assert.equal(nextEpoch.readiness.runtime_ready, false, "a prior daemon observation cannot satisfy a new epoch");
+});
+
+test("isSessionCurrent accepts a resumed session observed in the current daemon epoch", () => {
+  const epoch = "2026-10-01T01:26:07.000Z";
+  assert.equal(isSessionCurrent({
+    startedAt: "2026-08-01T00:00:00.000Z",
+    lastSeenAt: "2026-10-01T01:26:33.000Z",
+  }, epoch), true);
+});
+
+test("isSessionCurrent rejects a session that was not observed in the current daemon epoch", () => {
+  const epoch = "2026-10-01T01:26:07.000Z";
+  assert.equal(isSessionCurrent({
+    startedAt: "2026-08-01T00:00:00.000Z",
+    lastSeenAt: "2026-10-01T01:26:06.000Z",
+  }, epoch), false);
+  assert.equal(isSessionCurrent({ startedAt: "2026-08-01T00:00:00.000Z" }, epoch), false);
+  assert.equal(isSessionCurrent({}, epoch), false);
+  assert.equal(isSessionCurrent(null, epoch), false);
+});
+
+test("isSessionCurrent rejects a session when the daemon epoch is missing", () => {
+  const session = { startedAt: "2026-10-01T01:26:33.000Z", lastSeenAt: "2026-10-01T01:26:33.000Z" };
+  assert.equal(isSessionCurrent(session, null), false);
+  assert.equal(isSessionCurrent(session, undefined), false);
+  assert.equal(isSessionCurrent(session, ""), false);
 });
 
 test("a resumed session uses its current observation rather than its historic creation time", () => {

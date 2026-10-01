@@ -40,7 +40,7 @@ import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDoc
 import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
-import { isChannelReconnecting, isRuntimeReadinessCurrent } from "../app/agent-readiness.js";
+import { isChannelReconnecting, isRuntimeReadinessCurrent, isSessionCurrent } from "../app/agent-readiness.js";
 import {
   documentCommentMessageId,
   documentCommentNoticeType,
@@ -1575,9 +1575,12 @@ export function createHostShell({
         const status = hostState.readStatus(agent);
         const turns = status.session && typeof status.session === "object"
           ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
-        const sessionStartedAt = status.session && typeof status.session === "object"
-          ? Date.parse(String((status.session as { startedAt?: unknown }).startedAt || "")) : Number.NaN;
-        const sessionCurrent = Number.isFinite(sessionStartedAt) && sessionStartedAt >= Date.parse(daemonStartedAt);
+        const sessionCurrent = isSessionCurrent(
+          status.session && typeof status.session === "object"
+            ? status.session as { startedAt?: unknown; lastSeenAt?: unknown }
+            : null,
+          daemonStartedAt,
+        );
         const runtimeReady = sessionCurrent && isRuntimeReadinessCurrent(
           status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string } | undefined,
           daemonStartedAt,
@@ -1661,9 +1664,12 @@ export function createHostShell({
         const status = hostState.readStatus(agent);
         const turns = status.session && typeof status.session === "object"
           ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
-        const sessionStartedAt = status.session && typeof status.session === "object"
-          ? Date.parse(String((status.session as { startedAt?: unknown }).startedAt || "")) : Number.NaN;
-        const sessionCurrent = Number.isFinite(sessionStartedAt) && sessionStartedAt >= Date.parse(daemonStartedAt);
+        const sessionCurrent = isSessionCurrent(
+          status.session && typeof status.session === "object"
+            ? status.session as { startedAt?: unknown; lastSeenAt?: unknown }
+            : null,
+          daemonStartedAt,
+        );
         const runtimeReady = sessionCurrent && isRuntimeReadinessCurrent(
           status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string } | undefined,
           daemonStartedAt,

@@ -262,6 +262,19 @@ function agentConfigRequest(
       interval: options.values.get("--interval"),
       agentId: targetId,
     });
+  } else if (operation === "processing-eye") {
+    const [scope, first] = options.positionals;
+    if (scope === "global") assertOnlyFlags([]);
+    else if (scope === "agent") assertOnlyFlags(["--agent"]);
+    else assertOnlyFlags([]);
+    if (options.positionals.length !== 2) {
+      throw new Error("用法: larkin config processing-eye global <on|off> | processing-eye agent <inherit|on|off> [--agent <App ID>]");
+    }
+    mutation = larkinConfig.processingEyeMutationFromCli({
+      scope: scope || "",
+      enabled: first,
+      agentId: targetId,
+    });
   } else if (operation === "apply") {
     assertOnlyFlags(["--agent"]);
     if (options.positionals.length) throw new Error("用法: larkin config apply [--agent <App ID>]");
@@ -271,7 +284,7 @@ function agentConfigRequest(
       larkinConfig.markConfigApplied(env, targetId, expectedSignature);
       return { ok: true, agentId: targetId, applyState: "applied", result };
     }).catch((error) => { throw new Error(`配置已保存但未应用：${error instanceof Error ? error.message : String(error)}`); });
-  } else throw new Error("config 只支持 show/runtime/model/effort/mention/inbox-audit/apply；运行 larkin config --help");
+  } else throw new Error("config 只支持 show/runtime/model/effort/mention/inbox-audit/processing-eye/apply；运行 larkin config --help");
   const result = larkinConfig.mutateConfig(env, mutation, authority);
   return { ok: true, revision: result.revision, persisted: true, applyState: result.applyState, changedScope: result.changedScope };
 }

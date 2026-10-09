@@ -205,9 +205,11 @@ function GlobalSettingsSheet({ open, onOpenChange, onSaved }: { open: boolean; o
   const [serverAudit, setServerAudit] = useState({ enabled: false, intervalMs: 15 * 60_000 });
   const [draftAudit, setDraftAudit] = useState({ enabled: false, intervalMs: 15 * 60_000 });
   const [draftAuditGapMinutes, setDraftAuditGapMinutes] = useState("15");
+  const [serverEye, setServerEye] = useState({ enabled: false });
+  const [draftEye, setDraftEye] = useState({ enabled: false });
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const dirty = draft !== serverValue || draftAudit.enabled !== serverAudit.enabled || draftAuditGapMinutes !== formatAuditGapMinutes(serverAudit.intervalMs);
+  const dirty = draft !== serverValue || draftAudit.enabled !== serverAudit.enabled || draftAuditGapMinutes !== formatAuditGapMinutes(serverAudit.intervalMs) || draftEye.enabled !== serverEye.enabled;
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
@@ -218,6 +220,8 @@ function GlobalSettingsSheet({ open, onOpenChange, onSaved }: { open: boolean; o
       setServerAudit(value.inboxAudit);
       setDraftAudit(value.inboxAudit);
       setDraftAuditGapMinutes(formatAuditGapMinutes(value.inboxAudit.intervalMs));
+      setServerEye(value.processingEye ?? { enabled: false });
+      setDraftEye(value.processingEye ?? { enabled: false });
       setFeedback(null);
     }).catch((error) => { if (!controller.signal.aborted) setFeedback(error.message); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -235,6 +239,7 @@ function GlobalSettingsSheet({ open, onOpenChange, onSaved }: { open: boolean; o
       return;
     }
     const intervalMs = editedIntervalMs ?? serverAudit.intervalMs;
+    const eyeChanged = draftEye.enabled !== serverEye.enabled;
     setLoading(true);
     try {
       let result: { revision: string; applyState: string } | null = null;
@@ -246,10 +251,12 @@ function GlobalSettingsSheet({ open, onOpenChange, onSaved }: { open: boolean; o
           ...(draftAuditGapMinutes !== formatAuditGapMinutes(serverAudit.intervalMs) ? { intervalMs } : {}),
         });
       }
+      if (eyeChanged) result = await mutateConfig({ operation: "set-global-processing-eye", enabled: draftEye.enabled });
       setServerValue(draft);
       setServerAudit({ ...draftAudit, intervalMs });
       setDraftAudit((current) => ({ ...current, intervalMs }));
       setDraftAuditGapMinutes(formatAuditGapMinutes(intervalMs));
+      setServerEye(draftEye);
       setFeedback(result ? `已保存 · ${result.applyState} · ${result.revision.slice(0, 20)}…` : "没有需要保存的修改");
       onSaved();
     } catch (error) { setFeedback(error instanceof Error ? error.message : String(error)); }
@@ -265,11 +272,14 @@ function GlobalSettingsSheet({ open, onOpenChange, onSaved }: { open: boolean; o
       </label>
       <p className="field-help">未单独设置的 Agent 和群会使用这个值。机器人消息仍必须精确 @ 当前 Agent。</p>
       <div className="audit-controls" aria-labelledby="global-inbox-audit-title">
-        <div className="audit-heading"><div><h3 id="global-inbox-audit-title">Inbox 巡检</h3><p>定时检查仍待处理的入站工作；关闭时不会安排巡检。</p></div><label className="audit-switch"><input type="checkbox" checked={draftAudit.enabled} disabled={loading} onChange={(event) => setDraftAudit((current) => ({ ...current, enabled: event.target.checked }))} /><span aria-hidden="true" /><b>{draftAudit.enabled ? "已开启" : "已关闭"}</b></label></div>
+        <div className="audit-heading"><div><h3 id="global-inbox-audit-title">Inbox 巡检</h3><p>定时检查仍待处理的入站工作；关闭时不会安排巡检。</p></div><label className="audit-switch"><input aria-label="Inbox 巡检开关" type="checkbox" checked={draftAudit.enabled} disabled={loading} onChange={(event) => setDraftAudit((current) => ({ ...current, enabled: event.target.checked }))} /><span aria-hidden="true" /><b>{draftAudit.enabled ? "已开启" : "已关闭"}</b></label></div>
         <label><span>巡检间隔（分钟）</span><input aria-label="全局巡检间隔（分钟）" type="number" min={MIN_AUDIT_GAP_MINUTES} max={MAX_AUDIT_GAP_MINUTES} step="any" inputMode="decimal" value={draftAuditGapMinutes} disabled={loading} onChange={(event) => setDraftAuditGapMinutes(event.target.value)} /></label>
         <p className="field-help">可在关闭时预先调整；保存间隔本身不会开启巡检。</p>
       </div>
-      <div className="form-actions"><Button onClick={() => { setDraft(serverValue); setDraftAudit(serverAudit); setDraftAuditGapMinutes(formatAuditGapMinutes(serverAudit.intervalMs)); }} disabled={!dirty || loading}>放弃草稿</Button><Button className="primary" onClick={save} disabled={!dirty || loading}>{loading ? "保存中…" : "保存全局设置"}</Button></div>
+      <div className="audit-controls" aria-labelledby="global-processing-eye-title">
+        <div className="audit-heading"><div><h3 id="global-processing-eye-title">处理中表情</h3><p>入站消息时自动点 OnIt 表情；默认关闭，升级后缺 key 也保持关闭。</p></div><label className="audit-switch"><input aria-label="处理中表情开关" type="checkbox" checked={draftEye.enabled} disabled={loading} onChange={(event) => setDraftEye({ enabled: event.target.checked })} /><span aria-hidden="true" /><b>{draftEye.enabled ? "已开启" : "已关闭"}</b></label></div>
+      </div>
+      <div className="form-actions"><Button onClick={() => { setDraft(serverValue); setDraftAudit(serverAudit); setDraftAuditGapMinutes(formatAuditGapMinutes(serverAudit.intervalMs)); setDraftEye(serverEye); }} disabled={!dirty || loading}>放弃草稿</Button><Button className="primary" onClick={save} disabled={!dirty || loading}>{loading ? "保存中…" : "保存全局设置"}</Button></div>
       {feedback ? <p role="status" className="feedback">{feedback}</p> : null}
     </div>
   </Sheet>;
@@ -351,6 +361,7 @@ function AgentConfiguration({ agentId, readiness, onDirtyChange, refreshKey }: {
         auditEnabled: agent.inboxAudit.override.enabled,
         auditIntervalInherited: agent.inboxAudit.override.intervalMs === "inherit",
         auditGapMinutes: formatAuditGapMinutes(intervalMs),
+        processingEyeEnabled: agent.processingEye?.override.enabled ?? "inherit",
       };
       setResponse(next);
       setServerDraft(values);
@@ -398,6 +409,8 @@ function AgentConfiguration({ agentId, readiness, onDirtyChange, refreshKey }: {
   const auditDirty = draft.auditEnabled !== serverDraft.auditEnabled
     || draft.auditIntervalInherited !== serverDraft.auditIntervalInherited
     || draft.auditGapMinutes !== serverDraft.auditGapMinutes;
+  const processingEyeEnabled = draft.processingEyeEnabled === "on" || draft.processingEyeEnabled === "off" ? draft.processingEyeEnabled : "inherit";
+  const eyeDirty = draft.processingEyeEnabled !== serverDraft.processingEyeEnabled;
 
   const requestApply = () => jsonFetch<{ agentId: string; applyState: string }>("/api/config/apply", {
     method: "POST",
@@ -424,6 +437,10 @@ function AgentConfiguration({ agentId, readiness, onDirtyChange, refreshKey }: {
         ...(draft.auditEnabled !== serverDraft.auditEnabled ? { enabled: auditEnabled === "inherit" ? "inherit" : auditEnabled === "on" } : {}),
         ...(draft.auditIntervalInherited !== serverDraft.auditIntervalInherited || draft.auditGapMinutes !== serverDraft.auditGapMinutes
           ? { intervalMs: auditIntervalInherited ? "inherit" : auditIntervalMs! } : {}),
+      });
+      if (eyeDirty) operations.push({
+        operation: "set-agent-processing-eye", agentId,
+        enabled: processingEyeEnabled === "inherit" ? "inherit" : processingEyeEnabled === "on",
       });
       let latest: { revision: string; applyState: string } | null = null;
       for (const operation of operations) latest = await mutateConfig(operation);
@@ -465,6 +482,9 @@ function AgentConfiguration({ agentId, readiness, onDirtyChange, refreshKey }: {
   const auditEffective = config.inboxAudit.effective;
   const auditSource = config.inboxAudit.source;
   const auditStateDescription = `${auditSource.enabled === "agent" ? "当前 Agent 已单独设置" : auditSource.enabled === "global" ? "当前使用全局设置" : "当前使用默认设置"}：${auditEffective.enabled ? "已开启" : "已关闭"}，每 ${formatAuditGapMinutes(auditEffective.intervalMs)} 分钟`;
+  const eyeEffective = config.processingEye?.effective ?? { enabled: false };
+  const eyeSource = config.processingEye?.source ?? { enabled: "default" as const };
+  const eyeStateDescription = `${eyeSource.enabled === "agent" ? "当前 Agent 已单独设置" : eyeSource.enabled === "global" ? "当前使用全局设置" : "当前使用默认设置"}：${eyeEffective.enabled ? "已开启" : "已关闭"}`;
   const applyStateLabel = config.apply.applyState === "pending" ? "待应用" : config.apply.applyState === "applied" ? "已应用" : "状态未知";
   return <div className="configuration-page">
     <section className="config-section"><div className="section-heading"><div><h3>Agent 配置</h3><p>只作用于 {agentId}；运行配置会在安全时机自动应用，Agent 正忙时会保留待处理。</p></div><Badge className={config.apply.applyState === "pending" ? "warning" : "success"}>{applyStateLabel}</Badge></div>
@@ -484,6 +504,13 @@ function AgentConfiguration({ agentId, readiness, onDirtyChange, refreshKey }: {
         </div>
         <div className="audit-inline-actions"><span>{auditIntervalInherited ? "间隔跟随全局设置；编辑数字后会仅作用于此 Agent。" : "此 Agent 使用单独的巡检间隔。"}</span>{!auditIntervalInherited ? <Button disabled={loading} onClick={() => setDraft((current) => ({ ...current, auditIntervalInherited: true, auditGapMinutes: formatAuditGapMinutes(auditEffective.intervalMs) }))}>间隔跟随全局设置</Button> : null}</div>
         <p className="field-help">即使关闭巡检，也可保存间隔；间隔修改不会开启巡检。</p>
+      </div>
+      <div className="audit-controls" aria-labelledby="agent-processing-eye-title">
+        <div className="audit-heading"><div><h3 id="agent-processing-eye-title">处理中表情</h3><p>{eyeStateDescription}。</p></div></div>
+        <div className="config-grid audit-grid">
+          <label><span>处理中表情</span><select aria-label="处理中表情设置" value={processingEyeEnabled} disabled={loading} onChange={(event) => update("processingEyeEnabled", event.target.value)}><option value="inherit">跟随全局设置</option><option value="on">为此 Agent 开启</option><option value="off">为此 Agent 关闭</option></select></label>
+        </div>
+        <p className="field-help">关闭时不会给入站消息点 OnIt；缺 key 与显式关闭效果相同。</p>
       </div>
       {dirty || config.apply.applyState === "pending" ? <div className="form-actions">
         {dirty ? <Button disabled={loading} onClick={() => setDraft(serverDraft)}>放弃草稿</Button> : null}

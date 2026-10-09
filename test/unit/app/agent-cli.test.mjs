@@ -45,7 +45,7 @@ test("Agent CLI manifest is the single machine-readable public command inventory
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.reminder, ["schedule", "list", "snooze", "update", "cancel", "log"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.interaction, ["callback-status", "callback-probe", "create", "get", "resolve"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.profile, ["show"]);
-  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "inbox-audit", "apply"]);
+  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "inbox-audit", "processing-eye", "apply"]);
   const f = fixture();
   try {
     const help = JSON.parse(f.run(["--help"]).stdout);
@@ -136,6 +136,9 @@ test("Agent config commands reject extra positionals and operation-inapplicable 
       ["inbox-audit", "global", "on", "extra"],
       ["inbox-audit", "global", "on", "--agent", f.agentId],
       ["inbox-audit", "agent", "on", "--chat", "oc_irrelevant"],
+      ["processing-eye", "global", "on", "extra"],
+      ["processing-eye", "global", "on", "--agent", f.agentId],
+      ["processing-eye", "agent", "on", "--chat", "oc_irrelevant"],
     ];
     for (const args of invalidCases) {
       const rejected = f.run(["config", ...args]);

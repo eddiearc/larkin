@@ -37,7 +37,7 @@ import {
 } from "../runtime/runtime-readiness.js";
 import { providerFinishReason, safeProviderDiagnostic } from "../runtime/provider-error-classifier.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
-import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy } from "../platform/config.js";
+import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy, resolveProcessingEye } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { isChannelReconnecting, isRuntimeReadinessCurrent, isSessionCurrent } from "../app/agent-readiness.js";
@@ -592,6 +592,11 @@ export function createHostShell({
   });
   const seenEventIds = new Set<string>();
   const inFlightEventIds = new Set<string>();
+  const processingEyeEnabled = (agent: ConfiguredAgent): boolean => {
+    // 缺 key / 读配置失败都关闭，避免升级后继续自动点 OnIt。
+    try { return resolveProcessingEye(loadConfig(env).config, agent.agentId).enabled; }
+    catch { return false; }
+  };
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
     const wake = options?.wake !== false;
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
@@ -663,7 +668,8 @@ export function createHostShell({
         excerpt: safeConversationExcerpt(event.content, 180),
         at: new Date().toISOString(),
       }, 30);
-      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") {
+      if ((inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent")
+        && processingEyeEnabled(agent)) {
         processingEyes.add(agent, String(inboxEnvelope.message_id || ""), {
           replyInThread: String(inboxEnvelope.target || "").startsWith("thread:"),
           target: String(inboxEnvelope.target || ""),

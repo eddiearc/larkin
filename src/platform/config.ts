@@ -18,6 +18,7 @@ export type MentionPolicy = "require" | "free";
 export type MentionPolicyOverride = MentionPolicy | "inherit";
 export type InboxAuditEnabledOverride = boolean | "inherit";
 export type InboxAuditIntervalOverride = number | "inherit";
+export type ProcessingEyeEnabledOverride = boolean | "inherit";
 
 export interface InboxAuditSettings {
   enabled?: boolean;
@@ -26,6 +27,13 @@ export interface InboxAuditSettings {
 export interface InboxAuditResolved {
   enabled: boolean;
   intervalMs: number;
+}
+
+export interface ProcessingEyeSettings {
+  enabled?: boolean;
+}
+export interface ProcessingEyeResolved {
+  enabled: boolean;
 }
 
 export const DEFAULT_INBOX_AUDIT_INTERVAL_MS = 15 * 60_000;
@@ -39,6 +47,7 @@ export interface StoredAgent {
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
   inboxAudit?: InboxAuditSettings;
+  processingEye?: ProcessingEyeSettings;
   createdAt?: string;
 }
 
@@ -60,6 +69,7 @@ export interface HydratedConfig {
   serverId: string | null;
   mentionPolicy: MentionPolicy;
   inboxAudit?: InboxAuditResolved;
+  processingEye?: ProcessingEyeResolved;
   configDir: string;
   larkinHome: string;
   larkConfigDir: string;
@@ -74,6 +84,8 @@ export type ConfigMutation =
   | { kind: "set-chat-mention"; agentId: string; chatId: string; value: MentionPolicyOverride }
   | { kind: "set-global-inbox-audit"; enabled?: boolean; intervalMs?: number }
   | { kind: "set-agent-inbox-audit"; agentId: string; enabled?: InboxAuditEnabledOverride; intervalMs?: InboxAuditIntervalOverride }
+  | { kind: "set-global-processing-eye"; enabled: boolean }
+  | { kind: "set-agent-processing-eye"; agentId: string; enabled: ProcessingEyeEnabledOverride }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
   | { kind: "set-agent-model"; agentId: string; model: string }
   | { kind: "set-agent-effort"; agentId: string; effort: string | null };
@@ -94,11 +106,12 @@ interface ConfigApplyFile { version: 1; persistedRevision: string; agents: Recor
 
 const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
-const OPTIONAL_TOP_FIELDS_V4 = new Set(["inboxAudit"]);
+const OPTIONAL_TOP_FIELDS_V4 = new Set(["inboxAudit", "processingEye"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "effort", "mentionPolicy", "chatMentionPolicies", "inboxAudit", "createdAt"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "effort", "mentionPolicy", "chatMentionPolicies", "inboxAudit", "processingEye", "createdAt"]);
 const LEGACY_AGENT_FIELDS = new Set(["piDistribution", "runtimeOption"]);
 const INBOX_AUDIT_FIELDS = new Set(["enabled", "intervalMs"]);
+const PROCESSING_EYE_FIELDS = new Set(["enabled"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -212,6 +225,22 @@ function resolvedInboxAudit(settings: InboxAuditSettings | undefined): InboxAudi
   };
 }
 
+function parseStoredProcessingEye(value: unknown, label: string): ProcessingEyeSettings {
+  if (!isPlainObject(value)) throw new Error(`${label} 必须是普通 object`);
+  assertAllowedFields(value, PROCESSING_EYE_FIELDS, label);
+  const settings: ProcessingEyeSettings = {};
+  if (Object.hasOwn(value, "enabled")) {
+    if (typeof value.enabled !== "boolean") throw new Error(`${label}.enabled 必须是 boolean`);
+    settings.enabled = value.enabled;
+  }
+  return settings;
+}
+
+function resolvedProcessingEye(settings: ProcessingEyeSettings | undefined): ProcessingEyeResolved {
+  // 缺 key 视为关闭。升级后不再保留旧的自动 OnIt 行为，除非用户显式开启。
+  return { enabled: settings?.enabled ?? false };
+}
+
 export function inboxAuditMutationFromCli(input: {
   scope: string;
   enabled: string | undefined;
@@ -245,6 +274,30 @@ export function inboxAuditMutationFromCli(input: {
     return mutation;
   }
   throw new Error("inbox-audit scope 只支持 global/agent");
+}
+
+export function processingEyeMutationFromCli(input: {
+  scope: string;
+  enabled: string | undefined;
+  agentId: string;
+}): ConfigMutation {
+  if (input.scope === "global") {
+    if (input.enabled !== "on" && input.enabled !== "off") {
+      throw new Error("用法: larkin config processing-eye global <on|off>");
+    }
+    return { kind: "set-global-processing-eye", enabled: input.enabled === "on" };
+  }
+  if (input.scope === "agent") {
+    if (input.enabled !== "on" && input.enabled !== "off" && input.enabled !== "inherit") {
+      throw new Error("用法: larkin config processing-eye agent <inherit|on|off> [--agent <App ID>]");
+    }
+    return {
+      kind: "set-agent-processing-eye",
+      agentId: input.agentId,
+      enabled: input.enabled === "inherit" ? "inherit" : input.enabled === "on",
+    };
+  }
+  throw new Error("processing-eye scope 只支持 global/agent");
 }
 
 function assertModel(runtime: string, model: string): void {
@@ -305,6 +358,7 @@ function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asser
   }
   if (version === 4 && Object.hasOwn(agent, "mentionPolicy")) assertPolicy(agent.mentionPolicy, `Agent ${key}.mentionPolicy`);
   if (version === 4 && Object.hasOwn(agent, "inboxAudit")) parseStoredInboxAudit(agent.inboxAudit, `Agent ${key}.inboxAudit`);
+  if (version === 4 && Object.hasOwn(agent, "processingEye")) parseStoredProcessingEye(agent.processingEye, `Agent ${key}.processingEye`);
   if (version === 4 && Object.hasOwn(agent, "chatMentionPolicies")) {
     if (!isPlainObject(agent.chatMentionPolicies)) throw new Error(`Agent ${key}.chatMentionPolicies 必须是普通 object`);
     for (const [chatId, policy] of Object.entries(agent.chatMentionPolicies)) {
@@ -330,6 +384,7 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
     ...(typeof agent.effort === "string" ? { effort: agent.effort } : {}),
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(version === 4 && Object.hasOwn(agent, "inboxAudit") ? { inboxAudit: parseStoredInboxAudit(agent.inboxAudit, `Agent ${key}.inboxAudit`) } : {}),
+    ...(version === 4 && Object.hasOwn(agent, "processingEye") ? { processingEye: parseStoredProcessingEye(agent.processingEye, `Agent ${key}.processingEye`) } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
     ...(typeof agent.createdAt === "string" ? { createdAt: agent.createdAt } : {}),
   };
@@ -345,6 +400,7 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
     ...(agent.effort ? { effort: agent.effort } : {}),
     ...(agent.mentionPolicy ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(agent.inboxAudit ? { inboxAudit: { ...agent.inboxAudit } } : {}),
+    ...(agent.processingEye ? { processingEye: { ...agent.processingEye } } : {}),
     ...(agent.chatMentionPolicies ? { chatMentionPolicies: { ...agent.chatMentionPolicies } } : {}),
     ...(agent.noMentionChats ? { noMentionChats: [...agent.noMentionChats] } : {}),
     ...(agent.createdAt ? { createdAt: agent.createdAt } : {}),
@@ -374,9 +430,13 @@ export function normalizeConfig(raw: unknown, configDir: string, { mint }: { min
   const inboxAudit = version === 4 && Object.hasOwn(raw, "inboxAudit")
     ? resolvedInboxAudit(parseStoredInboxAudit(raw.inboxAudit, "config.inboxAudit"))
     : undefined;
+  const processingEye = version === 4 && Object.hasOwn(raw, "processingEye")
+    ? resolvedProcessingEye(parseStoredProcessingEye(raw.processingEye, "config.processingEye"))
+    : undefined;
   return {
     version: 4, serverId: raw.serverId, mentionPolicy: version === 4 ? raw.mentionPolicy as MentionPolicy : "require",
     ...(inboxAudit ? { inboxAudit } : {}),
+    ...(processingEye ? { processingEye } : {}),
     configDir: layout.configDir, larkinHome: layout.larkinHome, larkConfigDir: resolveLarkConfigDir({}, layout.root), activeAgent: raw.activeAgent as string | null, agents,
   };
 }
@@ -567,12 +627,13 @@ export function selectAgent(config: HydratedConfig, env: Env = process.env): Hyd
 
 export function toStored(config: HydratedConfig): {
   version: 4; serverId: string | null; mentionPolicy: MentionPolicy; inboxAudit?: InboxAuditResolved;
-  activeAgent: string | null; agents: Record<string, StoredAgent>;
+  processingEye?: ProcessingEyeResolved; activeAgent: string | null; agents: Record<string, StoredAgent>;
 } {
   const out: ReturnType<typeof toStored> = {
     version: 4, serverId: config.serverId, mentionPolicy: config.mentionPolicy, activeAgent: config.activeAgent, agents: {},
   };
   if (config.inboxAudit) out.inboxAudit = { enabled: config.inboxAudit.enabled, intervalMs: config.inboxAudit.intervalMs };
+  if (config.processingEye) out.processingEye = { enabled: config.processingEye.enabled };
   for (const [key, agent] of Object.entries(config.agents || {})) {
     const stored: StoredAgent = { runtime: agent.runtime, model: agent.model };
     if (typeof agent.effort === "string" && agent.effort) stored.effort = agent.effort;
@@ -580,6 +641,9 @@ export function toStored(config: HydratedConfig): {
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
     if (agent.inboxAudit && (agent.inboxAudit.enabled !== undefined || agent.inboxAudit.intervalMs !== undefined)) {
       stored.inboxAudit = { ...agent.inboxAudit };
+    }
+    if (agent.processingEye && agent.processingEye.enabled !== undefined) {
+      stored.processingEye = { enabled: agent.processingEye.enabled };
     }
     if (typeof agent.createdAt === "string" && agent.createdAt) stored.createdAt = agent.createdAt;
     out.agents[key] = stored;
@@ -624,6 +688,18 @@ export function resolveInboxAuditSchedule(config: HydratedConfig, agentId: strin
   };
 }
 
+export function resolveProcessingEye(config: HydratedConfig, agentId: string): ProcessingEyeResolved & {
+  enabledSource: "agent" | "global" | "default";
+} {
+  const agent = config.agents[agentId];
+  if (!agent) throw new Error(`Agent 不存在：${agentId}`);
+  const enabled = agent.processingEye?.enabled ?? config.processingEye?.enabled ?? false;
+  return {
+    enabled,
+    enabledSource: agent.processingEye?.enabled !== undefined ? "agent" : config.processingEye ? "global" : "default",
+  };
+}
+
 function revision(bytes: Buffer | string): string {
   return `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
 }
@@ -637,6 +713,7 @@ function agentSignature(config: HydratedConfig, agentId: string): string {
     runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
     globalInboxAudit: config.inboxAudit ?? null, agentInboxAudit: agent.inboxAudit ?? null,
+    globalProcessingEye: config.processingEye ?? null, agentProcessingEye: agent.processingEye ?? null,
   }));
 }
 
@@ -778,6 +855,10 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     config.inboxAudit = current;
     return { scope: "global", runtimeChange: false, affectedAgentIds: Object.keys(config.agents) };
   }
+  if (mutation.kind === "set-global-processing-eye") {
+    config.processingEye = { enabled: mutation.enabled };
+    return { scope: "global", runtimeChange: false, affectedAgentIds: Object.keys(config.agents) };
+  }
   if (!APP_ID.test(mutation.agentId) || !config.agents[mutation.agentId]) throw new Error(`Agent 不存在：${mutation.agentId}`);
   const agent = config.agents[mutation.agentId];
   if (mutation.kind === "set-agent-mention") {
@@ -797,6 +878,11 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     }
     if (current.enabled === undefined && current.intervalMs === undefined) delete agent.inboxAudit;
     else agent.inboxAudit = current;
+    return { scope: "agent", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
+  }
+  if (mutation.kind === "set-agent-processing-eye") {
+    if (mutation.enabled === "inherit") delete agent.processingEye;
+    else agent.processingEye = { enabled: mutation.enabled };
     return { scope: "agent", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
   }
   if (mutation.kind === "set-chat-mention") {
@@ -1203,13 +1289,23 @@ export function safeConfigView(config: HydratedConfig, onlyAgentId?: string, cha
         source: { enabled: resolved.enabledSource, intervalMs: resolved.intervalSource },
       };
     })(),
+    processingEye: (() => {
+      const resolved = resolveProcessingEye(config, agentId);
+      return {
+        override: { enabled: agent.processingEye?.enabled === undefined ? "inherit" : agent.processingEye.enabled ? "on" : "off" },
+        effective: { enabled: resolved.enabled },
+        source: { enabled: resolved.enabledSource },
+      };
+    })(),
     chatMentionPolicies: { ...(agent.chatMentionPolicies || {}) },
     apply: (applyState?.agents as Record<string, unknown> | undefined)?.[agentId] ?? { applyState: "unknown" },
   }));
   const inboxAudit = resolvedInboxAudit(config.inboxAudit);
+  const processingEye = resolvedProcessingEye(config.processingEye);
   return {
     version: 4, mentionPolicy: config.mentionPolicy,
     inboxAudit: { enabled: inboxAudit.enabled, intervalMs: inboxAudit.intervalMs },
+    processingEye: { enabled: processingEye.enabled },
     persistedRevision: applyState?.persistedRevision ?? "unknown", agents,
   };
 }

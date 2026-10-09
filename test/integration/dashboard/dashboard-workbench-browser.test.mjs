@@ -159,7 +159,7 @@ test.skipIf(!RUN)("real Chromium exercises the Agent workbench at desktop and mo
     await page.getByRole("alert").waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "全局设置" }).click();
     await page.getByRole("dialog").getByLabel("真人群消息默认策略").selectOption("require");
-    await page.getByRole("dialog").getByRole("checkbox").check();
+    await page.getByRole("dialog").getByLabel("Inbox 巡检开关").check();
     await page.getByRole("dialog").getByLabel("全局巡检间隔（分钟）").fill("30");
     await page.screenshot({ path: path.join(evidence, "desktop-inbox-audit-settings.png"), fullPage: true });
     await page.getByRole("dialog").getByRole("button", { name: "保存全局设置" }).click();

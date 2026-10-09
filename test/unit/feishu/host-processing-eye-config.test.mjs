@@ -21,7 +21,8 @@ function writeConfig(root, agentId, processingEye) {
 function createHost(root, agentId) {
   const agent = {
     agentId, name: agentId, runtime: "pi", model: "default", feishuAppId: agentId,
-    feishuProfile: agentId, workspaceDir: path.join(root, "agents", agentId),
+    feishuAppSecret: "fixture-secret", feishuProfile: agentId, feishuDomain: "https://open.feishu.cn",
+    workspaceDir: path.join(root, "agents", agentId),
     stateDir: path.join(root, "state", "agents", agentId),
     larkConfigDir: path.join(root, "state", "agents", agentId, "lark-cli-config"),
   };

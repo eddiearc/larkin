@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.18
+
+The Feishu processing-eye OnIt reaction is now off by default. New installs and existing configs that omit `processingEye` no longer auto-react on inbound messages after upgrade; there is no migration prompt. Opt back in with `larkin config processing-eye global on`, a per-Agent `on`/`off`/`inherit` override, or the Dashboard 处理中表情 toggle. Explicit `enabled: false` and a missing key both skip the reactions API.
+
 ## 0.5.8
 
 Lark setup now reconciles requested tenant permissions with actual grants and links missing scopes to the same application in the developer console. Required permissions still block setup until granted; optional permissions and event/callback verification are reported separately. Existing-application authorization preserves and checks its App ID before recording any capability state.

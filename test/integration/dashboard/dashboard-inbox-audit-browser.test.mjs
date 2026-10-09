@@ -63,14 +63,14 @@ test.skipIf(!RUN)("real Chromium saves Inbox audit settings through the local Da
     await page.screenshot({ path: path.join(evidence, "desktop-inbox-audit-global.png"), fullPage: true });
     await global.getByRole("button", { name: "保存全局设置" }).click();
     await global.getByRole("status").getByText(/已保存/).waitFor();
-    assert.equal(await global.getByRole("checkbox").isChecked(), false, "gap-only save must not enable audit");
+    assert.equal(await global.getByLabel("Inbox 巡检开关").isChecked(), false, "gap-only save must not enable audit");
     await global.getByRole("button", { name: "关闭面板" }).click();
 
     await page.reload({ waitUntil: "networkidle" });
     await page.getByRole("button", { name: "全局设置" }).click();
     await page.waitForFunction(() => document.querySelector('[aria-label="全局巡检间隔（分钟）"]')?.value === "30");
     assert.equal(await global.getByLabel("全局巡检间隔（分钟）").inputValue(), "30");
-    assert.equal(await global.getByRole("checkbox").isChecked(), false);
+    assert.equal(await global.getByLabel("Inbox 巡检开关").isChecked(), false);
     await global.getByRole("button", { name: "关闭面板" }).click();
 
     await page.getByLabel("Inbox 巡检设置").selectOption("on");

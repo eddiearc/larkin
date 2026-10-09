@@ -58,6 +58,8 @@ type ConfigMutation =
   | { kind: "set-chat-mention"; agentId: string; chatId: string; value: "inherit" | "require" | "free" }
   | { kind: "set-global-inbox-audit"; enabled?: boolean; intervalMs?: number }
   | { kind: "set-agent-inbox-audit"; agentId: string; enabled?: boolean | "inherit"; intervalMs?: number | "inherit" }
+  | { kind: "set-global-processing-eye"; enabled: boolean }
+  | { kind: "set-agent-processing-eye"; agentId: string; enabled: boolean | "inherit" }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
   | { kind: "set-agent-model"; agentId: string; model: string }
   | { kind: "set-agent-effort"; agentId: string; effort: string | null };
@@ -141,7 +143,7 @@ const die = (message: string): never => {
 };
 
 if (!kind || !["agents", "model", "runtime", "effort", "chats", "config"].includes(kind)) {
-  die("用法: larkin agents | larkin config <show|mention|inbox-audit|apply> | larkin model [<id>] | larkin runtime [<id>] [--model <id>] | larkin effort [<level>|clear] | larkin chats [free|strict <oc_id>]");
+  die("用法: larkin agents | larkin config <show|mention|inbox-audit|processing-eye|apply> | larkin model [<id>] | larkin runtime [<id>] [--model <id>] | larkin effort [<level>|clear] | larkin chats [free|strict <oc_id>]");
 }
 
 const allowedValueFlags: Record<string, ReadonlySet<string>> = {
@@ -223,11 +225,17 @@ if (kind === "agents") {
   } else if (operation === "inbox-audit" && scope === "agent") {
     assertOnlyFlags(["--agent", "--interval"]);
     if (positionals.length !== 3) die("用法: larkin config inbox-audit agent <inherit|on|off> [--agent <App ID>] [--interval <15m|inherit>]");
+  } else if (operation === "processing-eye" && scope === "global") {
+    assertOnlyFlags([]);
+    if (positionals.length !== 3) die("用法: larkin config processing-eye global <on|off>");
+  } else if (operation === "processing-eye" && scope === "agent") {
+    assertOnlyFlags(["--agent"]);
+    if (positionals.length !== 3) die("用法: larkin config processing-eye agent <inherit|on|off> [--agent <App ID>]");
   } else if (operation === "apply") {
     assertOnlyFlags(["--agent"]);
     if (positionals.length !== 1) die("用法: larkin config apply [--agent <App ID>]");
   } else {
-    die("config 只支持 show/mention/inbox-audit/apply；运行 larkin config --help");
+    die("config 只支持 show/mention/inbox-audit/processing-eye/apply；运行 larkin config --help");
   }
 }
 
@@ -389,13 +397,17 @@ if (kind === "config") {
       say(`全局群消息策略=${String(view.mentionPolicy)}（free 会唤醒所有继承它的 Agent）`);
       const inboxAudit = view.inboxAudit as { enabled?: boolean; intervalMs?: number } | undefined;
       say(`全局 Inbox Audit=${inboxAudit?.enabled ? "on" : "off"} interval=${larkinConfig.formatInboxAuditInterval(Number(inboxAudit?.intervalMs || larkinConfig.DEFAULT_INBOX_AUDIT_INTERVAL_MS))}（默认关闭；未 @ 的 require 群消息不会进入审计）`);
+      const processingEye = view.processingEye as { enabled?: boolean } | undefined;
+      say(`全局处理中表情=${processingEye?.enabled ? "on" : "off"}（默认关闭；缺 key 视为关闭，升级后不再自动点 OnIt）`);
       for (const item of view.agents as Array<Record<string, unknown>>) {
         const mention = item.mention as { override: string; chat?: { chatId: string; override: string; effective: string; source: string } };
         const agentAudit = item.inboxAudit as { override?: { enabled?: string; intervalMs?: number | "inherit" }; effective?: { enabled?: boolean; intervalMs?: number } };
+        const agentEye = item.processingEye as { override?: { enabled?: string }; effective?: { enabled?: boolean } };
         const apply = item.apply as { applyState?: string };
-        say(`agent=${item.agentId} runtime=${item.runtime} model=${item.model} effort=${item.effort || "default"} mention=${mention.override} inbox-audit=${agentAudit?.override?.enabled || "inherit"} apply=${apply.applyState || "unknown"}`);
+        say(`agent=${item.agentId} runtime=${item.runtime} model=${item.model} effort=${item.effort || "default"} mention=${mention.override} inbox-audit=${agentAudit?.override?.enabled || "inherit"} processing-eye=${agentEye?.override?.enabled || "inherit"} apply=${apply.applyState || "unknown"}`);
         if (mention.chat) say(`  chat=${mention.chat.chatId} override=${mention.chat.override} effective=${mention.chat.effective} source=${mention.chat.source}`);
         if (agentAudit?.effective) say(`  inbox-audit effective=${agentAudit.effective.enabled ? "on" : "off"} interval=${larkinConfig.formatInboxAuditInterval(Number(agentAudit.effective.intervalMs || larkinConfig.DEFAULT_INBOX_AUDIT_INTERVAL_MS))}`);
+        if (agentEye?.effective) say(`  processing-eye effective=${agentEye.effective.enabled ? "on" : "off"}`);
       }
     }
     process.exit(0);
@@ -429,6 +441,17 @@ if (kind === "config") {
     } catch (error) { die(error instanceof Error ? error.message : String(error)); }
     process.exit(0);
   }
+  if (operation === "processing-eye") {
+    try {
+      const result = larkinConfig.mutateConfig(process.env, larkinConfig.processingEyeMutationFromCli({
+        scope: scope || "",
+        enabled: first,
+        agentId: scope === "agent" ? requireTarget() : (selected || keys[0] || ""),
+      }), authority);
+      say(JSON.stringify({ ok: true, revision: result.revision, persisted: result.persisted, applyState: result.applyState, changedScope: result.changedScope }, null, 2));
+    } catch (error) { die(error instanceof Error ? error.message : String(error)); }
+    process.exit(0);
+  }
   if (operation === "apply") {
     const agentId = requireTarget();
     const expectedSignature = larkinConfig.runtimeConfigSignature(config, agentId);
@@ -445,7 +468,7 @@ if (kind === "config") {
     } catch (error) { die(`配置已保存但未应用：${error instanceof Error ? error.message : String(error)}`); }
     process.exit(0);
   }
-  die("config 只支持 show/mention/inbox-audit/apply");
+  die("config 只支持 show/mention/inbox-audit/processing-eye/apply");
 }
 let key = flagAgent;
 if (!key && runtimeAgentId) key = runtimeAgentId;

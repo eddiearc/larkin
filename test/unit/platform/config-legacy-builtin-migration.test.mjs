@@ -32,6 +32,7 @@ function currentRuntimeSignature(config, agentId) {
     runtime: agent.runtime, model: agent.model, effort: agent.effort ?? null,
     globalMentionPolicy: config.mentionPolicy, agentMentionPolicy: agent.mentionPolicy ?? null, chatMentionPolicies: chats,
     globalInboxAudit: config.inboxAudit ?? null, agentInboxAudit: agent.inboxAudit ?? null,
+    globalProcessingEye: config.processingEye ?? null, agentProcessingEye: agent.processingEye ?? null,
   })).digest("hex")}`;
 }
 

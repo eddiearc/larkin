@@ -112,6 +112,11 @@ export interface ConfigAgent {
     effective: { enabled: boolean; intervalMs: number };
     source: { enabled: "default" | "global" | "agent"; intervalMs: "default" | "global" | "agent" };
   };
+  processingEye: {
+    override: { enabled: "inherit" | "on" | "off" };
+    effective: { enabled: boolean };
+    source: { enabled: "default" | "global" | "agent" };
+  };
   knownChats: KnownChat[];
   apply: { applyState?: "unknown" | "pending" | "applied" };
 }
@@ -127,6 +132,7 @@ export interface ConfigResponse {
   version: 4;
   mentionPolicy: "require" | "free";
   inboxAudit: { enabled: boolean; intervalMs: number };
+  processingEye: { enabled: boolean };
   persistedRevision: string;
   agents: ConfigAgent[];
   runtimeModels: Record<string, RuntimeModel[]>;

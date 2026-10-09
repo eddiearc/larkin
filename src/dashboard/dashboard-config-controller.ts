@@ -407,9 +407,14 @@ function dashboardMutation(value: Record<string, unknown>): ConfigMutation {
     "set-chat-mention": ["operation", "agentId", "chatId", "value"], "set-agent-runtime": ["operation", "agentId", "runtime", "model"],
     "set-agent-model": ["operation", "agentId", "model"], "set-agent-effort": ["operation", "agentId", "effort"],
     "set-global-inbox-audit": ["operation", "enabled", "intervalMs"], "set-agent-inbox-audit": ["operation", "agentId", "enabled", "intervalMs"],
+    "set-global-processing-eye": ["operation", "enabled"], "set-agent-processing-eye": ["operation", "agentId", "enabled"],
   };
   if (!allowed[operation] || Object.keys(value).some((key) => !allowed[operation].includes(key))) throw new Error("unsupported operation");
   if (operation === "set-global-mention") return { kind: operation, value: String(value.value) as "require" | "free" };
+  if (operation === "set-global-processing-eye") {
+    if (typeof value.enabled !== "boolean") throw new Error("invalid processing-eye enabled");
+    return { kind: operation, enabled: value.enabled };
+  }
   if (operation === "set-global-inbox-audit") {
     if (value.enabled !== undefined && typeof value.enabled !== "boolean") throw new Error("invalid inbox-audit enabled");
     if (value.intervalMs !== undefined && (typeof value.intervalMs !== "number" || !Number.isSafeInteger(value.intervalMs))) throw new Error("invalid inbox-audit interval");
@@ -420,6 +425,10 @@ function dashboardMutation(value: Record<string, unknown>): ConfigMutation {
     if (value.enabled !== undefined && value.enabled !== "inherit" && typeof value.enabled !== "boolean") throw new Error("invalid inbox-audit enabled");
     if (value.intervalMs !== undefined && value.intervalMs !== "inherit" && (typeof value.intervalMs !== "number" || !Number.isSafeInteger(value.intervalMs))) throw new Error("invalid inbox-audit interval");
     return { kind: operation, agentId, ...(value.enabled !== undefined ? { enabled: value.enabled as boolean | "inherit" } : {}), ...(value.intervalMs !== undefined ? { intervalMs: value.intervalMs as number | "inherit" } : {}) };
+  }
+  if (operation === "set-agent-processing-eye") {
+    if (value.enabled !== "inherit" && typeof value.enabled !== "boolean") throw new Error("invalid processing-eye enabled");
+    return { kind: operation, agentId, enabled: value.enabled as boolean | "inherit" };
   }
   if (operation === "set-agent-mention") return { kind: operation, agentId, value: String(value.value) as "inherit" | "require" | "free" };
   if (operation === "set-chat-mention") return { kind: operation, agentId, chatId: String(value.chatId || ""), value: String(value.value) as "inherit" | "require" | "free" };

@@ -16,7 +16,13 @@ import {
   safeConversationExcerpt,
   shouldPreventiveReconnect,
 } from "./host-business-state.js";
-import { ProcessingEyeOrchestrator, shouldShowProcessingEye } from "./host-processing-eye.js";
+import {
+  isBotStartedTopic,
+  listBotTopicRoots,
+  persistBotTopicRoot,
+  ProcessingEyeOrchestrator,
+  shouldShowProcessingEye,
+} from "./host-processing-eye.js";
 import { feishuImTarget, serializeFeishuImTarget } from "./im-freshness-adapter.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
@@ -664,19 +670,26 @@ export function createHostShell({
         at: new Date().toISOString(),
       }, 30);
       if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") {
-        // 仅私聊或入站已标记 @bot 时点 OnIt；群未@不点，不再读 processingEye 开关。
+        // 私聊、入站 @bot，或 inbound root/thread 落在本 bot 已发出的话题根上才点 OnIt。
+        const botStartedTopic = isBotStartedTopic({
+          threadId: event.thread_id,
+          rootId: event.root_id,
+          ownedIds: listBotTopicRoots(stateStore(agent).readJson("freshnessState", {})),
+        });
         if (shouldShowProcessingEye({
           chatType: event.chat_type,
           channelType: typeof inboxEnvelope.channel_type === "string" ? inboxEnvelope.channel_type : undefined,
           parentChannelType: typeof inboxEnvelope.parent_channel_type === "string" ? inboxEnvelope.parent_channel_type : undefined,
           mentionedBot: event._mentioned_bot === true,
+          botStartedTopic,
         })) {
+          if (botStartedTopic) persistBotTopicRoot(stateStore(agent), event.thread_id);
           processingEyes.add(agent, String(inboxEnvelope.message_id || ""), {
             replyInThread: String(inboxEnvelope.target || "").startsWith("thread:"),
             target: String(inboxEnvelope.target || ""),
           });
         } else {
-          log(`👀 跳过群未@消息 agent=${agent.name} chat=${event.chat_id}`);
+          log(`👀 跳过群未@且非 AI 话题消息 agent=${agent.name} chat=${event.chat_id}`);
         }
       }
       if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${inboxEnvelope.seq}: ${receipt.reason}`);

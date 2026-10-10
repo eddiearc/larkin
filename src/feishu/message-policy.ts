@@ -9,6 +9,8 @@ export interface ChannelMessage {
   content?: string;
   createTime?: string | number;
   threadId?: string | null;
+  /** Feishu topic-root message id (`root_id`); present on replies inside a topic. */
+  rootId?: string | null;
   mentionedBot?: boolean;
   mentionAll?: boolean;
   senderIsBot?: boolean;
@@ -23,6 +25,8 @@ export interface FeishuInboundEvent {
   content: string;
   create_time?: string | number;
   thread_id: string | null;
+  /** Topic-root `om_` when the inbound event is inside a Feishu topic. */
+  root_id?: string | null;
   _mentioned_bot: boolean;
   _mention_all: boolean;
   _sender_is_bot: boolean;
@@ -104,6 +108,7 @@ export function normalizeChannelMessage(message: ChannelMessage): FeishuInboundE
     content: String(message.content || ""),
     create_time: message.createTime,
     thread_id: message.threadId || null,
+    root_id: message.rootId || null,
     _mentioned_bot: Boolean(message.mentionedBot || message.mentionAll),
     _mention_all: Boolean(message.mentionAll),
     _sender_is_bot: message.senderIsBot === true,

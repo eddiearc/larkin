@@ -1,19 +1,51 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { ProcessingEyeOrchestrator, shouldShowProcessingEye } from "../../../dist/feishu/host-processing-eye.mjs";
+import {
+  isBotStartedTopic,
+  persistBotTopicRoot,
+  ProcessingEyeOrchestrator,
+  rememberBotTopicRoot,
+  shouldShowProcessingEye,
+} from "../../../dist/feishu/host-processing-eye.mjs";
 
 const agent = { agentId: "cli_eye", name: "cli_eye", feishuProfile: "cli_eye" };
 
-test("shouldShowProcessingEye is true for private chats and group @, false for group without @", () => {
+test("shouldShowProcessingEye is true for private chats, group @, and bot-started topics", () => {
   assert.equal(shouldShowProcessingEye({ chatType: "p2p", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "dm", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ channelType: "dm", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", parentChannelType: "dm", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: true }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: true }), true);
+  assert.equal(shouldShowProcessingEye({
+    chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false, botStartedTopic: true,
+  }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: false }), false);
   assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false }), false);
+  assert.equal(shouldShowProcessingEye({
+    chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false, botStartedTopic: false,
+  }), false);
   assert.equal(shouldShowProcessingEye({ mentionedBot: false }), false);
+});
+
+test("isBotStartedTopic matches a topic whose root or thread the bot already owns", () => {
+  assert.equal(isBotStartedTopic({ threadId: "omt_topic", rootId: "om_bot_root", ownedIds: ["om_bot_root"] }), true);
+  assert.equal(isBotStartedTopic({ threadId: "omt_topic", ownedIds: ["omt_topic"] }), true);
+  assert.equal(isBotStartedTopic({ threadId: "omt_topic", rootId: "om_human_root", ownedIds: ["om_bot_root"] }), false);
+  assert.equal(isBotStartedTopic({ threadId: null, rootId: "om_bot_root", ownedIds: ["om_bot_root"] }), false);
+  assert.equal(isBotStartedTopic({ threadId: "omt_topic", rootId: "om_bot_root", ownedIds: [] }), false);
+  assert.deepEqual(rememberBotTopicRoot(["om_a"], "om_b"), ["om_a", "om_b"]);
+  assert.deepEqual(rememberBotTopicRoot(["om_a"], "not-a-message"), ["om_a"]);
+  const store = {
+    state: { version: 1, cursors: {} },
+    mutateJson(_key, fallback, operation) {
+      this.state = { ...fallback, ...this.state };
+      operation(this.state);
+    },
+  };
+  persistBotTopicRoot(store, "om_owned");
+  persistBotTopicRoot(store, "skip-me");
+  assert.deepEqual(store.state.bot_topic_roots, ["om_owned"]);
 });
 
 function createTimers() {

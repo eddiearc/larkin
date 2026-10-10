@@ -21,6 +21,19 @@ export interface ProcessingEyeEligibility {
   channelType?: string | null;
   parentChannelType?: string | null;
   mentionedBot?: boolean;
+  /** True when the inbound sits in a topic whose root/thread the bot already owns. */
+  botStartedTopic?: boolean;
+}
+
+export const BOT_TOPIC_ROOT_LIMIT = 256;
+const BOT_TOPIC_ID = /^om[t]?_[A-Za-z0-9_-]+$/;
+
+export interface BotTopicRootState {
+  bot_topic_roots?: unknown;
+}
+
+interface BotTopicRootStore {
+  mutateJson<T, R>(key: "freshnessState", fallback: T, operation: (value: T) => R): R;
 }
 
 function isPrivateChat(input: ProcessingEyeEligibility): boolean {
@@ -30,10 +43,48 @@ function isPrivateChat(input: ProcessingEyeEligibility): boolean {
   return String(input.parentChannelType || "").toLowerCase() === "dm";
 }
 
-/** OnIt 只给私聊，或入站事件已标记 @bot（含 @all，沿用 `_mentioned_bot`）。群未@不点。 */
+/** OnIt 给私聊、入站 @bot（含 @all），或用户在 AI 消息下发起的话题里说话。群未@且非 AI 话题不点。 */
 export function shouldShowProcessingEye(input: ProcessingEyeEligibility): boolean {
   if (isPrivateChat(input)) return true;
-  return input.mentionedBot === true;
+  if (input.mentionedBot === true) return true;
+  return input.botStartedTopic === true;
+}
+
+export function listBotTopicRoots(state: BotTopicRootState | null | undefined): string[] {
+  if (!Array.isArray(state?.bot_topic_roots)) return [];
+  return state.bot_topic_roots.filter((id): id is string => typeof id === "string" && BOT_TOPIC_ID.test(id));
+}
+
+export function rememberBotTopicRoot(ids: readonly string[], candidate: string | null | undefined): string[] {
+  const id = String(candidate || "");
+  if (!BOT_TOPIC_ID.test(id) || ids.includes(id)) return [...ids];
+  return [...ids, id].slice(-BOT_TOPIC_ROOT_LIMIT);
+}
+
+/** 机器人成功发出的 `om_`/`omt_` 记为话题根，供后续「AI 发起的话题」判定，不做飞书回查。 */
+export function persistBotTopicRoot(store: BotTopicRootStore, candidate: string | null | undefined): void {
+  const id = String(candidate || "");
+  if (!BOT_TOPIC_ID.test(id)) return;
+  store.mutateJson<{ version: 1; cursors?: Record<string, unknown>; bot_topic_roots?: string[] }, void>(
+    "freshnessState",
+    { version: 1, cursors: {} },
+    (state) => {
+      state.bot_topic_roots = rememberBotTopicRoot(listBotTopicRoots(state), id);
+    },
+  );
+}
+
+export function isBotStartedTopic(input: {
+  threadId?: string | null;
+  rootId?: string | null;
+  ownedIds?: readonly string[] | null;
+}): boolean {
+  const threadId = String(input.threadId || "");
+  if (!threadId) return false;
+  const owned = new Set(input.ownedIds || []);
+  if (owned.has(threadId)) return true;
+  const rootId = String(input.rootId || "");
+  return Boolean(rootId) && owned.has(rootId);
 }
 
 export interface ProcessingEyeOptions {

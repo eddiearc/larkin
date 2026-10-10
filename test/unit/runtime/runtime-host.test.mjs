@@ -1055,7 +1055,8 @@ test("turn end retries an accepted wake when the Agent never polls without advan
     const stateBefore = store.readJson("inboxState", {});
     session.emit({ type: "turn-start", turnId: "turn-no-poll" });
     session.emit({ type: "turn-end", turnId: "turn-no-poll" });
-    await waitForCondition(() => session.prompts.length === 2);
+    // Production turn-end retry defaults to 1000ms; wait past that so CI timer slack cannot miss it.
+    await waitForCondition(() => session.prompts.length === 2, 2_500);
 
     assert.equal(session.prompts.length, 2);
     assert.equal(session.prompts[1].inputId, receipt.deliveryId);

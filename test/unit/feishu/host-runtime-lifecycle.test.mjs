@@ -740,7 +740,7 @@ test("production HostShell clears eyes on inactive/error and ignores heartbeat a
     larkConfigDir: path.join(root, "state", "agents", agentId, "lark-cli-config") };
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 4, serverId: "server-eye-host", mentionPolicy: "require",
-    processingEye: { enabled: true }, activeAgent: agentId,
+    activeAgent: agentId,
     agents: { [agentId]: { runtime: "pi", model: "default" } },
   }, null, 2)}\n`, { mode: 0o600 });
   const env = { LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-eye-host",

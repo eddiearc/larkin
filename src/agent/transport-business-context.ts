@@ -18,6 +18,7 @@ import { createReminderRoutes } from "./reminder-routes.js";
 import { auditReminderDelivery } from "./reminder-delivery-audit.js";
 import { isImageMime, looksLikeMarkdown, resolveMappedChatId, safeConversationExcerpt } from "./transport-shell.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
+import { persistBotTopicRoot } from "../feishu/host-processing-eye.js";
 
 type Env = Record<string, string | undefined>;
 type JsonObject = Record<string, unknown>;
@@ -117,6 +118,7 @@ export function createTransportBusinessContext(env: Env = process.env) {
   const appendConversation = (item: JsonObject): void => {
     try {
       fs.appendFileSync(paths.conversation, `${JSON.stringify({ ...item, text: safeConversationExcerpt(item.text) })}\n`);
+      if (item.direction === "out") persistBotTopicRoot(stateStore, typeof item.messageId === "string" ? item.messageId : null);
     } catch (error) { log(`conversation 写失败: ${(error as Error).message}`); }
   };
 

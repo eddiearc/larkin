@@ -7,14 +7,14 @@ import { createHostShell } from "../../../dist/feishu/host-shell.mjs";
 
 const testManagedCli = () => ({ command: { command: "/test/official-lark-cli", argsPrefix: [], version: "1.0.80" }, env: {} });
 
-function writeConfig(root, agentId, processingEye) {
+function writeConfig(root, agentId, extra = {}) {
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 4,
     serverId: "server-processing-eye-host",
-    mentionPolicy: "require",
-    ...(processingEye ? { processingEye } : {}),
+    mentionPolicy: "free",
     activeAgent: agentId,
     agents: { [agentId]: { runtime: "pi", model: "default" } },
+    ...extra,
   }, null, 2)}\n`, { mode: 0o600 });
 }
 
@@ -57,43 +57,83 @@ function reactionPosts(apiCalls) {
   return apiCalls.filter((args) => args.includes("POST") && args.some((arg) => String(arg).includes("/reactions")));
 }
 
-async function ingest(host, agentId, suffix) {
+async function ingest(host, agentId, {
+  suffix, chatType = "p2p", mentionedBot = false, threadId = null, rootId = null,
+}) {
   await host.ingest(agentId, {
-    chat_id: "oc_eye_config", chat_type: "p2p", sender_id: "ou_sender", message_id: `om_${suffix}`,
-    event_id: `evt_${suffix}`, content: suffix, thread_id: null,
-    _mentioned_bot: false, _mention_all: false, _sender_is_bot: false,
+    chat_id: chatType === "p2p" ? "oc_eye_dm" : "oc_eye_group",
+    chat_type: chatType,
+    sender_id: "ou_sender",
+    message_id: `om_${suffix}`,
+    event_id: `evt_${suffix}`,
+    content: suffix,
+    thread_id: threadId,
+    root_id: rootId,
+    _mentioned_bot: mentionedBot,
+    _mention_all: false,
+    _sender_is_bot: false,
   });
 }
 
-test("Host skips the OnIt reactions API when processingEye is omitted or disabled", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-processing-eye-host-off-"));
-  const agentId = "cli_eyeOffA1";
+test("Host posts OnIt for DM, group @, and bot-started topics, and skips ordinary group messages", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-processing-eye-host-gate-"));
+  const agentId = "cli_eyeGateA1";
   writeConfig(root, agentId);
+  const freshnessFile = path.join(root, "state", "agents", agentId, "freshness-state.json");
+  fs.mkdirSync(path.dirname(freshnessFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(freshnessFile, `${JSON.stringify({
+    version: 1, cursors: {}, bot_topic_roots: ["om_bot_root"],
+  })}\n`, { mode: 0o600 });
   const { host, apiCalls } = createHost(root, agentId);
   try {
-    await ingest(host, agentId, "omitted");
-    assert.equal(reactionPosts(apiCalls).length, 0, "missing processingEye key must not POST OnIt");
+    await ingest(host, agentId, { suffix: "dm", chatType: "p2p", mentionedBot: false });
+    assert.equal(reactionPosts(apiCalls).length, 1, "private chat must POST OnIt");
+    assert.ok(reactionPosts(apiCalls)[0].some((arg) => String(arg).includes("/open-apis/im/v1/messages/om_dm/reactions")));
+    assert.ok(reactionPosts(apiCalls)[0].some((arg) => String(arg).includes("OnIt")));
 
-    writeConfig(root, agentId, { enabled: false });
-    await ingest(host, agentId, "explicit_off");
-    assert.equal(reactionPosts(apiCalls).length, 0, "explicit processingEye.enabled=false must not POST OnIt");
+    await ingest(host, agentId, { suffix: "group_mention", chatType: "group", mentionedBot: true });
+    assert.equal(reactionPosts(apiCalls).length, 2, "group @ must POST OnIt");
+    assert.ok(reactionPosts(apiCalls)[1].some((arg) => String(arg).includes("/open-apis/im/v1/messages/om_group_mention/reactions")));
+
+    await ingest(host, agentId, {
+      suffix: "bot_topic", chatType: "group", mentionedBot: false,
+      threadId: "omt_bot_topic", rootId: "om_bot_root",
+    });
+    assert.equal(reactionPosts(apiCalls).length, 3, "topic under a bot message must POST OnIt without @");
+    assert.ok(reactionPosts(apiCalls)[2].some((arg) => String(arg).includes("/open-apis/im/v1/messages/om_bot_topic/reactions")));
+
+    await ingest(host, agentId, {
+      suffix: "bot_topic_followup", chatType: "group", mentionedBot: false,
+      threadId: "omt_bot_topic",
+    });
+    assert.equal(reactionPosts(apiCalls).length, 4, "later replies in the remembered bot topic must still POST OnIt");
+
+    await ingest(host, agentId, {
+      suffix: "human_topic", chatType: "group", mentionedBot: false,
+      threadId: "omt_human_topic", rootId: "om_human_root",
+    });
+    assert.equal(reactionPosts(apiCalls).length, 4, "topic under a human message must not POST OnIt without @");
+
+    await ingest(host, agentId, { suffix: "group_plain", chatType: "group", mentionedBot: false });
+    assert.equal(reactionPosts(apiCalls).length, 4, "group without @ must not POST OnIt");
   } finally {
     await host.shutdown("cleanup");
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("Host posts OnIt when processingEye is explicitly enabled", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-processing-eye-host-on-"));
-  const agentId = "cli_eyeOnA1";
-  writeConfig(root, agentId, { enabled: true });
+test("Leftover processingEye.enabled does not restore a master OnIt switch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-processing-eye-host-legacy-"));
+  const agentId = "cli_eyeLegacyA1";
+  writeConfig(root, agentId, { processingEye: { enabled: false } });
   const { host, apiCalls } = createHost(root, agentId);
   try {
-    await ingest(host, agentId, "explicit_on");
-    const posts = reactionPosts(apiCalls);
-    assert.equal(posts.length, 1, "explicit processingEye.enabled=true must POST OnIt");
-    assert.ok(posts[0].some((arg) => String(arg).includes("/open-apis/im/v1/messages/om_explicit_on/reactions")));
-    assert.ok(posts[0].some((arg) => String(arg).includes("OnIt")));
+    await ingest(host, agentId, { suffix: "legacy_off_dm", chatType: "p2p", mentionedBot: false });
+    assert.equal(reactionPosts(apiCalls).length, 1, "retired enabled=false must not suppress DM OnIt");
+
+    writeConfig(root, agentId, { processingEye: { enabled: true } });
+    await ingest(host, agentId, { suffix: "legacy_on_group", chatType: "group", mentionedBot: false });
+    assert.equal(reactionPosts(apiCalls).length, 1, "retired enabled=true must not OnIt a group without @");
   } finally {
     await host.shutdown("cleanup");
     fs.rmSync(root, { recursive: true, force: true });

@@ -15,6 +15,7 @@ import * as larkinConfig from "../platform/config.js";
 import { resolveOfficialLarkCli, type OfficialLarkCliCommand } from "./official-lark-cli.js";
 import { assertAgentWorkspaceBound, managedLarkCliEnv } from "./agent-lark-cli-workspace.js";
 import { parseDocumentCommentTarget } from "../feishu/document-comment.js";
+import { persistBotTopicRoot } from "../feishu/host-processing-eye.js";
 import { SpanKind } from "@opentelemetry/api";
 import { loadTelemetryConfig } from "../platform/telemetry-config.js";
 import { telemetrySingleton, type TelemetryRuntime } from "../platform/telemetry-tracing.js";
@@ -1288,6 +1289,9 @@ export function runLarkCli(
     const deliveryAnchor = currentReminder?.deliveryAnchor;
     const memo = !write.error && write.status === 0 && writeMessage
       ? recordImWriteMemo(store, intentKey, writeMessage.message_id, deliveryAnchor) : { duplicate: false };
+    if (!write.error && write.status === 0 && writeMessage?.message_id) {
+      persistBotTopicRoot(store, writeMessage.message_id);
+    }
     const duplicateOfEarlierReminder = memo.duplicate && Boolean(currentReminder)
       && memo.priorSourceMessageId !== currentReminder?.deliveryAnchor;
     const committedWrite = !write.error && write.status === 0 && !duplicateOfEarlierReminder;

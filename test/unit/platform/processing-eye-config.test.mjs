@@ -15,7 +15,7 @@ const CLI_ENTRY = path.join(ROOT, "dist", "app", "cli.mjs");
 const APP = "cli_processingEyeA1";
 const OTHER = "cli_processingEyeB2";
 
-function fixture() {
+function fixture(extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-processing-eye-config-"));
   fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     version: 4,
@@ -26,79 +26,51 @@ function fixture() {
       [APP]: { runtime: "codex", model: "gpt-5.6-sol" },
       [OTHER]: { runtime: "claude", model: "sonnet" },
     },
+    ...extra,
   }, null, 2)}\n`, { mode: 0o600 });
   return { root, env: { LARKIN_CONFIG_DIR: root } };
 }
 
-test("processing eye defaults off when the key is omitted", () => {
-  const { root, env } = fixture();
+test("leftover processingEye keys are ignored and dropped on the next write", () => {
+  const { root, env } = fixture({
+    processingEye: { enabled: false },
+    agents: {
+      [APP]: { runtime: "codex", model: "gpt-5.6-sol", processingEye: { enabled: true } },
+      [OTHER]: { runtime: "claude", model: "sonnet" },
+    },
+  });
   try {
     const { config } = configApi.loadConfig(env);
     assert.equal(config.processingEye, undefined);
-    assert.deepEqual(configApi.resolveProcessingEye(config, APP), {
-      enabled: false,
-      enabledSource: "default",
-    });
+    assert.equal("processingEye" in config.agents[APP], false);
     const view = configApi.safeConfigView(config, APP);
-    assert.equal(view.processingEye.enabled, false);
-    assert.equal(view.agents[0].processingEye.override.enabled, "inherit");
-    assert.equal(view.agents[0].processingEye.effective.enabled, false);
-    assert.equal(view.agents[0].processingEye.source.enabled, "default");
+    assert.equal("processingEye" in view, false);
+    assert.equal("processingEye" in view.agents[0], false);
+    assert.equal(typeof configApi.resolveProcessingEye, "undefined");
+    assert.equal(typeof configApi.processingEyeMutationFromCli, "undefined");
+
+    configApi.mutateConfig(env, { kind: "set-global-mention", value: "free" }, { kind: "user" });
+    const stored = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
+    assert.equal("processingEye" in stored, false);
+    assert.equal("processingEye" in stored.agents[APP], false);
+    assert.equal(stored.mentionPolicy, "free");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("explicit global and agent processing-eye overrides persist without a migration prompt", () => {
-  const { root, env } = fixture();
-  try {
-    configApi.mutateConfig(env, configApi.processingEyeMutationFromCli({
-      scope: "global", enabled: "on", agentId: APP,
-    }), { kind: "user" });
-    let stored = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-    assert.deepEqual(stored.processingEye, { enabled: true });
-    assert.equal("processingEye" in stored.agents[APP], false);
-
-    configApi.mutateConfig(env, configApi.processingEyeMutationFromCli({
-      scope: "agent", enabled: "off", agentId: APP,
-    }), { kind: "user" });
-    const after = configApi.loadConfig(env).config;
-    assert.deepEqual(configApi.resolveProcessingEye(after, APP), {
-      enabled: false, enabledSource: "agent",
-    });
-    assert.deepEqual(configApi.resolveProcessingEye(after, OTHER), {
-      enabled: true, enabledSource: "global",
-    });
-
-    configApi.mutateConfig(env, configApi.processingEyeMutationFromCli({
-      scope: "agent", enabled: "inherit", agentId: APP,
-    }), { kind: "user" });
-    stored = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-    assert.equal("processingEye" in stored.agents[APP], false);
-    assert.throws(() => configApi.processingEyeMutationFromCli({
-      scope: "global", enabled: "inherit", agentId: APP,
-    }), /on\|off/);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test("larkin config processing-eye CLI persists the opt-in without editing config.json by hand", () => {
+test("larkin config processing-eye is removed from the CLI surface", () => {
   const { root, env } = fixture();
   try {
     const help = spawnSync(process.execPath, [CLI_ENTRY, "help", "config"], { encoding: "utf8" });
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /config processing-eye global/);
-    assert.match(help.stdout, /config processing-eye agent/);
-    const run = (...args) => {
-      const spawnEnv = { ...process.env, ...env };
-      delete spawnEnv.LARKIN_AGENT_ID;
-      return spawnSync(process.execPath, [CONFIG_ENTRY, "config", ...args], { encoding: "utf8", env: spawnEnv });
-    };
-    const enabled = run("processing-eye", "global", "on");
-    assert.equal(enabled.status, 0, enabled.stderr);
+    assert.doesNotMatch(help.stdout, /processing-eye/);
+    const spawnEnv = { ...process.env, ...env };
+    delete spawnEnv.LARKIN_AGENT_ID;
+    const rejected = spawnSync(process.execPath, [CONFIG_ENTRY, "config", "processing-eye", "global", "on"], {
+      encoding: "utf8", env: spawnEnv,
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(`${rejected.stdout}\n${rejected.stderr}`, /只支持|不支持|用法/);
     const stored = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-    assert.deepEqual(stored.processingEye, { enabled: true });
-    const agentOff = run("processing-eye", "agent", "off", "--agent", APP);
-    assert.equal(agentOff.status, 0, agentOff.stderr);
-    const after = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-    assert.deepEqual(after.agents[APP].processingEye, { enabled: false });
-    assert.equal("processingEye" in after.agents[OTHER], false);
+    assert.equal("processingEye" in stored, false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

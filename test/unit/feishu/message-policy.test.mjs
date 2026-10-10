@@ -42,6 +42,7 @@ test("channel normalization preserves topic, mention, and bot identity inputs", 
     content: "hello",
     createTime: "1700000000000",
     threadId: "omt_topic",
+    rootId: "om_topic_root",
     mentionedBot: false,
     mentionAll: true,
     senderIsBot: true,
@@ -54,6 +55,7 @@ test("channel normalization preserves topic, mention, and bot identity inputs", 
     content: "hello",
     create_time: "1700000000000",
     thread_id: "omt_topic",
+    root_id: "om_topic_root",
     _mentioned_bot: true,
     _mention_all: true,
     _sender_is_bot: true,
@@ -62,6 +64,7 @@ test("channel normalization preserves topic, mention, and bot identity inputs", 
 });
 
 test("scan authority requires raw boolean senderIsBot and group or topic", () => {
+  assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", chatType: "group", senderIsBot: false, messageId: "om_a" }).root_id, null);
   assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", chatType: "group", senderIsBot: false, messageId: "om_a" })._scan_authority, true);
   assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", senderIsBot: false, messageId: "om_a" })._scan_authority, false);
   assert.equal(policy.normalizeChannelMessage({ chatId: "oc_x", chatType: "group", messageId: "om_a" })._scan_authority, false);

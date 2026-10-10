@@ -45,7 +45,7 @@ test("Agent CLI manifest is the single machine-readable public command inventory
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.reminder, ["schedule", "list", "snooze", "update", "cancel", "log"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.interaction, ["callback-status", "callback-probe", "create", "get", "resolve"]);
   assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.profile, ["show"]);
-  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "inbox-audit", "processing-eye", "apply"]);
+  assert.deepEqual(cliModule.AGENT_CLI_CAPABILITIES.commands.config, ["show", "runtime", "model", "effort", "mention", "inbox-audit", "apply"]);
   const f = fixture();
   try {
     const help = JSON.parse(f.run(["--help"]).stdout);
@@ -136,14 +136,13 @@ test("Agent config commands reject extra positionals and operation-inapplicable 
       ["inbox-audit", "global", "on", "extra"],
       ["inbox-audit", "global", "on", "--agent", f.agentId],
       ["inbox-audit", "agent", "on", "--chat", "oc_irrelevant"],
-      ["processing-eye", "global", "on", "extra"],
-      ["processing-eye", "global", "on", "--agent", f.agentId],
-      ["processing-eye", "agent", "on", "--chat", "oc_irrelevant"],
+      ["processing-eye", "global", "on"],
+      ["processing-eye", "agent", "on", "--agent", f.agentId],
     ];
     for (const args of invalidCases) {
       const rejected = f.run(["config", ...args]);
       assert.equal(rejected.code, 2, `${args.join(" ")} unexpectedly succeeded`);
-      assert.match(rejected.stderr, /用法|不支持参数|只接受/);
+      assert.match(rejected.stderr, /用法|不支持参数|只接受|只支持/);
       assert.deepEqual(fs.readFileSync(path.join(f.root, "config.json")), before, `${args.join(" ")} changed config bytes`);
     }
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

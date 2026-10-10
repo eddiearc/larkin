@@ -327,6 +327,7 @@ test("guarded outbound marker uses the same canonical target as Host progress su
     assert.equal(f.run(["im", "+messages-send", "--chat-id", "oc_progress", "--text", "sent"]).code, 0);
     const freshness = f.store.readJson("freshnessState", {});
     assert.ok(freshness.last_outbound_by_target["feishu.im/chat/oc_progress"]);
+    assert.deepEqual(freshness.bot_topic_roots, ["om_outbound"]);
     assert.ok(hostShell.lastOutboundAtForTarget(f.store, "chat:oc_progress"));
     assert.equal(hostShell.lastOutboundAtForTarget(f.store, "chat:oc_other"), null);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

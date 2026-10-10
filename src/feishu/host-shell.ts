@@ -16,7 +16,7 @@ import {
   safeConversationExcerpt,
   shouldPreventiveReconnect,
 } from "./host-business-state.js";
-import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
+import { ProcessingEyeOrchestrator, shouldShowProcessingEye } from "./host-processing-eye.js";
 import { feishuImTarget, serializeFeishuImTarget } from "./im-freshness-adapter.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
@@ -37,7 +37,7 @@ import {
 } from "../runtime/runtime-readiness.js";
 import { providerFinishReason, safeProviderDiagnostic } from "../runtime/provider-error-classifier.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
-import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy, resolveProcessingEye } from "../platform/config.js";
+import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 import { isChannelReconnecting, isRuntimeReadinessCurrent, isSessionCurrent } from "../app/agent-readiness.js";
@@ -592,11 +592,6 @@ export function createHostShell({
   });
   const seenEventIds = new Set<string>();
   const inFlightEventIds = new Set<string>();
-  const processingEyeEnabled = (agent: ConfiguredAgent): boolean => {
-    // 缺 key / 读配置失败都关闭，避免升级后继续自动点 OnIt。
-    try { return resolveProcessingEye(loadConfig(env).config, agent.agentId).enabled; }
-    catch { return false; }
-  };
   const onFeishuMessage = async (agent: ConfiguredAgent, event: FeishuInboundEvent, options?: { wake?: boolean }): Promise<void> => {
     const wake = options?.wake !== false;
     const eventKey = `${agent.agentId}:${event.event_id || event.message_id || ""}`;
@@ -668,12 +663,21 @@ export function createHostShell({
         excerpt: safeConversationExcerpt(event.content, 180),
         at: new Date().toISOString(),
       }, 30);
-      if ((inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent")
-        && processingEyeEnabled(agent)) {
-        processingEyes.add(agent, String(inboxEnvelope.message_id || ""), {
-          replyInThread: String(inboxEnvelope.target || "").startsWith("thread:"),
-          target: String(inboxEnvelope.target || ""),
-        });
+      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") {
+        // 仅私聊或入站已标记 @bot 时点 OnIt；群未@不点，不再读 processingEye 开关。
+        if (shouldShowProcessingEye({
+          chatType: event.chat_type,
+          channelType: typeof inboxEnvelope.channel_type === "string" ? inboxEnvelope.channel_type : undefined,
+          parentChannelType: typeof inboxEnvelope.parent_channel_type === "string" ? inboxEnvelope.parent_channel_type : undefined,
+          mentionedBot: event._mentioned_bot === true,
+        })) {
+          processingEyes.add(agent, String(inboxEnvelope.message_id || ""), {
+            replyInThread: String(inboxEnvelope.target || "").startsWith("thread:"),
+            target: String(inboxEnvelope.target || ""),
+          });
+        } else {
+          log(`👀 跳过群未@消息 agent=${agent.name} chat=${event.chat_id}`);
+        }
       }
       if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${inboxEnvelope.seq}: ${receipt.reason}`);
     } catch (error) {

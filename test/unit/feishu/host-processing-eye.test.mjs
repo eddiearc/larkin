@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { ProcessingEyeOrchestrator } from "../../../dist/feishu/host-processing-eye.mjs";
+import { ProcessingEyeOrchestrator, shouldShowProcessingEye } from "../../../dist/feishu/host-processing-eye.mjs";
 
 const agent = { agentId: "cli_eye", name: "cli_eye", feishuProfile: "cli_eye" };
+
+test("shouldShowProcessingEye is true for private chats and group @, false for group without @", () => {
+  assert.equal(shouldShowProcessingEye({ chatType: "p2p", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "dm", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ channelType: "dm", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", parentChannelType: "dm", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: true }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: true }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: false }), false);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false }), false);
+  assert.equal(shouldShowProcessingEye({ mentionedBot: false }), false);
+});
 
 function createTimers() {
   const timers = [];

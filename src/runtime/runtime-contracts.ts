@@ -97,7 +97,7 @@ export type AgentCliCommand =
   | { command: `reminder ${"schedule" | "list" | "snooze" | "update" | "cancel" | "log"}`; purpose: string }
   | { command: `interaction ${"callback-status" | "callback-probe" | "create" | "get" | "resolve"}`; purpose: string }
   | { command: "profile show"; purpose: string }
-  | { command: `config ${"show" | "runtime" | "model" | "effort" | "mention" | "inbox-audit" | "processing-eye" | "apply"}`; purpose: string };
+  | { command: `config ${"show" | "runtime" | "model" | "effort" | "mention" | "inbox-audit" | "apply"}`; purpose: string };
 
 export interface AgentCliCapabilities {
   executable: string;

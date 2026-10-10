@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.19
+
+The Feishu processing-eye OnIt reaction is no longer a config switch. After a successful deliver, Larkin reacts OnIt only for private chats (DM / p2p) or when the inbound event already marked the bot as mentioned. Group messages without @ never get the reaction, including free-mention chats that still wake the Agent.
+
+The 0.5.18 `processingEye.enabled` key, `larkin config processing-eye`, and Dashboard 处理中表情 toggle are removed. Leftover keys in existing configs are ignored on load and dropped on the next config write. There is no on/off flag and no migration prompt.
+
 ## 0.5.18
 
 The Feishu processing-eye OnIt reaction is now off by default. New installs and existing configs that omit `processingEye` no longer auto-react on inbound messages after upgrade; there is no migration prompt. Opt back in with `larkin config processing-eye global on`, a per-Agent `on`/`off`/`inherit` override, or the Dashboard 处理中表情 toggle. Explicit `enabled: false` and a missing key both skip the reactions API.

@@ -55,7 +55,7 @@ const status = {
 };
 
 const config = (agentId?: string) => ({
-  version: 4, mentionPolicy: "free", inboxAudit: { enabled: false, intervalMs: 15 * 60_000 }, processingEye: { enabled: false }, persistedRevision: "sha256:revision",
+  version: 4, mentionPolicy: "free", inboxAudit: { enabled: false, intervalMs: 15 * 60_000 }, persistedRevision: "sha256:revision",
   runtimeModels: {
     pi: [{ id: "default" }],
     codex: [{ id: "default" }, { id: "gpt-5.6-sol", supportedReasoningEfforts: ["low", "high"] }],
@@ -70,10 +70,6 @@ const config = (agentId?: string) => ({
     inboxAudit: {
       override: { enabled: "inherit", intervalMs: "inherit" }, effective: { enabled: false, intervalMs: 15 * 60_000 },
       source: { enabled: "default", intervalMs: "default" },
-    },
-    processingEye: {
-      override: { enabled: "inherit" }, effective: { enabled: false },
-      source: { enabled: "default" },
     },
     knownChats: agent.agentId === "cli_AgentB2" ? [
       { chatId: "oc_BuildRoom", displayName: "构建群", kind: "group", override: "free", effective: "free", source: "chat" },
@@ -197,28 +193,16 @@ describe("Agent-centric dashboard workbench", () => {
     expect(within(dialog).getByRole("status")).toHaveTextContent("已保存");
   });
 
-  it("saves the global processing-eye opt-in through the existing protected mutation", async () => {
-    const mutations: Array<Record<string, unknown>> = [];
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input), "http://localhost");
-      if (url.pathname === "/api/status") return ok(status);
-      if (url.pathname === "/api/config" && init?.method === "PATCH") {
-        mutations.push(JSON.parse(String(init.body)));
-        return ok({ revision: "sha256:global-eye", applyState: "saved_not_applied" });
-      }
-      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
-      if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
-      throw new Error(`unexpected request ${url}`);
-    }));
+  it("does not expose a processing-eye toggle after the switch was removed", async () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
     await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByLabelText("处理中表情开关")).not.toBeChecked();
-    await userEvent.click(within(dialog).getByLabelText("处理中表情开关"));
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    await waitFor(() => expect(mutations).toEqual([{ operation: "set-global-processing-eye", enabled: true }]));
-    expect(within(dialog).getByRole("status")).toHaveTextContent("已保存");
+    expect(within(dialog).queryByLabelText("处理中表情开关")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("处理中表情")).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "关闭面板" }));
+    expect(screen.queryByLabelText("处理中表情设置")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "处理中表情" })).not.toBeInTheDocument();
   });
 
   it("keeps a precise existing audit gap when saving a different global setting", async () => {

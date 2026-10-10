@@ -16,6 +16,26 @@ interface ApiResult { ok?: boolean; data?: { reaction_id?: string }; error?: unk
 type ApiCallback = (error: Error | null, result: ApiResult | null) => void;
 type ExecFile = typeof nodeExecFile;
 
+export interface ProcessingEyeEligibility {
+  chatType?: string | null;
+  channelType?: string | null;
+  parentChannelType?: string | null;
+  mentionedBot?: boolean;
+}
+
+function isPrivateChat(input: ProcessingEyeEligibility): boolean {
+  const chatType = String(input.chatType || "").toLowerCase();
+  if (chatType === "p2p" || chatType === "dm") return true;
+  if (String(input.channelType || "").toLowerCase() === "dm") return true;
+  return String(input.parentChannelType || "").toLowerCase() === "dm";
+}
+
+/** OnIt 只给私聊，或入站事件已标记 @bot（含 @all，沿用 `_mentioned_bot`）。群未@不点。 */
+export function shouldShowProcessingEye(input: ProcessingEyeEligibility): boolean {
+  if (isPrivateChat(input)) return true;
+  return input.mentionedBot === true;
+}
+
 export interface ProcessingEyeOptions {
   execFile?: ExecFile;
   log?: (...parts: unknown[]) => void;

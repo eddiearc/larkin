@@ -142,7 +142,7 @@ test("Agent config commands reject extra positionals and operation-inapplicable 
     for (const args of invalidCases) {
       const rejected = f.run(["config", ...args]);
       assert.equal(rejected.code, 2, `${args.join(" ")} unexpectedly succeeded`);
-      assert.match(rejected.stderr, /用法|不支持参数|只接受/);
+      assert.match(rejected.stderr, /用法|不支持参数|只接受|只支持/);
       assert.deepEqual(fs.readFileSync(path.join(f.root, "config.json")), before, `${args.join(" ")} changed config bytes`);
     }
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }

@@ -53,7 +53,7 @@ export type NormalizedRuntimeEvent =
    * Feeds the streaming card reply; never contains thinking or tool payloads.
    */
   | { type: "text-delta"; text: string; newBlock?: boolean }
-  | { type: "turn-end"; sessionId?: string; turnId?: string }
+  | { type: "turn-end"; outcome: "success" | "error" | "aborted" | "unknown"; sessionId?: string; turnId?: string }
   | { type: "input-error"; inputId?: string; retryable: boolean; willRetry?: boolean; message: string;
       errorCategory?: "billing" | "quota" | "rate_limit" | "auth" | "context_window" | "provider"; nextAction?: string;
       upstream?: UpstreamProviderError }

@@ -44,7 +44,7 @@ class FakeSession {
       this.listeners.delete(fn);
     };
   }
-  emit(event) { for (const fn of this.listeners) fn(event); }
+  emit(event) { if (event.type === "turn-end") event = { outcome: "success", ...event }; for (const fn of this.listeners) fn(event); }
   async prompt(input) { this.prompts.push(input); return { status: "accepted", inputId: input.inputId }; }
   async busyInput(input) {
     this.steers.push(input);

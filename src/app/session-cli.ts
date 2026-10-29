@@ -1,9 +1,12 @@
+import fs from "node:fs";
+import { requestTransportSessionRecovery } from "./local-control.js";
+import { MAX_TRANSPORT_RECOVERY_REVIEW_BYTES, type TransportRecoveryReview } from "../runtime/transport-session-recovery.js";
 import { loadConfig } from "../platform/config.js";
 import { requestSessionRecovery, requestSessionReset, type SessionResetResponse } from "./local-control.js";
 
 interface SessionCliIo { stdout(value: string): void; stderr(value: string): void }
 
-interface SessionArguments { operation: "reset" | "recover"; agentId: string; waitReadyMs: number; reason?: "context-overflow" }
+interface SessionArguments { operation: "reset" | "recover"; agentId: string; waitReadyMs: number; reason?: "context-overflow" | "transport-failure"; planToken?: string; reviewFile?: string; abort?: boolean }
 
 function sanitizeRecoveryReadiness(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -19,14 +22,16 @@ function parseSessionArguments(args: readonly string[]): SessionArguments {
   const operation = args[0];
   const values = new Map<string, string>();
   let json = false;
+  let abort = false;
   for (let index = 1; index < args.length; index += 1) {
     const token = args[index];
+    if (token === "--abort") { if (abort) throw new Error("duplicate flag: --abort"); abort = true; continue; }
     if (token === "--json") {
       if (json) throw new Error("duplicate flag: --json");
       json = true;
       continue;
     }
-    if (!["--agent", "--wait-ready", "--reason"].includes(token)) {
+    if (!["--agent", "--wait-ready", "--reason", "--plan", "--review-file"].includes(token)) {
       throw new Error(token.startsWith("-") ? `unknown flag: ${token}` : `unexpected positional: ${token}`);
     }
     if (values.has(token)) throw new Error(`duplicate flag: ${token}`);
@@ -41,9 +46,12 @@ function parseSessionArguments(args: readonly string[]): SessionArguments {
   const waitSeconds = Number(values.get("--wait-ready") ?? "30");
   if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || waitSeconds > 300) throw new Error("--wait-ready must be 0..300 seconds");
   const reason = values.get("--reason");
-  if (operation === "recover" && reason !== "context-overflow") throw new Error("--reason context-overflow is required for session recover");
+  if (operation === "recover" && !["context-overflow", "transport-failure"].includes(reason || "")) throw new Error("--reason context-overflow or transport-failure is required for session recover");
+  const planToken = values.get("--plan"); const reviewFile = values.get("--review-file");
+  if ((planToken || reviewFile || abort) && reason !== "transport-failure") throw new Error("transport recovery flags require --reason transport-failure");
+  if (reason === "transport-failure" && ((planToken && !/^sha256:[a-f0-9]{64}$/.test(planToken)) || (Boolean(planToken) !== Boolean(reviewFile || abort)) || (abort && reviewFile))) throw new Error("provide --plan with exactly one of --review-file or --abort");
   if (operation === "reset" && reason !== undefined) throw new Error("--reason is only valid for session recover");
-  return { operation, agentId, waitReadyMs: Math.round(waitSeconds * 1000), ...(reason ? { reason: reason as "context-overflow" } : {}) };
+  return { operation, agentId, waitReadyMs: Math.round(waitSeconds * 1000), ...(reason ? { reason: reason as SessionArguments["reason"] } : {}), ...(planToken ? { planToken } : {}), ...(reviewFile ? { reviewFile } : {}), ...(abort ? { abort } : {}) };
 }
 
 export async function runSessionCli(
@@ -52,6 +60,7 @@ export async function runSessionCli(
   dependencies: {
     request?: typeof requestSessionReset;
     requestRecovery?: typeof requestSessionRecovery;
+    requestTransportRecovery?: typeof requestTransportSessionRecovery;
     io?: SessionCliIo;
   } = {},
 ): Promise<number> {
@@ -71,9 +80,27 @@ export async function runSessionCli(
   }
   try {
     const loaded = loadConfig(env);
+    if (parsed.reason === "transport-failure") {
+      let review: TransportRecoveryReview | undefined;
+      if (parsed.reviewFile) {
+        try {
+          const fd = fs.openSync(parsed.reviewFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+          try {
+            const stat = fs.fstatSync(fd);
+            if (!stat.isFile()) throw new Error("invalid instructions file");
+            if (stat.size > MAX_TRANSPORT_RECOVERY_REVIEW_BYTES) return fail("recovery_review_too_large", "recovery review JSON exceeds 16 KiB", agentId);
+            review = JSON.parse(fs.readFileSync(fd, "utf8"));
+          } finally { fs.closeSync(fd); }
+        } catch { return fail("recovery_review_invalid", "unable to read recovery review JSON", agentId); }
+      }
+      const result = await (dependencies.requestTransportRecovery ?? requestTransportSessionRecovery)({
+        larkinHome: loaded.config.larkinHome, agentId, planToken: parsed.planToken, review, abort: parsed.abort });
+      io.stdout(`${JSON.stringify(result, null, 2)}\n`);
+      return result.ok ? 0 : 1;
+    }
     const result = parsed.operation === "recover"
       ? await (dependencies.requestRecovery ?? requestSessionRecovery)({
-        larkinHome: loaded.config.larkinHome, agentId, reason: parsed.reason!, waitReadyMs: parsed.waitReadyMs,
+        larkinHome: loaded.config.larkinHome, agentId, reason: parsed.reason as "context-overflow", waitReadyMs: parsed.waitReadyMs,
       })
       : await (dependencies.request ?? requestSessionReset)({
         larkinHome: loaded.config.larkinHome, agentId, waitReadyMs: parsed.waitReadyMs,

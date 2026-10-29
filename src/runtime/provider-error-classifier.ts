@@ -88,3 +88,11 @@ export function providerFinishReason(value: unknown): string | null {
   const token = match?.[1]?.toLowerCase() ?? "";
   return SURFACED_FINISH_REASONS.has(token) ? token : null;
 }
+
+/** A terminal stream failure has unknown side effects: operator recovery only, never an automatic replay. */
+export function isRecoverableStreamFailure(source: { reason?: string; errorCategory?: string }): boolean {
+  if (source.errorCategory && !["provider", "transport"].includes(source.errorCategory)) return false;
+  const message = (source.reason || "").replace(/^Codex error: /, "").trim();
+  return /^stream disconnected before completion: stream closed before response\.completed\.?$/i.test(message)
+    || /^stream connection failed\.?$/i.test(message);
+}

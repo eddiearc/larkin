@@ -1730,6 +1730,42 @@ test("Codex update timeout terminates then kills the child and settles once", as
   assert.deepEqual(update.killed, ["SIGTERM", "SIGKILL"]);
 });
 
+for (const [status, outcome] of [["failed", "error"], ["interrupted", "aborted"], ["completed", "success"], [undefined, "unknown"]]) {
+  test(`Codex unowned terminal ${status || "missing status"} reports ${outcome} independently of input errors`, async () => {
+    const child = new FakeProcess();
+    const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create());
+    const events = [];
+    session.subscribe((event) => events.push(event));
+    child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    const request = child.writes.find((item) => item.method === "thread/start");
+    child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { thread: { id: "thread-native-unowned" } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn-native-unowned" } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "partial synthetic output" } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn-native-unowned", status } } })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.find((event) => event.type === "turn-end")?.outcome, outcome);
+    assert.equal(events.filter((event) => event.type === "input-error").length, 0, "there is no owned input to fail");
+    assert.equal(child.writes.filter((item) => item.method === "turn/start").length, 0);
+    await session.close("terminal outcome test");
+  });
+}
+
+for (const [is_error, subtype, outcome] of [[true, "error_during_execution", "error"], [false, "success", "success"], [false, undefined, "unknown"]]) {
+  test(`Claude native result reports ${outcome} after partial output`, async () => {
+    const child = new FakeProcess();
+    const session = await createNativeRuntimeAdapter("claude", { spawn: () => child, mkdir() {}, writeFile() {} }).createSession(create());
+    const events = [];
+    session.subscribe((event) => events.push(event));
+    child.stdout.write(`${JSON.stringify({ type: "system", subtype: "init", session_id: "claude-native-outcome" })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "partial synthetic output" }] } })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "result", is_error, subtype })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(events.find((event) => event.type === "turn-end")?.outcome, outcome);
+    await session.close("terminal outcome test");
+  });
+}
+
 test("Codex, Claude and Pi emit ordered text-delta events with block boundaries for card replies", async () => {
   const textDeltas = (events) => events.filter((event) => event.type === "text-delta")
     .map((event) => `${event.newBlock ? "|" : ""}${event.text}`);

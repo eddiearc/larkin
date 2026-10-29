@@ -26,7 +26,7 @@ class FakeNativeSession {
   replayStore = null;
   constructor(runtime) { this.sessionId = `${runtime}-session`; }
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  emit(event) { for (const listener of this.listeners) listener(event); }
+  emit(event) { if (event.type === "turn-end") event = { outcome: "success", ...event }; for (const listener of this.listeners) listener(event); }
   async prompt(input) {
     this.prompts.push(input);
     if (this.replayStore) setTimeout(() => { this.emit({ type: "turn-start" }); this.replayStore.pollInbox({ limit: 1 }); this.emit({ type: "turn-end" }); }, 0);
@@ -800,6 +800,11 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
         session.emit({ type: "activity", activity: "text" });
         session.emit({ type: "turn-end", turnId: "pi-auth-recovered" });
         await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unavailable",
+          "authentication recovery cannot hide the still-unconsumed delivery");
+        assert.deepEqual(store.pollInbox({ target: "chat:oc_pi" }).envelopes.map((row) => row.message_id), ["om_pi_auth"]);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal(store.readJson("status", {}).inboundDeliveryHealth.state, "healthy");
         assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
       }
       if (telemetry) {
@@ -908,6 +913,12 @@ test("missing-key prompt rejection terminals the HostShell ledger and projects u
     session.emit({ type: "activity", activity: "text" });
     session.emit({ type: "turn-end", turnId: "pi-missing-recovered" });
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(store.readJson("status", {}).runtimeReadiness.state, "unavailable",
+      "a recovered credential does not consume the canonical Inbox");
+    assert.deepEqual(store.pollInbox({ target: "chat:oc_missing_key" }).envelopes.map((row) => row.message_id), ["om_missing_key"]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(store.readJson("status", {}).inboundDeliveryHealth.state, "healthy");
+    assert.equal(otherStore.readJson("runtimeDeliveries", {}).records[0].status, "accepted", "another Agent's pending work cannot block this Agent's recovery");
     assert.equal(store.readJson("status", {}).runtimeReadiness.state, "ready");
   } finally {
     await hostShell.shutdown("missing-key mock e2e complete");

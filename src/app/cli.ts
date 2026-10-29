@@ -96,7 +96,13 @@ Examples:
 Credentials, internal paths, serverId, activeAgent, and raw config are never exposed here.`,
   session: `Usage: larkin session reset --agent <App ID> --json [--wait-ready <seconds>]
        larkin session recover --agent <App ID> --reason context-overflow --json [--wait-ready <seconds>]
-Reset replaces one idle, zero-backlog Runtime session. Recover is an explicit operator-only context-window recovery that preserves and replays canonical Inbox deliveries.`,
+       larkin session recover --agent <App ID> --reason transport-failure --json
+       larkin session recover --agent <App ID> --reason transport-failure --plan <sha256> --review-file <JSON> --json
+       larkin session recover --agent <App ID> --reason transport-failure --plan <sha256> --abort --json
+Transport recovery inspection is read-only. Review JSON binds planToken and one decision per failed delivery:
+{planToken, decisions:[{deliveryId,target,owner:<App ID>,disposition:already-completed|cancel|resume,evidence,instruction?}]}.
+Inspect external side effects and task ownership first. Only explicit reviewed reconciliation runs in a fresh session; original tasks are never automatically replayed.
+Reset replaces one idle, zero-backlog Runtime session. Context-overflow recovery preserves and replays canonical Inbox deliveries. Transport recovery supports Codex only, holds ordinary dispatch until reconciliation succeeds, and permits at most 3 explicit attempts per 15 minutes with a 60-second cooldown. Abort releases the recovery hold without clearing failed deliveries.`,
   comment: `Usage: larkin comment reply --message-id <doc_comment_message_id> --text '<reply>' --json
 Reply as the Runtime-bound Bot to the exact cloud-document comment locator supplied by canonical Inbox. Retrying the same body is idempotent; a different body appends a follow-up reply to the same comment.`,
   telemetry: `Usage: larkin telemetry <status|export|import|flush>
@@ -148,7 +154,7 @@ Usage: larkin <command>
   chats            List known chats; use free/strict <oc_id> to configure mention requirements
   config           Inspect effective config/source, edit mention inheritance, or explicitly apply runtime changes
   session reset    Replace one idle, zero-backlog Agent Runtime session for a fresh scenario
-  session recover  Explicitly recover a context-overflowed session and replay retained Inbox deliveries
+  session recover  Inspect and explicitly recover context-window or terminal transport failures
   comment reply    Reply to the exact cloud-document comment bound by a polled Inbox message
   telemetry        Inspect, export, import, or flush the durable OpenTelemetry trace queue
   <lark-cli 命令组>  im/docs/wiki/drive 等 lark-cli 命令原样转发，机器人身份已锁定（如 larkin im +chat-list）

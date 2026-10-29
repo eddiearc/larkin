@@ -97,8 +97,8 @@ test("public context-overflow recovery requires the exact reason and emits only 
     assert.deepEqual(JSON.parse(stdout).readiness, { runtime: "pi", state: "unavailable",
       reason: "Runtime readiness is unavailable.", nextAction: "Inspect Runtime/provider configuration, then retry." });
     for (const [argv, expected] of [
-      [["recover", "--agent", agentId, "--json"], /--reason context-overflow is required/],
-      [["recover", "--agent", agentId, "--reason", "quota", "--json"], /--reason context-overflow is required/],
+      [["recover", "--agent", agentId, "--json"], /--reason context-overflow or transport-failure is required/],
+      [["recover", "--agent", agentId, "--reason", "quota", "--json"], /--reason context-overflow or transport-failure is required/],
       [["reset", "--agent", agentId, "--reason", "context-overflow", "--json"], /--reason is only valid/],
     ]) {
       let invalid = "";

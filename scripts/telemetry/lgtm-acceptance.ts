@@ -49,7 +49,7 @@ try {
     LARKIN_CONFIG_DIR: root, LARKIN_AGENT_ID: agentId,
   }, { stateStore, telemetry: runtime, io: { stdout() {}, stderr() {} } });
   if (pollCode !== 0) throw new Error("authoritative Inbox poll failed");
-  runtime.delivery(agentId, messageId, "consumed"); runtime.runtimeEvent(agentId, { type: "turn-end" });
+  runtime.delivery(agentId, messageId, "consumed"); runtime.runtimeEvent(agentId, { type: "turn-end", outcome: "success" });
   await runtime.shutdown();
 
   const spool = new TelemetrySpool(telemetryConfig); const local = spool.list();

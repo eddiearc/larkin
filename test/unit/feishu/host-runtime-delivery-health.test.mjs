@@ -107,7 +107,7 @@ for (const { mode, explicitReadiness, runtimeError } of [
         assert.match(status.runtimeReadiness.reason, /HTTP 403/);
         assert.match(status.runtimeReadiness.nextAction, /inspect.*retry/i);
       } else {
-        assert.match(status.runtimeReadiness.nextAction, /inspect.*restart.*replay/i);
+        assert.match(status.runtimeReadiness.nextAction, /inspect.*verify completed side effects.*session recovery/i);
       }
       if (mode === "content-filter-input-error") {
         const lastError = (status.recentErrors || []).at(-1);

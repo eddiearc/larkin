@@ -32,6 +32,7 @@ import { HostChannelBusiness } from "./host-channel-business.js";
 import { HostInteractionOrchestrator } from "./interaction-orchestrator.js";
 import { targetFor, type FeishuInboundEvent } from "./message-policy.js";
 import type { PreviousSessionRef } from "../agent/context-prompt.js";
+import { readTransportRecovery, transportRecoveryHeld, type TransportRecoveryRequest, type TransportRecoveryResult } from "../runtime/transport-session-recovery.js";
 import type { RuntimeHost, RuntimeHostEvent, RuntimeSessionRecoveryResult } from "../runtime/runtime-host.js";
 import {
   authFailureAppliesTo,
@@ -40,6 +41,7 @@ import {
   readinessForPersistedAuthFailure,
   RuntimePrerequisiteError,
   type PersistedAuthFailure,
+  type RuntimeReadiness,
 } from "../runtime/runtime-readiness.js";
 import { providerFinishReason, safeProviderDiagnostic } from "../runtime/provider-error-classifier.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
@@ -144,6 +146,7 @@ export interface HostShell {
     readyForFreshScenario: boolean; inboundObserved: false;
     code?: string; error?: string;
   }>;
+  recoverTransportSession(agentId: string, request: TransportRecoveryRequest): Promise<TransportRecoveryResult>;
   recoverSession(agentId: string, reason: "context-overflow", waitReadyMs?: number): Promise<{
     recoveryCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
     runtimeReady: boolean; channelConnected: boolean; reconnecting: boolean; pendingCount: number;
@@ -371,7 +374,7 @@ export function createHostShell({
       return null;
     }
   };
-  const projectReadyUnlessUnresolvedAuth = (agent: ConfiguredAgent, observedAt: string): void => {
+  const projectReadyUnlessUnresolvedFailure = (agent: ConfiguredAgent, observedAt: string, deliveryRecovered = false, readiness?: RuntimeReadiness): void => {
     const failure = unresolvedCurrentAuth(agent);
     if (failure) {
       hostState.updateStatus(agent, {
@@ -379,12 +382,39 @@ export function createHostShell({
       });
       return;
     }
-    hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", observedAt } });
+    let recovering = true;
+    try { recovering = transportRecoveryHeld(readTransportRecovery(stateStore(agent).readJson("transportRecovery", null))); } catch { /* corrupt recovery state fails closed */ }
+    if (recovering) {
+      hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "unavailable", source: "inbound-delivery", observedAt,
+        reason: "Operator session recovery requires reconciliation.", nextAction: "Inspect session recover --reason transport-failure from a user terminal." } });
+      return;
+    }
+    const health = hostState.readStatus(agent).inboundDeliveryHealth as Record<string, unknown> | undefined;
+    if (health?.state === "healthy" && ["reason", "nextAction", "code", "messageIds"].some((key) => key in health)) {
+      const { state: _state, at, recoveredAt, lastFailure, ...diagnostics } = health;
+      hostState.updateStatus(agent, { inboundDeliveryHealth: { state: "healthy", at: recoveredAt || at,
+        ...(recoveredAt ? { recoveredAt } : {}), lastFailure: lastFailure || { ...diagnostics, state: "error", at } } });
+    }
+    let unresolvedDeliveries = false;
+    if (!deliveryRecovered && (hostState.readStatus(agent).inboundDeliveryHealth as { state?: string } | undefined)?.state === "error") {
+      try { unresolvedDeliveries = !stateStore(agent).areRuntimeDeliveriesConsumed(
+        (hostState.readStatus(agent).inboundDeliveryHealth as { messageIds?: string[] }).messageIds || []); }
+      catch { unresolvedDeliveries = true; }
+    }
+    // A fresh prerequisite probe may restore Runtime readiness after a drained
+    // historical fault. Delivery health still needs successful-turn evidence.
+    if (unresolvedDeliveries) {
+      hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "unavailable", source: "inbound-delivery", observedAt,
+        reason: "Inbound Runtime delivery recovery is not yet proven.",
+        nextAction: "Resolve pending deliveries and complete a successful Runtime turn before resuming dispatch." } });
+      return;
+    }
+    hostState.updateStatus(agent, { runtimeReadiness: { runtime: agent.runtime, state: "ready", ...readiness, observedAt } });
   };
   const projectFallbackRuntimeReadiness = (
     agent: ConfiguredAgent,
     observedAt: string,
-    fallback: { state: "missing" | "unavailable"; reason: string; nextAction?: string },
+    fallback: { state: "missing" | "unavailable"; reason: string; nextAction?: string; source?: string },
     preserveCurrentUnavailableDiagnostic = false,
   ): void => {
     const failure = unresolvedCurrentAuth(agent);
@@ -416,14 +446,20 @@ export function createHostShell({
   const recordInboundDeliveryFailure = (
     agent: ConfiguredAgent,
     code: "non_retryable_receipt" | "runtime_delivery_exception" | "runtime_delivery_event",
+    messageId?: string,
   ): void => {
     const at = new Date().toISOString();
     const reason = "Inbound Runtime delivery failed non-retryably; durable Inbox/ledger state is retained for recovery.";
-    const nextAction = "Inspect the delivery/status error, correct the Runtime or canonical Inbox state, then restart to replay safely.";
+    const nextAction = "Inspect the delivery/status error and verify completed side effects before retrying. Use user-terminal session recovery for eligible transport failures.";
+    const previous = hostState.readStatus(agent).inboundDeliveryHealth as { state?: string; messageIds?: unknown } | undefined;
+    const messageIds = [...new Set([
+      ...(previous?.state === "error" && Array.isArray(previous.messageIds) ? previous.messageIds.filter((id): id is string => typeof id === "string") : []),
+      ...(messageId ? [messageId] : []),
+    ])];
     hostState.updateStatus(agent, {
-      inboundDeliveryHealth: { state: "error", code, at, reason, nextAction },
+      inboundDeliveryHealth: { state: "error", code, at, reason, nextAction, messageIds },
     });
-    projectFallbackRuntimeReadiness(agent, at, { state: "unavailable", reason, nextAction }, true);
+    projectFallbackRuntimeReadiness(agent, at, { state: "unavailable", reason, nextAction, source: "inbound-delivery" }, true);
     hostState.recordStatusError(agent, `${reason} ${nextAction} code=${code}`);
   };
   const agentStates = new Map<string, AgentStateRecord>();
@@ -664,7 +700,7 @@ export function createHostShell({
       if (!wake || !inboxEnvelope) return;
       const receipt = await runtimeHost.deliver(agent.agentId, inboxEnvelope);
       if (receipt.status === "error") {
-        recordInboundDeliveryFailure(agent, "non_retryable_receipt");
+        recordInboundDeliveryFailure(agent, "non_retryable_receipt", String(inboxEnvelope.message_id || ""));
         hostState.appendStatusLog(agent, "deliverLog", {
           at: new Date().toISOString(), status: "error",
           reason: "non-retryable Runtime delivery error; durable recovery state retained",
@@ -705,7 +741,7 @@ export function createHostShell({
       if (wake) telemetry?.delivery(agent.agentId, telemetryMessageId, "error");
       if (canonicalInboxDurable) {
         log(`onFeishuMessage Runtime delivery failed agent=${agent.name}; canonical Inbox retained`);
-        recordInboundDeliveryFailure(agent, "runtime_delivery_exception");
+        recordInboundDeliveryFailure(agent, "runtime_delivery_exception", event.message_id);
       } else {
         log(`onFeishuMessage 异常 agent=${agent.name}: ${error instanceof Error ? error.stack || error.message : String(error)}`);
         hostState.recordStatusError(agent, `onFeishuMessage: ${errorMessage(error)}`);
@@ -1468,6 +1504,7 @@ export function createHostShell({
         } else {
           projectFallbackRuntimeReadiness(agent, observedAt, message.status === "error" ? {
             state: "unavailable",
+            source: "runtime-status",
             reason: safeRuntimeStatusDiagnostic(message.error),
             nextAction: "Inspect the Runtime status error, correct the Runtime availability issue, then retry.",
           } : {
@@ -1477,15 +1514,17 @@ export function createHostShell({
         }
       }
       else if (message.readiness) {
-        if (message.readiness.state === "ready" && unresolvedCurrentAuth(agent)) {
-          projectReadyUnlessUnresolvedAuth(agent, observedAt);
+        if (message.readiness.state === "ready") {
+          projectReadyUnlessUnresolvedFailure(agent, observedAt, false, message.readiness);
         } else {
           hostState.updateStatus(agent, { runtimeReadiness: { ...message.readiness, observedAt } });
         }
       }
-      else if (message.status === "active") projectReadyUnlessUnresolvedAuth(agent, observedAt);
+      else if (message.status === "active") projectReadyUnlessUnresolvedFailure(agent, observedAt);
       if (message.status === "active") {
         const redeliveryTimer = setTimeout(() => {
+          const readiness = hostState.readStatus(agent).runtimeReadiness as { state?: string } | undefined;
+          if (readiness?.state !== "ready") return;
           void reminder.redeliverUnread(agent).catch((error) => log("启动补投失败", errorMessage(error)));
         }, 5_000);
         redeliveryTimer.unref?.();
@@ -1506,8 +1545,34 @@ export function createHostShell({
       processingEyes.observeActivity(agent, message.activity);
       return;
     }
+    if (message.type === "delivery-recovered") {
+      const status = hostState.readStatus(agent);
+      const session = status.session as { runtime?: string; id?: string; launchId?: string } | undefined;
+      const readiness = status.runtimeReadiness as { state?: string; source?: string } | undefined;
+      if (agent.runtime !== message.runtime || session?.runtime !== message.runtime
+        || session.id !== message.sessionId || session.launchId !== message.launchId
+        || unresolvedCurrentAuth(agent) || (readiness?.state !== "ready"
+          && !(readiness?.state === "unavailable" && ["inbound-delivery", "runtime-status"].includes(readiness.source || "")))) return;
+      // Runtime supplies successful-turn evidence; canonical state independently
+      // covers Host failures that occurred before any ledger record was created.
+      try {
+        if (!stateStore(agent).areRuntimeDeliveriesConsumed(
+          (status.inboundDeliveryHealth as { messageIds?: string[] } | undefined)?.messageIds || [])) return;
+      } catch { return; }
+      let recovery;
+      try { recovery = readTransportRecovery(stateStore(agent).readJson("transportRecovery", null)); if (transportRecoveryHeld(recovery)) return; }
+      catch { return; }
+      const observedAt = new Date().toISOString();
+      if (recovery) hostState.updateStatus(agent, { transportRecovery: { phase: recovery.phase, recoveryId: recovery.id, dispatchHeld: false } });
+      if ((status.inboundDeliveryHealth as { state?: string } | undefined)?.state === "error") {
+        hostState.updateStatus(agent, { inboundDeliveryHealth: { state: "healthy", at: observedAt, recoveredAt: observedAt,
+          lastFailure: status.inboundDeliveryHealth } });
+      }
+      projectReadyUnlessUnresolvedFailure(agent, observedAt, true);
+      return;
+    }
     if (message.type === "delivery") {
-      if (message.status === "error") recordInboundDeliveryFailure(agent, "runtime_delivery_event");
+      if (message.status === "error") recordInboundDeliveryFailure(agent, "runtime_delivery_event", message.messageId);
       hostState.appendStatusLog(agent, "deliverLog", {
         at: new Date().toISOString(), deliveryId: message.deliveryId, messageId: message.messageId,
         status: message.status,
@@ -1659,9 +1724,9 @@ export function createHostShell({
             session: { runtime: agent.runtime, id: null, launchId: null, startedAt: observedAt,
               lastSeenAt: null, lastTurnAt: null, turns: 0 },
           });
-          projectReadyUnlessUnresolvedAuth(agent, observedAt);
+          projectReadyUnlessUnresolvedFailure(agent, observedAt);
         } else if (reset.runtimeReady) {
-          projectReadyUnlessUnresolvedAuth(agent, new Date().toISOString());
+          projectReadyUnlessUnresolvedFailure(agent, new Date().toISOString());
         }
       } catch (error) {
         const projection = readinessProjection();
@@ -1689,6 +1754,23 @@ export function createHostShell({
         error: contaminated ? "reset committed but the fresh scenario was contaminated by a turn or Inbox arrival"
           : unavailable ? "reset committed but Runtime/channel readiness is unavailable"
             : "reset committed but readiness did not converge before timeout" };
+    },
+    async recoverTransportSession(agentId, request): Promise<TransportRecoveryResult> {
+      const agent = agents.find((candidate) => candidate.agentId === agentId);
+      if (!agent) throw Object.assign(new Error("unknown Agent"), { code: "unknown_agent" });
+      if (!runtimeHost.recoverTransportSession) throw Object.assign(new Error("recovery unavailable"), { code: "recovery_unavailable" });
+      if (request.review && !request.abort) {
+        const status = hostState.readStatus(agent);
+        const connectedAt = Date.parse(String(status.connectedAt || ""));
+        if (!Number.isFinite(connectedAt) || connectedAt < Date.parse(daemonStartedAt) - 1000) throw Object.assign(new Error("channel unavailable"), { code: "channel_unavailable" });
+        if (isChannelReconnecting(status)) throw Object.assign(new Error("channel reconnecting"), { code: "channel_reconnecting" });
+      }
+      const result = await runtimeHost.recoverTransportSession(agentId, request);
+      if (request.review || request.abort) {
+        hostState.updateStatus(agent, { transportRecovery: { phase: result.phase, recoveryId: result.recoveryId, dispatchHeld: result.dispatchHeld } });
+        if (result.dispatchHeld) projectReadyUnlessUnresolvedFailure(agent, new Date().toISOString());
+      }
+      return result;
     },
     async recoverSession(agentId, reason, waitReadyMs = 30_000): Promise<{
       recoveryCommitted: boolean; generationChanged: boolean; sessionChanged: boolean; turns: number;
@@ -1732,7 +1814,7 @@ export function createHostShell({
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), readinessProjection());
       }
       if (recovery.runtimeReady) {
-        projectReadyUnlessUnresolvedAuth(agent, new Date().toISOString());
+        projectReadyUnlessUnresolvedFailure(agent, new Date().toISOString());
       }
       const record = agentStates.get(agentId);
       try {

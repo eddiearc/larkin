@@ -18,7 +18,7 @@ class FakeRuntimeSession {
   prompts = [];
   steers = [];
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  emit(event) { for (const listener of this.listeners) listener(event); }
+  emit(event) { if (event.type === "turn-end") event = { outcome: "success", ...event }; for (const listener of this.listeners) listener(event); }
   async prompt(input) { this.prompts.push(structuredClone(input)); return { status: "accepted", inputId: input.inputId }; }
   async busyInput(input) { this.steers.push(structuredClone(input)); return { status: "accepted", inputId: input.inputId }; }
   async cancel() {}

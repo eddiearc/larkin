@@ -378,7 +378,7 @@ class CodexSession extends EventSession {
       this.emit({ type: "turn-start", ...(this.activeTurnId ? { turnId: this.activeTurnId } : {}) });
     } else if (message.method === "turn/completed") {
       const turnId = String(message.params?.turn?.id || this.activeTurnId || "") || undefined;
-      const status = String(message.params?.turn?.status || "completed").toLowerCase();
+      const status = String(message.params?.turn?.status || "").toLowerCase();
       const turnError = message.params?.turn?.error;
       const errorMessage = String(turnError?.message || turnError || `Codex turn ${status}`);
       if (turnId && (status === "failed" || status === "interrupted")) {
@@ -386,7 +386,7 @@ class CodexSession extends EventSession {
       }
       this.activeTurnId = null;
       if (turnId) this.completeTurn(turnId);
-      this.emit({ type: "turn-end", ...(this.threadId ? { sessionId: this.threadId } : {}), ...(turnId ? { turnId } : {}) });
+      this.emit({ type: "turn-end", outcome: status === "interrupted" ? "aborted" : status === "failed" || turnError ? "error" : status === "completed" ? "success" : "unknown", ...(this.threadId ? { sessionId: this.threadId } : {}), ...(turnId ? { turnId } : {}) });
     } else if (message.method === "item/started" && message.params?.item?.type === "agentMessage") {
       this.textBlockPending = true;
     } else if (message.method === "item/started" && codexToolName(message.params?.item)) {
@@ -597,7 +597,7 @@ class ClaudeSession extends EventSession {
       this.busy = false;
       this.safeBoundary = true;
       if (message.is_error) this.emit({ type: "error", message: String(message.result || message.subtype || "Claude runtime error") });
-      this.emit({ type: "turn-end", ...(this.currentSessionId ? { sessionId: this.currentSessionId } : {}) });
+      this.emit({ type: "turn-end", outcome: message.is_error ? "error" : message.subtype === "success" ? "success" : "unknown", ...(this.currentSessionId ? { sessionId: this.currentSessionId } : {}) });
       for (const next of this.gated.splice(0)) void this.writeUser(next.input).then(next.resolve);
     } else if (message.type === "system" && message.subtype === "init") {
       this.emit({ type: "turn-start" });
@@ -799,14 +799,14 @@ class PiSession extends EventSession {
           type: "input-error", inputId, retryable, willRetry: false, message: classified.reason,
           errorCategory: classified.category, nextAction: classified.nextAction, upstream: error.upstream,
         });
-        this.emit({ type: "turn-end", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
+        this.emit({ type: "turn-end", outcome: "error", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
       } else if (stopReason === "aborted") {
         for (const inputId of owned) this.emit({
           type: "input-error", inputId, retryable: true, willRetry: false, message: "Pi assistant turn aborted",
         });
-        this.emit({ type: "turn-end", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
+        this.emit({ type: "turn-end", outcome: "aborted", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
       } else {
-        this.emit({ type: "turn-end", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
+        this.emit({ type: "turn-end", outcome: stopReason === "error" ? "error" : ["stop", "length", "toolUse"].includes(stopReason || "") ? "success" : "unknown", ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
       }
       for (const inputId of owned) { this.ownedInputIds.delete(inputId); this.inputEpochs.delete(inputId); }
       this.observedSubmitEpochs.delete(epoch);

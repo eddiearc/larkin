@@ -1,3 +1,4 @@
+import { MAX_TRANSPORT_RECOVERY_REVIEW_BYTES, type TransportRecoveryRequest, type TransportRecoveryResult } from "../runtime/transport-session-recovery.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -36,8 +37,11 @@ export interface SessionRecoveryResponse {
 }
 interface SessionResetControlRequest { operation: "session-reset"; agentId: string; authorization: string; waitReadyMs?: number }
 interface SessionRecoveryControlRequest { operation: "session-recover"; agentId: string; authorization: string; reason: "context-overflow"; waitReadyMs?: number }
-type AgentControlRequest = AgentUpsertRequest | SessionResetControlRequest | SessionRecoveryControlRequest;
-type AgentControlPayload = Omit<AgentUpsertRequest, "authorization"> | Omit<SessionResetControlRequest, "authorization"> | Omit<SessionRecoveryControlRequest, "authorization">;
+interface TransportRecoveryControlRequest extends TransportRecoveryRequest { operation: "session-transport-recover"; agentId: string; authorization: string }
+type AgentControlRequest = TransportRecoveryControlRequest | AgentUpsertRequest | SessionResetControlRequest | SessionRecoveryControlRequest;
+type AgentControlPayload = Omit<AgentUpsertRequest, "authorization">
+  | Omit<SessionResetControlRequest, "authorization">
+  | Omit<SessionRecoveryControlRequest, "authorization"> | Omit<TransportRecoveryControlRequest, "authorization">;
 
 interface ProcessBinding { pid: number; processStartToken: string }
 interface SocketBinding { device: string; inode: string; owner: string; changeTimeNs: string }
@@ -60,6 +64,8 @@ const AGENT_ID = /^cli_[A-Za-z0-9]+$/;
 const OPERATION_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const AUTHORIZATION = /^[A-Za-z0-9_-]{43,128}$/;
 const CONFIG_SIGNATURE = /^sha256:[a-f0-9]{64}$/;
+// A 16 KiB review plus authenticated framing fits below this bounded request cap.
+const MAX_CONTROL_REQUEST_BYTES = 65_536;
 const UNIX_SOCKET_PATH_MAX_BYTES = process.platform === "darwin" ? 103 : 107;
 
 function recoveryErrorText(code: string | undefined): string {
@@ -181,6 +187,17 @@ function parseRequest(line: string): AgentControlRequest {
   const value = JSON.parse(line) as Record<string, unknown>;
   if (!AGENT_ID.test(String(value.agentId || "")) || !AUTHORIZATION.test(String(value.authorization || ""))) {
     throw new Error("invalid agent control request");
+  }
+  if (value.operation === "session-transport-recover") {
+    if (value.review && Buffer.byteLength(JSON.stringify(value.review)) > MAX_TRANSPORT_RECOVERY_REVIEW_BYTES) {
+      throw Object.assign(new Error("transport recovery review too large"), { code: "recovery_review_too_large" });
+    }
+    if (Object.keys(value).some((key) => !["operation", "agentId", "authorization", "planToken", "review", "abort"].includes(key))
+      || (value.planToken !== undefined && (typeof value.planToken !== "string" || !CONFIG_SIGNATURE.test(value.planToken)))
+      || (value.abort !== undefined && typeof value.abort !== "boolean")
+      || (value.review !== undefined && (!value.review || typeof value.review !== "object" || Array.isArray(value.review)))
+      || (value.review !== undefined && !value.planToken) || (value.abort && (!value.planToken || value.review !== undefined))) throw new Error("invalid transport recovery request");
+    return value as unknown as TransportRecoveryControlRequest;
   }
   if (value.operation === "session-reset") {
     if (value.waitReadyMs !== undefined && (typeof value.waitReadyMs !== "number" || !Number.isSafeInteger(value.waitReadyMs) || value.waitReadyMs < 0 || value.waitReadyMs > 300_000)) {
@@ -530,13 +547,21 @@ export function createSupervisorControlServer({
       prepareSocket(socket);
       server = net.createServer((connection) => {
         connection.setEncoding("utf8");
+        connection.on("error", () => { /* a broken local client must not terminate the daemon */ });
+        let finished = false;
         let input = "";
         connection.on("data", (chunk) => {
+          if (finished) return;
           input += chunk;
-          if (input.length > 4096) connection.destroy(new Error("control request too large"));
+          if (Buffer.byteLength(input) > 4096) {
+            finished = true; input = "";
+            connection.end(`${JSON.stringify({ ok: false, agentId: "invalid", code: "control_request_too_large", error: "control request too large" })}\n`);
+            return;
+          }
           const newline = input.indexOf("\n");
           if (newline < 0) return;
           const line = input.slice(0, newline);
+          finished = true;
           input = "";
           void (async () => {
             let request: { operationId: string; operation: string; authorization: string; agentId?: string };
@@ -617,6 +642,7 @@ export function createAgentControlServer({
   upsert,
   resetSession,
   recoverSession,
+  recoverTransportSession,
   maxRememberedOperations = 256,
 }: {
   larkinHome: string;
@@ -624,6 +650,7 @@ export function createAgentControlServer({
   upsert(request: AgentUpsertOperation): Promise<void>;
   resetSession?(request: { agentId: string; waitReadyMs: number }): Promise<SessionResetResponse>;
   recoverSession?(request: { agentId: string; reason: "context-overflow"; waitReadyMs: number }): Promise<SessionRecoveryResponse>;
+  recoverTransportSession?(request: TransportRecoveryRequest & { agentId: string }): Promise<TransportRecoveryResult>;
   maxRememberedOperations?: number;
 }): { start(): Promise<void>; close(): Promise<void> } {
   let socket = "";
@@ -660,19 +687,27 @@ export function createAgentControlServer({
       prepareSocket(socket);
       server = net.createServer((connection) => {
         connection.setEncoding("utf8");
+        connection.on("error", () => { /* a broken local client must not terminate the daemon */ });
+        let finished = false;
         let input = "";
         connection.on("data", (chunk) => {
+          if (finished) return;
           input += chunk;
-          if (input.length > 4096) connection.destroy(new Error("control request too large"));
+          if (Buffer.byteLength(input) > MAX_CONTROL_REQUEST_BYTES) {
+            finished = true; input = "";
+            connection.end(`${JSON.stringify({ ok: false, agentId: "invalid", code: "control_request_too_large", error: "control request too large" })}\n`);
+            return;
+          }
           const newline = input.indexOf("\n");
           if (newline < 0) return;
           const line = input.slice(0, newline);
+          finished = true;
           input = "";
           void (async () => {
             let request: AgentControlRequest;
             try { request = parseRequest(line); }
             catch (error) {
-              connection.end(`${JSON.stringify({ ok: false, agentId: "invalid", error: (error as Error).message })}\n`);
+              connection.end(`${JSON.stringify({ ok: false, agentId: "invalid", code: (error as { code?: string }).code || "invalid_arguments", error: (error as Error).message })}\n`);
               return;
             }
             try {
@@ -684,6 +719,25 @@ export function createAgentControlServer({
               return;
             }
             if ("operation" in request) {
+              if (request.operation === "session-transport-recover") {
+                const transportRequest = request;
+                const prior = agentQueues.get(transportRequest.agentId) ?? Promise.resolve();
+                const operation = prior.catch(() => {}).then(async (): Promise<TransportRecoveryResult> => {
+                  try {
+                    if (!recoverTransportSession) return { ok: false, agentId: transportRequest.agentId, code: "recovery_unavailable", dispatchHeld: true };
+                    return await recoverTransportSession({ agentId: transportRequest.agentId, planToken: transportRequest.planToken,
+                      review: transportRequest.review, abort: transportRequest.abort });
+                  } catch (error) {
+                    const code = String((error as { code?: unknown }).code || "recovery_refused");
+                    return { ok: false, agentId: transportRequest.agentId, dispatchHeld: true,
+                      code: /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "recovery_refused" };
+                  }
+                });
+                const queued = operation.finally(() => { if (agentQueues.get(transportRequest.agentId) === queued) agentQueues.delete(transportRequest.agentId); });
+                agentQueues.set(transportRequest.agentId, queued);
+                connection.end(`${JSON.stringify(await queued)}\n`);
+                return;
+              }
               if (request.operation === "session-recover") {
                 const recoveryRequest = request;
                 let operation = recoveryInFlight.get(recoveryRequest.agentId);
@@ -956,6 +1010,7 @@ async function requestAgentControl<T>({
     client.setEncoding("utf8");
     client.once("error", (error) => { clearTimeout(timer); reject(error); });
     client.once("connect", () => client.write(`${JSON.stringify({ ...request, authorization: authority.token })}\n`));
+    client.once("end", () => { if (!input.includes("\n")) { clearTimeout(timer); reject(new Error("agent control ended before response")); } });
     client.on("data", (chunk) => {
       input += chunk;
       const newline = input.indexOf("\n");
@@ -1040,4 +1095,11 @@ export function cleanupStaleAgentControlSocket(larkinHome: string, expectedToken
     cleanupSocketRoot(root);
     return "absent";
   }
+}
+
+/** Same authenticated daemon control boundary as context-overflow recovery; never an ambient Runtime command. */
+export async function requestTransportSessionRecovery(input: TransportRecoveryRequest & { larkinHome: string; agentId: string; timeoutMs?: number }): Promise<TransportRecoveryResult> {
+  return requestAgentControl<TransportRecoveryResult>({ larkinHome: input.larkinHome, timeoutMs: input.timeoutMs ?? 60_000,
+    request: { operation: "session-transport-recover", agentId: input.agentId,
+      ...(input.planToken ? { planToken: input.planToken } : {}), ...(input.review ? { review: input.review } : {}), ...(input.abort ? { abort: true } : {}) } });
 }

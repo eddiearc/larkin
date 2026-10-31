@@ -391,12 +391,12 @@ test("a failure after polling A then B answers B, not the earlier card's message
   ]);
 });
 
-test("each turn with reply text logs a diagnostic summary, flagging text that had no polled message", async () => {
+test("each turn with reply text logs a diagnostic summary, flagging text that no card carried", async () => {
   const { state, logs, coordinator, send } = harness();
   send({ type: "turn-start" });
   send({ type: "text-delta", text: "没有领取消息就写的回复", newBlock: true });
   send({ type: "turn-end" });
-  assert.match(logs.at(-1), /流式回复回合结束 agent=agent-1 text=11 cards=0 tools=0 source=none（有回复文字但本回合没有领取到消息，文字未发送）/);
+  assert.match(logs.at(-1), /流式回复回合结束 agent=agent-1 text=11 cards=0 tools=0 source=none（本回合没有领到消息，Agent 输出的文字没有可回复的对象，没有发到飞书）/);
 
   send({ type: "turn-start" });
   poll(send, state, { deliveryTarget: "chat:oc_room", deliveryAnchor: "om_user" });
@@ -405,6 +405,13 @@ test("each turn with reply text logs a diagnostic summary, flagging text that ha
   await coordinator.idle();
   assert.ok(logs.includes("流式回复回合结束 agent=agent-1 text=2 cards=1 tools=1 source=chat:oc_room#om_user"), logs.join("\n"));
   assert.ok(logs.includes("流式卡片已发送 anchor=om_user message=om_card_1 chars=2"), logs.join("\n"));
+
+  state.source = null; // the turn boundary clears the previous poll's source
+  send({ type: "turn-start" });
+  poll(send, state, { deliveryTarget: "chat:oc_room", deliveryAnchor: "om_quiet", replyByCommand: true });
+  send({ type: "text-delta", text: "随手一句", newBlock: true });
+  send({ type: "turn-end" });
+  assert.match(logs.at(-1), /cards=0 tools=1 source=chat:oc_room#om_quiet（本回合领到的消息没有 @ 机器人，Agent 输出的文字不会自动发到飞书）/);
 
   const before = logs.length;
   state.source = null;

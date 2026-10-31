@@ -12,6 +12,7 @@ import type {
   RuntimeInputResult,
   RuntimeSession,
   RuntimeSessionCreate,
+  RuntimeTurnSettings,
   StandingPrompt,
   UpstreamProviderError,
 } from "./runtime-contracts.js";
@@ -141,6 +142,7 @@ interface CodexTurnOwnership {
 
 abstract class EventSession implements RuntimeSession {
   protected listeners = new Set<Listener>();
+  private unsubscribedEvents: NormalizedRuntimeEvent[] | null = [];
   abstract get sessionId(): string | null;
   abstract prompt(input: RuntimeInput): Promise<RuntimeInputResult>;
   abstract busyInput(input: RuntimeInput): Promise<RuntimeInputResult>;
@@ -149,11 +151,15 @@ abstract class EventSession implements RuntimeSession {
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
+    const early = this.unsubscribedEvents ?? [];
+    this.unsubscribedEvents = null;
+    for (const event of early) listener(event);
     return () => this.listeners.delete(listener);
   }
 
   protected emit(event: NormalizedRuntimeEvent): void {
-    for (const listener of this.listeners) listener(event);
+    if (this.unsubscribedEvents) this.unsubscribedEvents.push(event);
+    else for (const listener of this.listeners) listener(event);
   }
 }
 
@@ -237,6 +243,9 @@ export function codexSandboxParams(config: Pick<RuntimeSessionCreate, "sandbox" 
   return { sandbox: "workspace-write", config: overrides };
 }
 
+const CODEX_WRITER_WAITS = 40;
+const CODEX_WRITER_WAIT_MS = 500;
+
 class CodexSession extends EventSession {
   private requestId = 0;
   private threadId: string | null = null;
@@ -249,11 +258,15 @@ class CodexSession extends EventSession {
   private initialized = false;
   private freshThreadParams: Record<string, unknown> | null = null;
   private resumeFallbackStarted = false;
+  private writerWaits = 0;
+  private settings: RuntimeTurnSettings;
+  private turnOverrides: Record<string, unknown> = {};
   private readonly pending = new Map<number, { method: string; inputId?: string; turnId?: string;
     resolve?: (result: RuntimeInputResult) => void }>();
 
   constructor(private readonly process: ProcessLike, private readonly config: RuntimeSessionCreate) {
     super();
+    this.settings = { model: config.model, reasoningEffort: config.reasoningEffort, fastMode: config.fastMode };
     attachLines(process.stdout, (message) => this.onMessage(message));
     attachLines(process.stderr, (message) => this.onMessage(message));
     process.once("exit", (code, signal) => this.emit({ type: "closed", code, signal }));
@@ -265,7 +278,17 @@ class CodexSession extends EventSession {
 
   async prompt(input: RuntimeInput): Promise<RuntimeInputResult> {
     if (!this.threadId) return { status: "deferred", inputId: input.inputId, reason: "Codex thread is not initialized" };
-    return this.sendInput("turn/start", { threadId: this.threadId, input: textInput(input) }, input);
+    return this.sendInput("turn/start", { threadId: this.threadId, input: textInput(input), ...this.turnOverrides }, input);
+  }
+
+  updateSettings(next: RuntimeTurnSettings): boolean {
+    const model = configuredModel(next.model);
+    const effort = next.reasoningEffort || undefined;
+    if ((configuredModel(this.settings.model) && !model) || (this.settings.reasoningEffort && !effort)
+      || (this.settings.fastMode && !next.fastMode)) return false;
+    this.settings = next;
+    this.turnOverrides = { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(next.fastMode ? { serviceTier: "fast" } : {}) };
+    return true;
   }
 
   async busyInput(input: RuntimeInput): Promise<RuntimeInputResult> {
@@ -325,6 +348,12 @@ class CodexSession extends EventSession {
         if (replaceableResumeFailure && this.freshThreadParams && !this.resumeFallbackStarted) {
           this.resumeFallbackStarted = true;
           this.request("thread/start", this.freshThreadParams);
+          return;
+        }
+        if (pending.method === "thread/resume" && /active writer/i.test(errorMessage) && this.writerWaits++ < CODEX_WRITER_WAITS) {
+          const timer = setTimeout(() => this.request("thread/resume", { threadId: this.config.resumeSessionId, ...this.freshThreadParams }),
+            CODEX_WRITER_WAIT_MS);
+          timer.unref?.();
           return;
         }
         if (pending.method === "turn/steer") this.activeTurnId = null;

@@ -10,7 +10,6 @@ import { gradeProtectedRecallTrace, loadProtectedMessageRecallEval } from "../..
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const launcher = await import(pathToFileURL(path.join(ROOT, "dist/app/lark-cli.mjs")).href);
 const stateModule = await import(pathToFileURL(path.join(ROOT, "dist/agent/agent-state-store.mjs")).href);
-const hostShell = await import(pathToFileURL(path.join(ROOT, "dist/feishu/host-shell.mjs")).href);
 const recallEval = loadProtectedMessageRecallEval(path.join(ROOT, "evals/protected-message-recall/scenarios.json"));
 const recallScenario = (id) => recallEval.scenarios.find((scenario) => scenario.id === id);
 
@@ -315,20 +314,6 @@ test("guarded IM bodies normalize literal escaped newlines and tabs before provi
       const native = f.calls.slice(before).at(-1).args;
       assert.equal(native[native.indexOf("--text") + 1], body, label);
     }
-  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
-});
-
-test("guarded outbound marker uses the same canonical target as Host progress suppression", () => {
-  const f = fixture();
-  try {
-    f.setWriteResult({ status: 0, signal: null, output: [], pid: 1,
-      stdout: JSON.stringify({ ok: true, data: { message_id: "om_outbound", chat_id: "oc_progress", create_time: "1786553650354" } }),
-      stderr: "", error: undefined });
-    assert.equal(f.run(["im", "+messages-send", "--chat-id", "oc_progress", "--text", "sent"]).code, 0);
-    const freshness = f.store.readJson("freshnessState", {});
-    assert.ok(freshness.last_outbound_by_target["feishu.im/chat/oc_progress"]);
-    assert.ok(hostShell.lastOutboundAtForTarget(f.store, "chat:oc_progress"));
-    assert.equal(hostShell.lastOutboundAtForTarget(f.store, "chat:oc_other"), null);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

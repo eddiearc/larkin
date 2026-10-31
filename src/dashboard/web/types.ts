@@ -109,6 +109,8 @@ export interface ConfigAgent {
   /** Codex sandbox; other Runtimes ignore it. */
   sandbox?: "workspace-write" | "danger-full-access";
   fastMode?: boolean;
+  /** Effective reply mode (own or global); null means the Runtime default (LARKIN_REPLY_MODE, else cli). */
+  replyMode?: "card" | "cli" | null;
   mention: { override: "inherit" | "require" | "free"; effective: "require" | "free"; source: "global" | "agent" };
   inboxAudit: {
     override: { enabled: "inherit" | "on" | "off"; intervalMs: "inherit" | number };

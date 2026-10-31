@@ -420,6 +420,8 @@ interface TurnState {
   cards: number;
   tools: number;
   source: string;
+  /** The polled message did not @ the Agent, so its text opens no card. */
+  replyByCommand: boolean;
 }
 
 export class StreamReplyCoordinator {
@@ -491,7 +493,7 @@ export class StreamReplyCoordinator {
 
   private freshTurn(): TurnState {
     return { card: null, needsResolve: true, lastResolveAt: 0, lastAddress: null, buffered: [], failed: null,
-      textChars: 0, cards: 0, tools: 0, source: "none" };
+      textChars: 0, cards: 0, tools: 0, source: "none", replyByCommand: false };
   }
 
   /** The card for the current source, opening (or switching) it when `open` is allowed. */
@@ -524,6 +526,7 @@ export class StreamReplyCoordinator {
     catch (error) { this.log(`读取当前 Inbox source 失败 agent=${agentId}: ${error instanceof Error ? error.message : String(error)}`); }
     const address = replyAddressOf(source);
     turn.source = source ? `${source.deliveryTarget}#${source.deliveryAnchor}` : "none";
+    turn.replyByCommand = Boolean(source?.replyByCommand);
     if (address && turn.lastAddress?.key !== address.key) turn.buffered = [];
     turn.lastAddress = address;
     return address;
@@ -544,7 +547,9 @@ export class StreamReplyCoordinator {
     this.turns.delete(agentId);
     if (turn.textChars || turn.failed || turn.cards) {
       this.log(`流式回复回合结束 agent=${agentId} text=${turn.textChars} cards=${turn.cards} tools=${turn.tools} source=${turn.source}${turn.failed ? " failed" : ""}`
-        + (turn.textChars && !turn.cards ? "（有回复文字但本回合没有领取到消息，文字未发送）" : ""));
+        + (turn.textChars && !turn.cards ? (turn.replyByCommand
+          ? "（本回合领到的消息没有 @ 机器人，Agent 输出的文字不会自动发到飞书）"
+          : "（本回合没有领到消息，Agent 输出的文字没有可回复的对象，没有发到飞书）") : ""));
     }
     if (!turn.failed) { turn.card?.finish(); return; }
     // A failed turn after a poll must not leave the user unanswered. Refresh the source first, so

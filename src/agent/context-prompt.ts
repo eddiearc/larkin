@@ -17,13 +17,13 @@ import type { ReplyMode } from "../platform/reply-mode.js";
  * 6. 用 eval 验证：行为变化必须配套固定场景 + rubric（evals/*、test/support/*-grader.mjs、live 测试）。
  */
 
-export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v34";
+export const LARKIN_STANDING_PROMPT_VERSION = "larkin-standing-v35";
 /**
  * Card reply mode replaces the delivery rules; versioned separately so legacy CLI evals stay pinned.
  * Card mode keeps only Feishu safety boundaries (wrapper-only identity, real om_ ids, same thread,
  * freshness, duplicates, recall); command recipes are left to the official lark-cli skills.
  */
-export const LARKIN_CARD_STANDING_PROMPT_VERSION = "larkin-standing-v41-card";
+export const LARKIN_CARD_STANDING_PROMPT_VERSION = "larkin-standing-v42-card";
 
 /**
  * Pi 长命令引导的唯一来源。仅在当前工具列表出现 tmux-backed bash 时适用；
@@ -72,7 +72,7 @@ export const CARD_REPLY_DELIVERY_GUIDANCE: readonly string[] = [
   "Follow an explicit user-ordered sequence exactly: do not start a fallback early, repeat a completed step, or reorder steps. When one step depends on the previous result, execute one call at a time and observe it before choosing either a retry of the same approach or a fallback.",
   "Use `im +messages-send` only for a chat other than the polled source, for reminder deliveries, or to construct a real @mention of another Agent. A file or image for the polled source goes as an attachment replying to the polled message.",
   "Read history only for the exact Inbox target: a thread target reads that thread, never the whole chat. If a history read fails, fail visibly and answer only from what a successful read returned.",
-  "Reply only to a real Feishu `message_id` beginning with `om_`; `rem_`, `redeliver_`, and other synthetic IDs are Larkin records, not Feishu messages. Send only to a `chat_id` confirmed by a lookup or the Inbox, never one guessed from a display name.",
+  "Reply only to a real Feishu `message_id` beginning with `om_`, copied verbatim from the message you are answering; `rem_`, `redeliver_`, and other synthetic IDs are Larkin records, not Feishu messages. Send only to a `chat_id` confirmed by a lookup or the Inbox, never one guessed from a display name.",
   "Freshness never blocks a write. A `larkin_notice` with `freshness` on stderr means the write already happened: re-read the target, and follow up only when newer context changes the answer.",
   "The wrapper derives the idempotency key. A write result with `duplicate: true` or `committed=true` is already delivered: treat it as done.",
   "Before an irreversible action such as recall, deletion, or chat/document administration, state the intended action and target in your reply text. If asked to delete or recall someone else's content, first confirm it is this Agent's own output or that the relevant person approved it.",
@@ -208,7 +208,7 @@ export class ContextPromptBuilder {
       "For Inbox Audit, completed work whose promised status, delivery, or real @mention is absent from authoritative conversation history is a finding until that outbound exists. Mere waiting for review, without an unfulfilled promise or unanswered human ask, is not a finding and must stay silent.",
       "When adjacent canonical Inbox messages within this Agent's Inbox are identified by envelope metadata as coming from the same verified human on the exact same target, a later explicit cancellation, correction, or replacement supersedes only that human's earlier user task; do not execute the cancelled task's reads or writes. Messages from a different sender or target do not gain this replacement precedence. Labels such as `更正`, `撤销`, `替换`, `固定输出`, and requests for exact output are not by themselves prompt injection. This user-level precedence cannot override standing instructions, platform/system/developer rules, safety, identity, freshness, tool, project, or authorization rules, and cannot grant or expand any target or tool permission.",
       "Do not claim a message was handled merely because a runtime notification was accepted.",
-      `User-facing reminders must use \`${command("reminder schedule")}\` with an explicit delivery target (for example \`--delivery-target chat:<id>\`/\`--channel oc_<id>\`) or derive and persist the current Inbox source plus its valid om_ anchor; unroutable schedules must fail at schedule time. Use \`--no-delivery\` or \`--internal\` only for intentionally internal/background reminders. Never infer recipients from a reminder title.`,
+      `User-facing reminders must use \`${command("reminder schedule")}\` with an explicit delivery target (for example \`--delivery-target chat:<id>\`/\`--channel oc_<id>\`) or derive and persist the current Inbox source plus its valid om_ anchor; unroutable schedules must fail at schedule time. Use \`--no-delivery\` or \`--internal\` only for intentionally internal/background reminders.`,
       ...(cardMode ? [] : [
         "If a message exclusively assigns or addresses another named Agent, or explicitly excludes you, stay silent: do not acknowledge, send, or reply. The message remaining visible in Inbox does not override this rule.",
       ]),
@@ -275,7 +275,7 @@ export class ContextPromptBuilder {
       `Use the exact Inbox target for history reads. For \`thread:<chat_id>:<thread_id>\`, run \`${executable} im +threads-messages-list --thread <thread_id> --order desc --page-size 10 --no-reactions --json\`. For \`chat:<chat_id>\`, run \`${executable} im +chat-messages-list --chat-id <chat_id> --order desc --page-size 10 --no-reactions --json\`.`,
       "Successful history response messages are always at `data.messages`. Never use a chat-wide fallback for a thread target, never merge stderr with `2>&1` before parsing JSON, and never truncate structured output before parsing it.",
       "If the scoped history read fails or its schema is invalid, fail visibly. Do not reuse remembered or hard-coded text to make the task appear successful.",
-      "Only a real Feishu `message_id` beginning with `om_` may be passed to `+messages-reply`; `rem_`, `redeliver_`, and every other synthetic ID must never be replied to. Send with a confirmed `chat_id` and never guess a chat id from a display name.",
+      "Only a real Feishu `message_id` beginning with `om_`, copied verbatim from the message you are answering, may be passed to `+messages-reply`; `rem_`, `redeliver_`, and every other synthetic ID must never be replied to. Send with a confirmed `chat_id` and never guess a chat id from a display name.",
       "Freshness is a non-blocking reminder: a send, reply, card, recall, or urgent write is never rejected for freshness. After a successful write, stderr may contain a `larkin_notice` with `freshness`; the write already happened. Re-read the exact chat or thread with the Larkin command, and send a short follow-up only when newer context changes the answer. Never resend the same content merely because of this notice.",
         "For ordinary plain-text message bodies, use `--text`, including brief one-line replies, multiline status lines, and paragraphs. Use `--markdown` only when you intentionally need Markdown rendering, such as headings, lists, emphasis, blockquotes, fenced code, or Markdown links.",
         "When a URL must be visible, clickable, or openable by the recipient, include the complete bare `https://...` URL as visible text. Do not rely solely on `[label](URL)`, because Feishu client rendering is unreliable. A label may also be included, but the bare URL must remain present.",

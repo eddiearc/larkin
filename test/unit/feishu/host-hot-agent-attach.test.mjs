@@ -205,6 +205,61 @@ test("HostShell hot attach adds only the target Agent and duplicate upsert is id
   }
 });
 
+test("HostShell applies model, effort, and Fast changes to the live Runtime without restaging or reconnecting", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-hot-settings-"));
+  fs.chmodSync(root, 0o700);
+  const target = { ...configFor(root, "cli_settingsA1"), effort: "medium" };
+  const settingUpdates = [];
+  const stages = [];
+  let liveUpdate = true;
+  const runtimeHost = {
+    async start() {}, async stop() {}, async shutdown() {},
+    async stage(config) {
+      stages.push(config.model);
+      return { readiness: { runtime: config.runtime, state: "ready" }, async commit() {}, async rollback() {} };
+    },
+    updateSettings(config) { settingUpdates.push(`${config.model}/${config.effort}/${config.fastMode === true}`); return liveUpdate; },
+    async deliver() { return { status: "accepted", deliveryId: "delivery" }; },
+    subscribe() { return () => {}; },
+  };
+  const channels = [];
+  const channelPackage = {
+    createLarkChannel(options) {
+      const channel = {
+        options, disconnected: 0, registrations: {},
+        botIdentity: { openId: `ou_${options.appId}`, name: options.appId },
+        rawClient: { async request() { return { bot: { open_id: `ou_${options.appId}`, app_name: options.appId } }; } },
+        dispatcher: { register: (map) => Object.assign(channel.registrations, map) }, on() {},
+        async connect() {}, async disconnect() { this.disconnected += 1; },
+      };
+      channels.push(channel);
+      return channel;
+    },
+  };
+  const shell = createHostShell({ env: { ...process.env, LARKIN_HOME: root, LARKIN_CONFIG_DIR: root, LARKIN_SERVER_ID: "server-hot-settings",
+    LARKIN_AGENTS_CONFIG: JSON.stringify([target]), LARKIN_INBOUND_DROUGHT_SEC: "0" }, runtimeHost, channelPackage, eventSourceStartDelayMs: 0 });
+  try {
+    shell.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(await shell.upsertAgent({ ...target, model: "gpt-6", effort: "low", fastMode: true }), "updated");
+    assert.deepEqual(settingUpdates, ["gpt-6/low/true"]);
+    assert.deepEqual(stages, [], "a live settings change must not stage a second Runtime");
+    assert.deepEqual(channels.map(({ disconnected }) => disconnected), [0], "a live settings change must not reconnect Feishu");
+    assert.deepEqual(shell.agents.map(({ model, effort, fastMode }) => `${model}/${effort}/${fastMode}`), ["gpt-6/low/true"]);
+
+    liveUpdate = false;
+    assert.equal(await shell.upsertAgent({ ...target, model: "gpt-6", effort: "low", fastMode: false }), "updated");
+    assert.deepEqual(stages, ["gpt-6"], "a change the live session cannot adopt falls back to a staged replacement");
+
+    assert.equal(await shell.upsertAgent({ ...target, model: "gpt-6", effort: "low", replyMode: "card" }), "updated");
+    assert.equal(settingUpdates.length, 2, "a reply-mode change needs a new standing prompt, not a live settings update");
+    assert.equal(stages.length, 2);
+  } finally {
+    await shell.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("HostShell hot update switches card projection only after the old channel disconnects", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-hot-update-card-"));
   fs.chmodSync(root, 0o700);

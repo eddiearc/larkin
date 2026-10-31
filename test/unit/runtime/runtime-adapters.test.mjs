@@ -185,12 +185,11 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v34");
+  assert.equal(prompt.version, "larkin-standing-v35");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
-  assert.match(prompt.content, /Never infer recipients from a reminder title/);
   assert.doesNotMatch(prompt.content, /at most one bounded wait call per turn/);
   assert.doesNotMatch(prompt.content, /do not loop or call wait again in the same turn/);
   assert.match(prompt.content, /tmux-backed bash.*wait timeout|wait timeout.*not process failure/);
@@ -460,6 +459,63 @@ test("Codex resume failure falls back to a fresh thread with the same standing p
   assert.equal(fallback.method, "thread/start");
   assert.equal(fallback.params.threadId, undefined);
   assert.equal(fallback.params.developerInstructions, "standing");
+});
+
+test("Codex applies model, effort, and Fast to the live thread from its next turn", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child })
+    .createSession(create({ model: "gpt-old", reasoningEffort: "medium" }));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const threadRequest = child.writes.find((request) => request.method === "thread/start");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: threadRequest.id, result: { thread: { id: "thread-live" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(session.updateSettings({ model: "gpt-new", reasoningEffort: "low", fastMode: true }), true);
+  void session.prompt({ inputId: "wake-1", kind: "wake", text: "hi", attempt: 0 });
+  const turn = child.writes.find((request) => request.method === "turn/start");
+  assert.deepEqual({ ...turn.params, input: undefined },
+    { threadId: "thread-live", input: undefined, model: "gpt-new", effort: "low", serviceTier: "fast" });
+  assert.equal(child.writes.filter((request) => request.method === "thread/resume").length, 0);
+
+  for (const handBack of [{ model: "default", reasoningEffort: "low", fastMode: true },
+    { model: "gpt-new", reasoningEffort: null, fastMode: true }, { model: "gpt-new", reasoningEffort: "low", fastMode: false }]) {
+    assert.equal(session.updateSettings(handBack), false, `${JSON.stringify(handBack)} needs a fresh session`);
+  }
+});
+
+test("Codex resumes a thread once the replaced process releases its writer", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "thread-busy" }));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resume = child.writes.find((request) => request.method === "thread/resume");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id,
+    error: { code: -32600, message: "thread thread-busy already has an active writer" } })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const retry = child.writes.filter((request) => request.method === "thread/resume").at(-1);
+  assert.notEqual(retry.id, resume.id);
+  assert.equal(retry.params.threadId, "thread-busy");
+  assert.equal(retry.params.developerInstructions, "standing");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: retry.id, result: { thread: { id: "thread-busy" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.sessionId, "thread-busy");
+  assert.deepEqual(events.map(({ type }) => type), ["session-init"]);
+});
+
+test("Runtime events emitted before the first subscriber are replayed to it", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "thread-gone" }));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resume = child.writes.find((request) => request.method === "thread/resume");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id, error: { code: -32600, message: "permission denied" } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  assert.deepEqual(events, [{ type: "error", message: "permission denied" }]);
 });
 
 test("Codex sandbox defaults to danger-full-access and workspace-write keeps network plus Larkin state writable", async () => {

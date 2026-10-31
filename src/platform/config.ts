@@ -47,6 +47,8 @@ export interface StoredAgent {
   sandbox?: AgentSandbox;
   /** Codex Fast service tier. Stored only when on; absent follows the user's own Codex config. */
   fastMode?: true;
+  /** Who delivers this Agent's IM replies. Absent follows the global replyMode. */
+  replyMode?: ReplyMode;
   mentionPolicy?: MentionPolicy;
   chatMentionPolicies?: Record<string, MentionPolicy>;
   inboxAudit?: InboxAuditSettings;
@@ -63,8 +65,10 @@ export interface HydratedAgent extends StoredAgent {
   larkConfigDir: string;
   /** Compatibility projection for older status consumers. Never stored in v4. */
   noMentionChats?: string[];
-  /** Projection of the global reply mode so Runtime agent snapshots carry it. Never stored per Agent. */
+  /** Effective reply mode (this Agent's own, else the global one) so Runtime agent snapshots carry it. */
   replyMode?: ReplyMode;
+  /** This Agent's own stored reply mode; only this one is written back per Agent. */
+  agentReplyMode?: ReplyMode;
   [key: string]: unknown;
 }
 
@@ -90,6 +94,7 @@ export type ConfigMutation =
   | { kind: "set-global-inbox-audit"; enabled?: boolean; intervalMs?: number }
   | { kind: "set-agent-inbox-audit"; agentId: string; enabled?: InboxAuditEnabledOverride; intervalMs?: InboxAuditIntervalOverride }
   | { kind: "set-global-reply-mode"; value: ReplyMode }
+  | { kind: "set-agent-reply-mode"; agentId: string; value: ReplyMode }
   | { kind: "set-agent-runtime"; agentId: string; runtime: string; model?: string }
   | { kind: "set-agent-model"; agentId: string; model: string }
   | { kind: "set-agent-effort"; agentId: string; effort: string | null }
@@ -114,7 +119,7 @@ const TOP_FIELDS_V3 = new Set(["version", "serverId", "activeAgent", "agents"]);
 const TOP_FIELDS_V4 = new Set(["version", "serverId", "mentionPolicy", "activeAgent", "agents"]);
 const OPTIONAL_TOP_FIELDS_V4 = new Set(["inboxAudit", "replyMode"]);
 const AGENT_FIELDS_V3 = new Set(["runtime", "model", "effort", "noMentionChats", "createdAt"]);
-const AGENT_FIELDS_V4 = new Set(["runtime", "model", "effort", "sandbox", "fastMode", "mentionPolicy", "chatMentionPolicies", "inboxAudit", "createdAt"]);
+const AGENT_FIELDS_V4 = new Set(["runtime", "model", "effort", "sandbox", "fastMode", "replyMode", "mentionPolicy", "chatMentionPolicies", "inboxAudit", "createdAt"]);
 const LEGACY_AGENT_FIELDS = new Set(["piDistribution", "runtimeOption", "processingEye"]);
 const INBOX_AUDIT_FIELDS = new Set(["enabled", "intervalMs"]);
 const APP_ID = /^cli_[A-Za-z0-9]+$/;
@@ -338,6 +343,7 @@ function validateStoredAgent(key: string, agent: unknown, version: 3 | 4): asser
       throw new Error(`Agent ${key}.noMentionChats 必须是安全的群 ID 字符串数组`);
     }
   }
+  if (version === 4 && Object.hasOwn(agent, "replyMode")) assertReplyMode(agent.replyMode, `Agent ${key}.replyMode`);
   if (version === 4 && Object.hasOwn(agent, "mentionPolicy")) assertPolicy(agent.mentionPolicy, `Agent ${key}.mentionPolicy`);
   if (version === 4 && Object.hasOwn(agent, "inboxAudit")) parseStoredInboxAudit(agent.inboxAudit, `Agent ${key}.inboxAudit`);
   if (version === 4 && Object.hasOwn(agent, "chatMentionPolicies")) {
@@ -365,6 +371,7 @@ function hydratedStoredAgent(key: string, agent: Obj, version: 3 | 4): StoredAge
     ...(typeof agent.effort === "string" ? { effort: agent.effort } : {}),
     ...(version === 4 && isAgentSandbox(agent.sandbox) ? { sandbox: agent.sandbox } : {}),
     ...(version === 4 && agent.fastMode === true ? { fastMode: true as const } : {}),
+    ...(version === 4 && (agent.replyMode === "card" || agent.replyMode === "cli") ? { replyMode: agent.replyMode } : {}),
     ...(version === 4 && (agent.mentionPolicy === "require" || agent.mentionPolicy === "free") ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(version === 4 && Object.hasOwn(agent, "inboxAudit") ? { inboxAudit: parseStoredInboxAudit(agent.inboxAudit, `Agent ${key}.inboxAudit`) } : {}),
     ...(Object.keys(chatMentionPolicies).length ? { chatMentionPolicies, noMentionChats: Object.entries(chatMentionPolicies).filter(([, policy]) => policy === "free").map(([chatId]) => chatId) } : {}),
@@ -382,6 +389,7 @@ export function hydrateAgent(key: string, agent: StoredAgent & { noMentionChats?
     ...(agent.effort ? { effort: agent.effort } : {}),
     ...(agent.sandbox ? { sandbox: agent.sandbox } : {}),
     ...(agent.fastMode ? { fastMode: true as const } : {}),
+    ...(agent.replyMode ? { replyMode: agent.replyMode, agentReplyMode: agent.replyMode } : {}),
     ...(agent.mentionPolicy ? { mentionPolicy: agent.mentionPolicy } : {}),
     ...(agent.inboxAudit ? { inboxAudit: { ...agent.inboxAudit } } : {}),
     ...(agent.chatMentionPolicies ? { chatMentionPolicies: { ...agent.chatMentionPolicies } } : {}),
@@ -414,7 +422,7 @@ export function normalizeConfig(raw: unknown, configDir: string, { mint }: { min
   const agents: Record<string, HydratedAgent> = {};
   for (const [key, agent] of Object.entries(raw.agents)) {
     agents[key] = hydrateAgent(key, hydratedStoredAgent(key, agent as Obj, version), layout.root);
-    if (replyMode) agents[key].replyMode = replyMode;
+    if (replyMode && !agents[key].agentReplyMode) agents[key].replyMode = replyMode;
   }
   const inboxAudit = version === 4 && Object.hasOwn(raw, "inboxAudit")
     ? resolvedInboxAudit(parseStoredInboxAudit(raw.inboxAudit, "config.inboxAudit"))
@@ -625,6 +633,7 @@ export function toStored(config: HydratedConfig): {
     if (typeof agent.effort === "string" && agent.effort) stored.effort = agent.effort;
     if (agent.sandbox && agent.sandbox !== DEFAULT_AGENT_SANDBOX) stored.sandbox = agent.sandbox;
     if (agent.fastMode === true) stored.fastMode = true;
+    if (agent.agentReplyMode) stored.replyMode = agent.agentReplyMode;
     if (agent.mentionPolicy) stored.mentionPolicy = agent.mentionPolicy;
     if (agent.chatMentionPolicies && Object.keys(agent.chatMentionPolicies).length) stored.chatMentionPolicies = { ...agent.chatMentionPolicies };
     if (agent.inboxAudit && (agent.inboxAudit.enabled !== undefined || agent.inboxAudit.intervalMs !== undefined)) {
@@ -689,7 +698,8 @@ function agentSignature(config: HydratedConfig, agentId: string): string {
     // 0.5.19 起不再有 processingEye 开关；固定 null 以免未配过该 key 的 Agent 升级后无意义 pending apply。
     globalProcessingEye: null, agentProcessingEye: null,
     // Only present once configured, so upgrading does not mark every Agent pending apply.
-    ...(config.replyMode ? { globalReplyMode: config.replyMode } : {}),
+    // An Agent's own reply mode replaces the global one, so a global change leaves it applied.
+    ...(agent.agentReplyMode ? { agentReplyMode: agent.agentReplyMode } : config.replyMode ? { globalReplyMode: config.replyMode } : {}),
     ...(agent.sandbox && agent.sandbox !== DEFAULT_AGENT_SANDBOX ? { sandbox: agent.sandbox } : {}),
     ...(agent.fastMode ? { fastMode: true } : {}),
   }));
@@ -837,9 +847,11 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
   if (mutation.kind === "set-global-reply-mode") {
     assertReplyMode(mutation.value, "全局 reply mode");
     config.replyMode = mutation.value;
-    for (const agent of Object.values(config.agents)) agent.replyMode = mutation.value;
+    // Agents with their own reply mode keep it.
+    const followers = Object.entries(config.agents).filter(([, agent]) => !agent.agentReplyMode);
+    for (const [, agent] of followers) agent.replyMode = mutation.value;
     // The standing prompt and the lark-cli gate are fixed per Runtime session, so each Agent must re-apply.
-    return { scope: "global", runtimeChange: true, affectedAgentIds: Object.keys(config.agents) };
+    return { scope: "global", runtimeChange: true, affectedAgentIds: followers.map(([agentId]) => agentId) };
   }
   if (!APP_ID.test(mutation.agentId) || !config.agents[mutation.agentId]) throw new Error(`Agent 不存在：${mutation.agentId}`);
   const agent = config.agents[mutation.agentId];
@@ -870,6 +882,12 @@ function applyMutation(config: HydratedConfig, mutation: ConfigMutation): { scop
     if (Object.keys(policies).length) agent.chatMentionPolicies = policies; else delete agent.chatMentionPolicies;
     agent.noMentionChats = Object.entries(policies).filter(([, value]) => value === "free").map(([chatId]) => chatId);
     return { scope: "chat", agentId: mutation.agentId, runtimeChange: false, affectedAgentIds: [mutation.agentId] };
+  }
+  if (mutation.kind === "set-agent-reply-mode") {
+    assertReplyMode(mutation.value, "Agent reply mode");
+    agent.agentReplyMode = mutation.value;
+    agent.replyMode = mutation.value;
+    return { scope: "agent", agentId: mutation.agentId, runtimeChange: true, affectedAgentIds: [mutation.agentId] };
   }
   if (mutation.kind === "set-agent-sandbox") {
     if (!isAgentSandbox(mutation.value)) throw new Error(`sandbox 只能是 ${AGENT_SANDBOXES.join(" / ")}`);
@@ -1263,6 +1281,7 @@ export function safeConfigView(config: HydratedConfig, onlyAgentId?: string, cha
     agentId, runtime: agent.runtime, runtimeOption: toUserRuntime(agent.runtime), model: agent.model, effort: agent.effort ?? null,
     sandbox: agent.sandbox ?? DEFAULT_AGENT_SANDBOX,
     fastMode: agent.fastMode === true,
+    replyMode: agent.replyMode ?? null,
     mention: {
       override: agent.mentionPolicy ?? "inherit",
       effective: agent.mentionPolicy ?? config.mentionPolicy,

@@ -135,6 +135,7 @@ export interface RuntimeHost {
   shutdown(reason: string): Promise<void>;
   subscribe(listener: (event: RuntimeHostEvent) => void): () => void;
   isBusy?(agentId: string): boolean;
+  updateSettings?(config: AgentRuntimeConfig): boolean;
   /** Promote accepted inbox_update deliveries once after idle / drought reconnect. */
   scanPendingInboxUpdates?(agentId?: string): Promise<void>;
   resetSession?(agentId: string): Promise<RuntimeSessionResetResult>;
@@ -1660,6 +1661,13 @@ export function createRuntimeHost(options: {
       };
     },
     isBusy(agentId): boolean { const agent = managed.get(agentId); return Boolean(agent?.busy || agent?.submitting || agent?.starting); },
+    updateSettings(config): boolean {
+      const agent = managed.get(config.agentId);
+      if (!agent?.session?.updateSettings || agent.config.runtime !== config.runtime) return false;
+      if (!agent.session.updateSettings({ model: config.model, reasoningEffort: config.effort || null, fastMode: config.fastMode === true })) return false;
+      agent.config = { ...agent.config, model: config.model, effort: config.effort, fastMode: config.fastMode };
+      return true;
+    },
     async scanPendingInboxUpdates(agentId): Promise<void> {
       const agents = agentId ? [managed.get(agentId)] : [...managed.values()];
       for (const agent of agents) {

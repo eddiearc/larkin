@@ -56,11 +56,7 @@ test.skipIf(!RUN)("real Chromium saves Inbox audit settings through the local Da
     await page.goto(`${base}/?agent=${APP}&tab=configuration`, { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: APP, level: 1 }).waitFor({ timeout: 5_000 });
 
-    await page.getByRole("button", { name: "全局设置" }).click();
-    const global = page.getByRole("dialog");
-    await global.getByLabel("真人群消息默认策略").waitFor();
-    assert.equal(await global.getByText("Inbox 巡检").count(), 0, "Inbox audit is configured per Agent only");
-    await global.getByRole("button", { name: "关闭面板" }).click();
+    assert.equal(await page.getByRole("button", { name: "全局设置" }).count(), 0, "Inbox audit is configured per Agent only");
 
     await page.getByRole("tab", { name: "高级" }).click();
     const toggle = page.getByLabel("Inbox 巡检开关");

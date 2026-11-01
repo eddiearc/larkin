@@ -51,7 +51,7 @@ test("dashboard is layered: React workbench, shell template, filesystem-only vie
   assert.match(workbench, /GroupPolicyTable/);
   assert.doesNotMatch(workbench, /覆盖链|effective=|source=/, "implementation precedence details stay out of the user-facing workbench");
   assert.match(workbench, /\/api\/config\/apply/);
-  assert.match(workbench, /GlobalSettingsSheet/);
+  assert.doesNotMatch(workbench, /GlobalSettingsSheet/);
   assert.match(workbench, /role="tablist"/);
   assert.match(state, /activity.*persona.*reply.*advanced/);
   assert.match(styles, /body \{[^}]*overflow-x: (?:hidden|clip)/, "dashboard must not expose page-level horizontal scrolling");

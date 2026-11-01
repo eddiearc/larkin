@@ -89,6 +89,43 @@ class FakeTurnEndRetryScheduler {
   }
 }
 
+test("RuntimeHost applies live settings to the session and keeps them for later sessions", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-live-settings-"));
+  class SettingsSession extends FakeSession {
+    updates = [];
+    accept = true;
+    updateSettings(settings) { this.updates.push(settings); return this.accept; }
+  }
+  const sessions = [];
+  const creates = [];
+  const adapter = { id: "codex", capabilities: {}, async createSession(input) {
+    creates.push(input);
+    const session = new SettingsSession();
+    sessions.push(session);
+    return session;
+  } };
+  const host = createRuntimeHost({ adapterFor: () => adapter, promptBuilder: new ContextPromptBuilder() });
+  const config = { agentId: "cli_liveSettings", name: "live", runtime: "codex", model: "gpt-old", effort: "medium", workspaceDir: "/tmp", stateDir: root };
+  try {
+    await host.start([config]);
+    const next = { ...config, model: "gpt-new", effort: "low", fastMode: true };
+    assert.equal(host.updateSettings({ ...next, runtime: "claude" }), false, "a Runtime switch needs a replacement");
+    sessions[0].accept = false;
+    assert.equal(host.updateSettings(next), false);
+    sessions[0].accept = true;
+    assert.equal(host.updateSettings(next), true);
+    assert.deepEqual(sessions[0].updates.at(-1), { model: "gpt-new", reasoningEffort: "low", fastMode: true });
+    sessions[0].emit({ type: "closed", code: 1, signal: null });
+    const deadline = Date.now() + 2_000;
+    while (creates.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual({ model: creates[1].model, reasoningEffort: creates[1].reasoningEffort, fastMode: creates[1].fastMode },
+      { model: "gpt-new", reasoningEffort: "low", fastMode: true }, "a recreated session must keep the live settings");
+  } finally {
+    await host.shutdown("test");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeHost manually compacts one exact overflow and retries the same stable input once", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-pi-manual-compaction-"));
   const agentId = "cli_piManualA1";

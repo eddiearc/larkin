@@ -354,7 +354,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     await page.getByText("larkin config --help", { exact: true }).waitFor();
     assert.equal(await page.getByLabel("Runtime").inputValue(), "codex");
     assert.equal(await page.getByLabel("Model").inputValue(), "default");
-    await page.getByLabel("群消息策略").selectOption("require");
+    await page.getByRole("radio", { name: /只回 @ 它的/ }).check();
     await page.getByRole("button", { name: "保存 Agent 配置" }).click();
     await page.getByText(/配置已保存/).waitFor();
     const chatEditor = page.locator(".chat-add");

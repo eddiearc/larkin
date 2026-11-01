@@ -82,6 +82,8 @@ export interface RuntimeSessionCreate {
   env?: NodeJS.ProcessEnv;
 }
 
+export type RuntimeTurnSettings = Pick<RuntimeSessionCreate, "model" | "reasoningEffort" | "fastMode">;
+
 export interface RuntimeSession {
   readonly sessionId: string | null;
   /** On-disk archive of this session when the Runtime exposes one (Pi jsonl). */
@@ -93,6 +95,7 @@ export interface RuntimeSession {
   cancel(reason: string): Promise<void>;
   compact?(customInstructions?: string): Promise<unknown>;
   getContextUsage?(): Promise<{ tokens: number; contextWindow: number } | null>;
+  updateSettings?(settings: RuntimeTurnSettings): boolean;
   close(reason: string): Promise<void>;
   subscribe(listener: (event: NormalizedRuntimeEvent) => void): () => void;
 }

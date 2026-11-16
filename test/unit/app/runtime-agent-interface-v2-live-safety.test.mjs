@@ -312,6 +312,7 @@ test("direct Bot-only profile materialization keeps the secret local and never c
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   try {
     materializeBotOnlyProfile({
+      agentId: "cli_fixtureA",
       stateDir,
       larkConfigDir,
       feishuAppId: "cli_fixtureA",
@@ -324,8 +325,14 @@ test("direct Bot-only profile materialization keeps the secret local and never c
       defaultAs: "bot", strictMode: "bot", users: [],
     }]);
     assert.equal(typeof profile.apps[0].appSecret, "string");
-    assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "larkin")), true);
+    const runtimeShim = path.join(stateDir, "runtime-bin", "larkin");
+    assert.equal(fs.existsSync(runtimeShim), true);
     assert.equal(fs.existsSync(path.join(stateDir, "runtime-bin", "lark-cli")), false);
+    const shim = fs.readFileSync(runtimeShim, "utf8");
+    assert.match(shim, /export LARKIN_AGENT_ID='cli_fixtureA'/);
+    assert.match(shim, /export LARKIN_RUNTIME=1/);
+    assert.match(shim, new RegExp(`export LARKIN_STATE_DIR='${stateDir.replaceAll("/", "\\/")}'`));
+    assert.match(shim, new RegExp(`export LARKIN_CONFIG_DIR='${claim.targetRoot.replaceAll("/", "\\/")}'`));
   } finally {
     cleanupClaimedHoldHostRoot(claim);
   }

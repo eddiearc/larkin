@@ -70,7 +70,9 @@ test("dashboard config API is sanitized, same-origin/CSRF protected, bounded, an
       await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ operation: "write-raw", serverId: "replace" }) }),
       await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ operation: "set-global-mention", value: "free", padding: "x".repeat(17_000) }) }),
     ];
-    assert.deepEqual(rejected.map((response) => response.status), [400, 400, 400, 400, 400, 400]);
+    // Forbidden callers get 403, an oversized body 413, a malformed request 400; a wrong capability is a stale page.
+    assert.deepEqual(rejected.map((response) => response.status), [403, 403, 400, 403, 400, 413]);
+    assert.match((await rejected[3].json()).error, /刷新页面/);
     assert.equal(fs.readFileSync(path.join(root, "config.json"), "utf8"), before);
 
     const accepted = await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: raw });
@@ -98,6 +100,13 @@ test("dashboard config API is sanitized, same-origin/CSRF protected, bounded, an
       override: { enabled: "on", intervalMs: 30 * 60_000 }, effective: { enabled: true, intervalMs: 30 * 60_000 },
       source: { enabled: "agent", intervalMs: "agent" },
     });
+    assert.equal("processingEye" in auditView, false, "config view must not project a processingEye switch");
+    assert.equal("processingEye" in auditView.agents[0], false);
+    const savedEye = await fetch(`${base}/api/config`, {
+      method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf },
+      body: JSON.stringify({ operation: "set-global-processing-eye", enabled: true }),
+    });
+    assert.equal(savedEye.status, 400, "retired processing-eye mutations must be rejected");
 
     const inherit = await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ operation: "set-chat-mention", agentId: APP, chatId: "oc_legacy", value: "inherit" }) });
     assert.equal(inherit.status, 200);
@@ -107,7 +116,8 @@ test("dashboard config API is sanitized, same-origin/CSRF protected, bounded, an
     const applyMissingOrigin = await fetch(`${base}/api/config/apply`, { method: "POST", headers: { "Content-Type": "application/json", "X-Larkin-CSRF": csrf }, body: JSON.stringify({ agentId: APP }) });
     const applyBadCsrf = await fetch(`${base}/api/config/apply`, { method: "POST", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": "bad" }, body: JSON.stringify({ agentId: APP }) });
     const applyOffline = await fetch(`${base}/api/config/apply`, { method: "POST", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ agentId: APP }) });
-    assert.deepEqual([applyMissingOrigin.status, applyBadCsrf.status, applyOffline.status], [409, 409, 409]);
+    assert.deepEqual([applyMissingOrigin.status, applyBadCsrf.status, applyOffline.status], [403, 403, 409]);
+    assert.match((await applyOffline.json()).error, /daemon|配置已保存.*应用失败/);
     const pendingView = await fetch(`${base}/api/config`, { headers: privateHeaders }).then((response) => response.json());
     assert.equal(pendingView.agents[0].apply.applyState, "pending");
   } finally {
@@ -168,7 +178,7 @@ test("removed pi-auth routes 404 like unknown routes; remaining config routes ke
       await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": "wrong" }, body: raw }),
       await fetch(`${base}/api/config`, { method: "PATCH", headers: { "Content-Type": "application/json", Origin: base, "X-Larkin-CSRF": csrf }, body: JSON.stringify({ operation: "set-global-mention", value: "free", padding: "x".repeat(17_000) }) }),
     ];
-    assert.deepEqual(rejected.map((response) => response.status), [400, 400, 400, 400]);
+    assert.deepEqual(rejected.map((response) => response.status), [403, 403, 403, 413]);
     for (const response of rejected) {
       assert.equal(response.headers.get("cache-control"), "no-store");
     }

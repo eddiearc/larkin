@@ -14,14 +14,14 @@ import "../platform/check-bun-version.cjs";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { currentProcessMetadata, readJson } from "../platform/process-state.js";
-import { prepareDashboardLaunch } from "../dashboard/dashboard-lifecycle.js";
-import { DASHBOARD_BUILD_FINGERPRINT, DASHBOARD_BUILD_VERSION, PACKAGE_VERSION, collectStatus, collectWorkspaceEntry, loadDashboardConfig, resolveDashboardAvatarSource } from "../dashboard/dashboard-view-model.js";
+import { loadDashboardCapability, prepareDashboardLaunch } from "../dashboard/dashboard-lifecycle.js";
+import { DASHBOARD_BUILD_FINGERPRINT, DASHBOARD_BUILD_VERSION, PACKAGE_VERSION, collectStatus, loadDashboardConfig, resolveDashboardAvatarSource } from "../dashboard/dashboard-view-model.js";
 import { renderDashboardHtml } from "../dashboard/dashboard-template.js";
 import { createDashboardConfigController, createPiModelDirectoryResolver } from "../dashboard/dashboard-config-controller.js";
+import { createDashboardWorkspaceController } from "../dashboard/dashboard-workspace-controller.js";
 import { createDashboardAvatarController } from "../dashboard/dashboard-avatar.js";
 import { processCommandToken } from "./internal-command.js";
 import { dashboardAsset } from "../dashboard/dashboard-assets.js";
@@ -65,11 +65,12 @@ if (preparedDashboard.action === "reuse") {
 }
 const dashboardLaunchLock = { release: preparedDashboard.release };
 
-const csrfCapability = crypto.randomBytes(32).toString("base64url");
+const csrfCapability = loadDashboardCapability(path.join(startupConfig.larkinHome, "dashboard-capability"));
 const HTML = renderDashboardHtml(PACKAGE_VERSION, DASHBOARD_BUILD_VERSION, BUILD_FINGERPRINT, csrfCapability);
 const piModelResolver = createPiModelDirectoryResolver();
 const configController = createDashboardConfigController({ csrfCapability, piModelDirectoryResolver: piModelResolver });
 const avatarController = createDashboardAvatarController({ resolveSource: resolveDashboardAvatarSource });
+const workspaceController = createDashboardWorkspaceController({ csrfCapability });
 
 const server = http.createServer(async (req, res) => {
   const requestUrl = new URL(req.url || "/", "http://localhost");
@@ -100,18 +101,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (await avatarController.handle(req, res, requestUrl)) return;
   if (await configController.handle(req, res, requestUrl)) return;
-  if (requestUrl.pathname === "/api/workspace") {
-    try {
-      const body = JSON.stringify(collectWorkspaceEntry(requestUrl.searchParams.get("agent"), requestUrl.searchParams.get("path") || ""));
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(body);
-    } catch (error) {
-      const statusCode = typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : 500;
-      res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
-    }
-    return;
-  }
+  if (await workspaceController.handle(req, res, requestUrl)) return;
   if (requestUrl.pathname === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(HTML);

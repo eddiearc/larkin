@@ -205,7 +205,7 @@ test("production graph does not ship a host Pi package and speaks only the share
   assert.equal(pkg.dependencies["@tintinweb/pi-subagents"], undefined);
   assert.equal(pkg.dependencies["@richardgill/pi-tmux-bash"], undefined);
   assert.equal(pkg.patchedDependencies, undefined);
-  assert.equal(pkg.packageManager, "bun@1.3.14");
+  assert.equal(pkg.packageManager, "bun@1.4.4");
   assert.equal(pkg.engines, undefined);
   assert.equal(pkg.scripts.preinstall, undefined);
   assert.doesNotMatch(JSON.stringify(pkg.dependencies), /earendil-works\/pi-coding-agent/);
@@ -223,10 +223,11 @@ test("production graph does not ship a host Pi package and speaks only the share
 
 test("Bun preflight requires the exact pinned runtime", () => {
   const check = require("../../../dist/platform/check-bun-version.cjs");
-  assert.equal(check.supported("1.3.14"), true);
-  assert.equal(check.supported("1.3.13"), false);
-  assert.equal(check.supported("1.4.0"), false);
-  assert.throws(() => check.assertSupportedBun("1.3.13"), /requires Bun 1\.3\.14.*packageManager/i);
+  assert.equal(check.supported("1.4.4"), true);
+  assert.equal(check.supported("1.3.14"), false);
+  assert.equal(check.supported("1.4.3"), false);
+  assert.equal(check.supported("1.5.0"), false);
+  assert.throws(() => check.assertSupportedBun("1.3.14"), /requires Bun 1\.4\.4.*packageManager/i);
   for (const file of [
     "dist/app/cli.mjs", "dist/app/run.mjs", "dist/app/setup.mjs",
     "dist/app/agent-config.mjs", "dist/app/dashboard.mjs",

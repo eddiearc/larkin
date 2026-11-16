@@ -105,6 +105,8 @@ const TENANT_SCOPES = [
   "drive:drive",
   "docs:document.comment:read",
   "docs:document.comment:create",
+  // 流式卡片回复：创建 CardKit 卡片实体并持续更新内容。
+  "cardkit:card:write",
 ];
 const TENANT_EVENTS = ["drive.notice.comment_add_v1"];
 const log = (...args: unknown[]): void => { process.stderr.write(`${args.join(" ")}\n`); };

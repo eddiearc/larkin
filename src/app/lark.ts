@@ -5,6 +5,21 @@ import { spawn } from "node:child_process";
 import * as larkinConfig from "../platform/config.js";
 import { assessPassthrough, PASSTHROUGH_USAGE } from "../feishu/lark-passthrough.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
+import { isLarkinRuntimeContext } from "./runtime-context.js";
+
+const runtimeScopedCommands = new Set(["inbox", "reminder", "interaction", "profile", "comment"]);
+const requestedCommand = process.argv.slice(2).find((argument) => !argument.startsWith("-"));
+const runtimeContext = isLarkinRuntimeContext(process.env);
+if (!process.env.LARKIN_AGENT_ID && runtimeContext) {
+  console.error(`larkin: Runtime Agent authority is missing for "${requestedCommand ?? "lark-cli"}" (LARKIN_AGENT_ID is required). `
+    + "Runtime commands cannot fall back to the active Agent.");
+  process.exit(2);
+}
+if (!process.env.LARKIN_AGENT_ID && requestedCommand && runtimeScopedCommands.has(requestedCommand)) {
+  console.error(`larkin: Runtime Agent authority is missing for "${requestedCommand}" (LARKIN_AGENT_ID is required). `
+    + "Agent-scoped commands cannot fall back to the active Agent.");
+  process.exit(2);
+}
 
 const decision = assessPassthrough(process.argv.slice(2), process.env);
 if (!decision.ok) {

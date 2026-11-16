@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { ProcessingEyeOrchestrator } from "../../../dist/feishu/host-processing-eye.mjs";
+import {
+  ProcessingEyeOrchestrator,
+  shouldShowProcessingEye,
+} from "../../../dist/feishu/host-processing-eye.mjs";
 
 const agent = { agentId: "cli_eye", name: "cli_eye", feishuProfile: "cli_eye" };
+
+test("shouldShowProcessingEye is true only for private chats and group @", () => {
+  assert.equal(shouldShowProcessingEye({ chatType: "p2p", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "dm", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ channelType: "dm", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", parentChannelType: "dm", mentionedBot: false }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: true }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: true }), true);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: false }), false);
+  assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false }), false);
+  assert.equal(shouldShowProcessingEye({ mentionedBot: false }), false);
+});
 
 function createTimers() {
   const timers = [];
@@ -169,6 +184,15 @@ test("error and offline clear immediately while fallback remains 15 minutes", ()
   assert.ok(fallback);
   timers.run(fallback);
   assert.equal(deletes().length, 1);
+});
+
+test("a long-running turn only adds and removes the OnIt reaction", () => {
+  const { eye, calls, timers } = createHarness();
+  eye.add(agent, "om_long_turn");
+  assert.deepEqual(timers.timers.map(({ delay }) => delay), [15 * 60 * 1_000]);
+  eye.observeActivity(agent, "idle");
+  timers.run(timers.active(1_000)[0]);
+  assert.deepEqual(calls.map(({ args }) => args.slice(0, 2)), [["api", "POST"], ["api", "DELETE"]]);
 });
 
 test("unknown non-terminal activity preserves the reaction until explicit idle", () => {

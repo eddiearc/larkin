@@ -24,7 +24,8 @@ test("IM cursor uses max create/update revision and preserves every ID at the sa
 test("IM adapter detects edits, first touch, empty targets, gaps, malformed payloads, and exact target keys", async () => {
   const { feishuImFreshnessAdapter: adapter, feishuImTarget, serializeFeishuImTarget } = await import(moduleUrl);
   assert.equal(adapter.compare(null, null), "fresh");
-  assert.equal(adapter.compare(null, { schema: 1, revisionTime: "1", messageIds: ["om_1"] }), "conflict");
+  assert.equal(adapter.compare(null, { schema: 1, revisionTime: "1", messageIds: ["om_1"] }), "fresh");
+  assert.deepEqual(adapter.unseen(null, { messages: [{ message_id: "om_1", create_time: "1" }] }), []);
   assert.equal(adapter.compare({ schema: 1, revisionTime: "9", messageIds: ["om_9"] }, { schema: 1, revisionTime: "8", messageIds: ["om_8"] }), "gap");
   const edit = adapter.cursor({ messages: [{ message_id: "om_edit", create_time: "1", update_time: "10" }] });
   assert.equal(adapter.compare({ schema: 1, revisionTime: "1", messageIds: ["om_edit"] }, edit), "conflict");

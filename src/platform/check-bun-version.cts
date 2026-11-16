@@ -1,4 +1,4 @@
-const REQUIRED = "1.3.14";
+const REQUIRED = "1.4.4";
 
 function supported(version: unknown): boolean {
   return String(version || "") === REQUIRED;

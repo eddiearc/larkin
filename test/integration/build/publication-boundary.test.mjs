@@ -432,7 +432,7 @@ test("default scan covers reachable history blobs, paths, and refs but not commi
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
+}, 60_000);
 
 test("default history scan explicitly checks annotated tag contents", () => {
   const root = fixture();

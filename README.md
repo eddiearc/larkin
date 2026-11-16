@@ -13,7 +13,7 @@ Larkin is a local Runtime Host that connects Codex, Claude Code, and Pi agent ru
 - A supported macOS, Linux, or Windows (x64) system
 - Official `@larksuite/cli >= 1.0.80` (`lark-cli`) (Larkin product policy)
 - At least one externally installed agent runtime on `PATH`, already logged in: `pi`, `codex`, or `claude`
-- Bun 1.3.14 when running the npm package or building from source (standalone binaries bundle their own runtime)
+- Bun 1.4.4 when running the npm package or building from source (standalone binaries bundle their own runtime)
 
 ## Quick start
 
@@ -113,6 +113,10 @@ larkin config inbox-audit global off
 ```
 
 When enabled, audit only revisits originally wake-eligible human group/topic work and does not wake a model for an empty work list. Reading an audit list does not complete it: the managed Agent follows the returned inspection instructions and explicitly confirms the receipt after checking. A failed check remains retryable; newer messages cannot be completed by an older receipt. Old audit-index records without proven eligibility or observation identity are ignored; ordinary Inbox messages and conversation history are preserved.
+
+### Processing eye (OnIt)
+
+The Feishu "processing eye" is an OnIt reaction on the inbound message while the Agent works. It is automatic and not configurable: Larkin adds it after a successful deliver only for messages explicitly addressed to the bot: private chats (DM / p2p) and group messages that @ the bot. Group messages without @ never get the reaction, including replies inside a topic the bot started. The 0.5.18 `processingEye` config key, CLI, and Dashboard toggle are removed; leftover keys are ignored.
 
 <details>
 <summary>Windows support and optional autostart</summary>

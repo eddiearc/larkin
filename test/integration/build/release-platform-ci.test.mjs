@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 
@@ -23,7 +25,7 @@ test("PR and main CI retain Linux source checks and add a blocking native Window
   assert.equal(workflow.match(/runs-on: ubuntu-24\.04/g)?.length, 2);
   assert.equal(workflow.match(/runs-on: windows-latest/g)?.length, 1);
   assert.deepEqual(JSON.parse(read("package.json")).trustedDependencies ?? [], []);
-  assert.equal(workflow.match(/bun-version: 1\.3\.14/g)?.length, 3);
+  assert.equal(workflow.match(/bun-version: 1\.4\.4/g)?.length, 3);
   assert.doesNotMatch(workflow, /actions\/setup-go|go-version:/);
   assert.equal(workflow.match(/bun install --frozen-lockfile/g)?.length, 3);
   assert.match(workflow, /bun run licenses:check/);
@@ -123,6 +125,13 @@ test("package version and explicit tag publication share one immutable combined-
   assert.match(workflow, /bun "\$GITHUB_WORKSPACE\/release-tooling\/scripts\/release\/intent\.mjs" prepare/);
   assert.equal(workflow.match(/bun "\$GITHUB_WORKSPACE\/release-tooling\/scripts\/release\/intent\.mjs" assert-draft/g)?.length, 2);
   assert.match(workflow, /source_sha: \$\{\{ steps\.intent\.outputs\.source_sha \}\}/);
+  // Recovering an older candidate must not install today's Bun into source that pins another one.
+  assert.ok(
+    workflow.includes(`jq -er '.packageManager | select(type == "string" and test("^bun@[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\z")) | sub("^bun@"; "")' release-source/package.json`),
+    "candidate Bun must be taken from the original packageManager string",
+  );
+  assert.equal(workflow.match(/bun-version: 1\.4\.4/g)?.length, 2, "only resolve-release and prepare-release run tooling-only Bun");
+  assert.equal(workflow.match(/bun-version: \$\{\{ needs\.resolve-release\.outputs\.candidate_bun_version \}\}/g)?.length, 5);
   assert.ok((workflow.match(/ref: \$\{\{ needs\.resolve-release\.outputs\.source_sha \}\}/g) ?? []).length >= 4);
   assert.match(workflow, /RELEASE_TAG: \$\{\{ needs\.resolve-release\.outputs\.release_tag \}\}/);
   assert.match(workflow, /should_publish: \$\{\{ steps\.prepare\.outputs\.should_publish \}\}/);
@@ -190,4 +199,109 @@ test("package version and explicit tag publication share one immutable combined-
   assert.match(workflow, /publish:\n[\s\S]*permissions:\n\s+contents: write/);
   assert.doesNotMatch(workflow, /git (?:commit|push)|continue-on-error|\bnode\b|\bpnpm\b|\bnpm (?:i|install|ci|run|publish|config|version|exec|link|uninstall)\b/);
   assert.doesNotMatch(intent, /git push|--force/);
+});
+
+function workflowStepRun(file, stepId) {
+  const text = read(file);
+  const marker = `id: ${stepId}\n`;
+  const at = text.indexOf(marker);
+  assert.notEqual(at, -1, stepId);
+  const after = text.slice(at + marker.length);
+  const header = after.match(/^        run: \|\n/);
+  assert.ok(header, `${file} ${stepId} run block`);
+  const lines = [];
+  for (const line of after.slice(header[0].length).split("\n")) {
+    if (line.startsWith("          ")) lines.push(line.slice(10));
+    else if (line === "") lines.push("");
+    else break;
+  }
+  while (lines.at(-1) === "") lines.pop();
+  return `${lines.join("\n")}\n`;
+}
+
+// release.yml and npm-publish.yml run these selectors on ubuntu-24.04.
+// Windows has no /bin/bash. Git Bash is not that shell and does not provide the workflow jq.
+function workflowShellDetail(result) {
+  const error = result.error ? `${result.error.code ?? "ERR"}: ${result.error.message}` : "none";
+  return `status=${result.status} signal=${result.signal ?? "none"} error=${error}\nstderr:\n${result.stderr ?? ""}\nstdout:\n${result.stdout ?? ""}`;
+}
+
+test("release and npm workflows encode the original packageManager pin in jq", () => {
+  const originalPin = 'select(type == "string" and test("^bun@[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\z")) | sub("^bun@"; "")';
+  const steps = [
+    [".github/workflows/release.yml", "candidate-bun"],
+    [".github/workflows/npm-publish.yml", "release-bun"],
+  ];
+  for (const [file, stepId] of steps) {
+    const script = workflowStepRun(file, stepId);
+    assert.ok(script.includes("jq -er "), `${file} validates the original JSON string before shell normalization`);
+    assert.ok(script.includes(originalPin), file);
+    assert.equal(script.includes("=~"), false, `${file} must not validate the pin after command substitution`);
+    assert.equal(script.includes(".packageManager // empty"), false, `${file} must not read an unvalidated raw string`);
+  }
+});
+
+test.skipIf(!["linux", "darwin"].includes(process.platform))("release and npm workflows accept only an exact bun@X.Y.Z pin before stripping it (Linux and macOS only; Windows has no Ubuntu bash or workflow jq)", () => {
+  const steps = [
+    [".github/workflows/release.yml", "candidate-bun", "release-source/package.json"],
+    [".github/workflows/npm-publish.yml", "release-bun", "package.json"],
+  ];
+  const cases = [
+    ["bun1314", { packageManager: "bun@1.3.14" }, "1.3.14"],
+    ["bun144", { packageManager: "bun@1.4.4" }, "1.4.4"],
+    ["missing", {}, null],
+    ["null", { packageManager: null }, null],
+    ["bool", { packageManager: false }, null],
+    ["empty", { packageManager: "" }, null],
+    ["partial", { packageManager: "bun@1.4" }, null],
+    ["other", { packageManager: "npm@1.3.14" }, null],
+    ["bare", { packageManager: "1.3.14" }, null],
+    ["injection", { packageManager: "bun@1.3.14; touch injected" }, null],
+    ["substitution", { packageManager: "bun@$(touch injected)" }, null],
+    ["trailing-lf", { packageManager: "bun@1.3.14\n" }, null],
+    ["multi-lf", { packageManager: "bun@1.3.14\n\n" }, null],
+    ["crlf", { packageManager: "bun@1.3.14\r\n" }, null],
+    ["newline", { packageManager: "bun@1.3.14\nversion=1.4.4" }, null],
+    ["number", { packageManager: 134 }, null],
+    ["array", { packageManager: ["bun@1.3.14"] }, null],
+    ["object", { packageManager: { name: "bun", version: "1.3.14" } }, null],
+    ["malformed", "{", null],
+    ["no-file", undefined, null],
+  ];
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-bun-pin-"));
+  try {
+    for (const [file, stepId, packagePath] of steps) {
+      const script = workflowStepRun(file, stepId);
+      for (const [label, data, expected] of cases) {
+        const dir = path.join(root, stepId, label);
+        fs.mkdirSync(path.dirname(path.join(dir, packagePath)), { recursive: true });
+        if (data !== undefined) {
+          fs.writeFileSync(path.join(dir, packagePath), typeof data === "string" ? data : `${JSON.stringify(data)}\n`);
+        }
+        const output = path.join(dir, "github-output");
+        fs.writeFileSync(output, "");
+        const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], {
+          cwd: dir,
+          env: { ...process.env, GITHUB_OUTPUT: output },
+          encoding: "utf8",
+        });
+        const detail = `${stepId} ${label}\n${workflowShellDetail(result)}`;
+        if (result.error || result.status === null) {
+          assert.fail(`${detail}\n/bin/bash did not start. A missing shell is not a packageManager result.`);
+        }
+        if (/command not found/.test(`${result.stderr ?? ""}\n${result.stdout ?? ""}`)) {
+          assert.fail(`${detail}\njq or another required tool is missing. A tool failure is not a rejected pin.`);
+        }
+        assert.equal(fs.existsSync(path.join(dir, "injected")), false, `${stepId} ${label} executed shell from the pin`);
+        if (expected === null) {
+          assert.notEqual(result.status, 0, `${stepId} ${label} should reject\n${detail}`);
+          continue;
+        }
+        assert.equal(result.status, 0, `${stepId} ${label} should accept\n${detail}`);
+        assert.equal(fs.readFileSync(output, "utf8"), `version=${expected}\n`);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

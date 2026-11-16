@@ -9,6 +9,8 @@ export interface ChannelMessage {
   content?: string;
   createTime?: string | number;
   threadId?: string | null;
+  /** Feishu topic-root message id (`root_id`); present on replies inside a topic. */
+  rootId?: string | null;
   mentionedBot?: boolean;
   mentionAll?: boolean;
   senderIsBot?: boolean;
@@ -23,6 +25,8 @@ export interface FeishuInboundEvent {
   content: string;
   create_time?: string | number;
   thread_id: string | null;
+  /** Topic-root `om_` when the inbound event is inside a Feishu topic. */
+  root_id?: string | null;
   _mentioned_bot: boolean;
   _mention_all: boolean;
   _sender_is_bot: boolean;
@@ -80,6 +84,11 @@ export interface MessageEnvelope {
   thread_id: string | null;
   parent_channel_type?: "dm" | "channel";
   parent_channel_name?: string;
+  /**
+   * Group messages only: true when it @-ed the Agent (or @all), false for a person's message that did
+   * not, which opens no reply card. The standing prompt explains the field once; the content is untouched.
+   */
+  mentions_you?: boolean;
 }
 
 export function decideWake(input: WakePolicyInput): WakeDecision {
@@ -104,6 +113,7 @@ export function normalizeChannelMessage(message: ChannelMessage): FeishuInboundE
     content: String(message.content || ""),
     create_time: message.createTime,
     thread_id: message.threadId || null,
+    root_id: message.rootId || null,
     _mentioned_bot: Boolean(message.mentionedBot || message.mentionAll),
     _mention_all: Boolean(message.mentionAll),
     _sender_is_bot: message.senderIsBot === true,
@@ -179,10 +189,8 @@ export function createMessageEnvelope({
   const timestamp = event.create_time
     ? new Date(Number(event.create_time)).toISOString()
     : new Date().toISOString();
-  let content = event.content || "";
-  if (event._mentioned_bot && !event._mention_all) {
-    content += `\n[提及说明: 本消息 @ 的${agent.botName ? `“${agent.botName}”` : "机器人"}就是你自己，请按被点名处理]`;
-  }
+  const mentionsYou = event.chat_type !== "group" ? undefined
+    : event._mentioned_bot ? true : senderIsBot ? undefined : false;
   return {
     message_id: event.message_id || `m_${crypto.randomBytes(6).toString("hex")}`,
     seq,
@@ -192,7 +200,8 @@ export function createMessageEnvelope({
     sender_type: senderIsBot ? "agent" : "human",
     channel_type: target.channel_type,
     channel_name: target.channel_name,
-    content,
+    content: event.content || "",
+    ...(mentionsYou === undefined ? {} : { mentions_you: mentionsYou }),
     timestamp,
     thread_id: event.thread_id || null,
     ...(target.parent_channel_type ? { parent_channel_type: target.parent_channel_type } : {}),

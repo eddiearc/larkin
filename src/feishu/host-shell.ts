@@ -16,7 +16,10 @@ import {
   safeConversationExcerpt,
   shouldPreventiveReconnect,
 } from "./host-business-state.js";
-import { ProcessingEyeOrchestrator } from "./host-processing-eye.js";
+import {
+  ProcessingEyeOrchestrator,
+  shouldShowProcessingEye,
+} from "./host-processing-eye.js";
 import { projectInboxEnvelope, targetKeyOfInboxEnvelope } from "../agent/inbox-projection.js";
 import { HostReminderOrchestrator } from "../agent/host-reminder-orchestrator.js";
 import { boundedInboxAuditDiagnostic, InboxAuditHeartbeat, INBOX_AUDIT_CADENCE_MS } from "../agent/inbox-audit-heartbeat.js";
@@ -39,7 +42,7 @@ import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDoc
 import { loadConfig, resolveInboxAuditSchedule, resolveMentionPolicy } from "../platform/config.js";
 import { processCommandToken } from "../app/internal-command.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
-import { isChannelReconnecting, isRuntimeReadinessCurrent } from "../app/agent-readiness.js";
+import { isChannelReconnecting, isRuntimeReadinessCurrent, isSessionCurrent } from "../app/agent-readiness.js";
 import {
   documentCommentMessageId,
   documentCommentNoticeType,
@@ -49,6 +52,7 @@ import {
 import type { CommentEvent, CommentTarget, FetchedComment } from "@larksuite/channel";
 import type { TelemetryRuntime } from "../platform/telemetry-tracing.js";
 import { isOpenPlatformHost, requireOpenDomain } from "./platform-hosts.js";
+import { replyModeFromEnv, STREAM_REPLY_INITIAL_TEXT, StreamReplyCoordinator, type ReplyMode, type StreamReplyChannel } from "./stream-reply.js";
 
 interface ConfiguredAgent {
   agentId: string;
@@ -56,6 +60,8 @@ interface ConfiguredAgent {
   runtime: string;
   model: string;
   effort?: string | null;
+  sandbox?: string | null;
+  fastMode?: boolean | null;
   displayName?: string | null;
   description?: string | null;
   feishuAppId: string;
@@ -66,6 +72,7 @@ interface ConfiguredAgent {
   workspaceDir: string;
   stateDir: string;
   noMentionChats?: string[];
+  replyMode?: ReplyMode | null;
   botOpenId?: string | null;
   botName?: string | null;
 }
@@ -208,6 +215,10 @@ function agentConfigSignature(agent: ConfiguredAgent): string {
     larkConfigDir: agent.larkConfigDir, feishuDomain: agent.feishuDomain,
     feishuAppSecret: agent.feishuAppSecret, workspaceDir: agent.workspaceDir, stateDir: agent.stateDir,
     noMentionChats: agent.noMentionChats || [],
+    // Only present once configured, so upgrading does not restart unchanged Agents.
+    ...(agent.replyMode ? { replyMode: agent.replyMode } : {}),
+    ...(agent.sandbox ? { sandbox: agent.sandbox } : {}),
+    ...(agent.fastMode ? { fastMode: true } : {}),
   });
 }
 
@@ -628,7 +639,19 @@ export function createHostShell({
         excerpt: safeConversationExcerpt(event.content, 180),
         at: new Date().toISOString(),
       }, 30);
-      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") processingEyes.add(agent, String(inboxEnvelope.message_id || ""));
+      if (inboxEnvelope.sender_type === "human" || inboxEnvelope.sender_type === "agent") {
+        // 只有私聊或入站 @bot 才点 OnIt。
+        if (shouldShowProcessingEye({
+          chatType: event.chat_type,
+          channelType: typeof inboxEnvelope.channel_type === "string" ? inboxEnvelope.channel_type : undefined,
+          parentChannelType: typeof inboxEnvelope.parent_channel_type === "string" ? inboxEnvelope.parent_channel_type : undefined,
+          mentionedBot: event._mentioned_bot === true,
+        })) {
+          processingEyes.add(agent, String(inboxEnvelope.message_id || ""));
+        } else {
+          log(`👀 跳过群未@消息 agent=${agent.name} chat=${event.chat_id}`);
+        }
+      }
       if (receipt.status === "deferred") log(`Runtime 暂缓投递，消息保留在 inbox seq=${inboxEnvelope.seq}: ${receipt.reason}`);
     } catch (error) {
       if (wake) telemetry?.delivery(agent.agentId, telemetryMessageId, "error");
@@ -644,6 +667,14 @@ export function createHostShell({
     }
   };
   const interactionChannels = new Map<string, LarkChannel>();
+  // Card reply mode: the Host streams each polled message's reply into a Feishu card.
+  const cardReplyAgent = (agentId: string): boolean =>
+    (agents.find((agent) => agent.agentId === agentId)?.replyMode ?? replyModeFromEnv(env)) === "card";
+  const streamReplies = new StreamReplyCoordinator({
+    channelFor: (agentId) => interactionChannels.get(agentId) as unknown as StreamReplyChannel | undefined,
+    resolveSource: (agentId) => stateStore({ agentId }).resolveCurrentInboxSource(),
+    log,
+  });
   const interaction = new HostInteractionOrchestrator({
     agents,
     stateStore,
@@ -941,6 +972,7 @@ export function createHostShell({
   const startChannelSource = (agent: ConfiguredAgent, callbacks: { onConnectFail?(error: unknown): void; onFatal?(error: Error): void }): LarkChannel => {
     const { createLarkChannel } = channelPackage ?? channelSdk as unknown as ChannelPackage;
     log(`入站(createLarkChannel): agent=${agent.name} app=${agent.feishuAppId} (群需@)`);
+    log(`回复方式 agent=${agent.name} mode=${cardReplyAgent(agent.agentId) ? "card(流式卡片)" : "cli(命令行回复)"}`);
     const channel = createLarkChannel({
       appId: agent.feishuAppId,
       appSecret: agent.feishuAppSecret,
@@ -960,6 +992,7 @@ export function createHostShell({
         },
       },
       includeRawEvent: true,
+      outbound: { streamInitialText: STREAM_REPLY_INITIAL_TEXT },
     });
     interactionChannels.set(agent.agentId, channel);
     channel.on(channelBusiness.handlers(agent, channel));
@@ -1060,6 +1093,7 @@ export function createHostShell({
         handshakeTimeoutMs: 15_000,
         keepalive: { enabled: true, intervalMs: 15_000 },
         includeRawEvent: true,
+        outbound: { streamInitialText: STREAM_REPLY_INITIAL_TEXT },
       });
       const handlers = channelBusiness.handlers(agent, channel);
       let active = activateImmediately;
@@ -1173,6 +1207,13 @@ export function createHostShell({
       const previous = index >= 0 ? agents[index] : null;
       const unchanged = previous && agentConfigSignature(previous) === agentConfigSignature(candidate);
       if (unchanged && activeChannels.has(candidate.agentId)) return "unchanged";
+      const settingsOnly = previous && activeChannels.has(candidate.agentId) && agentConfigSignature(
+        { ...previous, model: candidate.model, effort: candidate.effort, fastMode: candidate.fastMode }) === agentConfigSignature(candidate);
+      if (settingsOnly && runtimeHost.updateSettings?.(candidate)) {
+        Object.assign(previous, { model: candidate.model, effort: candidate.effort, fastMode: candidate.fastMode });
+        log(`Runtime 设置下一轮生效 agent=${candidate.name} model=${candidate.model} effort=${candidate.effort ?? "default"} fast=${candidate.fastMode === true}`);
+        return "updated";
+      }
 
       // Runtime replacement is target-only. The old channel remains connected until the
       // candidate Runtime and channel are both ready, so unrelated Agents are untouched.
@@ -1373,6 +1414,10 @@ export function createHostShell({
   const onRuntimeEvent = (message: RuntimeHostEvent): void => {
     const agent = agents.find((candidate) => candidate.agentId === message.agentId);
     if (!agent) return;
+    if (message.type === "runtime") {
+      try { if (cardReplyAgent(message.agentId)) streamReplies.observe(message.agentId, message.event); }
+      catch (error) { log(`流式卡片回复异常 agent=${agent.name}: ${errorMessage(error)}`); }
+    }
     if (message.type === "agent-status") {
       log("agent:status", message.agentId, message.status);
       const observedAt = new Date().toISOString();
@@ -1535,9 +1580,12 @@ export function createHostShell({
         const status = hostState.readStatus(agent);
         const turns = status.session && typeof status.session === "object"
           ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
-        const sessionStartedAt = status.session && typeof status.session === "object"
-          ? Date.parse(String((status.session as { startedAt?: unknown }).startedAt || "")) : Number.NaN;
-        const sessionCurrent = Number.isFinite(sessionStartedAt) && sessionStartedAt >= Date.parse(daemonStartedAt);
+        const sessionCurrent = isSessionCurrent(
+          status.session && typeof status.session === "object"
+            ? status.session as { startedAt?: unknown; lastSeenAt?: unknown }
+            : null,
+          daemonStartedAt,
+        );
         const runtimeReady = sessionCurrent && isRuntimeReadinessCurrent(
           status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string } | undefined,
           daemonStartedAt,
@@ -1621,9 +1669,12 @@ export function createHostShell({
         const status = hostState.readStatus(agent);
         const turns = status.session && typeof status.session === "object"
           ? Math.max(0, Number((status.session as { turns?: unknown }).turns) || 0) : 0;
-        const sessionStartedAt = status.session && typeof status.session === "object"
-          ? Date.parse(String((status.session as { startedAt?: unknown }).startedAt || "")) : Number.NaN;
-        const sessionCurrent = Number.isFinite(sessionStartedAt) && sessionStartedAt >= Date.parse(daemonStartedAt);
+        const sessionCurrent = isSessionCurrent(
+          status.session && typeof status.session === "object"
+            ? status.session as { startedAt?: unknown; lastSeenAt?: unknown }
+            : null,
+          daemonStartedAt,
+        );
         const runtimeReady = sessionCurrent && isRuntimeReadinessCurrent(
           status.runtimeReadiness as { state?: "missing" | "unauthenticated" | "incompatible" | "ready" | "unavailable"; observedAt?: string } | undefined,
           daemonStartedAt,

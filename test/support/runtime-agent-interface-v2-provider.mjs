@@ -29,6 +29,11 @@ const historySequence = process.env.LARKIN_TEST_PROVIDER_HISTORY_SEQUENCE
   ? JSON.parse(process.env.LARKIN_TEST_PROVIDER_HISTORY_SEQUENCE) : null;
 const sequencedHistory = isHistoryRead && Array.isArray(historySequence) ? historySequence[historyCallIndex] : undefined;
 
+const historyDelayMs = Number(process.env.LARKIN_TEST_PROVIDER_HISTORY_DELAY_MS || "0");
+if (isHistoryRead && Number.isFinite(historyDelayMs) && historyDelayMs > 0) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, historyDelayMs);
+}
+
 if (process.env.LARKIN_TEST_PROVIDER_APPEND_FILE && process.env.LARKIN_TEST_PROVIDER_APPEND_ENVELOPE) {
   fs.appendFileSync(
     process.env.LARKIN_TEST_PROVIDER_APPEND_FILE,

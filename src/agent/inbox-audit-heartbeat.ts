@@ -134,7 +134,7 @@ export class InboxAuditHeartbeat {
     const now = this.options.now ?? Date.now;
     const message_id = `rem_inbox_audit_${now()}_${++this.sequence}_${agent.agentId}`;
     const envelope = { kind: "reminder", message_id, target: RUNTIME_REMINDER_TARGET, wake: true,
-      content: "Internal inbox audit wake. Poll runtime:reminder, then run larkin inbox audit --json. Inspect first and explicitly complete its receipt; no finding stays silent." };
+      content: "Inbox audit is due. Poll runtime:reminder, run larkin inbox audit --json, and follow its steps and each target's numbered instruction through its receipt." };
     try {
       const appended = this.options.stateStore(agent).appendCanonicalInboxOnce(envelope);
       if (appended.status === "appended") await this.options.runtimeHost.deliver(agent.agentId, appended.envelope as object);

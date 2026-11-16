@@ -66,7 +66,7 @@ export const feishuImFreshnessAdapter: FreshnessAdapter<FeishuImCursor, FeishuIm
   },
   compare(seen, current) {
     if (!current) return seen ? "gap" : "fresh";
-    if (!seen) return "conflict";
+    if (!seen) return "fresh";
     const seenTime = integerMillis(seen.revisionTime);
     const currentTime = integerMillis(current.revisionTime);
     if (seen.schema !== 1 || seenTime === null || currentTime === null) return "gap";
@@ -76,7 +76,7 @@ export const feishuImFreshnessAdapter: FreshnessAdapter<FeishuImCursor, FeishuIm
   },
   unseen(seen, snapshot) {
     const messages = normalizedMessages(snapshot);
-    if (!seen) return messages.map(({ revision: _revision, ...message }) => message);
+    if (!seen) return [];
     const seenTime = integerMillis(seen.revisionTime);
     if (seenTime === null) return messages.map(({ revision: _revision, ...message }) => message);
     return messages.filter((message) => message.revision > seenTime

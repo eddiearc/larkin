@@ -63,7 +63,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(PROVIDER)} "$@"
 }
 
 for (const shell of ["/bin/bash", "/bin/zsh"]) {
-  test.skipIf(!fs.existsSync(shell))(`${path.basename(shell)} login-shell routing keeps two Agents on larkin AOP and blocks the stale write`, () => {
+  test.skipIf(!fs.existsSync(shell))(`${path.basename(shell)} login-shell routing keeps two Agents on larkin AOP and emits a freshness reminder after the stale write`, () => {
     const f = fixture(shell);
     const chatId = "oc_shellRouting";
     try {
@@ -76,14 +76,23 @@ for (const shell of ["/bin/bash", "/bin/zsh"]) {
       const staleHistory = JSON.stringify({ ok: true, identity: "bot", data: { messages: [
         { message_id: "om_shell_first", chat_id: chatId, create_time: "1" },
       ] } });
+      writePrivate(path.join(f.root, "state", "agents", f.agents[1], "freshness-state.json"), JSON.stringify({
+        version: 1,
+        cursors: {
+          [`feishu.im/chat/${chatId}`]: {
+            generation: "agent-b",
+            cursor: { schema: 1, revisionTime: "0", messageIds: ["om_before_shell_first"] },
+          },
+        },
+      }));
       const second = spawnSync(shell, ["-lc", `larkin im +messages-send --chat-id ${chatId} --text stale`], {
         cwd: f.root, encoding: "utf8", env: { ...f.baseEnv, LARKIN_AGENT_ID: f.agents[1],
           LARKIN_RUNTIME_OBSERVATION_GENERATION: "agent-b", LARKIN_TEST_PROVIDER_HISTORY: staleHistory },
       });
-      assert.equal(second.status, 3, second.stderr || second.stdout);
-      assert.equal(JSON.parse(second.stderr).error.subtype, "freshness_conflict");
+      assert.equal(second.status, 0, second.stderr || second.stdout);
+      assert.equal(JSON.parse(second.stderr).larkin_notice, "freshness");
       const providerCalls = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(providerCalls.filter((call) => call.argv?.includes("+messages-send")).length, 1);
+      assert.equal(providerCalls.filter((call) => call.argv?.includes("+messages-send")).length, 2);
       assert.deepEqual(new Set(providerCalls.map((call) => call.config_dir)), new Set(f.agents.map((agentId) =>
         path.join(f.root, "state", "agents", agentId, "lark-cli-config"))));
       assert.match(fs.readFileSync(path.join(f.root, "startup.marker"), "utf8"), /loaded/);

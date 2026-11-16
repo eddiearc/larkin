@@ -79,6 +79,18 @@ const config = (agentId?: string) => ({
   })),
 });
 
+function missingRules() {
+  return { files: [
+    { name: "AGENTS.md", linkedTo: null, file: null, error: null },
+    { name: "CLAUDE.md", linkedTo: null, file: null, error: null },
+  ] };
+}
+
+function ruleFile(name: string, content: string) {
+  return { kind: "file", path: name, name, size: content.length, modifiedAt: "2026-10-24T10:00:00.000Z",
+    binary: false, truncated: false, content, sha256: "c".repeat(64) };
+}
+
 function ok(value: unknown) {
   return Promise.resolve({ ok: true, status: 200, json: async () => value });
 }
@@ -91,12 +103,14 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=configuration");
+  window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=persona");
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/status") return ok(status);
     if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
     if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+    if (url.pathname === "/api/agent-rules") return ok(missingRules());
+    if (url.pathname === "/api/agent-capabilities") return ok({ runtime: "codex", items: [], unsupported: [] });
     throw new Error(`unexpected request ${url}`);
   }));
 });
@@ -111,23 +125,23 @@ afterEach(() => {
 
 describe("Agent-centric dashboard workbench", () => {
   it("shows the package version in desktop and mobile branding and explains the CLI-first configuration boundary", async () => {
-    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=configuration");
     const { container } = render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
     expect(screen.getAllByText("v0.2.20")).toHaveLength(2);
     expect(container.querySelector(".app-topbar strong")).toHaveTextContent(/^Larkin v0\.2\.20$/);
-    expect(screen.getByRole("tab", { name: "配置" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "设定" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByText("Agent workbench")).not.toBeInTheDocument();
-    const guidance = await screen.findByText(/这里只提供常用微调/);
+    const guidance = await screen.findByText(/更多选项可以让 Agent 运行/);
     expect(guidance).toBeVisible();
-    expect(guidance).toHaveTextContent(/当前 Agent.*larkin config --help/);
+    expect(guidance).toHaveTextContent(/让 Agent 运行 larkin config --help 自己改/);
   });
 
   it("renders only explicit group policies without implementation-oriented precedence terminology", async () => {
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
     render(<App />);
     expect(await screen.findByRole("heading", { level: 1, name: "Builder" })).toBeVisible();
-    expect(screen.getByRole("tab", { name: "配置" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByRole("heading", { level: 3, name: "群策略" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "回复规则" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("heading", { level: 3, name: "单独设置的群" })).toBeVisible();
     expect(screen.getByText("构建群")).toBeVisible();
     expect(screen.queryByText("继承群")).not.toBeInTheDocument();
     expect(screen.queryByText(/覆盖链/i)).not.toBeInTheDocument();
@@ -138,13 +152,42 @@ describe("Agent-centric dashboard workbench", () => {
     expect(screen.getByText("没有匹配的群")).toBeVisible();
   });
 
-  it("separates global settings and protects an Agent draft before navigation", async () => {
+  it("offers the group policy as explained choices", async () => {
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
+    render(<App />);
+    const policy = await screen.findByRole("radiogroup", { name: "群消息策略" });
+    expect(within(policy).getByRole("radio", { name: /^只回 @ 它的/ })).toBeChecked();
+    expect(within(policy).queryByRole("radio", { name: /跟随全局/ })).not.toBeInTheDocument();
+    await userEvent.click(within(policy).getByRole("radio", { name: /^每条都看/ }));
+    expect(within(policy).getByRole("radio", { name: /^每条都看/ })).toBeChecked();
+    expect(screen.getByRole("button", { name: "保存 Agent 配置" })).toBeEnabled();
+  });
+
+  it("says what Inbox audit does now and how", async () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    expect(await screen.findByRole("dialog")).toBeVisible();
-    expect(within(screen.getByRole("dialog")).getByRole("heading", { name: "全局设置" })).toBeVisible();
-    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "关闭面板" }));
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    const toggle = await screen.findByLabelText("Inbox 巡检开关");
+    expect(screen.getByRole("note")).toHaveTextContent("已关闭");
+    await userEvent.click(toggle);
+    expect(screen.getByRole("note")).toHaveTextContent(/约 \d+ 分钟内回头检查一次/);
+    expect(screen.getByText("巡检具体怎么做")).toBeVisible();
+  });
+
+  it("looks up group names only for the reply tab, not for the other tabs", async () => {
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
+    render(<App />);
+    expect(await screen.findByRole("heading", { level: 3, name: "单独设置的群" })).toBeVisible();
+    const configReads = () => vi.mocked(fetch).mock.calls.map(([input]) => String(input)).filter((url) => url.startsWith("/api/config"));
+    await waitFor(() => expect(configReads()).toContain("/api/config?agent=cli_AgentB2&chats=0"));
+    expect(configReads().filter((url) => !url.includes("chats=0"))).toEqual(["/api/config?agent=cli_AgentB2"]);
+    expect(configReads()).toContain("/api/config?agent=cli_AgentB2&chats=0");
+  });
+
+  it("has no global settings and protects an Agent draft before navigation", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    expect(screen.queryByRole("button", { name: "全局设置" })).not.toBeInTheDocument();
 
     const runtime = await screen.findByLabelText("Runtime");
     await userEvent.selectOptions(runtime, "claude");
@@ -155,14 +198,50 @@ describe("Agent-centric dashboard workbench", () => {
     expect(window.location.search).toContain("agent=cli_AgentB2");
   });
 
-  it("saves global Inbox audit controls through the existing protected mutation", async () => {
+  it("saves the Agent's own reply mode and applies it to that Agent", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    const applied: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config" && init?.method === "PATCH") {
+        mutations.push(JSON.parse(String(init.body)));
+        return ok({ revision: "sha256:agent-reply-mode", applyState: "saved_not_applied" });
+      }
+      if (url.pathname === "/api/config/apply") {
+        applied.push(JSON.parse(String(init?.body)).agentId);
+        return ok({ ok: true, agentId: "cli_AgentB2", applyState: "applied" });
+      }
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
+      throw new Error(`unexpected request ${url}`);
+    }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
+    render(<App />);
+    const replyMode = await screen.findByRole("radiogroup", { name: "回复方式" });
+    expect(within(replyMode).getByRole("radio", { name: /^普通消息/ })).toBeChecked();
+    await userEvent.click(within(replyMode).getByRole("radio", { name: /^流式卡片/ }));
+    await userEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("配置已保存并应用"));
+    expect(mutations).toEqual([{ operation: "set-agent-reply-mode", agentId: "cli_AgentB2", value: "card" }]);
+    expect(applied).toEqual(["cli_AgentB2"]);
+  });
+
+  it("does not expose a processing-eye toggle after the switch was removed", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    expect(screen.queryByLabelText("处理中表情设置")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "处理中表情" })).not.toBeInTheDocument();
+  });
+
+  it("turns Inbox audit on per Agent", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/status") return ok(status);
       if (url.pathname === "/api/config" && init?.method === "PATCH") {
         mutations.push(JSON.parse(String(init.body)));
-        return ok({ revision: "sha256:global-audit", applyState: "saved_not_applied" });
+        return ok({ revision: "sha256:agent-audit", applyState: "saved_not_applied" });
       }
       if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
       if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
@@ -170,53 +249,53 @@ describe("Agent-centric dashboard workbench", () => {
     }));
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    const dialog = await screen.findByRole("dialog");
-    const gap = within(dialog).getByLabelText("全局巡检间隔（分钟）");
-    await userEvent.clear(gap);
-    await userEvent.type(gap, "0");
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    expect(within(dialog).getByRole("status")).toHaveTextContent("巡检间隔必须在 1 到 1440 分钟之间");
-    expect(gap).toHaveValue(0);
-    expect(mutations).toEqual([]);
-    await userEvent.clear(gap);
-    await userEvent.type(gap, "30");
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    await waitFor(() => expect(mutations).toEqual([{ operation: "set-global-inbox-audit", intervalMs: 30 * 60_000 }]));
-    expect(within(dialog).getByRole("checkbox")).not.toBeChecked();
-    await userEvent.click(within(dialog).getByRole("checkbox"));
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    await waitFor(() => expect(mutations).toEqual([
-      { operation: "set-global-inbox-audit", intervalMs: 30 * 60_000 },
-      { operation: "set-global-inbox-audit", enabled: true },
-    ]));
-    expect(within(dialog).getByRole("status")).toHaveTextContent("已保存");
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    const toggle = await screen.findByLabelText("Inbox 巡检开关");
+    expect(toggle).not.toBeChecked();
+    expect(screen.queryByRole("button", { name: "间隔跟随全局设置" })).not.toBeInTheDocument();
+    await userEvent.click(toggle);
+    await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+    await waitFor(() => expect(mutations).toEqual([{ operation: "set-agent-inbox-audit", agentId: "cli_AgentB2", enabled: true }]));
   });
 
-  it("keeps a precise existing audit gap when saving a different global setting", async () => {
+  it("saves only the open page's fields, so an older draft on another page cannot revert a newer save", async () => {
     const mutations: Array<Record<string, unknown>> = [];
-    const persisted = config();
-    persisted.inboxAudit = { enabled: false, intervalMs: 60_060 };
+    let mention = "require";
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/status") return ok(status);
       if (url.pathname === "/api/config" && init?.method === "PATCH") {
-        mutations.push(JSON.parse(String(init.body)));
-        return ok({ revision: "sha256:precise-gap", applyState: "saved_not_applied" });
+        const mutation = JSON.parse(String(init.body));
+        mutations.push(mutation);
+        if (mutation.operation === "set-agent-mention") mention = mutation.value;
+        return ok({ revision: "sha256:next", applyState: "pending" });
       }
-      if (url.pathname === "/api/config") return ok(persisted);
+      if (url.pathname === "/api/config") {
+        const value = config(url.searchParams.get("agent") || undefined);
+        for (const agent of value.agents) if (agent.agentId === "cli_AgentB2") agent.mention = { ...agent.mention, override: mention, effective: mention };
+        return ok(value);
+      }
       if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
       throw new Error(`unexpected request ${url}`);
     }));
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByLabelText("全局巡检间隔（分钟）")).toHaveValue(1.001);
-    await userEvent.selectOptions(within(dialog).getByLabelText("真人群消息默认策略"), "require");
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    await waitFor(() => expect(mutations).toEqual([{ operation: "set-global-mention", value: "require" }]));
-    expect(within(dialog).getByRole("status")).toHaveTextContent("已保存");
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    const gap = await screen.findByLabelText("巡检间隔（分钟）");
+    await userEvent.clear(gap);
+    await userEvent.type(gap, "30");
+
+    await userEvent.click(screen.getByRole("tab", { name: "回复规则" }));
+    await userEvent.click(within(await screen.findByRole("radiogroup", { name: "群消息策略" })).getByRole("radio", { name: /^每条都看/ }));
+    await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+    await waitFor(() => expect(mutations).toEqual([{ operation: "set-agent-mention", agentId: "cli_AgentB2", value: "free" }]));
+
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    expect(screen.getByLabelText("巡检间隔（分钟）")).toHaveValue(30);
+    await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+    await waitFor(() => expect(mutations).toHaveLength(2));
+    expect(mutations[1]).toEqual({ operation: "set-agent-inbox-audit", agentId: "cli_AgentB2", intervalMs: 30 * 60_000 });
+    expect(mention).toBe("free");
   });
 
   it("keeps an Agent Inbox audit draft visible after a rejected save", async () => {
@@ -234,15 +313,105 @@ describe("Agent-centric dashboard workbench", () => {
     }));
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.selectOptions(await screen.findByLabelText("Inbox 巡检设置"), "on");
-    const gap = screen.getByLabelText("Agent 巡检间隔（分钟）");
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    await userEvent.click(await screen.findByLabelText("Inbox 巡检开关"));
+    const gap = screen.getByLabelText("巡检间隔（分钟）");
+    await userEvent.clear(gap);
+    await userEvent.type(gap, "0");
+    await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+    expect(screen.getByRole("status")).toHaveTextContent("巡检间隔必须在 1 到 1440 分钟之间");
+    expect(mutations).toEqual([]);
     await userEvent.clear(gap);
     await userEvent.type(gap, "30");
     await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
     await waitFor(() => expect(mutations).toEqual([{ operation: "set-agent-inbox-audit", agentId: "cli_AgentB2", enabled: true, intervalMs: 30 * 60_000 }]));
     expect(screen.getByRole("status")).toHaveTextContent("configuration update rejected");
-    expect(screen.getByLabelText("Inbox 巡检设置")).toHaveValue("on");
-    expect(screen.getByLabelText("Agent 巡检间隔（分钟）")).toHaveValue(30);
+    expect(screen.getByLabelText("Inbox 巡检开关")).toBeChecked();
+    expect(screen.getByLabelText("巡检间隔（分钟）")).toHaveValue(30);
+  });
+
+  it("saves the Codex sandbox from 高级 and applies it like a model change", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    const applied: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config" && init?.method === "PATCH") {
+        mutations.push(JSON.parse(String(init.body)));
+        return ok({ revision: "sha256:sandbox", applyState: "saved_not_applied" });
+      }
+      if (url.pathname === "/api/config/apply" && init?.method === "POST") {
+        applied.push(JSON.parse(String(init.body)).agentId);
+        return ok({ ok: true, applyState: "applied" });
+      }
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
+      throw new Error(`unexpected request ${url}`);
+    }));
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    const sandbox = await screen.findByRole("radiogroup", { name: "沙箱模式" });
+    expect(within(sandbox).getByRole("radio", { name: /不限制/ })).toBeChecked();
+    await userEvent.click(screen.getByText("选「只改自己的工作区」后，具体能改哪些地方"));
+    expect(screen.getByText("~/.larkin/agents/cli_AgentB2/")).toBeVisible();
+    expect(screen.getByText("~/.larkin/state/agents/cli_AgentB2/")).toBeVisible();
+    await userEvent.click(within(sandbox).getByRole("radio", { name: /只改自己的工作区/ }));
+    await userEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+    await waitFor(() => expect(mutations).toEqual([{ operation: "set-agent-sandbox", agentId: "cli_AgentB2", value: "workspace-write" }]));
+    await waitFor(() => expect(applied).toEqual(["cli_AgentB2"]));
+  });
+
+  it("turns on Codex Fast mode from the model settings and applies it", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    const applied: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config" && init?.method === "PATCH") {
+        mutations.push(JSON.parse(String(init.body)));
+        return ok({ revision: "sha256:fast", applyState: "saved_not_applied" });
+      }
+      if (url.pathname === "/api/config/apply" && init?.method === "POST") {
+        applied.push(JSON.parse(String(init.body)).agentId);
+        return ok({ ok: true, applyState: "applied" });
+      }
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default", supportsFast: true }] });
+      throw new Error(`unexpected request ${url}`);
+    }));
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(screen.getByRole("tab", { name: "设定" }));
+    const fast = await screen.findByLabelText("Fast 模式");
+    await waitFor(() => expect(fast).not.toBeDisabled());
+    expect(fast).not.toBeChecked();
+    await userEvent.click(fast);
+    await userEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+    await waitFor(() => expect(mutations).toEqual([{ operation: "set-agent-fast-mode", agentId: "cli_AgentB2", value: true }]));
+    await waitFor(() => expect(applied).toEqual(["cli_AgentB2"]));
+  });
+
+  it("tells the user to refresh and keeps the draft when a save is rejected as coming from an expired page", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config" && init?.method === "PATCH") {
+        return Promise.resolve({ ok: false, status: 403, json: async () => ({ error: "这个页面已过期，刷新页面后再操作。" }) });
+      }
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+      if (url.pathname === "/api/agent-rules") return ok(missingRules());
+      if (url.pathname === "/api/agent-capabilities") return ok({ runtime: "codex", items: [], unsupported: [] });
+      throw new Error(`unexpected request ${url}`);
+    }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
+    render(<App />);
+    const policy = await screen.findByRole("radiogroup", { name: "群消息策略" });
+    await userEvent.click(within(policy).getByRole("radio", { name: /^每条都看/ }));
+    await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("这个页面已过期，刷新页面后再操作"));
+    expect(within(policy).getByRole("radio", { name: /^每条都看/ })).toBeChecked();
   });
 
   it("filters the sidebar and preserves last-known status on polling errors", async () => {
@@ -258,7 +427,7 @@ describe("Agent-centric dashboard workbench", () => {
   it("renders production conversation direction, sender, and unawakened listening state", async () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("tab", { name: "对话" }));
+    await userEvent.click(screen.getByRole("tab", { name: "动态" }));
     expect(screen.getByText("已发送")).toBeVisible();
     expect(screen.getByText("旁听 · 未唤醒")).toBeVisible();
     expect(screen.getByText("入站 · 已唤醒")).toBeVisible();
@@ -273,7 +442,7 @@ describe("Agent-centric dashboard workbench", () => {
     expect(screen.getByText("累计 12,345 tokens")).toBeVisible();
     expect(screen.getByText("最近一轮 678 tokens")).toBeVisible();
     expect(screen.getByText("Compact 2 次 · idle")).toBeVisible();
-    await userEvent.click(screen.getByRole("tab", { name: "概览" }));
+    await userEvent.click(screen.getByRole("tab", { name: "动态" }));
     expect(screen.getByText("累计 Token")).toBeVisible();
     expect(screen.getByText("12,345")).toBeVisible();
     expect(screen.getByText("最近一轮用量")).toBeVisible();
@@ -289,10 +458,10 @@ describe("Agent-centric dashboard workbench", () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
     scrollY = 420;
-    await userEvent.click(screen.getByRole("tab", { name: "对话" }));
+    await userEvent.click(screen.getByRole("tab", { name: "动态" }));
     await waitFor(() => expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "auto" }));
     scrollY = 88;
-    await userEvent.click(screen.getByRole("tab", { name: "配置" }));
+    await userEvent.click(screen.getByRole("tab", { name: "设定" }));
     await waitFor(() => expect(scrollTo).toHaveBeenLastCalledWith({ top: 420, behavior: "auto" }));
   });
 
@@ -324,7 +493,7 @@ describe("Agent-centric dashboard workbench", () => {
     await act(async () => { vi.advanceTimersByTime(3_000); await Promise.resolve(); await Promise.resolve(); });
     expect(result.current.data).toBe(status);
     expect(result.current.stale).toBe(true);
-    expect(result.current.error).toBe("poll offline");
+    expect(result.current.error).toBe("连不上 larkin：服务可能已停止或正在重启。确认 larkin 在运行后刷新页面。");
     await act(async () => { await result.current.retry(); });
     expect(result.current.data).toBe(recovered);
     expect(result.current.stale).toBe(false);
@@ -546,7 +715,7 @@ describe("Agent-centric dashboard workbench", () => {
     try {
       render(<App />);
       await screen.findByRole("heading", { level: 1, name: "Builder" });
-      await userEvent.click(screen.getByRole("tab", { name: "提醒" }));
+      await userEvent.click(screen.getByRole("tab", { name: "动态" }));
       const scheduled = screen.getByText("等待执行提醒").closest("article");
       const repeated = screen.getByText("重复等待提醒").closest("article");
       const pending = screen.getByText("旧版等待提醒").closest("article");
@@ -581,7 +750,8 @@ describe("Agent-centric dashboard workbench", () => {
     try {
       render(<App />);
       await screen.findByRole("heading", { level: 1, name: "Builder" });
-      await userEvent.click(screen.getByRole("tab", { name: "日志" }));
+      await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+      await userEvent.click(screen.getByText("运行日志"));
       const activePanel = screen.getByRole("tabpanel");
       const dotFor = (detail: string) => within(activePanel).getByText(detail).closest("li")?.querySelector(".timeline-dot");
       expect(dotFor("正在执行语义")).toHaveClass("state-active");
@@ -595,13 +765,206 @@ describe("Agent-centric dashboard workbench", () => {
     } finally { agents[1].feed = prior; }
   });
 
-  it("marks the active workspace route so the workspace can fill the remaining viewport", async () => {
+  it("folds workspace files and logs under 高级 until they are opened", async () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("tab", { name: "工作区" }));
-    await screen.findByText("只读工作区");
-    expect(document.querySelector(".agent-content")).toHaveClass("workspace-active");
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    expect(document.querySelector(".workspace-browser")).not.toBeVisible();
+    await userEvent.click(screen.getByText("工作区文件"));
+    await screen.findByText("未选择文件");
     expect(document.querySelector(".workspace-browser")).toBeVisible();
+    expect(screen.getByText("运行日志").closest("details")).not.toHaveAttribute("open");
+    expect(screen.queryByText("运行摘要")).toBeNull();
+  });
+
+  it("flags a stuck Agent in its header instead of a buried summary", async () => {
+    const prior = agents[1].eyeIndicator;
+    agents[1].eyeIndicator = { pendingCount: 2, oldestAgeSec: 600 as unknown as null, stuck: true };
+    try {
+      render(<App />);
+      await screen.findByRole("heading", { level: 1, name: "Builder" });
+      expect(screen.getByText("疑似卡住：有消息超过 3 分钟没处理")).toBeVisible();
+    } finally { agents[1].eyeIndicator = prior; }
+  });
+
+  it("edits a workspace text file with an explicit save and surfaces a concurrent-edit conflict", async () => {
+    const original = { kind: "file", path: "AGENTS.md", name: "AGENTS.md", size: 10, modifiedAt: "2026-10-24T10:00:00.000Z",
+      binary: false, truncated: false, content: "old rules\n", sha256: "a".repeat(64) };
+    const writes: Array<Record<string, unknown>> = [];
+    let conflict = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
+      if (url.pathname === "/api/workspace/file" && init?.method === "PUT") {
+        writes.push(JSON.parse(String(init.body)));
+        if (conflict) return Promise.resolve({ ok: false, status: 409, json: async () => ({ error: "文件已被修改，请重新加载后再编辑" }) });
+        const body = JSON.parse(String(init.body));
+        return ok({ ...original, content: body.content, sha256: "b".repeat(64) });
+      }
+      if (url.pathname === "/api/workspace" && url.searchParams.get("path") === "AGENTS.md") return ok(original);
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [
+        { name: "AGENTS.md", path: "AGENTS.md", kind: "file", size: 10, modifiedAt: "2026-10-24T10:00:00.000Z" },
+      ] });
+      throw new Error(`unexpected request ${url}`);
+    }));
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    await userEvent.click(screen.getByText("工作区文件"));
+    await userEvent.click(await screen.findByRole("button", { name: /AGENTS\.md/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    const editor = screen.getByLabelText("编辑 AGENTS.md");
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    await userEvent.clear(editor);
+    await userEvent.type(editor, "new rules");
+    expect(screen.getByLabelText("未保存")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("下一次开启新会话"));
+    expect(writes).toEqual([{ agentId: "cli_AgentB2", path: "AGENTS.md", content: "new rules", expectedSha256: "a".repeat(64) }]);
+    expect(screen.queryByLabelText("编辑 AGENTS.md")).not.toBeInTheDocument();
+
+    conflict = true;
+    await userEvent.click(screen.getByRole("button", { name: "编辑" }));
+    await userEvent.type(screen.getByLabelText("编辑 AGENTS.md"), "!");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("已被 Agent 或其他人修改"));
+    expect(writes[1]).toMatchObject({ content: "new rules!", expectedSha256: "b".repeat(64) });
+    expect(screen.getByLabelText("编辑 AGENTS.md")).toHaveValue("new rules!");
+    expect(screen.getByRole("button", { name: "载入最新版本" })).toBeVisible();
+  });
+
+  it("creates AGENTS.md from a template in 设定 and adds a CLAUDE.md that imports it", async () => {
+    let rules = missingRules();
+    const creates: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+      if (url.pathname === "/api/agent-rules/file" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        creates.push(body);
+        rules = { files: rules.files.map((view) => view.name === body.name ? { ...view, file: ruleFile(body.name, body.content) } : view) } as typeof rules;
+        return ok(ruleFile(body.name, body.content));
+      }
+      if (url.pathname === "/api/agent-rules") return ok(rules);
+      throw new Error(`unexpected request ${url}`);
+    }));
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(screen.getByRole("tab", { name: "设定" }));
+    await userEvent.click(await screen.findByRole("button", { name: "用模板新建" }));
+    await waitFor(() => expect(creates.map((body) => body.name)).toEqual(["AGENTS.md", "CLAUDE.md"]));
+    expect(creates[0]).toMatchObject({ agentId: "cli_AgentB2", content: expect.stringContaining("# 角色") });
+    expect(creates[1]).toEqual({ agentId: "cli_AgentB2", name: "CLAUDE.md", content: "@AGENTS.md\n" });
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    expect(screen.getByLabelText("编辑 AGENTS.md")).toHaveValue(creates[0].content);
+  });
+
+  it("tells a Claude-runtime Agent when CLAUDE.md does not use AGENTS.md", async () => {
+    const prior = agents[1].runtime;
+    agents[1].runtime = "claude";
+    let rules = { files: [
+      { name: "AGENTS.md", linkedTo: null, file: ruleFile("AGENTS.md", "# 角色\n"), error: null },
+      { name: "CLAUDE.md", linkedTo: null, file: null, error: null },
+    ] } as ReturnType<typeof missingRules>;
+    const creates: Array<Record<string, unknown>> = [];
+    try {
+      vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://localhost");
+        if (url.pathname === "/api/status") return ok(status);
+        if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+        if (url.pathname.startsWith("/api/models/")) return ok({ models: [{ id: "default", label: "default" }] });
+        if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+        if (url.pathname === "/api/agent-rules/file" && init?.method === "POST") {
+          const body = JSON.parse(String(init.body));
+          creates.push(body);
+          rules = { files: rules.files.map((view) => view.name === body.name ? { ...view, file: ruleFile(body.name, body.content) } : view) } as typeof rules;
+          return ok(ruleFile(body.name, body.content));
+        }
+        if (url.pathname === "/api/agent-rules") return ok(rules);
+        throw new Error(`unexpected request ${url}`);
+      }));
+      render(<App />);
+      await screen.findByRole("heading", { level: 1, name: "Builder" });
+      await userEvent.click(screen.getByRole("tab", { name: "设定" }));
+      expect(await screen.findByText(/还没有 CLAUDE\.md，这份设定不会被读取/)).toBeVisible();
+      await userEvent.click(screen.getByRole("button", { name: "新建 CLAUDE.md 并引用 AGENTS.md" }));
+      await waitFor(() => expect(creates).toEqual([{ agentId: "cli_AgentB2", name: "CLAUDE.md", content: "@AGENTS.md\n" }]));
+      await waitFor(() => expect(screen.queryByText(/这份设定不会被读取/)).not.toBeInTheDocument());
+    } finally { agents[1].runtime = prior; }
+  });
+
+  it("lists capabilities by source in 设定 and says when the runtime lacks a kind", async () => {
+    const capabilities: Record<string, unknown> = {
+      cli_AgentB2: { runtime: "codex", unsupported: [], items: [
+        { kind: "skill", source: "global", name: "lark-im", description: "收发飞书消息", location: "~/.agents/skills/lark-im/SKILL.md", status: "ok", detail: null },
+        { kind: "skill", source: "workspace", name: "weekly-report", description: "整理周报", location: ".agents/skills/weekly-report/SKILL.md", status: "ok", detail: null },
+        { kind: "skill", source: "global", name: "notes", description: null, location: "~/.agents/skills/notes/SKILL.md", status: "invalid", detail: "缺少 description" },
+        { kind: "mcp", source: "global", name: "feishu-docs", description: "stdio · npx", location: "~/.codex/config.toml", status: "ok", detail: null },
+      ] },
+      cli_AgentA1: { runtime: "pi", unsupported: ["subagent", "plugin", "mcp"], items: [] },
+    };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname.startsWith("/api/models/")) return ok({ models: [{ id: "default", label: "default" }] });
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+      if (url.pathname === "/api/agent-rules") return ok(missingRules());
+      if (url.pathname === "/api/agent-capabilities") return ok(capabilities[url.searchParams.get("agent") || ""]);
+      throw new Error(`unexpected request ${url}`);
+    }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=persona");
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(await screen.findByRole("button", { name: /^Skill\s*3$/ }));
+    const groups = screen.getAllByRole("region").filter((region) => ["工作区", "全局"].includes(region.getAttribute("aria-label") || ""));
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual(["工作区", "全局"]);
+    expect(within(groups[0]).getByText("weekly-report")).toBeVisible();
+    expect(within(screen.getByRole("complementary", { name: "weekly-report 详情" })).getByText("只属于这个 Agent，改动从下一个新会话生效。")).toBeVisible();
+    await userEvent.click(within(groups[1]).getByRole("button", { name: /notes/ }));
+    const detail = screen.getByRole("complementary", { name: "notes 详情" });
+    expect(within(detail).getByText("需要修复")).toBeVisible();
+    expect(within(detail).getByText("缺少 description")).toBeVisible();
+    expect(within(detail).getByText("~/.agents/skills/notes/SKILL.md")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /^MCP\s*1$/ }));
+    expect(within(screen.getByRole("complementary", { name: "feishu-docs 详情" })).getByText("stdio · npx")).toBeVisible();
+
+    cleanup();
+    window.history.replaceState(null, "", "/?agent=cli_AgentA1&tab=persona");
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "研究员" });
+    await userEvent.click(await screen.findByRole("button", { name: "Subagent" }));
+    expect(screen.getByText("pi 不支持 Subagent")).toBeVisible();
+  });
+
+  it("shows the read-only built-in instructions next to AGENTS.md in 设定", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/status") return ok(status);
+      if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
+      if (url.pathname.startsWith("/api/models/")) return ok({ models: [{ id: "default", label: "default" }] });
+      if (url.pathname === "/api/workspace") return ok({ kind: "directory", path: "", parent: null, entries: [] });
+      if (url.pathname === "/api/agent-rules") return ok(missingRules());
+      if (url.pathname === "/api/agent-capabilities") return ok({ runtime: "codex", items: [], unsupported: [] });
+      if (url.pathname === "/api/agent-standing-prompt") {
+        expect(url.searchParams.get("agent")).toBe("cli_AgentB2");
+        return ok({ runtime: "codex", replyMode: "card", version: "larkin-standing-v36-card", content: "# Larkin standing instructions\n\nYou are Builder." });
+      }
+      throw new Error(`unexpected request ${url}`);
+    }));
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(await screen.findByRole("button", { name: "内置指令" }));
+    const content = await screen.findByRole("region", { name: "内置指令内容" });
+    expect(content).toHaveTextContent("You are Builder.");
+    expect(screen.getByText("larkin-standing-v36-card")).toBeVisible();
+    expect(screen.getByText("卡片回复")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
   });
 
   it("does not render Provider Credentials and keeps only three runtime options", async () => {
@@ -624,7 +987,7 @@ describe("Agent-centric dashboard workbench", () => {
     expect([...runtimeSelect.querySelectorAll("option")].map((option) => option.getAttribute("value"))).toEqual(["codex", "claude", "pi"]);
   });
 
-  it("renders readiness in Overview and Agent 配置, and shows a rejected runtime-switch error", async () => {
+  it("renders readiness, with version and executable, next to the model settings and shows a rejected runtime-switch error", async () => {
     const missing = {
       runtime: "claude" as const,
       state: "missing" as const,
@@ -637,6 +1000,8 @@ describe("Agent-centric dashboard workbench", () => {
       state: "unauthenticated",
       reason: "codex is installed but not logged in",
       nextAction: "Run `codex login`, then retry.",
+      version: "0.130.0",
+      executable: "codex",
     };
     try {
       vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -657,10 +1022,9 @@ describe("Agent-centric dashboard workbench", () => {
       }));
       render(<App />);
       await screen.findByRole("heading", { level: 1, name: "Builder" });
-      expect(screen.getByText(/^Readiness unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
-      await userEvent.click(screen.getByRole("tab", { name: "概览" }));
-      expect(screen.getByText(/^unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
-      await userEvent.click(screen.getByRole("tab", { name: "配置" }));
+      expect(await screen.findByText(/^Readiness unauthenticated · codex is installed but not logged in · Run `codex login`/)).toBeVisible();
+      expect(screen.getByText(/Run `codex login`, then retry\. · 0\.130\.0 · codex$/)).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: "设定" }));
       await userEvent.selectOptions(await screen.findByLabelText("Runtime"), "claude");
       await userEvent.click(screen.getByRole("button", { name: "保存并应用" }));
       const feedback = await screen.findByRole("status");

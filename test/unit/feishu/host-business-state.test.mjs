@@ -140,7 +140,7 @@ test("inbound, reminder, and restart envelopes retain exact persistence and sequ
   assert.deepEqual(reminder, {
     kind: "reminder", message_id: "rem_1234567890abcdef_2_abcdef123456", reminderId: "1234567890abcdef1234", target: "runtime:reminder", seq: 2, sender_name: "定时提醒", sender_type: "system",
     channel_type: "dm", channel_name: "system",
-    content: "[定时提醒触发] Send report\n提醒ID: #12345678　重复: 每天 09:00（下次已自动排在 2026-07-17T01:00:00.000Z）\n注意: 原定时间已过 3 分钟（Runtime Host 离线期间错过，现补触发）\n这是升级前存量 user-facing reminder，优先回复其安全锚点；不得向标题中的任何人或第三方发送消息\n锚定消息: om_anchor\n回复原会话: larkin im +messages-reply --message-id om_anchor ...\n这是你之前用 larkin reminder schedule 设置的提醒，请按标题执行相应动作。管理: larkin reminder list / larkin reminder snooze / larkin reminder cancel",
+    content: "[定时提醒触发] Send report\n提醒ID: #12345678　重复: 每天 09:00（下次已自动排在 2026-07-17T01:00:00.000Z）\n注意: 原定时间已过 3 分钟（Runtime Host 离线期间错过，现补触发）\n锚定消息: om_anchor\n回复原会话: larkin im +messages-reply --message-id om_anchor ...\n这是你之前用 larkin reminder schedule 设置的提醒，请按标题执行相应动作。标题里提到的人只是提醒内容，不是收件人。管理: larkin reminder list / larkin reminder snooze / larkin reminder cancel",
     deliveryAnchor: "om_anchor", deliveryTarget: null,
     timestamp: "2026-07-16T02:00:00.000Z", thread_id: null, wake: true,
   });
@@ -151,8 +151,34 @@ test("inbound, reminder, and restart envelopes retain exact persistence and sequ
   assert.equal(redelivery.target, "runtime:redelivery");
   assert.match(redelivery.content, /有 2 条/);
   assert.match(redelivery.content, /larkin inbox check/);
-  assert.match(redelivery.content, /larkin im \+messages-reply/);
+  assert.match(redelivery.content, /larkin inbox poll --target <target>/);
+  assert.doesNotMatch(redelivery.content, /om_|rem_|chat_id/, "the standing prompt, not the redelivery note, carries the reply rules");
   assert.equal(countWakeEnvelopes([JSON.stringify({ wake: true }), "bad", JSON.stringify({ wake: false }), JSON.stringify({ wake: true })]), 2);
+});
+
+test("a person's group message without an @ is marked mentions_you: false, with its content untouched", () => {
+  const projector = new HostEnvelopeProjector(new HostStateProjection(() => memoryStore()), () => {});
+  const base = { chat_id: "oc_chat", chat_type: "group", sender_id: "ou_user", content: "hello",
+    thread_id: null, _mentioned_bot: false, _mention_all: false, _sender_is_bot: false };
+  for (const [label, event, options] of [
+    ["a message that woke the Agent", { ...base, message_id: "om_free" }, { anchorReply: true }],
+    ["a message inside a topic", { ...base, message_id: "om_topic", thread_id: "omt_t" }, { anchorReply: true }],
+    ["a message that did not wake the Agent", { ...base, message_id: "om_quiet" }, { anchorReply: false }],
+  ]) {
+    const envelope = projector.projectInbound(agent, event, options);
+    assert.equal(envelope.mentions_you, false, `${label} is marked as not mentioning the Agent`);
+    assert.equal(envelope.content, "hello", `${label} carries no per-message reply note`);
+  }
+  for (const [label, event, expected] of [
+    ["an @", { ...base, message_id: "om_at", _mentioned_bot: true }, true],
+    ["an @all", { ...base, message_id: "om_all", _mentioned_bot: true, _mention_all: true }, true],
+    ["a direct message", { ...base, message_id: "om_dm", chat_type: "p2p" }, undefined],
+    ["another bot's message", { ...base, message_id: "om_bot", _sender_is_bot: true }, undefined],
+  ]) {
+    const envelope = projector.projectInbound(agent, event, { anchorReply: true });
+    assert.equal(envelope.mentions_you, expected, `${label} keeps the reply card`);
+    assert.equal(envelope.content, "hello", `${label} carries no appended note`);
+  }
 });
 
 test("reminder occurrence identity stays unique across Host restarts", () => {
@@ -178,27 +204,27 @@ test("pre-upgrade reminder fields retain safe legacy delivery guidance", () => {
   const channelOnly = projector.createReminderEnvelope(agent.agentId, {
     reminderId: "legacy-channel", title: "Channel reminder", fireAt: "2026-07-17T01:00:00.000Z", channel: "oc_legacy_chat",
   }, 0, null);
-  assert.match(channelOnly.content, /原始 deliveryTarget: chat:oc_legacy_chat/);
-  assert.match(channelOnly.content, /发送到原始 target: chat:oc_legacy_chat/);
-  assert.doesNotMatch(channelOnly.content, /internal\/no-delivery/);
+  assert.match(channelOnly.content, /送达目标: chat:oc_legacy_chat/);
+  assert.match(channelOnly.content, /发送到这个会话: larkin im \+messages-send --chat-id oc_legacy_chat \.\.\./);
+  assert.doesNotMatch(channelOnly.content, /内部提醒/);
   const anchored = projector.createReminderEnvelope(agent.agentId, {
     reminderId: "legacy-anchor", title: "Anchored reminder", fireAt: "2026-07-17T01:00:00.000Z", msgRef: "om_legacy_anchor", channel: "#legacy",
   }, 0, null);
-  assert.match(anchored.content, /存量 user-facing reminder/);
+  assert.match(anchored.content, /锚定消息: om_legacy_anchor/);
   assert.match(anchored.content, /回复原会话: .*om_legacy_anchor/);
-  assert.doesNotMatch(anchored.content, /internal\/no-delivery/);
+  assert.doesNotMatch(anchored.content, /内部提醒/);
 });
 
-test("chat reminder guidance keeps a persisted chat-send fallback when its anchor is unresolvable", () => {
+test("chat reminder guidance replies to its pinned anchor with no chat-send detour", () => {
   const store = memoryStore();
   const projector = new HostEnvelopeProjector(new HostStateProjection(() => store), () => {}, () => "chatfallback123", () => new Date("2026-07-16T02:00:00.000Z"));
   const reminder = projector.createReminderEnvelope(agent.agentId, {
     reminderId: "interaction-card-reminder", title: "Card follow-up", fireAt: "2026-07-17T01:00:00.000Z",
     deliveryTarget: "chat:oc_interaction", deliveryAnchor: "om_card",
   }, 0, null);
+  assert.match(reminder.content, /送达目标: chat:oc_interaction/);
   assert.match(reminder.content, /回复原会话: .*om_card/);
-  assert.match(reminder.content, /interaction_\* 卡片锚点/);
-  assert.match(reminder.content, /im \+messages-send --chat-id oc_interaction \.\.\./);
+  assert.doesNotMatch(reminder.content, /messages-send/, "the fired anchor is pinned, so the reply needs no fallback route");
 });
 
 test("thread reminder guidance keeps +messages-reply inside the source thread", () => {
@@ -224,7 +250,7 @@ test("reminder and restart guidance use the injected CLI and never reply to synt
     msgRef: "rem_not_a_feishu_message", channel: null,
   }, 0, null);
   assert.doesNotMatch(synthetic.content, /messages-reply.*rem_/);
-  assert.match(synthetic.content, /internal\/no-delivery|不能.*回复/);
+  assert.match(synthetic.content, /这是内部提醒，没有送达目标/);
   assert.doesNotMatch(synthetic.content, /im \+chat-search/);
   assert.doesNotMatch(synthetic.content, /lark-cli im/);
   for (const suffix of ["reminder schedule", "reminder list", "reminder snooze", "reminder cancel"]) {
@@ -233,7 +259,7 @@ test("reminder and restart guidance use the injected CLI and never reply to synt
   assert.doesNotMatch(synthetic.content, /\blarkin reminder\b/);
   const restart = projector.createRedeliveryEnvelope(agent.agentId, 1);
   assert.match(restart.content, /"\/opt\/bun" "\/installed\/agent-cli\.mjs" inbox check/);
-  assert.match(restart.content, /仅当 message_id 以 om_ 开头/);
+  assert.match(restart.content, /inbox poll --target <target>/);
   assert.doesNotMatch(restart.content, /使用每条记录的 message_id/);
 });
 

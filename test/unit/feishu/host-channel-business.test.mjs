@@ -34,6 +34,16 @@ test("channel message callback preserves Owner wake matrix and normalized event"
   assert.deepEqual(f.statuses, Array.from({ length: 4 }, () => ({ inboundVerifiedAt: "2026-07-16T04:00:00.000Z" })));
 });
 
+test("channel message callback keeps Feishu topic root_id on the inbound event", () => {
+  const f = fixture();
+  f.business.handlers(agent).message({
+    chatId: "oc_group", chatType: "group", senderId: "ou_h", messageId: "om_topic_reply",
+    content: "follow-up", threadId: "omt_bot_topic", rootId: "om_bot_root",
+  });
+  assert.equal(f.messages[0].event.thread_id, "omt_bot_topic");
+  assert.equal(f.messages[0].event.root_id, "om_bot_root");
+});
+
 test("cardAction is a separate callback path and returns the orchestrator response", async () => {
   const calls = [];
   const base = fixture();

@@ -25,10 +25,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up pinned Bun
+      # An older release tag pins an older Bun, and its own scripts check that version strictly.
+      - name: Read the release's pinned Bun version
+        id: release-bun
+        run: |
+          version="$(jq -er '.packageManager | select(type == "string" and test("^bun@[0-9]+\\.[0-9]+\\.[0-9]+\\z")) | sub("^bun@"; "")' package.json)" || {
+            echo "Refusing to publish: package.json does not pin packageManager bun@X.Y.Z" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up the release's pinned Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version: ${{ steps.release-bun.outputs.version }}
 
       - name: Install locked dependencies
         run: bun install --frozen-lockfile

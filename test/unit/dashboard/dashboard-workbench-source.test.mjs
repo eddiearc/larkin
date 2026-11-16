@@ -12,9 +12,9 @@ test("dashboard ships an authored React Agent workbench instead of an inline car
   const state = read("src/dashboard/web/dashboard-state.ts");
   const template = read("src/dashboard/dashboard-template.ts");
   assert.match(app, /AgentSidebar/);
-  assert.match(app, /GlobalSettingsSheet/);
+  assert.doesNotMatch(app, /GlobalSettingsSheet/, "every setting lives on its Agent");
   assert.match(app, /GroupPolicyTable/);
-  for (const tab of ["overview", "conversation", "configuration", "reminders", "workspace", "logs"]) {
+  for (const tab of ["activity", "persona", "reply", "advanced"]) {
     assert.match(state, new RegExp(`(?:^|[\\s\"'])${tab}(?:[\\s\"',]|$)`));
   }
   assert.match(template, /dashboard-assets\/dashboard\.css/);
@@ -39,7 +39,7 @@ test("dashboard build and server own the offline Vite assets", () => {
   assert.ok(pkg.devDependencies.tailwindcss);
 });
 
-test("dashboard stylesheet defines semantic reminder, timeline, and active-workspace states", () => {
+test("dashboard stylesheet defines semantic reminder, timeline, and folded workspace states", () => {
   const styles = read("src/dashboard/web/styles.css");
   assert.match(styles, /\.reminder-list article\.done\b[^}]*\{[^}]*text-decoration:\s*line-through/s,
     "completed reminders need a visible done treatment");
@@ -49,12 +49,10 @@ test("dashboard stylesheet defines semantic reminder, timeline, and active-works
   for (const state of ["active", "idle", "deliver", "error", "unknown"]) {
     assert.match(styles, new RegExp(`\\.timeline-dot\\.state-${state}\\b`), `timeline ${state} needs a semantic dot rule`);
   }
-  assert.match(styles, /\.app-shell\.workspace-app-active\b[^}]*\{[^}]*height:\s*100vh[^}]*height:\s*100dvh[^}]*min-height:\s*0[^}]*overflow:\s*hidden/s,
-    "the active desktop workspace route must bound the complete grid to the viewport");
-  assert.match(styles, /\.workspace-shell\.workspace-route-active\b[^}]*\{[^}]*height:\s*100vh[^}]*height:\s*100dvh[^}]*min-height:\s*0[^}]*overflow:\s*hidden/s,
-    "the active Workspace main column must own the viewport height while sizing its rows naturally");
-  assert.match(styles, /\.agent-content\.workspace-active\b[^}]*\{[^}]*height:\s*auto[^}]*flex:\s*1 1 0[^}]*overflow:\s*hidden/s,
-    "Workspace content must consume natural remaining height instead of subtracting a hard-coded header height");
+  assert.match(styles, /\.runtime-details > \.workspace-browser\b[^}]*\{[^}]*height:\s*min\(/s,
+    "the folded Workspace browser keeps a bounded height so its two lists scroll on their own");
+  assert.doesNotMatch(styles, /workspace-(?:app|route)-active|\.agent-content\.workspace-active/,
+    "Workspace no longer owns a full-viewport route");
 });
 
 test("dashboard uses flat sections and two bounded Workspace scroll regions", () => {

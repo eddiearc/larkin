@@ -18,7 +18,9 @@ test("Codex catalog consumes app-server model/list and exposes only visible safe
           id: "gpt-5.4-mini", model: "gpt-5.4-mini", displayName: "  GPT-5.4\u0000-Mini  ", hidden: false, isDefault: true,
           defaultReasoningEffort: "medium",
           supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }, { reasoningEffort: "high" }],
+          additionalSpeedTiers: ["fast"], serviceTiers: [{ id: "priority", name: "Fast", description: "2x speed" }],
         },
+        { id: "gpt-5.4-slow", model: "gpt-5.4-slow", displayName: "Slow", hidden: false, isDefault: false, supportedReasoningEfforts: [] },
         { id: "codex-auto-review", model: "codex-auto-review", displayName: "Auto Review", hidden: true, isDefault: false, supportedReasoningEfforts: [] },
         { id: "unsafe/model", model: "unsafe/model", displayName: "Unsafe", hidden: false, isDefault: false, supportedReasoningEfforts: [] },
       ] };
@@ -31,6 +33,13 @@ test("Codex catalog consumes app-server model/list and exposes only visible safe
     label: "GPT-5.4-Mini",
     supportedReasoningEfforts: ["low", "medium", "high"],
     defaultReasoningEffort: "medium",
+    supportsFast: true,
+    verified: "codex-cli-visible",
+  }, {
+    id: "gpt-5.4-slow",
+    label: "Slow",
+    supportedReasoningEfforts: [],
+    supportsFast: false,
     verified: "codex-cli-visible",
   }]);
   assert.equal(calls.length, 1);

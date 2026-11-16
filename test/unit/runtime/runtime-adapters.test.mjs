@@ -185,12 +185,11 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v32");
+  assert.equal(prompt.version, "larkin-standing-v35");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
-  assert.match(prompt.content, /Never infer recipients from a reminder title/);
   assert.doesNotMatch(prompt.content, /at most one bounded wait call per turn/);
   assert.doesNotMatch(prompt.content, /do not loop or call wait again in the same turn/);
   assert.match(prompt.content, /tmux-backed bash.*wait timeout|wait timeout.*not process failure/);
@@ -208,15 +207,20 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   for (const command of [
     "im +messages-send", "im +messages-reply", "im +chat-messages-list", "im +messages-mget",
     "im +chat-list", "im +chat-search", "im chats get", "im +messages-resources-download",
+    "docs +create", "docs +update", "docs +fetch",
   ]) assert.match(prompt.content, new RegExp(command.replace(/[+.]/g, "\\$&")), command);
+  assert.match(prompt.content, /`larkin docs \+create`/);
+  assert.match(prompt.content, /`larkin docs \+update`/);
+  assert.match(prompt.content, /`larkin docs \+fetch`/);
+  assert.match(prompt.content, /Do not invent Larkin commands that are absent from this list/);
   assert.doesNotMatch(prompt.content, /larkin (?:message|channel|attachment|server|task claim)\b/);
   assert.match(prompt.content, /Only a real Feishu `message_id` beginning with `om_`/);
   assert.match(prompt.content, /`rem_`, `redeliver_`.*synthetic ID must never be replied to/);
-  assert.match(prompt.content, /nonzero `freshness_conflict`.*direct-acks/);
+  assert.match(prompt.content, /Freshness is a non-blocking reminder.*never rejected for freshness.*larkin_notice/i);
   assert.doesNotMatch(prompt.content, /larkin-draft|draft-id|send --draft/);
   assert.match(prompt.content, /ordinary plain-text message bodies.*`--text`.*brief one-line replies.*multiline status lines.*paragraphs.*`--markdown`.*intentional.*headings.*lists.*fenced code.*Markdown links/i);
   assert.match(prompt.content, /native `--text`.*ordinary plain text.*logs.*literal code.*exact whitespace/i);
-  assert.doesNotMatch(prompt.content, /rejected|--literal-text/i);
+  assert.doesNotMatch(prompt.content, /--literal-text/i);
   assert.match(prompt.content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   assert.match(prompt.content, /passes one argument with real newline characters/);
   assert.match(prompt.content, /ordinary (?:double )?quotes.*do not decode.*`\\n`.*backslash.*letter `n`/i);
@@ -280,7 +284,7 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content,
     /Use the .--reply-in-thread. recipe only when the source is a thread or the user or current Inbox event explicitly asks.*topic.*in-thread.*thread reply.*Never invent a topic request from ordinary reply wording or a bare source message id.*thread membership.*thread:.*target.*thread_id.*explicit request.*never from wording alone/i);
   assert.match(prompt.content,
-    /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*without.*freshness_conflict.*two.*model tool calls.*pre-commit.*provider-not-reached.*retry.*identical.*three.*model tool calls/i);
+    /exactly one post-poll.*model tool call.*must not.*skill.*reference.*help.*discovery.*freshness notice.*advisory.*must not cause a duplicate send/i);
   assert.match(prompt.content,
     /larkin im \+messages-send --chat-id <confirmed_chat_id> --text '<exact_body_as_one_literal_argument>' --json/i);
   assert.match(prompt.content, /complete canonical exact send and reply paths.*must not.*messages-send --help.*messages-reply --help/i);
@@ -292,9 +296,8 @@ test("default context prompt consumes the Agent CLI manifest", () => {
   assert.match(prompt.content, /does not waive.*skill.*safety.*unknown.*high-risk/i);
   assert.match(prompt.content, /exact.*`--text`.*overrides.*ordinary-body guidance/i);
   assert.match(prompt.content, /wrapper derives.*stable.*idempotency key.*do not pass.*--idempotency-key/i);
-  assert.match(prompt.content, /freshness_unavailable.*freshness_conflict.*pre-commit.*provider-not-reached.*retry.*identical.*`--text`.*`--content`.*wrapper reuses/i);
-  assert.match(prompt.content, /target or body changes.*revised ordinary command.*derive a new key/i);
-  assert.match(prompt.content, /`committed=true` must not be repeated.*ambiguous termination.*wrapper same-key recovery/i);
+  assert.match(prompt.content, /`larkin_notice` freshness reminder.*stderr only after.*provider write.*re-read the target.*revised follow-up.*materially changes.*must not be repeated/i);
+  assert.match(prompt.content, /result with `committed=true`.*must not be repeated.*ambiguous termination.*wrapper same-key recovery/i);
   assert.doesNotMatch(prompt.content, /oc_eval_exact|om_eval_anchor|原文：“修复 A\/B”|收到：“A\/B”|引用：“抢到”|消息原文：“保持”/);
 });
 
@@ -310,7 +313,7 @@ test("Codex, Claude and Pi receive the clickable-link and exact-content standing
     assert.match(content, /explicit exact or verbatim direct literal uses `--text`.*overrides.*ordinary-body guidance/i);
     assert.match(content, /tool-sourced exact or verbatim text.*deterministic native `--jq`.*`--content`/i);
     assert.match(content, /native `--text`.*ordinary plain text.*logs.*literal code.*exact whitespace/i);
-    assert.doesNotMatch(content, /rejected|--literal-text/i);
+    assert.doesNotMatch(content, /--literal-text/i);
     assert.match(content, /attachment-only send\/reply.*attachment flag.*without a text body flag/i);
   };
 
@@ -456,6 +459,95 @@ test("Codex resume failure falls back to a fresh thread with the same standing p
   assert.equal(fallback.method, "thread/start");
   assert.equal(fallback.params.threadId, undefined);
   assert.equal(fallback.params.developerInstructions, "standing");
+});
+
+test("Codex applies model, effort, and Fast to the live thread from its next turn", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child })
+    .createSession(create({ model: "gpt-old", reasoningEffort: "medium" }));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const threadRequest = child.writes.find((request) => request.method === "thread/start");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: threadRequest.id, result: { thread: { id: "thread-live" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(session.updateSettings({ model: "gpt-new", reasoningEffort: "low", fastMode: true }), true);
+  void session.prompt({ inputId: "wake-1", kind: "wake", text: "hi", attempt: 0 });
+  const turn = child.writes.find((request) => request.method === "turn/start");
+  assert.deepEqual({ ...turn.params, input: undefined },
+    { threadId: "thread-live", input: undefined, model: "gpt-new", effort: "low", serviceTier: "fast" });
+  assert.equal(child.writes.filter((request) => request.method === "thread/resume").length, 0);
+
+  for (const handBack of [{ model: "default", reasoningEffort: "low", fastMode: true },
+    { model: "gpt-new", reasoningEffort: null, fastMode: true }, { model: "gpt-new", reasoningEffort: "low", fastMode: false }]) {
+    assert.equal(session.updateSettings(handBack), false, `${JSON.stringify(handBack)} needs a fresh session`);
+  }
+});
+
+test("Codex resumes a thread once the replaced process releases its writer", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "thread-busy" }));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resume = child.writes.find((request) => request.method === "thread/resume");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id,
+    error: { code: -32600, message: "thread thread-busy already has an active writer" } })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const retry = child.writes.filter((request) => request.method === "thread/resume").at(-1);
+  assert.notEqual(retry.id, resume.id);
+  assert.equal(retry.params.threadId, "thread-busy");
+  assert.equal(retry.params.developerInstructions, "standing");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: retry.id, result: { thread: { id: "thread-busy" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.sessionId, "thread-busy");
+  assert.deepEqual(events.map(({ type }) => type), ["session-init"]);
+});
+
+test("Runtime events emitted before the first subscriber are replayed to it", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "thread-gone" }));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resume = child.writes.find((request) => request.method === "thread/resume");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id, error: { code: -32600, message: "permission denied" } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  assert.deepEqual(events, [{ type: "error", message: "permission denied" }]);
+});
+
+test("Codex sandbox defaults to danger-full-access and workspace-write keeps network plus Larkin state writable", async () => {
+  const startParams = async (overrides) => {
+    const child = new FakeProcess();
+    await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create(overrides));
+    child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    return child.writes.find((request) => request.method === "thread/start").params;
+  };
+  const legacy = await startParams({ reasoningEffort: "high" });
+  assert.equal(legacy.approvalPolicy, "never");
+  assert.equal(legacy.sandbox, "danger-full-access");
+  assert.deepEqual(legacy.config, { model_reasoning_effort: "high" });
+
+  const restricted = await startParams({
+    sandbox: "workspace-write", reasoningEffort: "medium", stateDir: "/tmp/larkin-root/state/agents/cli_test",
+    env: { LARKIN_TELEMETRY_SPOOL_DIR: "/tmp/larkin-root/telemetry/spool" },
+  });
+  assert.equal(restricted.approvalPolicy, "never");
+  assert.equal(restricted.sandbox, "workspace-write");
+  assert.deepEqual(restricted.config, {
+    model_reasoning_effort: "medium",
+    sandbox_workspace_write: {
+      network_access: true,
+      // Roots are resolved, so Windows turns these into drive-qualified paths.
+      writable_roots: ["/tmp/larkin-root/state/agents/cli_test", "/tmp/larkin-root/telemetry/spool"].map((root) => path.resolve(root)),
+    },
+  });
+  assert.ok(!restricted.config.sandbox_workspace_write.writable_roots.includes("/tmp/larkin-root"));
+  assert.equal(Object.hasOwn(legacy, "serviceTier"), false, "fast mode off leaves the tier to the user's Codex config");
+  assert.equal((await startParams({ fastMode: true })).serviceTier, "fast");
 });
 
 test("Codex rejects unsupported app-server requests without treating them as notifications", async () => {
@@ -1818,4 +1910,75 @@ test("Codex cancellation of a rejected retry does not block a later user prompt"
   child.stdout.write(`${JSON.stringify({ id: nextRequest.id, result: { turn: { id: "new-work-turn" } } })}\n`);
   assert.equal((await next).status, "accepted");
   await session.close("done");
+});
+
+test("Codex, Claude and Pi emit ordered text-delta events with block boundaries for card replies", async () => {
+  const textDeltas = (events) => events.filter((event) => event.type === "text-delta")
+    .map((event) => `${event.newBlock ? "|" : ""}${event.text}`);
+
+  const codex = await startedCodexTurn("delta-codex", "turn-delta-codex");
+  for (const message of [
+    { method: "item/started", params: { item: { type: "agentMessage", id: "m1" } } },
+    { method: "item/agentMessage/delta", params: { delta: "Hel" } },
+    { method: "item/agentMessage/delta", params: { delta: "lo" } },
+    { method: "item/reasoning/summaryTextDelta", params: { delta: "hidden" } },
+    { method: "item/started", params: { item: { type: "agentMessage", id: "m2" } } },
+    { method: "item/agentMessage/delta", params: { delta: "Done" } },
+  ]) codex.child.stdout.write(`${JSON.stringify(message)}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(textDeltas(codex.events), ["|Hel", "lo", "|Done"]);
+
+  codex.child.stdout.write(`${JSON.stringify({ method: "item/started", params: { item: { type: "commandExecution", id: "c1", command: "curl -H 'Authorization: Bearer s3cr3t' x" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const toolEvent = codex.events.findLast((event) => event.type === "activity" && event.activity === "tool");
+  assert.deepEqual(toolEvent, { type: "activity", activity: "tool", name: "command",
+    text: "curl -H 'Authorization: Bearer s3cr3t' x", toolId: "c1" }, "tool activity carries the raw command");
+
+  const child = new FakeProcess();
+  const claude = await createNativeRuntimeAdapter("claude", {
+    spawn: () => child, mkdir: () => {}, writeFile: () => {},
+  }).createSession(create());
+  const claudeEvents = [];
+  claude.subscribe((event) => claudeEvents.push(event));
+  for (const message of [
+    { type: "system", subtype: "init", session_id: "claude-delta" },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hidden" } } },
+    { type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "An" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "swer" } } },
+    { type: "assistant", session_id: "claude-delta", message: { content: [{ type: "text", text: "Answer" },
+      { type: "tool_use", id: "tu1", name: "Bash", input: { command: "git status", description: "Show status" } }] } },
+    { type: "result", session_id: "claude-delta", is_error: false },
+  ]) child.stdout.write(`${JSON.stringify(message)}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  // The complete assistant message keeps feeding activity, but never duplicates the streamed text.
+  assert.deepEqual(textDeltas(claudeEvents), ["|An", "swer"]);
+  assert.deepEqual(claudeEvents.find((event) => event.type === "activity" && event.activity === "tool"), {
+    type: "activity", activity: "tool", name: "Bash", text: '{"command":"git status","description":"Show status"}', toolId: "tu1",
+  }, "a structured tool input is shown as its raw JSON");
+
+  let listener;
+  const sdk = {
+    sessionId: "pi-delta", prompt() {}, steer() {}, abort() {},
+    subscribe(next) { listener = next; return () => {}; },
+  };
+  const pi = await createNativeRuntimeAdapter("pi", {
+    createPiSession: async () => sdk,
+    env: { LARKIN_PI_DISTRIBUTION: "builtin" },
+  }).createSession(create());
+  const piEvents = [];
+  pi.subscribe((event) => piEvents.push(event));
+  await pi.prompt({ inputId: "pi-delta-input", kind: "user", text: "work", attempt: 0 });
+  listener({ type: "turn_start" });
+  listener({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "hidden" } });
+  listener({ type: "message_update", assistantMessageEvent: { type: "text_start" } });
+  listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Hi" } });
+  listener({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", delta: "{\"cmd\"" } });
+  listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: " there" } });
+  assert.deepEqual(textDeltas(piEvents), ["|Hi", " there"]);
+  listener({ type: "tool_execution_start", toolName: "bash", toolCallId: "pt1", args: { command: "ls -la" } });
+  assert.deepEqual(piEvents.findLast((event) => event.type === "activity" && event.activity === "tool"), {
+    type: "activity", activity: "tool", name: "bash", text: '{"command":"ls -la"}', toolId: "pt1",
+  });
 });

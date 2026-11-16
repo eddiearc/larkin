@@ -24,7 +24,7 @@ test("authored source and generated runtime use the seven-domain mirrored layout
   );
   const packageJson = JSON.parse(source("package.json"));
   assert.equal(packageJson.bin.larkin, "scripts/npm/larkin-bin-shim.mjs");
-  assert.equal(packageJson.packageManager, "bun@1.3.14");
+  assert.equal(packageJson.packageManager, "bun@1.4.4");
   assert.equal(fs.existsSync(path.join(ROOT, "bun.lock")), true);
   assert.equal(fs.existsSync(path.join(ROOT, "package-lock.json")), false);
   for (const relative of [

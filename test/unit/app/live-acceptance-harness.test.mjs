@@ -18,7 +18,8 @@ function writeJson(file, value) {
 
 test("three-Agent live acceptance is opt-in, hermetic by default, and fixture-verifiable", async () => {
   const childEnv = { ...process.env };
-  for (const key of ["LARKIN_RUN_FEISHU_LIVE_TEST", "LARKIN_CONFIG_DIR", "LARKIN_LIVE_ACCEPTANCE_EVIDENCE"]) delete childEnv[key];
+  // Bun hides skipped-test names when it detects an AI agent, and the skip reason is asserted below.
+  for (const key of ["LARKIN_RUN_FEISHU_LIVE_TEST", "LARKIN_CONFIG_DIR", "LARKIN_LIVE_ACCEPTANCE_EVIDENCE", "CLAUDECODE", "REPL_ID", "AGENT"]) delete childEnv[key];
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   assert.equal(pkg.scripts["test:live:three-agent"], "bun test --max-concurrency 1 test/live/three-agent-live-acceptance.test.mjs");
   assert.equal(fs.existsSync(HARNESS), true, "live acceptance harness must exist");

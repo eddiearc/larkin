@@ -436,23 +436,16 @@ export class HostEnvelopeProjector {
         ? `　重复: ${repeatDescription}（下次已自动排在 ${reminder.fireAt}）`
         : "　类型: 一次性"),
       overdueMs > 120_000 ? `注意: 原定时间已过 ${Math.round(overdueMs / 60_000)} 分钟（Runtime Host 离线期间错过，现补触发）` : null,
-      deliveryTarget ? `原始 deliveryTarget: ${deliveryTarget}`
-        : anchorId ? "这是升级前存量 user-facing reminder，优先回复其安全锚点；不得向标题中的任何人或第三方发送消息"
-          : "本条为 internal/no-delivery reminder，不得向标题中的任何人或第三方发送消息",
-      anchorId ? `锚定消息: ${anchorId}` : reminder.msgRef ? `历史锚点 ${String(reminder.msgRef)} 不是可用的 delivery anchor，不能用于回复` : null,
+      deliveryTarget ? `送达目标: ${deliveryTarget}` : anchorId ? null : "这是内部提醒，没有送达目标。",
+      anchorId ? `锚定消息: ${anchorId}` : null,
       anchorMessageId
-        ? [
-            `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId}${deliveryTarget?.startsWith("thread:") ? " --reply-in-thread" : ""} ...`)}`,
-            chatId ? `若 ${anchorMessageId} 无法由当前 Inbox 解析（例如 interaction_* 卡片锚点或已淘汰的历史消息），改用聊天兜底发送: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}；仅使用这个持久化 chat_id，不得猜测收件人` : null,
-          ].filter((line): line is string => Boolean(line)).join("\n")
+        ? `回复原会话: ${this.larkCommand(`im +messages-reply --message-id ${anchorMessageId}${deliveryTarget?.startsWith("thread:") ? " --reply-in-thread" : ""} ...`)}`
         : commentAnchorId
           ? `回复原文档评论: ${this.agentCommand(`comment reply --message-id ${commentAnchorId} --text ...`)}`
-          : deliveryTarget
-          ? chatId
-            ? `发送到原始 target: ${deliveryTarget}: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}（不得从提醒标题推断收件人）`
-            : `发送到原始 target: ${deliveryTarget}（不得从提醒标题推断收件人）`
-          : null,
-      `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
+          : chatId
+            ? `发送到这个会话: ${this.larkCommand(`im +messages-send --chat-id ${chatId} ...`)}`
+            : null,
+      `这是你之前用 ${this.agentCommand("reminder schedule")} 设置的提醒，请按标题执行相应动作。标题里提到的人只是提醒内容，不是收件人。管理: ${this.agentCommand("reminder list")} / ${this.agentCommand("reminder snooze")} / ${this.agentCommand("reminder cancel")}`,
     ].filter((line): line is string => Boolean(line));
     const envelope = {
       kind: "reminder" as const,
@@ -486,7 +479,7 @@ export class HostEnvelopeProjector {
       sender_type: "system" as const,
       channel_type: "dm" as const,
       channel_name: "system" as const,
-      content: `[启动补投] 服务重启期间有 ${wakeCount} 条本应唤醒你的消息未被读取（可能包含用户消息、@提及或定时提醒）。请先用 ${this.agentCommand("inbox check")} 看目标摘要，再用 ${this.agentCommand("inbox poll")} 领取完整消息；仅当 message_id 以 om_ 开头时才用 ${this.larkCommand("im +messages-reply")}，系统 rem_/redeliver_ ID 不可回复；有 chat_id 时可用 ${this.larkCommand("im +messages-send")}，否则先查询确认目标，禁止猜测。`,
+      content: `[启动补投] 服务重启期间有 ${wakeCount} 条本应唤醒你的消息还没读（用户消息、@ 或提醒）。先用 ${this.agentCommand("inbox check")} 看有哪些目标，再用 ${this.agentCommand("inbox poll --target <target>")} 逐个领取并处理。`,
       timestamp: this.now().toISOString(),
       thread_id: null,
     };

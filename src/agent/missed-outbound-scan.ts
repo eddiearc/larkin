@@ -281,9 +281,23 @@ export function reconcileInboxAuditTargetRetries(registryFile: string, retryFile
   return { recovered, remaining: loadRetryJournal(retryFile).targets.filter((row) => !agentId || row.agent_id === agentId).length };
 }
 
+// Self-contained in both reply modes: the audit turn starts from runtime:reminder, so the explicit
+// reply command is the only delivery path. What counts as a finding is said once, in AUDIT_STEPS;
+// each target carries only its own commands.
+const AUDIT_STEPS = "For each target, read its history, find each finding (an unanswered human ask, or a promised status, result or real @mention that was never sent), answer each with the target's reply command, which is the only way a reply reaches the chat in this turn, then complete its receipt.";
+
 function instruction(target: InboxAuditTarget, receiptValue: string): string {
-  const history = target.target.startsWith("thread:") ? "Use larkin im +threads-messages-list for this exact thread." : "Use larkin im +chat-messages-list for this exact chat.";
-  return `${history} Inspect first. When finished, run larkin inbox audit complete --receipt ${receiptValue} --outcome <no-finding|handled> --json. If a real finding needs a response, use the guarded reply path anchored at ${target.anchor}; otherwise stay silent.`;
+  const [kind, chatId, threadId] = target.target.split(":");
+  const thread = kind === "thread";
+  const read = thread
+    ? `larkin im +threads-messages-list --thread ${threadId} --order desc --page-size 20 --no-reactions --json`
+    : `larkin im +chat-messages-list --chat-id ${chatId} --order desc --page-size 20 --no-reactions --json`;
+  const reply = `larkin im +messages-reply --message-id <om_id> --text '<reply>'${thread ? " --reply-in-thread" : ""} --json`;
+  return [
+    `1. Read this ${thread ? "thread" : "chat"}: \`${read}\`.`,
+    `2. Answer each finding: \`${reply}\`.`,
+    `3. Complete: \`larkin inbox audit complete --receipt ${receiptValue} --outcome handled --json\` after replying, or \`--outcome no-finding\`.`,
+  ].join(" ");
 }
 
 function pendingRows(file: string, agentId: string): StoredTarget[] {
@@ -294,10 +308,10 @@ export function hasPendingInboxAuditTargets(file: string, agentId: string): bool
 
 /** Public read is intentionally completion-free: a caller crash leaves the target pending. */
 export function readInboxAuditTargets(file: string, agentId: string): {
-  version: 4; targets: Array<InboxAuditTarget & { revision: string; receipt: string; instruction: string }>; has_more: boolean; no_finding: "stay_silent";
+  version: 4; steps: string; targets: Array<InboxAuditTarget & { revision: string; receipt: string; instruction: string }>; has_more: boolean; no_finding: "stay_silent";
 } {
   const rows = pendingRows(file, agentId);
-  return { version: 4, targets: rows.slice(0, MAX_INBOX_AUDIT_TARGETS).map((row) => {
+  return { version: 4, steps: AUDIT_STEPS, targets: rows.slice(0, MAX_INBOX_AUDIT_TARGETS).map((row) => {
     const target = { target: row.target, anchor: row.anchor, observed_at: row.observed_at, source_seq: row.source_seq };
     const receiptValue = receipt(row);
     return { ...target, revision: revision(row), receipt: receiptValue, instruction: instruction(target, receiptValue) };

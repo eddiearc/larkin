@@ -42,7 +42,7 @@ if (fs.existsSync(bunEntry)) {
 process.stderr.write(
   "[larkin] 未找到可用的平台二进制，也未找到 Bun。\n" +
   "  - 联网重新安装会自动下载对应平台二进制：npm install -g larkin\n" +
-  "  - 或安装 Bun 1.3.14 后重试（会走 JS 入口 fallback）\n" +
+  "  - 或安装 Bun 1.4.4 后重试（会走 JS 入口 fallback）\n" +
   "  - 或从 GitHub Release 下载 standalone 二进制：https://github.com/eddiearc/larkin/releases\n",
 );
 process.exit(1);

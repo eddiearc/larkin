@@ -51,7 +51,17 @@ test("audit registry retains only originally wake=true human group/topic targets
     assert.equal(audit.targets.length, 2);
     assert.equal(audit.targets.every((row) => row.target.startsWith("chat:") || row.target.startsWith("thread:")), true);
     assert.equal(audit.targets.some((row) => row.target === `thread:${CHAT}:omt_topic` && row.anchor === "om_topic"), true);
-    assert.equal(audit.targets.every((row) => /Inspect first/.test(row.instruction) && /audit complete --receipt/.test(row.instruction)), true);
+    assert.equal(audit.targets.every((row) => /^1\. Read this /.test(row.instruction) && /audit complete --receipt .* --outcome handled/.test(row.instruction)), true);
+    const topic = audit.targets.find((row) => row.target.startsWith("thread:"));
+    const chat = audit.targets.find((row) => row.target.startsWith("chat:"));
+    assert.match(topic.instruction, /\+threads-messages-list --thread omt_topic /);
+    assert.match(topic.instruction, /\+messages-reply --message-id <om_id> --text '<reply>' --reply-in-thread --json/);
+    assert.match(topic.instruction, /2\. Answer each finding/);
+    assert.match(audit.steps, /unanswered human ask/);
+    assert.match(chat.instruction, new RegExp(`\\+chat-messages-list --chat-id ${CHAT} `));
+    assert.match(chat.instruction, /\+messages-reply --message-id <om_id> --text '<reply>' --json/);
+    assert.match(audit.steps, /only way a reply reaches the chat/);
+    assert.doesNotMatch(chat.instruction, /unanswered human ask/, "the finding definition is stated once, in steps");
     assert.equal(audit.no_finding, "stay_silent");
     for (let index = 0; index < MAX_INBOX_AUDIT_TARGETS + 2; index += 1) {
       observeInboxAuditTarget(file, "cli_other", { ...WAKE, chat_id: `oc_${index}a`, message_id: `om_other${index}` });

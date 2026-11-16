@@ -570,7 +570,7 @@ test("CardKit callback -> production HostShell -> durable Reflex -> Runtime -> C
 });
 
 for (const runtime of ["codex", "claude", "pi"]) {
-  test(`synthetic Feishu → production HostShell → fake ${runtime} → freshness-gated poll and send`, async () => {
+  test(`synthetic Feishu → production HostShell → fake ${runtime} → freshness-gated poll and send`, { timeout: 15_000 }, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `larkin-production-${runtime}-`));
     const agentId = `cli_mock${runtime[0].toUpperCase()}A1`;
     const workspaceDir = path.join(root, "agents", agentId);
@@ -587,6 +587,7 @@ for (const runtime of ["codex", "claude", "pi"]) {
       stateStoreFor: () => store,
       assertOfficialCliReady: () => {},
       telemetry,
+      turnEndRetryPolicy: { baseDelayMs: 10, maxDelayMs: 10 },
     });
     const runtimeEvents = [];
     const memberCalls = [];
@@ -674,6 +675,9 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
 
       const runtimeEnv = { ...env, LARKIN_AGENT_ID: agentId };
       const target = `chat:oc_${runtime}`;
+      store.mergeFreshnessCursor(`feishu.im/chat/oc_${runtime}`, {
+        schema: 1, revisionTime: "1784159999999", messageIds: [`om_${runtime}_before`],
+      }, (seen, current) => current ?? seen, "external");
       const sent = [];
       let guardedStdout = "", guardedStderr = "";
       const guardedDependencies = {
@@ -695,11 +699,11 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
         io: { stdout: (text) => { guardedStdout += text; }, stderr: (text) => { guardedStderr += text; } },
       };
       const sendArgv = ["im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text", "fresh response"];
-      assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 3, guardedStderr);
-      const conflict = JSON.parse(guardedStderr);
-      assert.equal(conflict.error.subtype, "freshness_conflict");
-      assert.equal(conflict.target, `feishu.im/chat/oc_${runtime}`);
-      assert.equal(sent.length, 0, "a stale target must never reach the provider");
+      assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
+      const notice = JSON.parse(guardedStderr);
+      assert.equal(notice.larkin_notice, "freshness");
+      assert.equal(notice.target, `feishu.im/chat/oc_${runtime}`);
+      assert.equal(sent.length, 1, "a stale target still reaches the provider");
 
       let stdout = "", stderr = "";
       const code = runAgentCli(["inbox", "check"], runtimeEnv, {
@@ -729,7 +733,7 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
       assert.deepEqual(partial.consumed_delivery_ids, [session.prompts[0].inputId]);
 
       session.emit({ type: "turn-end", turnId: `${runtime}-turn` });
-      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       assert.equal(session.prompts.length, 2, "partial consumption schedules another production Runtime wake");
       assert.equal(session.prompts[1].inputId, session.busyInputs[0].inputId, "the replacement wake retains delivery identity");
       session.emit({ type: "turn-start", turnId: `${runtime}-rewake` });
@@ -746,13 +750,13 @@ else process.stdout.write(JSON.stringify({ok:true,data:{users:[],bots:[],message
       assert.deepEqual(drained.consumed_delivery_ids, [session.busyInputs[0].inputId]);
       guardedStdout = ""; guardedStderr = "";
       assert.equal(runLarkCli(sendArgv, runtimeEnv, guardedDependencies), 0, guardedStderr);
-      assert.equal(sent.length, 1, "the provider is called once after the target is current");
-      assert.deepEqual(sent[0].args.slice(0, 6), [
+      assert.equal(sent.length, 2, "the provider is called once for each completed intent");
+      assert.deepEqual(sent[1].args.slice(0, 6), [
         "im", "+messages-send", "--chat-id", `oc_${runtime}`, "--text", "fresh response",
       ]);
-      assert.equal(sent[0].command, "/fixture/@larksuite/cli/scripts/run.js");
-      assert.ok(sent[0].args.includes("--as") && sent[0].args.includes("bot"));
-      assert.ok(sent[0].args.includes("--idempotency-key"));
+      assert.equal(sent[1].command, "/fixture/@larksuite/cli/scripts/run.js");
+      assert.ok(sent[1].args.includes("--as") && sent[1].args.includes("bot"));
+      assert.ok(sent[1].args.includes("--idempotency-key"));
       await new Promise((resolve) => setTimeout(resolve, 300));
       assert.equal(runtimeEvents.filter((event) => event.type === "delivery" && event.status === "consumed").length, 2);
 

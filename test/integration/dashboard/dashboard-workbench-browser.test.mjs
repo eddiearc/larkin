@@ -157,15 +157,7 @@ test.skipIf(!RUN)("real Chromium exercises the Agent workbench at desktop and mo
     failStatus = false;
     await page.getByRole("alert").getByRole("button", { name: "重试" }).click();
     await page.getByRole("alert").waitFor({ state: "hidden" });
-    await page.getByRole("button", { name: "全局设置" }).click();
-    await page.getByRole("dialog").getByLabel("真人群消息默认策略").selectOption("require");
-    await page.getByRole("dialog").getByRole("checkbox").check();
-    await page.getByRole("dialog").getByLabel("全局巡检间隔（分钟）").fill("30");
-    await page.screenshot({ path: path.join(evidence, "desktop-inbox-audit-settings.png"), fullPage: true });
-    await page.getByRole("dialog").getByRole("button", { name: "保存全局设置" }).click();
-    await assert.doesNotReject(page.getByRole("dialog").getByText(/已保存/).waitFor());
-    await page.getByRole("dialog").getByRole("button", { name: "关闭面板" }).click();
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).inboxAudit, { enabled: true, intervalMs: 30 * 60_000 });
+    assert.equal(await page.getByRole("button", { name: "全局设置" }).count(), 0, "every setting lives on its Agent");
 
     await page.getByLabel("Runtime").selectOption("claude");
     page.once("dialog", (dialog) => void dialog.dismiss());

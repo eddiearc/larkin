@@ -351,9 +351,11 @@ export async function main(): Promise<void> {
   console.error(`[start] unified supervisor pid=${process.pid} daemon=${daemon.pid} agents=${names.join(",")}`);
   console.error("[start] dashboard 已随服务启动；不会自动打开浏览器");
 
-  const requestStop = (signal: NodeJS.Signals): void => {
+  const requestStop = (signal: NodeJS.Signals, received: NodeJS.Signals = signal): void => {
     if (stopping) return;
     stopping = true;
+    // Name the stop signal so a service that vanished can be told apart from a crash (a crash logs its own line).
+    console.error(`[start] 收到 ${received}，停止服务 (pid=${process.pid} ppid=${process.ppid})`);
     if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null; }
     if (daemon.exitCode === null && daemon.signalCode === null) {
       daemon.kill(signal);
@@ -366,6 +368,8 @@ export async function main(): Promise<void> {
   };
   process.once("SIGINT", () => requestStop("SIGINT"));
   process.once("SIGTERM", () => requestStop("SIGTERM"));
+  // A closed terminal would otherwise end the supervisor without a trace; stop the same way as SIGTERM.
+  process.once("SIGHUP", () => requestStop("SIGTERM", "SIGHUP"));
   const daemonResult = await daemonFinal;
   try { cleanupStaleAgentControlSocket(configDir, controlToken); }
   catch (error) {

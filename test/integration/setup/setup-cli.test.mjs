@@ -205,6 +205,8 @@ denied("rmdirSync", () => fs.rmdirSync(createThenDelete));
     CLI_HELP_FS_MARKER: fsMarker,
     CLI_HELP_HOME: isolatedHome,
     CLI_HELP_CONFIG: configDir,
+    // Bun 1.4 writes its runtime transpiler cache under $HOME/.bun; that is Bun's own cache, not Larkin state.
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
     BUN_OPTIONS: [process.env.BUN_OPTIONS, `--preload=${preload}`].filter(Boolean).join(" "),
   };
   for (const command of ["start", "status", "setup", "model", "runtime", "effort", "chats", "agents"]) {

@@ -242,9 +242,10 @@ function parseWindowLine(line) {
   };
 }
 
+// `-u` keeps the tab separators: under a non-UTF-8 locale tmux prints them as "_".
 export function listIsolatedTmuxWindows(sessionName) {
   const listed = spawnSync("tmux", [
-    "list-windows", "-t", sessionName, "-F",
+    "-u", "list-windows", "-t", sessionName, "-F",
     "#{window_id}\t#{window_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{@larkin-tmux-owner}",
   ], { encoding: "utf8" });
   if (listed.status !== 0) return [];
@@ -253,7 +254,7 @@ export function listIsolatedTmuxWindows(sessionName) {
 
 export function listTmuxPanesForCwd(cwd) {
   const listed = spawnSync("tmux", [
-    "list-panes", "-a", "-F",
+    "-u", "list-panes", "-a", "-F",
     "#{session_name}\t#{window_id}\t#{window_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}",
   ], { encoding: "utf8" });
   if (listed.status !== 0) return [];
@@ -307,7 +308,7 @@ export function inspectRunningTmuxChild(sessionName, taskId, cwd) {
     try { manager.peek(taskId); } catch { continue; }
     const meta = JSON.parse(fs.readFileSync(path.join(manager.root, taskId, "meta.json"), "utf8"));
     if (meta.taskId !== taskId || fs.realpathSync(meta.cwd) !== fs.realpathSync(cwd)) continue;
-    const listed = spawnSync("tmux", ["list-panes", "-t", `=${meta.session}`, "-F", "#{window_id}\t#{window_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}"], { encoding: "utf8" });
+    const listed = spawnSync("tmux", ["-u", "list-panes", "-t", `=${meta.session}`, "-F", "#{window_id}\t#{window_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}"], { encoding: "utf8" });
     if (listed.status === 0 && listed.stdout.trim()) return runningChildFromWindow(parseWindowLine(listed.stdout.trim().split("\n")[0]));
   }
   return { window: null, running: false, processes: [] };

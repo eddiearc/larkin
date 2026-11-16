@@ -55,6 +55,7 @@ const OPTIONAL_SCOPE_CAPABILITIES: ReadonlyArray<{ capability: string; scopes: r
   { capability: "应用可用范围自动设为全员可见", scopes: ["admin:app.visibility"] },
   { capability: "发送者签名中的工号（employee_id）", scopes: ["contact:user.employee_id:readonly"] },
   { capability: "机器人消息搜索", scopes: ["search:message"] },
+  { capability: "流式卡片回复", scopes: ["cardkit:card:write"] },
   { capability: "消息收发与资源（基本消息能力）", scopes: ["im:message", "im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot", "im:resource"] },
 ];
 

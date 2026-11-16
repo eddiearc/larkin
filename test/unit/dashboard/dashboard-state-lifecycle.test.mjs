@@ -317,3 +317,19 @@ test("dashboard HTTP readiness accepts resumed sessions but rejects stale sessio
     fs.rmSync(temp, { recursive: true, force: true });
   }
 }, 15_000);
+
+test("the dashboard capability survives a restart and is reissued when its file is unsafe", async () => {
+  const { loadDashboardCapability } = await import(`${LIFECYCLE}?capability=${Date.now()}`);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-dashboard-capability-"));
+  try {
+    const file = path.join(root, "dashboard-capability");
+    const first = loadDashboardCapability(file);
+    assert.match(first, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(loadDashboardCapability(file), first, "a restarted dashboard keeps the capability an open page holds");
+    fs.chmodSync(file, 0o644);
+    const reissued = loadDashboardCapability(file);
+    assert.notEqual(reissued, first, "a capability others could read is not reused");
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

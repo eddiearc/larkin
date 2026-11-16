@@ -3,8 +3,19 @@ import { createLatestResponseGate, filterAgents, parseRoute, reconcileAgentId, r
 
 describe("dashboard route and selection state", () => {
   it("round-trips an Agent deep link and rejects unknown tabs", () => {
-    expect(parseRoute(routeSearch("cli_AgentB2", "configuration"))).toEqual({ agentId: "cli_AgentB2", tab: "configuration" });
-    expect(parseRoute("?agent=cli_AgentB2&tab=unknown")).toEqual({ agentId: "cli_AgentB2", tab: "overview" });
+    expect(parseRoute(routeSearch("cli_AgentB2", "advanced"))).toEqual({ agentId: "cli_AgentB2", tab: "advanced" });
+    expect(parseRoute("?agent=cli_AgentB2&tab=unknown")).toEqual({ agentId: "cli_AgentB2", tab: "activity" });
+  });
+
+  it("maps links to the old tabs onto the page that now holds them", () => {
+    expect(parseRoute("?agent=a&tab=overview").tab).toBe("activity");
+    expect(parseRoute("?agent=a&tab=conversation").tab).toBe("activity");
+    expect(parseRoute("?agent=a&tab=reminders").tab).toBe("activity");
+    expect(parseRoute("?agent=a&tab=rules").tab).toBe("persona");
+    expect(parseRoute("?agent=a&tab=configuration").tab).toBe("persona");
+    expect(parseRoute("?agent=a&tab=runtime").tab).toBe("persona");
+    expect(parseRoute("?agent=a&tab=workspace").tab).toBe("advanced");
+    expect(parseRoute("?agent=a&tab=logs").tab).toBe("advanced");
   });
 
   it("falls back when the selected Agent disappears and filters by name or App ID", () => {

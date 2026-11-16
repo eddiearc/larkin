@@ -14,6 +14,12 @@ const testManagedCli = (agent, env) => ({ command: { command: "/test/official-la
   env: { ...env, LARK_CHANNEL: "1", LARK_CHANNEL_CONFIG: path.join(agent.stateDir, "lark-channel-source", "config.json"),
     LARKSUITE_CLI_CONFIG_DIR: agent.larkConfigDir } });
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((yes) => { resolve = yes; });
+  return { promise, resolve };
+}
+
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-dashboard-directory-"));
   fs.chmodSync(root, 0o700);
@@ -99,6 +105,52 @@ test("dashboard config lists only explicit chat policies, resolves a missing loc
   const after = await get(controller, `/api/config?agent=${APP}`);
   assert.equal(after.status, 200);
   assert.deepEqual(after.body.agents[0].knownChats, [], "inherit removes the persisted override and therefore the Dashboard row");
+});
+
+test("GET /api/config?chats=0 returns the global values without looking up any group name", async () => {
+  const { createDashboardConfigController } = await import(`${CONTROLLER}?nochats=${Date.now()}`);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const resolutions = [];
+  const chatDirectoryResolver = { async resolve(input) { resolutions.push(input); return {}; } };
+  const controller = createDashboardConfigController({ csrfCapability: "test", env: f.env, chatDirectoryResolver });
+
+  const response = await get(controller, "/api/config?chats=0");
+  assert.equal(response.status, 200);
+  assert.ok(response.body.mentionPolicy && response.body.agents.length > 0);
+  assert.equal(response.body.agents[0].knownChats, undefined);
+  assert.equal(resolutions.length, 0, "the global settings sheet must not wait on Feishu group lookups");
+});
+
+test("group names resolved once are saved and answer later reads without waiting on Feishu", async () => {
+  const { createDashboardConfigController } = await import(`${CONTROLLER}?saved-names=${Date.now()}`);
+  const { mutateConfig } = await import(CONFIG);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const namesFile = path.join(f.root, "state", "agents", APP, "chat-names.json");
+  let next = () => Promise.resolve({ oc_explicit: "第一次查到的群名" });
+  const calls = [];
+  const chatDirectoryResolver = { resolve(input) { calls.push(input.chatIds); return next(); } };
+  const controller = createDashboardConfigController({ csrfCapability: "test", env: f.env, chatDirectoryResolver });
+  const names = (response) => Object.fromEntries(response.body.agents[0].knownChats.map(({ chatId, displayName }) => [chatId, displayName]));
+
+  assert.deepEqual(names(await get(controller, `/api/config?agent=${APP}`)), { oc_explicit: "第一次查到的群名" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(namesFile, "utf8")), { oc_explicit: "第一次查到的群名" });
+  assert.equal((fs.statSync(namesFile).mode & 0o777), 0o600);
+
+  const refresh = deferred();
+  next = () => refresh.promise;
+  assert.deepEqual(names(await get(controller, `/api/config?agent=${APP}`)), { oc_explicit: "第一次查到的群名" },
+    "a saved name answers while the Feishu refresh is still pending");
+  refresh.resolve({ oc_explicit: "改名后的群名" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(JSON.parse(fs.readFileSync(namesFile, "utf8")), { oc_explicit: "改名后的群名" }, "the background refresh updates the saved name");
+
+  mutateConfig(f.env, { kind: "set-chat-mention", agentId: APP, chatId: "oc_new", value: "require" }, { kind: "user" });
+  next = () => Promise.resolve({ oc_explicit: "改名后的群名", oc_new: "新群" });
+  assert.deepEqual(names(await get(controller, `/api/config?agent=${APP}`)), { oc_explicit: "改名后的群名", oc_new: "新群" },
+    "a group never resolved before waits for Feishu once");
+  assert.equal(calls.length, 3);
 });
 
 test("dashboard chat lookup reuses the managed Agent environment that scrubs foreign CLI homes", async () => {
@@ -472,13 +524,14 @@ test("Codex model directory reuses app-server model/list with five-minute cachin
   const discoverCodexModelCatalog = async (options) => {
     calls.push(options);
     await Promise.resolve();
-    return { effectiveModel: "gpt-5.4-mini", models: [{ id: "gpt-5.4-mini", label: "GPT-5.4-Mini", supportedReasoningEfforts: ["low", "medium"], defaultReasoningEffort: "medium" }] };
+    return { effectiveModel: "gpt-5.4-mini", models: [{ id: "gpt-5.4-mini", label: "GPT-5.4-Mini", supportedReasoningEfforts: ["low", "medium"], defaultReasoningEffort: "medium", supportsFast: true }] };
   };
   const resolver = module.createCodexModelDirectoryResolver({ discoverCodexModelCatalog, now: () => now, ttlMs: 5 * 60_000 });
   const input = { agentId: APP, cwd: "/tmp/codex-workspace", env: { CODEX_HOME: "/tmp/codex-home" } };
 
   const [first, concurrent] = await Promise.all([resolver.resolve(input), resolver.resolve(input)]);
   assert.deepEqual(first.map(({ id }) => id), ["default", "gpt-5.4-mini"]);
+  assert.deepEqual(first.map(({ supportsFast }) => supportsFast), [true, true], "default inherits the effective model's Fast support");
   assert.equal(first[0].label, "default: gpt-5.4-mini");
   assert.equal(Object.hasOwn(first[0], "supportedReasoningEfforts"), false);
   assert.equal(Object.hasOwn(first[0], "defaultReasoningEffort"), false);
@@ -642,4 +695,44 @@ test("PATCH set-agent-runtime rejects builtin-pi as an unknown runtime", async (
   assert.equal(response.status, 400);
   assert.match(response.body.error, /未知 runtime/);
   assert.equal(fs.readFileSync(path.join(f.root, "config.json"), "utf8"), before);
+});
+
+test("PATCH set-agent-sandbox saves the Codex sandbox and GET projects it", async () => {
+  const { createDashboardConfigController } = await import(`${CONTROLLER}?sandbox=${Date.now()}`);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const controller = createDashboardConfigController({ csrfCapability: "test", env: f.env, chatDirectoryResolver: { async resolve() { return {}; } } });
+  assert.equal((await get(controller, `/api/config?agent=${APP}`)).body.agents[0].sandbox, "danger-full-access");
+
+  const saved = await patch(controller, { operation: "set-agent-sandbox", agentId: APP, value: "workspace-write" });
+  assert.equal(saved.status, 200);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, "config.json"), "utf8")).agents[APP].sandbox, "workspace-write");
+  assert.equal((await get(controller, `/api/config?agent=${APP}`)).body.agents[0].sandbox, "workspace-write");
+
+  const before = fs.readFileSync(path.join(f.root, "config.json"), "utf8");
+  const rejected = await patch(controller, { operation: "set-agent-sandbox", agentId: APP, value: "read-only" });
+  assert.equal(rejected.status, 400);
+  assert.equal(fs.readFileSync(path.join(f.root, "config.json"), "utf8"), before);
+});
+
+test("a request from a page that predates the dashboard is told to reload, not given a generic rejection", async () => {
+  const { createDashboardConfigController, dashboardError } = await import(`${CONTROLLER}?stale-page=${Date.now()}`);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const controller = createDashboardConfigController({ csrfCapability: "current", env: f.env, chatDirectoryResolver: { async resolve() { return {}; } } });
+
+  const read = await get(controller, `/api/config?agent=${APP}`, { host: "localhost:9996", "x-larkin-csrf": "from-before-restart" });
+  assert.equal(read.status, 403);
+  assert.match(read.body.error, /刷新页面/);
+  const write = await patch(controller, { operation: "set-global-mention", value: "free" });
+  assert.equal(write.status, 403, "the patch helper presents the old capability");
+  assert.match(write.body.error, /刷新页面/);
+
+  assert.deepEqual(dashboardError(new Error("unsupported operation"), "保存失败"),
+    { status: 400, body: { error: "页面和正在运行的 larkin 版本不一致。刷新页面后再操作。" } });
+  assert.equal(dashboardError(new Error("request too large"), "保存失败").status, 413);
+  assert.deepEqual(dashboardError(new Error("没找到配置 /x/config.json，先跑 larkin setup"), "保存失败").body,
+    { error: "没找到配置 /x/config.json，先跑 larkin setup" }, "a message written for people is shown as is");
+  assert.deepEqual(dashboardError(new Error("EACCES: permission denied"), "保存失败").body,
+    { error: "保存失败：EACCES: permission denied" }, "an unexpected failure keeps its reason");
 });

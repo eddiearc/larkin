@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { TargetRootLayout, type AgentStatePaths } from "../platform/root-layout.js";
-import { acquireProcessLock, inspectProcess } from "../platform/process-state.js";
+import { acquireProcessLock, inspectProcess, pidAlive } from "../platform/process-state.js";
 import { isWindows } from "../platform/secure-metadata.js";
 import { isCanonicalInboxTarget, isUserDeliveryTarget, RUNTIME_REMINDER_TARGET, targetKeyOfInboxEnvelope, type InboxEnvelope } from "./inbox-projection.js";
 import { buildStrictProviderErrorInput, classifyStrictProviderError } from "../runtime/provider-error-classifier.js";
@@ -123,6 +123,8 @@ interface InboxSourceState {
   message_id: string;
   seq: number;
   kind?: string;
+  /** No message in the polled batch addressed the Agent, so it replies by command and no card opens. */
+  reply_by?: "command";
 }
 
 interface InboxReminderState {
@@ -228,7 +230,8 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       && (/^om_[A-Za-z0-9_-]+$/.test(row.message_id) || (row.target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(row.message_id)))
       && validSequence(row.seq)) {
       state.last_source = { target: row.target, message_id: row.message_id, seq: row.seq,
-        ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}) };
+        ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}),
+        ...(row.reply_by === "command" ? { reply_by: "command" as const } : {}) };
     }
   }
   if (raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) {
@@ -280,7 +283,8 @@ interface RuntimeDeliveryStore extends Record<string, unknown> {
 interface InboxLockOwner {
   version: 1;
   pid: number;
-  processStartToken: string;
+  /** Absent when the owner could not read its own start token, e.g. a sandbox that denies `ps`. */
+  processStartToken?: string;
   nonce: string;
 }
 
@@ -293,17 +297,15 @@ export interface AgentStateStoreDependencies {
 
 function newInboxLockOwner(inspect: InspectProcess): InboxLockOwner {
   const inspected = inspect(process.pid);
-  if (!inspected.ok || !inspected.startToken) {
-    throw new Error(`无法读取 Inbox lock owner 身份：${inspected.reason || "metadata incomplete"}`);
-  }
-  return { version: 1, pid: process.pid, processStartToken: inspected.startToken, nonce: crypto.randomUUID() };
+  const identity = inspected.ok && inspected.startToken ? { processStartToken: inspected.startToken } : {};
+  return { version: 1, pid: process.pid, ...identity, nonce: crypto.randomUUID() };
 }
 
 function validInboxLockOwner(value: unknown): value is InboxLockOwner {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const owner = value as Partial<InboxLockOwner>;
   return owner.version === 1 && Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0
-    && typeof owner.processStartToken === "string" && !!owner.processStartToken
+    && (owner.processStartToken === undefined || (typeof owner.processStartToken === "string" && !!owner.processStartToken))
     && typeof owner.nonce === "string" && /^[0-9a-f-]{36}$/i.test(owner.nonce);
 }
 
@@ -387,6 +389,10 @@ export class AgentStateStore {
       const age = Date.now() - stat.mtimeMs;
       return age >= INBOX_MALFORMED_LOCK_GRACE_MS ? "reclaimable" : "unknown";
     }
+    if (!pidAlive(owner.pid)) return "reclaimable";
+    // A live owner is reclaimed only when its start token proves the pid was reused. Without a
+    // token to compare, the lock may still be held, and its owner may still write back.
+    if (!owner.processStartToken) return "unknown";
     const inspected = this.inspect(owner.pid);
     if (!inspected.ok) return inspected.dead ? "reclaimable" : "unknown";
     if (!inspected.startToken) return "unknown";
@@ -410,7 +416,8 @@ export class AgentStateStore {
         malformedGraceMs: INBOX_MALFORMED_LOCK_GRACE_MS,
       });
     } catch (error) {
-      if (/lock 已被|无法取得 lock|正在创建|暂不能接管/.test(error instanceof Error ? error.message : String(error))) return false;
+      // A sandboxed process cannot record its own identity for the reclaim lock; it waits for another process to reclaim.
+      if (/lock 已被|无法取得 lock|正在创建|暂不能接管|无法读取当前进程身份/.test(error instanceof Error ? error.message : String(error))) return false;
       throw error;
     }
     try {
@@ -1110,8 +1117,14 @@ export class AgentStateStore {
           : [];
       });
       const userTargets = new Set(userSources.map((source) => source.target));
-      if (userSources.length && userTargets.size === 1) state.last_source = userSources.at(-1);
-      else delete state.last_source;
+      if (userSources.length && userTargets.size === 1) {
+        // Only a user message that addressed the Agent opens a reply card. A message that never woke it
+        // (read later, e.g. by an Inbox audit) carries no `wake` field at all, and one that woke it without
+        // an @ carries `mentions_you: false`; the audit reminder itself is not a user message and does not count.
+        const addressed = envelopes.some((envelope) => envelope.wake === true && envelope.mentions_you !== false
+          && isUserDeliveryTarget(targetKeyOfInboxEnvelope(envelope)));
+        state.last_source = { ...userSources.at(-1)!, ...(addressed ? {} : { reply_by: "command" as const }) };
+      } else delete state.last_source;
       this.replaceInboxUnlocked(remaining);
       this.writeJson("inboxState", state);
       return { envelopes, consumedDeliveryIds, seenThroughSeq, pendingCount };
@@ -1169,10 +1182,11 @@ export class AgentStateStore {
   }
 
   /** Return the most recently observed user Inbox source with a safe reply/send anchor. */
-  resolveCurrentInboxSource(): { deliveryTarget: string; deliveryAnchor: string } | null {
+  resolveCurrentInboxSource(): { deliveryTarget: string; deliveryAnchor: string; replyByCommand?: true } | null {
     return this.withInboxLock(this.file("inbox"), () => {
       const source = this.inboxState().last_source;
-      return source ? { deliveryTarget: source.target, deliveryAnchor: source.message_id } : null;
+      return source ? { deliveryTarget: source.target, deliveryAnchor: source.message_id,
+        ...(source.reply_by === "command" ? { replyByCommand: true as const } : {}) } : null;
     });
   }
 

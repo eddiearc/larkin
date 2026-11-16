@@ -1,5 +1,11 @@
-export const AGENT_TABS = ["overview", "conversation", "configuration", "reminders", "workspace", "logs"] as const;
+export const AGENT_TABS = ["activity", "persona", "reply", "advanced"] as const;
 export type AgentTab = typeof AGENT_TABS[number];
+
+/** Tab ids from the earlier seven-tab layout, so saved links still open the page that now holds that content. */
+const LEGACY_TABS: Record<string, AgentTab> = {
+  overview: "activity", conversation: "activity", reminders: "activity",
+  rules: "persona", configuration: "persona", runtime: "persona", workspace: "advanced", logs: "advanced",
+};
 
 export interface RouteState {
   agentId: string | null;
@@ -11,7 +17,7 @@ export function parseRoute(search: string): RouteState {
   const candidate = params.get("tab");
   return {
     agentId: params.get("agent"),
-    tab: AGENT_TABS.includes(candidate as AgentTab) ? candidate as AgentTab : "overview",
+    tab: AGENT_TABS.includes(candidate as AgentTab) ? candidate as AgentTab : LEGACY_TABS[candidate || ""] || "activity",
   };
 }
 

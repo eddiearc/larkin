@@ -9,6 +9,7 @@ import {
   type OwnedProcessRecord,
 } from "../platform/process-state.js";
 import { processCommandToken } from "../app/internal-command.js";
+import { exactMode } from "../platform/secure-metadata.js";
 
 const PUBLISHED_RUNTIME_DIRS = ["dist", "assets"];
 const RUNTIME_EXTENSIONS = new Set([".cjs", ".mjs", ".js", ".css", ".json", ".node", ".svg", ".wasm"]);
@@ -43,6 +44,26 @@ function publishedRuntimeFiles(root: string): string[] {
 }
 
 /** Same semver can contain a different local build, so hash every published shell runtime byte. */
+/**
+ * The dashboard's CSRF capability, kept in an owned 0600 file so a page opened before a restart keeps working.
+ * A missing or unsafe file gets a new value; if it cannot be written, the value lasts for this process only.
+ */
+export function loadDashboardCapability(file: string): string {
+  try {
+    const stat = fs.lstatSync(file);
+    const value = fs.readFileSync(file, "utf8").trim();
+    if (stat.isFile() && exactMode(stat, 0o600) && (typeof process.getuid !== "function" || stat.uid === process.getuid())
+        && /^[A-Za-z0-9_-]{43}$/.test(value)) return value;
+  } catch { /* missing or unreadable: issue a new one */ }
+  const value = crypto.randomBytes(32).toString("base64url");
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${value}\n`, { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, file);
+  } catch { try { fs.unlinkSync(temporary); } catch { /* nothing was written */ } }
+  return value;
+}
+
 export function dashboardBuildFingerprint(root: string): string {
   const hash = crypto.createHash("sha256");
   for (const relative of publishedRuntimeFiles(root)) {

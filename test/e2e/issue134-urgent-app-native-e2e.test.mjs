@@ -88,8 +88,8 @@ test("issue 134 e2e: official urgent_app is guarded and spawned with native argv
     assert.match(sent.stdout, /invalid_user_id_list/);
 
     const kinds = f.calls.map((args) => args[2] === "messages" ? `${args[2]} ${args[3]}` : args[2]);
-    assert.deepEqual(kinds, ["+messages-mget", "GET", "+chat-members-list", "messages urgent_app"]);
-    const write = f.calls.at(-1);
+    assert.deepEqual(kinds, ["+messages-mget", "+chat-members-list", "messages urgent_app", "GET"]);
+    const write = f.calls.find((args) => args[2] === "messages" && args[3] === "urgent_app");
     assert.deepEqual(write.slice(1, 4), ["im", "messages", "urgent_app"]);
     assert.equal(write[write.indexOf("--message-id") + 1], "om_issue134_own");
     assert.equal(write[write.indexOf("--user-id-type") + 1], "open_id");

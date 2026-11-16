@@ -56,40 +56,34 @@ test.skipIf(!RUN)("real Chromium saves Inbox audit settings through the local Da
     await page.goto(`${base}/?agent=${APP}&tab=configuration`, { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: APP, level: 1 }).waitFor({ timeout: 5_000 });
 
-    await page.getByRole("button", { name: "全局设置" }).click();
-    const global = page.getByRole("dialog");
-    assert.equal(await global.getByLabel("全局巡检间隔（分钟）").inputValue(), "1.001");
-    await global.getByLabel("全局巡检间隔（分钟）").fill("30");
-    await page.screenshot({ path: path.join(evidence, "desktop-inbox-audit-global.png"), fullPage: true });
-    await global.getByRole("button", { name: "保存全局设置" }).click();
-    await global.getByRole("status").getByText(/已保存/).waitFor();
-    assert.equal(await global.getByRole("checkbox").isChecked(), false, "gap-only save must not enable audit");
-    await global.getByRole("button", { name: "关闭面板" }).click();
+    assert.equal(await page.getByRole("button", { name: "全局设置" }).count(), 0, "Inbox audit is configured per Agent only");
 
-    await page.reload({ waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "全局设置" }).click();
-    await page.waitForFunction(() => document.querySelector('[aria-label="全局巡检间隔（分钟）"]')?.value === "30");
-    assert.equal(await global.getByLabel("全局巡检间隔（分钟）").inputValue(), "30");
-    assert.equal(await global.getByRole("checkbox").isChecked(), false);
-    await global.getByRole("button", { name: "关闭面板" }).click();
-
-    await page.getByLabel("Inbox 巡检设置").selectOption("on");
-    await page.getByLabel("Agent 巡检间隔（分钟）").fill("45");
+    await page.getByRole("tab", { name: "高级" }).click();
+    const toggle = page.getByLabel("Inbox 巡检开关");
+    // The checkbox is visually hidden behind the switch track, so click the switch the way a person would.
+    const flipSwitch = () => page.getByLabel("Inbox 巡检", { exact: true }).locator("label.audit-switch").click();
+    const gap = page.getByLabel("巡检间隔（分钟）");
+    assert.equal(await toggle.isChecked(), false);
+    assert.equal(await gap.inputValue(), "1.001", "an Agent without its own value shows the stored global interval");
+    await page.screenshot({ path: path.join(evidence, "desktop-inbox-audit-agent.png"), fullPage: true });
+    await flipSwitch();
+    await gap.fill("45");
     await page.getByRole("button", { name: "保存 Agent 配置" }).click();
     await page.getByRole("status").getByText(/已保存/).waitFor();
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[APP].inboxAudit, { enabled: true, intervalMs: 45 * 60_000 });
     await page.reload({ waitUntil: "networkidle" });
-    await page.waitForFunction(() => document.querySelector('[aria-label="Inbox 巡检设置"]')?.value === "on");
-    assert.equal(await page.getByLabel("Inbox 巡检设置").inputValue(), "on");
-    assert.equal(await page.getByLabel("Agent 巡检间隔（分钟）").inputValue(), "45");
+    await page.getByRole("tab", { name: "高级" }).click();
+    await page.waitForFunction(() => document.querySelector('[aria-label="巡检间隔（分钟）"]')?.value === "45");
+    assert.equal(await toggle.isChecked(), true);
 
-    await page.getByLabel("Inbox 巡检设置").selectOption("off");
+    await flipSwitch();
     await page.getByRole("button", { name: "保存 Agent 配置" }).click();
     await page.getByRole("status").getByText(/已保存/).waitFor();
     assert.equal(JSON.parse(fs.readFileSync(path.join(temp, "config.json"), "utf8")).agents[APP].inboxAudit.enabled, false);
-    await page.getByLabel("Agent 巡检间隔（分钟）").fill("0");
+    await gap.fill("0");
     await page.getByRole("button", { name: "保存 Agent 配置" }).click();
     await page.getByRole("status").getByText(/巡检间隔必须在 1 到 1440 分钟之间/).waitFor();
-    assert.equal(await page.getByLabel("Agent 巡检间隔（分钟）").inputValue(), "0");
+    assert.equal(await gap.inputValue(), "0");
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: path.join(evidence, "mobile-inbox-audit-agent.png"), fullPage: true });

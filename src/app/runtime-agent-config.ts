@@ -261,19 +261,30 @@ function runOfficialLarkCliAsync(command: OfficialLarkCliCommand, args: readonly
   });
 }
 
-function expectedRuntimeCommandShim(): string {
+function expectedRuntimeCommandShim(agent: Pick<RuntimeAgentConfig, "agentId" | "stateDir">): string {
   const standalone = process.env.LARKIN_STANDALONE === "1";
   const binaryEntry = fileURLToPath(new URL("./binary-entry.mjs", import.meta.url));
   const argumentsPrefix = standalone ? [] : [binaryEntry];
   const command = [process.execPath, ...argumentsPrefix].map(shellQuote).join(" ");
-  return `#!/bin/sh\nexec ${command} "$@"\n`;
+  const stateDir = path.resolve(agent.stateDir);
+  const configDir = path.resolve(stateDir, "../../..");
+  return [
+    "#!/bin/sh",
+    "export LARKIN_RUNTIME=1",
+    `export LARKIN_AGENT_ID=${shellQuote(agent.agentId)}`,
+    `export LARKIN_STATE_DIR=${shellQuote(stateDir)}`,
+    `export LARKIN_CONFIG_DIR=${shellQuote(configDir)}`,
+    `export LARKIN_HOME=${shellQuote(configDir)}`,
+    `exec ${command} "$@"`,
+    "",
+  ].join("\n");
 }
 
-export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">): string {
+export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "agentId" | "stateDir">): string {
   const stateDir = path.resolve(agent.stateDir);
   const commandDir = path.join(stateDir, "runtime-bin");
   assertSecureRuntimeCommandDirectory(commandDir);
-  const fileContents = expectedRuntimeCommandShim();
+  const fileContents = expectedRuntimeCommandShim(agent);
   for (const name of ["larkin"] as const) {
     const file = path.join(commandDir, name);
     const temporary = path.join(commandDir, `.${name}.${process.pid}.${crypto.randomUUID()}.tmp`);
@@ -284,7 +295,7 @@ export function installRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stat
   return commandDir;
 }
 
-function validateRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">): void {
+function validateRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "agentId" | "stateDir">): void {
   const commandDir = path.join(path.resolve(agent.stateDir), "runtime-bin");
   const directory = fs.lstatSync(commandDir);
   if (!directory.isDirectory() || directory.isSymbolicLink()
@@ -295,7 +306,7 @@ function validateRuntimeCommandShims(agent: Pick<RuntimeAgentConfig, "stateDir">
   if (!stat.isFile() || stat.isSymbolicLink()
       || (typeof process.getuid === "function" && stat.uid !== process.getuid())
       || (!exactMode(stat, 0o700) && !exactMode(stat, 0o500))) throw new Error("Runtime command shim 不安全");
-  if (fs.readFileSync(file, "utf8") !== expectedRuntimeCommandShim()) {
+  if (fs.readFileSync(file, "utf8") !== expectedRuntimeCommandShim(agent)) {
     throw new Error("Runtime command shim 内容无效");
   }
 }

@@ -145,7 +145,7 @@ function migrationError(group: string, subcommand?: string): string | null {
     return "attachment 已移除：发送附件请使用 `larkin im +messages-send --file/--image/--video/--audio`；下载请使用 `larkin im +messages-resources-download`。";
   }
   if (group === "server") return "server 已移除；飞书（Lark）群与消息信息请通过 `larkin im ...` 查询。";
-  if (group === "im") return "请通过 `larkin im ...` 使用飞书（Lark）命令；Runtime 会自动绑定当前 Bot identity，并在写入前执行 freshness gate。可运行 `larkin im --help` 查看帮助。";
+  if (group === "im") return "请通过 `larkin im ...` 使用飞书（Lark）命令；Runtime 会自动绑定当前 Bot identity，并在成功写入后给出非阻塞 freshness 提示。可运行 `larkin im --help` 查看帮助。";
   if (group === "profile" && subcommand !== "show") {
     return "profile 只保留只读的 `larkin profile show`；身份和凭证由 `larkin setup` 管理，不支持 update。";
   }

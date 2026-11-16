@@ -1,6 +1,6 @@
 {
   "name": "larkin",
-  "version": "0.5.14",
+  "version": "0.5.26",
   "private": false,
   "larkinPackageRole": "npm-published",
   "files": [
@@ -14,7 +14,7 @@
     "CONTRIBUTING.md",
     "artifacts/release/THIRD_PARTY_NOTICES.txt"
   ],
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.4",
   "license": "Apache-2.0",
   "type": "module",
   "description": "把 Codex、Claude Code 和 Pi Agent Runtime 接到飞书（Lark）的本地 Runtime Host",

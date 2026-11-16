@@ -2,6 +2,7 @@
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHostShell } from "../feishu/host-shell.js";
+import { replyModeFromEnv } from "../platform/reply-mode.js";
 import { ContextPromptBuilder } from "../agent/context-prompt.js";
 import { createNativeRuntimeAdapter } from "../runtime/runtime-adapters.js";
 import { createRuntimeHost, type RuntimeHost } from "../runtime/runtime-host.js";
@@ -99,7 +100,7 @@ export async function applyRuntimeAgentUpsert(
 
 export async function markConfigAppliedAfterRuntimeReady(
   env: NodeJS.ProcessEnv,
-  runningAgents: ReadonlyArray<{ agentId: string; runtime: string; model: string; effort?: string | null }>,
+  runningAgents: ReadonlyArray<{ agentId: string; runtime: string; model: string; effort?: string | null; sandbox?: string | null; fastMode?: boolean | null }>,
   runtimeReady: Promise<void>,
 ): Promise<void> {
   await runtimeReady;
@@ -108,7 +109,9 @@ export async function markConfigAppliedAfterRuntimeReady(
     for (const running of runningAgents) {
       const current = loaded.config.agents[running.agentId];
       if (!current || current.runtime !== running.runtime || current.model !== running.model
-          || (current.effort || null) !== (running.effort || null)) continue;
+          || (current.effort || null) !== (running.effort || null)
+          || (current.sandbox || null) !== (running.sandbox || null)
+          || Boolean(current.fastMode) !== Boolean(running.fastMode)) continue;
       markConfigApplied(env, running.agentId, runtimeConfigSignature(loaded.config, running.agentId));
     }
   } catch { /* Runtime is ready; apply projection stays pending on a concurrent config change. */ }
@@ -138,7 +141,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env, overrides: {
   const adapters = new Map<string, ReturnType<typeof createNativeRuntimeAdapter>>();
   env.LARKIN_DAEMON_EPOCH ||= new Date().toISOString();
   const runtimeHost = overrides.runtimeHost ?? createRuntimeHost({
-    promptBuilder: new ContextPromptBuilder(),
+    promptBuilder: new ContextPromptBuilder({ replyMode: replyModeFromEnv(env) }),
     stateStoreFor(agentId) {
       if (!env.LARKIN_HOME) throw new Error("LARKIN_HOME is required for Runtime delivery state");
       return createAgentStateStore(env.LARKIN_HOME, agentId);

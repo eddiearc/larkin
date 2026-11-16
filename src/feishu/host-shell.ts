@@ -377,18 +377,52 @@ export function createHostShell({
       runtimeReadiness: { runtime: agent.runtime, ...fallback, observedAt },
     });
   };
+  const inboundFailureReason = "Inbound Runtime delivery failed non-retryably; durable Inbox/ledger state is retained for recovery.";
+  const inboundFailureNextAction = "Inspect the delivery/status error, correct the Runtime or canonical Inbox state, then restart to replay safely.";
+  const failedDeliveryMessageIds = (health: unknown): string[] => isRecord(health) && Array.isArray(health.messageIds)
+    ? health.messageIds.filter((id): id is string => typeof id === "string" && Boolean(id)) : [];
   const recordInboundDeliveryFailure = (
     agent: ConfiguredAgent,
     code: "non_retryable_receipt" | "runtime_delivery_exception" | "runtime_delivery_event",
+    messageId?: string,
   ): void => {
     const at = new Date().toISOString();
-    const reason = "Inbound Runtime delivery failed non-retryably; durable Inbox/ledger state is retained for recovery.";
-    const nextAction = "Inspect the delivery/status error, correct the Runtime or canonical Inbox state, then restart to replay safely.";
+    const reason = inboundFailureReason;
+    const nextAction = inboundFailureNextAction;
+    // Every failed message keeps owing a proven consumption: a later failure may
+    // add one, but it must not drop an earlier requirement.
+    const messageIds = [...new Set([...failedDeliveryMessageIds(hostState.readStatus(agent).inboundDeliveryHealth),
+      ...(typeof messageId === "string" && messageId ? [messageId] : [])])];
     hostState.updateStatus(agent, {
-      inboundDeliveryHealth: { state: "error", code, at, reason, nextAction },
+      inboundDeliveryHealth: { state: "error", code, at, reason, nextAction, ...(messageIds.length ? { messageIds } : {}) },
     });
     projectFallbackRuntimeReadiness(agent, at, { state: "unavailable", reason, nextAction }, true);
     hostState.recordStatusError(agent, `${reason} ${nextAction} code=${code}`);
+  };
+  /**
+   * The inbound failure diagnostic is durable evidence, not a latch: once the
+   * canonical Inbox/ledger snapshot proves these exact messages were consumed,
+   * health returns to healthy without a restart and without a new turn. Only the
+   * readiness written by this failure is restored; an independent prerequisite,
+   * authentication or Runtime diagnostic is left untouched.
+   */
+  const clearProvenInboundDeliveryHealth = (agent: ConfiguredAgent): void => {
+    const status = hostState.readStatus(agent);
+    const health = status.inboundDeliveryHealth;
+    if (!isRecord(health) || health.state !== "error") return;
+    const messageIds = failedDeliveryMessageIds(health);
+    if (!messageIds.length) return;
+    let proven = false;
+    try { proven = stateStore(agent).provenConsumedInboundDeliveries(messageIds); }
+    catch (error) { log(`投递健康校验失败 agent=${agent.name}: ${errorMessage(error)}`); return; }
+    if (!proven) return;
+    const at = new Date().toISOString();
+    hostState.updateStatus(agent, { inboundDeliveryHealth: { state: "healthy", at } });
+    const readiness = status.runtimeReadiness;
+    if (isRecord(readiness) && readiness.state === "unavailable" && readiness.reason === inboundFailureReason) {
+      projectReadyUnlessUnresolvedAuth(agent, at);
+    }
+    log(`投递健康已恢复 agent=${agent.name} messages=${messageIds.join(",")}`);
   };
   const agentStates = new Map<string, AgentStateRecord>();
   const mergePersistedAgentState = (record: AgentStateRecord): void => {
@@ -575,6 +609,7 @@ export function createHostShell({
     if (agent.botOpenId && event.sender_id === agent.botOpenId) { log(`agent=${agent.name} 跳过自己发的消息`); return; }
     const telemetryMessageId = String(event.message_id || event.event_id || eventKey);
     let canonicalInboxDurable = false;
+    let canonicalMessageId = "";
     if (wake) telemetry?.beginMessage(agent.agentId, telemetryMessageId);
     if (event.event_id) inFlightEventIds.add(eventKey);
     try {
@@ -597,6 +632,7 @@ export function createHostShell({
         try { append = stateStore(agent).appendCanonicalInboxOnce(candidate); }
         catch (error) { throw new Error(`inbox 写失败: ${errorMessage(error)}`); }
         canonicalInboxDurable = true;
+        if (typeof candidate.message_id === "string") canonicalMessageId = candidate.message_id;
         // An event becomes permanently transport-seen only after the canonical
         // append/dedupe decision is durable. Agent model-seen state is untouched.
         if (event.event_id) seenEventIds.add(eventKey);
@@ -626,7 +662,7 @@ export function createHostShell({
       if (!wake || !inboxEnvelope) return;
       const receipt = await runtimeHost.deliver(agent.agentId, inboxEnvelope);
       if (receipt.status === "error") {
-        recordInboundDeliveryFailure(agent, "non_retryable_receipt");
+        recordInboundDeliveryFailure(agent, "non_retryable_receipt", String(inboxEnvelope.message_id || ""));
         hostState.appendStatusLog(agent, "deliverLog", {
           at: new Date().toISOString(), status: "error",
           reason: "non-retryable Runtime delivery error; durable recovery state retained",
@@ -657,7 +693,7 @@ export function createHostShell({
       if (wake) telemetry?.delivery(agent.agentId, telemetryMessageId, "error");
       if (canonicalInboxDurable) {
         log(`onFeishuMessage Runtime delivery failed agent=${agent.name}; canonical Inbox retained`);
-        recordInboundDeliveryFailure(agent, "runtime_delivery_exception");
+        recordInboundDeliveryFailure(agent, "runtime_delivery_exception", canonicalMessageId);
       } else {
         log(`onFeishuMessage 异常 agent=${agent.name}: ${error instanceof Error ? error.stack || error.message : String(error)}`);
         hostState.recordStatusError(agent, `onFeishuMessage: ${errorMessage(error)}`);
@@ -1421,6 +1457,7 @@ export function createHostShell({
     if (message.type === "agent-status") {
       log("agent:status", message.agentId, message.status);
       const observedAt = new Date().toISOString();
+      clearProvenInboundDeliveryHealth(agent);
       if (message.status === "error" || message.status === "inactive") {
         if (message.readiness?.state && message.readiness.state !== "ready") {
           hostState.updateStatus(agent, { runtimeReadiness: { ...message.readiness, observedAt } });
@@ -1466,7 +1503,8 @@ export function createHostShell({
       return;
     }
     if (message.type === "delivery") {
-      if (message.status === "error") recordInboundDeliveryFailure(agent, "runtime_delivery_event");
+      if (message.status === "error") recordInboundDeliveryFailure(agent, "runtime_delivery_event", message.messageId);
+      else if (message.status === "consumed") clearProvenInboundDeliveryHealth(agent);
       hostState.appendStatusLog(agent, "deliverLog", {
         at: new Date().toISOString(), deliveryId: message.deliveryId, messageId: message.messageId,
         status: message.status,

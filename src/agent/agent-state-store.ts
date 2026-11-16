@@ -846,6 +846,56 @@ export class AgentStateStore {
   }
 
   /**
+   * Prove that exactly these messages reached the Agent, from one locked canonical
+   * Inbox/ledger snapshot. Unrelated historical rows and ledger entries are not
+   * evidence about them, so a long Inbox backlog or a retained consumed row cannot
+   * veto the answer. Each required message must be absent from the canonical Inbox,
+   * recorded as consumed in the Runtime ledger, and, while it is still in the
+   * bounded message index, covered by its target's model-seen watermark. Anything
+   * malformed or still pending fails closed.
+   */
+  provenConsumedInboundDeliveries(requiredMessageIds: readonly string[]): boolean {
+    const required = requiredMessageIds.filter((id): id is string => typeof id === "string" && Boolean(id));
+    if (!required.length || required.length !== requiredMessageIds.length) return false;
+    if (new Set(required).size !== required.length) return false;
+    return this.withInboxLock(this.file("inbox"), () => {
+      let rows: InboxEnvelope[];
+      try { rows = this.readNdjson<InboxEnvelope>("inbox"); }
+      catch { return false; }
+      const pendingIds = new Set<string>();
+      for (const row of rows) {
+        if (!row || typeof row !== "object" || typeof row.message_id !== "string" || !row.message_id) return false;
+        try { targetKeyOfInboxEnvelope(row); } catch { return false; }
+        if (pendingIds.has(row.message_id)) return false;
+        pendingIds.add(row.message_id);
+      }
+      const state = this.readJson<InboxStateFile | null>("inboxState", null);
+      if (!state || state.version !== 2 || !state.targets || typeof state.targets !== "object" || Array.isArray(state.targets)
+        || !state.messages || typeof state.messages !== "object" || Array.isArray(state.messages)) return false;
+      const ledger = this.readJson<RuntimeDeliveryStore>("runtimeDeliveries", { version: 1, records: [] });
+      if (!Array.isArray(ledger.records)) return false;
+      const records = ledger.records.filter((record): record is RuntimeDeliveryRecord => Boolean(record)
+        && typeof record === "object" && !Array.isArray(record));
+      return required.every((messageId) => {
+        // A row still queued for the Agent is never consumption, whatever the ledger says.
+        if (pendingIds.has(messageId)) return false;
+        const matching = records.filter((record) => record.messageId === messageId);
+        if (matching.length !== 1) return false;
+        const record = matching[0]!;
+        if (record.status !== "consumed") return false;
+        const known = state.messages[messageId];
+        // The bounded message index may have pruned an older consumed entry; the
+        // drained row plus the consumed ledger record is then the whole evidence.
+        if (!known) return true;
+        if (!isCanonicalInboxTarget(known.target) || !validSequence(known.seq)) return false;
+        if (typeof record.target === "string" && record.target && record.target !== known.target) return false;
+        const target = state.targets[known.target];
+        return Boolean(target && Number.isSafeInteger(target.model_seen_seq) && target.model_seen_seq >= known.seq);
+      });
+    });
+  }
+
+  /**
    * Re-arm only the durable deliveries proven to be the context-window incident.
    * The Inbox bytes are intentionally untouched. An optional synchronous commit
    * hook lets RuntimeHost swap its in-memory generation while this same lock is

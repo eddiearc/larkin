@@ -49,12 +49,43 @@ test("global reply mode is stored once, projected onto every Agent and requires 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("an Agent's own reply mode overrides the global one and survives a global change", () => {
+  const { root, env } = fixture();
+  try {
+    configApi.mutateConfig(env, { kind: "set-global-reply-mode", value: "card" }, { kind: "user" });
+    const signatureBefore = configApi.runtimeConfigSignature(configApi.loadConfig(env).config, APP);
+    const result = configApi.mutateConfig(env, { kind: "set-agent-reply-mode", agentId: APP, value: "cli" }, { kind: "user" });
+    assert.equal(result.changedScope, "agent");
+    assert.equal(result.applyState, "saved_not_applied");
+    const stored = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
+    assert.equal(stored.agents[APP].replyMode, "cli");
+    assert.equal("replyMode" in stored.agents[OTHER], false);
+
+    let config = configApi.loadConfig(env).config;
+    assert.equal(config.agents[APP].replyMode, "cli");
+    assert.equal(config.agents[OTHER].replyMode, "card");
+    assert.equal(configApi.safeConfigView(config, APP).agents[0].replyMode, "cli");
+    const signatureOwn = configApi.runtimeConfigSignature(config, APP);
+    assert.notEqual(signatureOwn, signatureBefore);
+
+    configApi.mutateConfig(env, { kind: "set-global-reply-mode", value: "cli" }, { kind: "user" });
+    configApi.mutateConfig(env, { kind: "set-global-reply-mode", value: "card" }, { kind: "user" });
+    config = configApi.loadConfig(env).config;
+    assert.equal(config.agents[APP].replyMode, "cli");
+    assert.equal(configApi.runtimeConfigSignature(config, APP), signatureOwn, "a global change leaves an Agent with its own mode applied");
+
+    assert.throws(() => configApi.mutateConfig(env, { kind: "set-agent-reply-mode", agentId: APP, value: "both" }, { kind: "user" }), /card\/cli/);
+    fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify({ ...stored, agents: { ...stored.agents, [APP]: { ...stored.agents[APP], replyMode: "bogus" } } })}\n`, { mode: 0o600 });
+    assert.throws(() => configApi.loadConfig(env), /replyMode/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a per-session reply mode overrides the prompt builder default", () => {
   const builder = new ContextPromptBuilder({ replyMode: "card" });
   const input = { agentId: APP, runtime: "codex" };
-  assert.equal(builder.build(input).version, "larkin-standing-v41-card");
-  assert.equal(builder.build({ ...input, replyMode: "cli" }).version, "larkin-standing-v34");
-  assert.equal(new ContextPromptBuilder().build({ ...input, replyMode: "card" }).version, "larkin-standing-v41-card");
+  assert.equal(builder.build(input).version, "larkin-standing-v42-card");
+  assert.equal(builder.build({ ...input, replyMode: "cli" }).version, "larkin-standing-v35");
+  assert.equal(new ContextPromptBuilder().build({ ...input, replyMode: "card" }).version, "larkin-standing-v42-card");
 });
 
 test("card prompt drops Feishu reply recipes but keeps the safety boundaries", () => {

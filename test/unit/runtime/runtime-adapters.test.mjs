@@ -185,12 +185,11 @@ test("context prompt references only the supplied previous session archive", () 
 
 test("default context prompt consumes the Agent CLI manifest", () => {
   const prompt = new ContextPromptBuilder().build({ agentId: "cli_test", runtime: "pi" });
-  assert.equal(prompt.version, "larkin-standing-v34");
+  assert.equal(prompt.version, "larkin-standing-v35");
   assert.doesNotMatch(prompt.content, /## Previous session archive/);
   assert.match(prompt.content, /never emit feishu\.cn for a Lark tenant/);
   assert.match(prompt.content, /larkin reminder schedule/);
   assert.match(prompt.content, /explicit delivery target/);
-  assert.match(prompt.content, /Never infer recipients from a reminder title/);
   assert.doesNotMatch(prompt.content, /at most one bounded wait call per turn/);
   assert.doesNotMatch(prompt.content, /do not loop or call wait again in the same turn/);
   assert.match(prompt.content, /tmux-backed bash.*wait timeout|wait timeout.*not process failure/);
@@ -549,6 +548,63 @@ test("Codex resume failure falls back to a fresh thread with the same standing p
   assert.equal(fallback.method, "thread/start");
   assert.equal(fallback.params.threadId, undefined);
   assert.equal(fallback.params.developerInstructions, "standing");
+});
+
+test("Codex applies model, effort, and Fast to the live thread from its next turn", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child })
+    .createSession(create({ model: "gpt-old", reasoningEffort: "medium" }));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const threadRequest = child.writes.find((request) => request.method === "thread/start");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: threadRequest.id, result: { thread: { id: "thread-live" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(session.updateSettings({ model: "gpt-new", reasoningEffort: "low", fastMode: true }), true);
+  void session.prompt({ inputId: "wake-1", kind: "wake", text: "hi", attempt: 0 });
+  const turn = child.writes.find((request) => request.method === "turn/start");
+  assert.deepEqual({ ...turn.params, input: undefined },
+    { threadId: "thread-live", input: undefined, model: "gpt-new", effort: "low", serviceTier: "fast" });
+  assert.equal(child.writes.filter((request) => request.method === "thread/resume").length, 0);
+
+  for (const handBack of [{ model: "default", reasoningEffort: "low", fastMode: true },
+    { model: "gpt-new", reasoningEffort: null, fastMode: true }, { model: "gpt-new", reasoningEffort: "low", fastMode: false }]) {
+    assert.equal(session.updateSettings(handBack), false, `${JSON.stringify(handBack)} needs a fresh session`);
+  }
+});
+
+test("Codex resumes a thread once the replaced process releases its writer", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "thread-busy" }));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resume = child.writes.find((request) => request.method === "thread/resume");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id,
+    error: { code: -32600, message: "thread thread-busy already has an active writer" } })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const retry = child.writes.filter((request) => request.method === "thread/resume").at(-1);
+  assert.notEqual(retry.id, resume.id);
+  assert.equal(retry.params.threadId, "thread-busy");
+  assert.equal(retry.params.developerInstructions, "standing");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: retry.id, result: { thread: { id: "thread-busy" } } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(session.sessionId, "thread-busy");
+  assert.deepEqual(events.map(({ type }) => type), ["session-init"]);
+});
+
+test("Runtime events emitted before the first subscriber are replayed to it", async () => {
+  const child = new FakeProcess();
+  const session = await createNativeRuntimeAdapter("codex", { spawn: () => child }).createSession(create({ resumeSessionId: "thread-gone" }));
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resume = child.writes.find((request) => request.method === "thread/resume");
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: resume.id, error: { code: -32600, message: "permission denied" } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const events = [];
+  session.subscribe((event) => events.push(event));
+  assert.deepEqual(events, [{ type: "error", message: "permission denied" }]);
 });
 
 test("Codex sandbox defaults to danger-full-access and workspace-write keeps network plus Larkin state writable", async () => {
@@ -1838,7 +1894,8 @@ test("Codex, Claude and Pi emit ordered text-delta events with block boundaries 
   codex.child.stdout.write(`${JSON.stringify({ method: "item/started", params: { item: { type: "commandExecution", id: "c1", command: "curl -H 'Authorization: Bearer s3cr3t' x" } } })}\n`);
   await new Promise((resolve) => setImmediate(resolve));
   const toolEvent = codex.events.findLast((event) => event.type === "activity" && event.activity === "tool");
-  assert.deepEqual(toolEvent, { type: "activity", activity: "tool", name: "执行命令", toolId: "c1" }, "tool activity carries no arguments");
+  assert.deepEqual(toolEvent, { type: "activity", activity: "tool", name: "command",
+    text: "curl -H 'Authorization: Bearer s3cr3t' x", toolId: "c1" }, "tool activity carries the raw command");
 
   const child = new FakeProcess();
   const claude = await createNativeRuntimeAdapter("claude", {
@@ -1853,12 +1910,16 @@ test("Codex, Claude and Pi emit ordered text-delta events with block boundaries 
     { type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } } },
     { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "An" } } },
     { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "swer" } } },
-    { type: "assistant", session_id: "claude-delta", message: { content: [{ type: "text", text: "Answer" }] } },
+    { type: "assistant", session_id: "claude-delta", message: { content: [{ type: "text", text: "Answer" },
+      { type: "tool_use", id: "tu1", name: "Bash", input: { command: "git status", description: "Show status" } }] } },
     { type: "result", session_id: "claude-delta", is_error: false },
   ]) child.stdout.write(`${JSON.stringify(message)}\n`);
   await new Promise((resolve) => setImmediate(resolve));
   // The complete assistant message keeps feeding activity, but never duplicates the streamed text.
   assert.deepEqual(textDeltas(claudeEvents), ["|An", "swer"]);
+  assert.deepEqual(claudeEvents.find((event) => event.type === "activity" && event.activity === "tool"), {
+    type: "activity", activity: "tool", name: "Bash", text: '{"command":"git status","description":"Show status"}', toolId: "tu1",
+  }, "a structured tool input is shown as its raw JSON");
 
   let listener;
   const sdk = {
@@ -1879,4 +1940,8 @@ test("Codex, Claude and Pi emit ordered text-delta events with block boundaries 
   listener({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", delta: "{\"cmd\"" } });
   listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: " there" } });
   assert.deepEqual(textDeltas(piEvents), ["|Hi", " there"]);
+  listener({ type: "tool_execution_start", toolName: "bash", toolCallId: "pt1", args: { command: "ls -la" } });
+  assert.deepEqual(piEvents.findLast((event) => event.type === "activity" && event.activity === "tool"), {
+    type: "activity", activity: "tool", name: "bash", text: '{"command":"ls -la"}', toolId: "pt1",
+  });
 });

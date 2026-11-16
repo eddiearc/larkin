@@ -3,13 +3,11 @@ import type { HostAgent } from "./host-business-state.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
 
 interface EyeAgent extends HostAgent { feishuProfile?: string | null }
-interface Reaction { msgId: string; reactionId: string; replyInThread?: boolean; target?: string }
+interface Reaction { msgId: string; reactionId: string }
 interface EyeState {
   sawActive: boolean;
   fallbackTimer: NodeJS.Timeout | null;
   completionTimer: NodeJS.Timeout | null;
-  progressTimer: NodeJS.Timeout | null;
-  turnStartedAt: number;
   gen: number;
 }
 interface ApiResult { ok?: boolean; data?: { reaction_id?: string }; error?: unknown; [key: string]: unknown }
@@ -21,19 +19,6 @@ export interface ProcessingEyeEligibility {
   channelType?: string | null;
   parentChannelType?: string | null;
   mentionedBot?: boolean;
-  /** True when the inbound sits in a topic whose root/thread the bot already owns. */
-  botStartedTopic?: boolean;
-}
-
-export const BOT_TOPIC_ROOT_LIMIT = 256;
-const BOT_TOPIC_ID = /^om[t]?_[A-Za-z0-9_-]+$/;
-
-export interface BotTopicRootState {
-  bot_topic_roots?: unknown;
-}
-
-interface BotTopicRootStore {
-  mutateJson<T, R>(key: "freshnessState", fallback: T, operation: (value: T) => R): R;
 }
 
 function isPrivateChat(input: ProcessingEyeEligibility): boolean {
@@ -43,48 +28,9 @@ function isPrivateChat(input: ProcessingEyeEligibility): boolean {
   return String(input.parentChannelType || "").toLowerCase() === "dm";
 }
 
-/** OnIt 给私聊、入站 @bot（含 @all），或用户在 AI 消息下发起的话题里说话。群未@且非 AI 话题不点。 */
+/** OnIt 只给明确找机器人的消息：私聊，或入站 @bot（含 @all）。群里未 @ 的消息（含话题内）不点。 */
 export function shouldShowProcessingEye(input: ProcessingEyeEligibility): boolean {
-  if (isPrivateChat(input)) return true;
-  if (input.mentionedBot === true) return true;
-  return input.botStartedTopic === true;
-}
-
-export function listBotTopicRoots(state: BotTopicRootState | null | undefined): string[] {
-  if (!Array.isArray(state?.bot_topic_roots)) return [];
-  return state.bot_topic_roots.filter((id): id is string => typeof id === "string" && BOT_TOPIC_ID.test(id));
-}
-
-export function rememberBotTopicRoot(ids: readonly string[], candidate: string | null | undefined): string[] {
-  const id = String(candidate || "");
-  if (!BOT_TOPIC_ID.test(id) || ids.includes(id)) return [...ids];
-  return [...ids, id].slice(-BOT_TOPIC_ROOT_LIMIT);
-}
-
-/** 机器人成功发出的 `om_`/`omt_` 记为话题根，供后续「AI 发起的话题」判定，不做飞书回查。 */
-export function persistBotTopicRoot(store: BotTopicRootStore, candidate: string | null | undefined): void {
-  const id = String(candidate || "");
-  if (!BOT_TOPIC_ID.test(id)) return;
-  store.mutateJson<{ version: 1; cursors?: Record<string, unknown>; bot_topic_roots?: string[] }, void>(
-    "freshnessState",
-    { version: 1, cursors: {} },
-    (state) => {
-      state.bot_topic_roots = rememberBotTopicRoot(listBotTopicRoots(state), id);
-    },
-  );
-}
-
-export function isBotStartedTopic(input: {
-  threadId?: string | null;
-  rootId?: string | null;
-  ownedIds?: readonly string[] | null;
-}): boolean {
-  const threadId = String(input.threadId || "");
-  if (!threadId) return false;
-  const owned = new Set(input.ownedIds || []);
-  if (owned.has(threadId)) return true;
-  const rootId = String(input.rootId || "");
-  return Boolean(rootId) && owned.has(rootId);
+  return isPrivateChat(input) || input.mentionedBot === true;
 }
 
 export interface ProcessingEyeOptions {
@@ -93,9 +39,6 @@ export interface ProcessingEyeOptions {
   recordStatusError?: (agent: EyeAgent, text: string) => void;
   readPending?: (agent: EyeAgent) => Reaction[];
   writePending?: (agent: EyeAgent, items: readonly Reaction[]) => void;
-  lastOutboundAt?: (agent: EyeAgent, target?: string) => number | null;
-  recordOutboundAt?: (agent: EyeAgent, target?: string) => void;
-  now?: () => number;
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
   envForAgent?: (agent: EyeAgent) => NodeJS.ProcessEnv;
@@ -114,7 +57,6 @@ export class ProcessingEyeOrchestrator {
   private readonly recordError: (agent: EyeAgent, text: string) => void;
   private readonly setTimer: typeof setTimeout;
   private readonly clearTimer: typeof clearTimeout;
-  private readonly now: () => number;
 
   constructor(private readonly options: ProcessingEyeOptions = {}) {
     this.execFile = options.execFile ?? nodeExecFile;
@@ -122,7 +64,6 @@ export class ProcessingEyeOrchestrator {
     this.recordError = options.recordStatusError ?? (() => {});
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
-    this.now = options.now ?? Date.now;
   }
 
   larkApi(agent: EyeAgent, method: string, apiPath: string, data: unknown, callback?: ApiCallback): void {
@@ -160,7 +101,7 @@ export class ProcessingEyeOrchestrator {
   private getState(agent: EyeAgent): EyeState {
     const existing = this.state.get(agent.agentId);
     if (existing) return existing;
-    const created = { sawActive: false, fallbackTimer: null, completionTimer: null, progressTimer: null, turnStartedAt: 0, gen: 0 };
+    const created = { sawActive: false, fallbackTimer: null, completionTimer: null, gen: 0 };
     this.state.set(agent.agentId, created);
     return created;
   }
@@ -171,12 +112,6 @@ export class ProcessingEyeOrchestrator {
     state.completionTimer = null;
   }
 
-  private cancelProgress(state: EyeState): void {
-    if (!state.progressTimer) return;
-    this.clearTimer(state.progressTimer);
-    state.progressTimer = null;
-  }
-
   restoreAndClear(agent: EyeAgent): void {
     let leftovers: Reaction[] = [];
     try { leftovers = this.options.readPending?.(agent) || []; } catch { return; }
@@ -185,7 +120,7 @@ export class ProcessingEyeOrchestrator {
     this.clear(agent, "启动清扫遗留");
   }
 
-  add(agent: EyeAgent, msgId: string, options: { replyInThread?: boolean; target?: string } = {}): void {
+  add(agent: EyeAgent, msgId: string): void {
     if (!agent.feishuProfile || !msgId || !msgId.startsWith("om_")) {
       this.log(`👀 跳过 agent=${agent.name} msg=${msgId || "?"} profile=${agent.feishuProfile || "缺"}（不满足点表情条件）`);
       return;
@@ -198,9 +133,7 @@ export class ProcessingEyeOrchestrator {
     // add itself therefore establishes an active generation instead of
     // erasing activity already observed for that turn.
     state.sawActive = true;
-    state.turnStartedAt = this.now();
     this.cancelCompletion(state);
-    this.cancelProgress(state);
     if (state.fallbackTimer) this.clearTimer(state.fallbackTimer);
     const generation = state.gen;
     let fallbackTimer: NodeJS.Timeout;
@@ -210,19 +143,6 @@ export class ProcessingEyeOrchestrator {
       this.clear(agent, "15分钟兜底");
     }, 15 * 60 * 1000);
     state.fallbackTimer = fallbackTimer;
-    let progressTimer: NodeJS.Timeout;
-    progressTimer = this.setTimer(() => {
-      const current = this.state.get(agent.agentId);
-      if (current?.gen !== generation || current.progressTimer !== progressTimer) return;
-      current.progressTimer = null;
-      const pending = this.pending.get(agent.agentId) || [];
-      const anchor = pending.at(-1);
-      if (!anchor) return;
-      const lastOutboundAt = this.options.lastOutboundAt?.(agent, anchor.target) ?? null;
-      if (lastOutboundAt !== null && lastOutboundAt >= current.turnStartedAt) return;
-      this.sendProgress(agent, anchor);
-    }, 2 * 60 * 1000);
-    state.progressTimer = progressTimer;
     this.larkApi(agent, "POST", `/open-apis/im/v1/messages/${msgId}/reactions`, { reaction_type: { emoji_type: "OnIt" } }, (error, result) => {
       const reactionId = result?.data?.reaction_id;
       if (!reactionId) {
@@ -235,8 +155,7 @@ export class ProcessingEyeOrchestrator {
         return;
       }
       const list = this.pending.get(agent.agentId) || [];
-      list.push({ msgId, reactionId, ...(options.replyInThread ? { replyInThread: true } : {}),
-        ...(options.target ? { target: options.target } : {}) });
+      list.push({ msgId, reactionId });
       this.pending.set(agent.agentId, list);
       this.save(agent);
     });
@@ -249,7 +168,6 @@ export class ProcessingEyeOrchestrator {
       state.sawActive = false;
       if (state.fallbackTimer) { this.clearTimer(state.fallbackTimer); state.fallbackTimer = null; }
       this.cancelCompletion(state);
-      this.cancelProgress(state);
     }
     const list = this.pending.get(agent.agentId) || [];
     if (!list.length) {
@@ -267,27 +185,6 @@ export class ProcessingEyeOrchestrator {
     }
     // 执行结束（含正常完成）：只摘除 👀，不再追加任何完成 reaction（用户 2026-08-12 要求）。
     this.log(`👀 已摘 agent=${agent.name} n=${list.length} 原因=${reason || "?"}`);
-  }
-
-  private sendProgress(agent: EyeAgent, anchor: Reaction): void {
-    const selected = this.options.cliForAgent?.(agent) ?? (() => {
-      const managed = managedOfficialLarkCli(agent, this.options.envForAgent?.(agent) ?? process.env);
-      return { command: managed.command.command, argsPrefix: managed.command.argsPrefix, env: managed.env };
-    })();
-    const args = ["im", "+messages-reply", "--message-id", anchor.msgId,
-      ...(anchor.replyInThread ? ["--reply-in-thread"] : []),
-      "--text", "我还在处理中，完成后会汇总更新。", "--json", "--as", "bot"];
-    this.execFile(selected.command, [...selected.argsPrefix, ...args], { encoding: "utf8", timeout: 10_000, env: selected.env },
-      (error, stdout, stderr) => {
-        if (error) {
-          const code = (error as { code?: number | string }).code;
-          const detail = String(stderr || "").trim().slice(0, 160) || String(stdout || "").trim().slice(0, 120);
-          this.log(`长任务进度发送失败 agent=${agent.name}: exit=${code ?? "?"}${detail ? ` | ${detail}` : ""}`);
-          return;
-        }
-        this.options.recordOutboundAt?.(agent, anchor.target);
-        this.log(`长任务进度已发送 agent=${agent.name} msg=${anchor.msgId}`);
-      });
   }
 
   observeActivity(agent: EyeAgent, activity: string | undefined): void {

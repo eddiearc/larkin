@@ -141,7 +141,7 @@ describe("Agent-centric dashboard workbench", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { level: 1, name: "Builder" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "回复规则" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByRole("heading", { level: 3, name: "群策略" })).toBeVisible();
+    expect(await screen.findByRole("heading", { level: 3, name: "单独设置的群" })).toBeVisible();
     expect(screen.getByText("构建群")).toBeVisible();
     expect(screen.queryByText("继承群")).not.toBeInTheDocument();
     expect(screen.queryByText(/覆盖链/i)).not.toBeInTheDocument();
@@ -152,25 +152,42 @@ describe("Agent-centric dashboard workbench", () => {
     expect(screen.getByText("没有匹配的群")).toBeVisible();
   });
 
-  it("looks up group names only for the reply tab, not for the other tabs or global settings", async () => {
+  it("offers the group policy as explained choices", async () => {
     window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
     render(<App />);
-    expect(await screen.findByRole("heading", { level: 3, name: "群策略" })).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    await screen.findByRole("dialog");
+    const policy = await screen.findByRole("radiogroup", { name: "群消息策略" });
+    expect(within(policy).getByRole("radio", { name: /^只回 @ 它的/ })).toBeChecked();
+    expect(within(policy).queryByRole("radio", { name: /跟随全局/ })).not.toBeInTheDocument();
+    await userEvent.click(within(policy).getByRole("radio", { name: /^每条都看/ }));
+    expect(within(policy).getByRole("radio", { name: /^每条都看/ })).toBeChecked();
+    expect(screen.getByRole("button", { name: "保存 Agent 配置" })).toBeEnabled();
+  });
+
+  it("says what Inbox audit does now and how", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { level: 1, name: "Builder" });
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    const toggle = await screen.findByLabelText("Inbox 巡检开关");
+    expect(screen.getByRole("note")).toHaveTextContent("已关闭");
+    await userEvent.click(toggle);
+    expect(screen.getByRole("note")).toHaveTextContent(/约 \d+ 分钟内回头检查一次/);
+    expect(screen.getByText("巡检具体怎么做")).toBeVisible();
+  });
+
+  it("looks up group names only for the reply tab, not for the other tabs", async () => {
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
+    render(<App />);
+    expect(await screen.findByRole("heading", { level: 3, name: "单独设置的群" })).toBeVisible();
     const configReads = () => vi.mocked(fetch).mock.calls.map(([input]) => String(input)).filter((url) => url.startsWith("/api/config"));
-    await waitFor(() => expect(configReads()).toContain("/api/config?chats=0"));
+    await waitFor(() => expect(configReads()).toContain("/api/config?agent=cli_AgentB2&chats=0"));
     expect(configReads().filter((url) => !url.includes("chats=0"))).toEqual(["/api/config?agent=cli_AgentB2"]);
     expect(configReads()).toContain("/api/config?agent=cli_AgentB2&chats=0");
   });
 
-  it("separates global settings and protects an Agent draft before navigation", async () => {
+  it("has no global settings and protects an Agent draft before navigation", async () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    expect(await screen.findByRole("dialog")).toBeVisible();
-    expect(within(screen.getByRole("dialog")).getByRole("heading", { name: "全局设置" })).toBeVisible();
-    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "关闭面板" }));
+    expect(screen.queryByRole("button", { name: "全局设置" })).not.toBeInTheDocument();
 
     const runtime = await screen.findByLabelText("Runtime");
     await userEvent.selectOptions(runtime, "claude");
@@ -181,7 +198,7 @@ describe("Agent-centric dashboard workbench", () => {
     expect(window.location.search).toContain("agent=cli_AgentB2");
   });
 
-  it("saves the global reply mode and re-applies it to every Agent, reporting busy ones", async () => {
+  it("saves the Agent's own reply mode and applies it to that Agent", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     const applied: string[] = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -189,45 +206,35 @@ describe("Agent-centric dashboard workbench", () => {
       if (url.pathname === "/api/status") return ok(status);
       if (url.pathname === "/api/config" && init?.method === "PATCH") {
         mutations.push(JSON.parse(String(init.body)));
-        return ok({ revision: "sha256:global-reply-mode", applyState: "saved_not_applied" });
+        return ok({ revision: "sha256:agent-reply-mode", applyState: "saved_not_applied" });
       }
       if (url.pathname === "/api/config/apply") {
-        const { agentId } = JSON.parse(String(init?.body));
-        applied.push(agentId);
-        return agentId === "cli_AgentA1"
-          ? Promise.resolve({ ok: false, status: 409, json: async () => ({ error: "configuration saved but apply failed" }) })
-          : ok({ ok: true, agentId, applyState: "applied" });
+        applied.push(JSON.parse(String(init?.body)).agentId);
+        return ok({ ok: true, agentId: "cli_AgentB2", applyState: "applied" });
       }
       if (url.pathname === "/api/config") return ok(config(url.searchParams.get("agent") || undefined));
       if (url.pathname === "/api/models/codex") return ok({ models: [{ id: "default", label: "default" }] });
       throw new Error(`unexpected request ${url}`);
     }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
     render(<App />);
-    await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    const dialog = await screen.findByRole("dialog");
-    const replyMode = within(dialog).getByLabelText("回复方式");
-    expect(replyMode).toHaveValue("cli");
-    await userEvent.selectOptions(replyMode, "card");
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent("cli_AgentA1 暂未应用"));
-    expect(mutations).toEqual([{ operation: "set-global-reply-mode", value: "card" }]);
-    expect(applied).toEqual(["cli_AgentA1", "cli_AgentB2", "cli_AgentC3"]);
+    const replyMode = await screen.findByRole("radiogroup", { name: "回复方式" });
+    expect(within(replyMode).getByRole("radio", { name: /^普通消息/ })).toBeChecked();
+    await userEvent.click(within(replyMode).getByRole("radio", { name: /^流式卡片/ }));
+    await userEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("配置已保存并应用"));
+    expect(mutations).toEqual([{ operation: "set-agent-reply-mode", agentId: "cli_AgentB2", value: "card" }]);
+    expect(applied).toEqual(["cli_AgentB2"]);
   });
 
   it("does not expose a processing-eye toggle after the switch was removed", async () => {
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).queryByLabelText("处理中表情开关")).not.toBeInTheDocument();
-    expect(within(dialog).queryByText("处理中表情")).not.toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: "关闭面板" }));
     expect(screen.queryByLabelText("处理中表情设置")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "处理中表情" })).not.toBeInTheDocument();
   });
 
-  it("keeps Inbox audit out of 全局设置 and turns it on per Agent", async () => {
+  it("turns Inbox audit on per Agent", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
@@ -242,10 +249,6 @@ describe("Agent-centric dashboard workbench", () => {
     }));
     render(<App />);
     await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).queryByText("Inbox 巡检")).not.toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: "关闭面板" }));
     await userEvent.click(screen.getByRole("tab", { name: "高级" }));
     const toggle = await screen.findByLabelText("Inbox 巡检开关");
     expect(toggle).not.toBeChecked();
@@ -283,7 +286,7 @@ describe("Agent-centric dashboard workbench", () => {
     await userEvent.type(gap, "30");
 
     await userEvent.click(screen.getByRole("tab", { name: "回复规则" }));
-    await userEvent.selectOptions(await screen.findByLabelText("群消息策略"), "free");
+    await userEvent.click(within(await screen.findByRole("radiogroup", { name: "群消息策略" })).getByRole("radio", { name: /^每条都看/ }));
     await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
     await waitFor(() => expect(mutations).toEqual([{ operation: "set-agent-mention", agentId: "cli_AgentB2", value: "free" }]));
 
@@ -402,14 +405,13 @@ describe("Agent-centric dashboard workbench", () => {
       if (url.pathname === "/api/agent-capabilities") return ok({ runtime: "codex", items: [], unsupported: [] });
       throw new Error(`unexpected request ${url}`);
     }));
+    window.history.replaceState(null, "", "/?agent=cli_AgentB2&tab=reply");
     render(<App />);
-    await screen.findByRole("heading", { level: 1, name: "Builder" });
-    await userEvent.click(screen.getByRole("button", { name: "全局设置" }));
-    const dialog = await screen.findByRole("dialog");
-    await userEvent.selectOptions(within(dialog).getByLabelText("真人群消息默认策略"), "require");
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存全局设置" }));
-    await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent("这个页面已过期，刷新页面后再操作"));
-    expect(within(dialog).getByLabelText("真人群消息默认策略")).toHaveValue("require");
+    const policy = await screen.findByRole("radiogroup", { name: "群消息策略" });
+    await userEvent.click(within(policy).getByRole("radio", { name: /^每条都看/ }));
+    await userEvent.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("这个页面已过期，刷新页面后再操作"));
+    expect(within(policy).getByRole("radio", { name: /^每条都看/ })).toBeChecked();
   });
 
   it("filters the sidebar and preserves last-known status on polling errors", async () => {

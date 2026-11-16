@@ -81,8 +81,8 @@ function completionEvent(marker, taskId = "task-done") {
 test("pi-tmux-bash dataset pins own bundle revision, non-git cwd, and standing v34", () => {
   assert.equal(DATASET.dataset, "pi-tmux-bash");
   assert.equal(DATASET.version, 1);
-  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v34");
-  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v34");
+  assert.equal(DATASET.standing_prompt_version, "larkin-standing-v35");
+  assert.equal(DATASET.model.standing_prompt_version, "larkin-standing-v35");
   assert.equal(DATASET.workspace.success_path, "non-git-cwd");
   assert.equal(DATASET.workspace.cwd_preservation, "exact");
   assert.equal(DATASET.workspace.spaces_in_path, true);
@@ -136,9 +136,9 @@ test("pi-tmux-bash dataset pins own bundle revision, non-git cwd, and standing v
 });
 
 test("standing prompt v34 keeps conditional tmux-backed bash guidance", () => {
-  assert.equal(LARKIN_STANDING_PROMPT_VERSION, "larkin-standing-v34");
+  assert.equal(LARKIN_STANDING_PROMPT_VERSION, "larkin-standing-v35");
   const pi = buildPrompt("pi");
-  assert.equal(pi.version, "larkin-standing-v34");
+  assert.equal(pi.version, "larkin-standing-v35");
   assert.match(pi.content, /## Long-running commands \(pi\)/);
   for (const line of PI_TMUX_BASH_GUIDANCE) {
     assert.equal(pi.content.includes(line), true, line);

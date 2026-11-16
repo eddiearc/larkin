@@ -473,7 +473,7 @@ function dashboardMutation(value: Record<string, unknown>): ConfigMutation {
     "set-agent-model": ["operation", "agentId", "model"], "set-agent-effort": ["operation", "agentId", "effort"],
     "set-global-inbox-audit": ["operation", "enabled", "intervalMs"], "set-agent-inbox-audit": ["operation", "agentId", "enabled", "intervalMs"],
     "set-global-reply-mode": ["operation", "value"], "set-agent-sandbox": ["operation", "agentId", "value"],
-    "set-agent-fast-mode": ["operation", "agentId", "value"],
+    "set-agent-fast-mode": ["operation", "agentId", "value"], "set-agent-reply-mode": ["operation", "agentId", "value"],
   };
   if (!allowed[operation] || Object.keys(value).some((key) => !allowed[operation].includes(key))) throw new Error("unsupported operation");
   if (operation === "set-global-mention") return { kind: operation, value: String(value.value) as "require" | "free" };
@@ -496,6 +496,7 @@ function dashboardMutation(value: Record<string, unknown>): ConfigMutation {
     if (typeof value.value !== "boolean") throw new Error("invalid fast mode");
     return { kind: operation, agentId, value: value.value };
   }
+  if (operation === "set-agent-reply-mode") return { kind: operation, agentId, value: String(value.value) as "card" | "cli" };
   if (operation === "set-agent-sandbox") return { kind: operation, agentId, value: String(value.value) as AgentSandbox };
   if (operation === "set-agent-model") return { kind: operation, agentId, model: String(value.model || "") };
   return { kind: "set-agent-effort", agentId, effort: value.effort === null || value.effort === "default" ? null : String(value.effort || "") };

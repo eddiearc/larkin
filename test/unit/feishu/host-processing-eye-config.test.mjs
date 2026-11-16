@@ -75,10 +75,11 @@ async function ingest(host, agentId, {
   });
 }
 
-test("Host posts OnIt for DM, group @, and bot-started topics, and skips ordinary group messages", async () => {
+test("Host posts OnIt only for DM and group @, including inside topics the bot started", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-processing-eye-host-gate-"));
   const agentId = "cli_eyeGateA1";
   writeConfig(root, agentId);
+  // Pre-0.5.22 state remembered bot topic roots; the leftover key must not bring back no-@ OnIt.
   const freshnessFile = path.join(root, "state", "agents", agentId, "freshness-state.json");
   fs.mkdirSync(path.dirname(freshnessFile), { recursive: true, mode: 0o700 });
   fs.writeFileSync(freshnessFile, `${JSON.stringify({
@@ -96,26 +97,19 @@ test("Host posts OnIt for DM, group @, and bot-started topics, and skips ordinar
     assert.ok(reactionPosts(apiCalls)[1].some((arg) => String(arg).includes("/open-apis/im/v1/messages/om_group_mention/reactions")));
 
     await ingest(host, agentId, {
-      suffix: "bot_topic", chatType: "group", mentionedBot: false,
+      suffix: "topic_mention", chatType: "group", mentionedBot: true,
       threadId: "omt_bot_topic", rootId: "om_bot_root",
     });
-    assert.equal(reactionPosts(apiCalls).length, 3, "topic under a bot message must POST OnIt without @");
-    assert.ok(reactionPosts(apiCalls)[2].some((arg) => String(arg).includes("/open-apis/im/v1/messages/om_bot_topic/reactions")));
+    assert.equal(reactionPosts(apiCalls).length, 3, "@ inside a topic must POST OnIt");
 
     await ingest(host, agentId, {
-      suffix: "bot_topic_followup", chatType: "group", mentionedBot: false,
-      threadId: "omt_bot_topic",
+      suffix: "topic_plain", chatType: "group", mentionedBot: false,
+      threadId: "omt_bot_topic", rootId: "om_bot_root",
     });
-    assert.equal(reactionPosts(apiCalls).length, 4, "later replies in the remembered bot topic must still POST OnIt");
-
-    await ingest(host, agentId, {
-      suffix: "human_topic", chatType: "group", mentionedBot: false,
-      threadId: "omt_human_topic", rootId: "om_human_root",
-    });
-    assert.equal(reactionPosts(apiCalls).length, 4, "topic under a human message must not POST OnIt without @");
+    assert.equal(reactionPosts(apiCalls).length, 3, "a topic reply without @ must not POST OnIt, even under a bot message");
 
     await ingest(host, agentId, { suffix: "group_plain", chatType: "group", mentionedBot: false });
-    assert.equal(reactionPosts(apiCalls).length, 4, "group without @ must not POST OnIt");
+    assert.equal(reactionPosts(apiCalls).length, 3, "group without @ must not POST OnIt");
   } finally {
     await host.shutdown("cleanup");
     fs.rmSync(root, { recursive: true, force: true });

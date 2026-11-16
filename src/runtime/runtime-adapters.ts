@@ -12,6 +12,7 @@ import type {
   RuntimeInputResult,
   RuntimeSession,
   RuntimeSessionCreate,
+  RuntimeTurnSettings,
   StandingPrompt,
   UpstreamProviderError,
 } from "./runtime-contracts.js";
@@ -141,6 +142,7 @@ interface CodexTurnOwnership {
 
 abstract class EventSession implements RuntimeSession {
   protected listeners = new Set<Listener>();
+  private unsubscribedEvents: NormalizedRuntimeEvent[] | null = [];
   abstract get sessionId(): string | null;
   abstract prompt(input: RuntimeInput): Promise<RuntimeInputResult>;
   abstract busyInput(input: RuntimeInput): Promise<RuntimeInputResult>;
@@ -149,11 +151,15 @@ abstract class EventSession implements RuntimeSession {
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
+    const early = this.unsubscribedEvents ?? [];
+    this.unsubscribedEvents = null;
+    for (const event of early) listener(event);
     return () => this.listeners.delete(listener);
   }
 
   protected emit(event: NormalizedRuntimeEvent): void {
-    for (const listener of this.listeners) listener(event);
+    if (this.unsubscribedEvents) this.unsubscribedEvents.push(event);
+    else for (const listener of this.listeners) listener(event);
   }
 }
 
@@ -187,15 +193,24 @@ function parseJson(line: string): Record<string, any> | null {
   } catch { return null; }
 }
 
-/** Display name of a Codex app-server tool item; null for messages and reasoning. Arguments are never shown. */
-function codexToolName(item: Record<string, any> | undefined): string | null {
+/** A tool call's raw input as one string for the streaming card: strings as-is, anything else as JSON. */
+function toolInputText(input: unknown): string {
+  if (input === undefined || input === null) return "";
+  if (typeof input === "string") return input;
+  if (Array.isArray(input) && input.every((part) => typeof part === "string")) return input.join(" ");
+  try { return JSON.stringify(input) ?? ""; } catch { return ""; }
+}
+
+/** Display name and raw input of a Codex app-server tool item; null for messages and reasoning. */
+function codexToolDisplay(item: Record<string, any> | undefined): { name: string; input: string } | null {
   if (!item || typeof item.type !== "string") return null;
   switch (item.type) {
-    case "commandExecution": return "执行命令";
-    case "mcpToolCall": return [item.server, item.tool].filter(Boolean).join("/") || "MCP 工具";
-    case "fileChange": return "修改文件";
-    case "webSearch": return "网页搜索";
-    case "dynamicToolCall": return String(item.tool || "工具");
+    case "commandExecution": return { name: "command", input: toolInputText(item.command) };
+    case "mcpToolCall": return { name: [item.server, item.tool].filter(Boolean).join("/") || "MCP tool", input: toolInputText(item.arguments) };
+    case "fileChange": return { name: "file change", input: Array.isArray(item.changes)
+      ? item.changes.map((change: { path?: unknown }) => String(change?.path ?? "")).filter(Boolean).join(", ") : "" };
+    case "webSearch": return { name: "web search", input: toolInputText(item.query) };
+    case "dynamicToolCall": return { name: String(item.tool || "tool"), input: toolInputText(item.arguments) };
     default: return null;
   }
 }
@@ -228,6 +243,9 @@ export function codexSandboxParams(config: Pick<RuntimeSessionCreate, "sandbox" 
   return { sandbox: "workspace-write", config: overrides };
 }
 
+const CODEX_WRITER_WAITS = 40;
+const CODEX_WRITER_WAIT_MS = 500;
+
 class CodexSession extends EventSession {
   private requestId = 0;
   private threadId: string | null = null;
@@ -240,11 +258,15 @@ class CodexSession extends EventSession {
   private initialized = false;
   private freshThreadParams: Record<string, unknown> | null = null;
   private resumeFallbackStarted = false;
+  private writerWaits = 0;
+  private settings: RuntimeTurnSettings;
+  private turnOverrides: Record<string, unknown> = {};
   private readonly pending = new Map<number, { method: string; inputId?: string; turnId?: string;
     resolve?: (result: RuntimeInputResult) => void }>();
 
   constructor(private readonly process: ProcessLike, private readonly config: RuntimeSessionCreate) {
     super();
+    this.settings = { model: config.model, reasoningEffort: config.reasoningEffort, fastMode: config.fastMode };
     attachLines(process.stdout, (message) => this.onMessage(message));
     attachLines(process.stderr, (message) => this.onMessage(message));
     process.once("exit", (code, signal) => this.emit({ type: "closed", code, signal }));
@@ -256,7 +278,17 @@ class CodexSession extends EventSession {
 
   async prompt(input: RuntimeInput): Promise<RuntimeInputResult> {
     if (!this.threadId) return { status: "deferred", inputId: input.inputId, reason: "Codex thread is not initialized" };
-    return this.sendInput("turn/start", { threadId: this.threadId, input: textInput(input) }, input);
+    return this.sendInput("turn/start", { threadId: this.threadId, input: textInput(input), ...this.turnOverrides }, input);
+  }
+
+  updateSettings(next: RuntimeTurnSettings): boolean {
+    const model = configuredModel(next.model);
+    const effort = next.reasoningEffort || undefined;
+    if ((configuredModel(this.settings.model) && !model) || (this.settings.reasoningEffort && !effort)
+      || (this.settings.fastMode && !next.fastMode)) return false;
+    this.settings = next;
+    this.turnOverrides = { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(next.fastMode ? { serviceTier: "fast" } : {}) };
+    return true;
   }
 
   async busyInput(input: RuntimeInput): Promise<RuntimeInputResult> {
@@ -316,6 +348,12 @@ class CodexSession extends EventSession {
         if (replaceableResumeFailure && this.freshThreadParams && !this.resumeFallbackStarted) {
           this.resumeFallbackStarted = true;
           this.request("thread/start", this.freshThreadParams);
+          return;
+        }
+        if (pending.method === "thread/resume" && /active writer/i.test(errorMessage) && this.writerWaits++ < CODEX_WRITER_WAITS) {
+          const timer = setTimeout(() => this.request("thread/resume", { threadId: this.config.resumeSessionId, ...this.freshThreadParams }),
+            CODEX_WRITER_WAIT_MS);
+          timer.unref?.();
           return;
         }
         if (pending.method === "turn/steer" && this.activeTurnId === pending.turnId) this.activeTurnId = null;
@@ -397,10 +435,11 @@ class CodexSession extends EventSession {
       this.emit({ type: "turn-end", ...(this.threadId ? { sessionId: this.threadId } : {}), ...(turnId ? { turnId } : {}) });
     } else if (message.method === "item/started" && message.params?.item?.type === "agentMessage") {
       this.textBlockPending = true;
-    } else if (message.method === "item/started" && codexToolName(message.params?.item)) {
-      this.emit({ type: "activity", activity: "tool", name: codexToolName(message.params.item)!,
+    } else if (message.method === "item/started" && codexToolDisplay(message.params?.item)) {
+      const tool = codexToolDisplay(message.params.item)!;
+      this.emit({ type: "activity", activity: "tool", name: tool.name, ...(tool.input ? { text: tool.input } : {}),
         ...(message.params.item.id ? { toolId: String(message.params.item.id) } : {}) });
-    } else if (message.method === "item/completed" && codexToolName(message.params?.item)) {
+    } else if (message.method === "item/completed" && codexToolDisplay(message.params?.item)) {
       const item = message.params.item;
       const status = String(item.status || "completed").toLowerCase();
       const ok = status !== "failed" && status !== "declined" && (item.exitCode === undefined || item.exitCode === null || item.exitCode === 0);
@@ -576,7 +615,9 @@ class ClaudeSession extends EventSession {
         if (block.type === "text" && block.text) this.emit({ type: "activity", activity: "text", text: String(block.text) });
         if (block.type === "thinking" && block.thinking) this.emit({ type: "activity", activity: "thinking", text: String(block.thinking) });
         if (block.type === "tool_use") {
-          this.emit({ type: "activity", activity: "tool", name: String(block.name || "tool"), ...(block.id ? { toolId: String(block.id) } : {}) });
+          const input = toolInputText(block.input);
+          this.emit({ type: "activity", activity: "tool", name: String(block.name || "tool"), ...(input ? { text: input } : {}),
+            ...(block.id ? { toolId: String(block.id) } : {}) });
         }
       }
       const next = this.gated.shift();
@@ -831,7 +872,8 @@ class PiSession extends EventSession {
         this.toolCallOpen = true;
         this.emit({ type: "runtime-observation", runtime: "pi", distribution: this.distribution, phase: "tool_call" });
       }
-      this.emit({ type: "activity", activity: "tool", name: String(event.toolName || "tool"),
+      const input = toolInputText(event.args);
+      this.emit({ type: "activity", activity: "tool", name: String(event.toolName || "tool"), ...(input ? { text: input } : {}),
         ...(event.toolCallId ? { toolId: String(event.toolCallId) } : {}) });
     }
     else if (event?.type === "tool_execution_end") {

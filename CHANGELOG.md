@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.25
+
+Codex subagents no longer leak into the root conversation. The app-server publishes child-thread notifications on the same connection, so Larkin now adopts a session only from a `thread/start` or `thread/resume` response it asked for, ignoring a bare `thread/started` that carries a child thread. Notifications scoped to another thread are dropped, so a child's lifecycle events, output, tool activity, and errors never reach the root delivery. A stale `turn/completed` for an earlier turn no longer ends the turn that is actually running, a late `turn/steer` rejection no longer clears the current turn, and a configuration error clears the active turn only when it belongs to that turn. Unscoped notifications keep working as before, so isolation requires the thread scope Codex supplies.
+
+## 0.5.23
+
+The standing prompt (`larkin-standing-v35`, card mode `larkin-standing-v42-card`) now requires a reply's `message_id` to be copied verbatim from the message being answered. A reply or other guarded write whose `--message-id` is not in this Agent's Inbox records now fails with a plain statement of that fact. Reminder envelopes drop the chat-send fallback for an unresolvable anchor and the legacy-anchor notes, and say once that people named in a reminder title are its content, not its recipients.
+
+Reply mode can now be set per Agent: `agents.<id>.replyMode` (`card` or `cli`) overrides the global `replyMode`, and an Agent without it keeps following the global value, so existing configs behave the same. A global change no longer re-applies Agents that have their own mode. The dashboard sets the group message policy and the reply mode on each Agent's reply tab, and the global settings button and sheet are removed. Saving either value on that tab stores it on the Agent.
+
+The Host no longer replies "我还在处理中，完成后会汇总更新。" as the bot when a turn runs past two minutes without an outbound message. Long turns keep only the OnIt reaction; any progress update comes from the Agent. The `last_outbound_at` / `last_outbound_by_target` fields that only suppressed that reply are no longer written; leftover values in existing state are ignored.
+
+Changing a Codex Agent's model, reasoning effort, or Fast mode no longer restarts the Runtime or reconnects Feishu. The new settings apply from the next turn of the same thread, including while a turn is running. Clearing a setting back to the Codex default, or any other config change, still replaces the session. When a replacement does start a new Codex process, it now waits for the old process to release the thread before resuming instead of failing with an active-writer error, and startup errors emitted before the Host subscribes are delivered instead of dropped, so the Agent no longer silently stops accepting messages.
+
+## 0.5.22
+
+The processing-eye OnIt reaction now marks only messages explicitly addressed to the bot: private chats (DM / p2p) and group messages that @ the bot. Replies inside a topic the bot started no longer get the reaction without an @, so OnIt appears exactly where a streaming card can open. Larkin no longer records bot topic roots; a leftover `bot_topic_roots` key in existing state is ignored.
+
+Streaming-card tool steps show each tool call's raw input instead of a tool label such as 执行命令, in private chats and groups alike: commands and search queries as written, structured arguments as JSON, file changes as paths; a call without input still shows its tool name. Inputs are not redacted. Each input is flattened to one line, and one longer than 200 characters keeps its head and tail with `…` in the middle. Steps no longer carry a status word; only a failed call is marked `· failed`. The card is now English throughout: Thinking…, Replying…, Running …, Replay · N tool calls · Ns, and the failure and nothing-to-reply notices, which also reach the plain-text fallback.
+
 ## 0.5.19
 
 The Feishu processing-eye OnIt reaction is no longer a config switch. After a successful deliver, Larkin reacts OnIt only for private chats (DM / p2p), when the inbound event already marked the bot as mentioned, or when the user is talking inside a topic the bot started (a Feishu topic whose root is a bot-owned message). Ordinary group messages without @ and outside a bot-started topic never get the reaction, including free-mention chats that still wake the Agent.

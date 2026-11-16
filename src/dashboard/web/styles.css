@@ -280,6 +280,9 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .sandbox-scope p { margin: 0; }
 .sandbox-scope ul { margin: 4px 0; padding-left: 18px; list-style: disc; }
 .sandbox-scope li { margin: 2px 0; }
+.sandbox-scope ol { margin: 4px 0 6px; padding-left: 18px; list-style: decimal; }
+.audit-now { margin: 0; border-left: 2px solid var(--accent); padding: 6px 10px; color: var(--ink); font-size: 12px; line-height: 1.55; }
+.warning-text { color: var(--warning); }
 @media (max-width: 720px) { .sandbox-options { grid-template-columns: 1fr; } }
 .compact-sidebar { padding: 16px 0; }
 @keyframes fade-in { from { opacity: 0; } }

@@ -14,7 +14,9 @@
 // the user without a reply. When the card could not be created, so certainly
 // nothing reached the chat, the Host replies with a plain text message instead.
 //
-// Tool steps show only the tool name and its status, never its arguments.
+// A tool step shows the call's raw input, unredacted and on one line; only a failed call is marked,
+// and only a call without input falls back to the tool name. A long input keeps its head and tail and
+// elides the middle.
 //
 // The model's current reply anchor is the canonical Inbox `last_source`, which a
 // successful scoped poll sets and the Runtime turn boundary clears. A poll is a
@@ -58,11 +60,12 @@ export interface StreamReplyOptions {
   now?: () => number;
 }
 
-export const STREAM_REPLY_INITIAL_TEXT = "正在思考…";
-export const STREAM_REPLY_FAILURE_TEXT = "处理这条消息时出错了，没能完成回复。请稍后重试。";
-export const STREAM_REPLY_SILENT_TEXT = "已处理完成，没有需要回复的内容。";
+export const STREAM_REPLY_INITIAL_TEXT = "Thinking…";
+export const STREAM_REPLY_FAILURE_TEXT = "Something went wrong while handling this message, so the reply is incomplete. Please try again later.";
+export const STREAM_REPLY_SILENT_TEXT = "Done. Nothing to reply.";
 
 const MAX_THINKING_CHARS = 600;
+const MAX_TOOL_INPUT_CHARS = 200;
 const MAX_STEP_LINES = 60;
 const SUMMARY_CHARS = 50;
 
@@ -80,10 +83,22 @@ export function replyAddressOf(source: StreamReplySource | null): ReplyAddress |
 
 type Step =
   | { kind: "thinking"; text: string }
-  | { kind: "tool"; key: string; name: string; status: "running" | "completed" | "failed" };
+  | { kind: "tool"; key: string; name: string; input: string; status: "running" | "completed" | "failed" };
 type Entry = { kind: "text"; text: string } | { kind: "steps"; steps: Step[] };
 
-const STATUS_LABEL = { running: "执行中", completed: "完成", failed: "失败" } as const;
+
+/** One line of a tool input; past the limit the middle is replaced by an ellipsis. */
+function toolInputForCard(input: string): string {
+  const line = input.replace(/\s+/g, " ").trim();
+  if (line.length <= MAX_TOOL_INPUT_CHARS) return line;
+  const tail = Math.floor((MAX_TOOL_INPUT_CHARS - 1) / 3);
+  return `${line.slice(0, MAX_TOOL_INPUT_CHARS - 1 - tail)}…${line.slice(-tail)}`;
+}
+
+/** What a tool step shows: its raw input as inline code, or the tool name when it has none. */
+function toolLabel(step: { name: string; input: string }): string {
+  return step.input ? `\`${step.input.replace(/`/g, "'")}\`` : step.name;
+}
 
 function stepLines(steps: readonly Step[]): string[] {
   const lines = steps.map((step) => {
@@ -91,17 +106,18 @@ function stepLines(steps: readonly Step[]): string[] {
       const text = step.text.replace(/\s+/g, " ").trim();
       return `> ${text.length > MAX_THINKING_CHARS ? `${text.slice(0, MAX_THINKING_CHARS - 1)}…` : text}`;
     }
-    return `- ${step.name} · ${STATUS_LABEL[step.status]}`;
+    return `- ${toolLabel(step)}${step.status === "failed" ? " · failed" : ""}`;
   });
-  return lines.length > MAX_STEP_LINES ? [`…（省略前 ${lines.length - MAX_STEP_LINES} 步）`, ...lines.slice(-MAX_STEP_LINES)] : lines;
+  return lines.length > MAX_STEP_LINES ? [`… ${lines.length - MAX_STEP_LINES} earlier steps omitted`, ...lines.slice(-MAX_STEP_LINES)] : lines;
 }
 
 function stepsTitle(steps: readonly Step[]): string {
   const tools = steps.filter((step) => step.kind === "tool").length;
   const thought = steps.some((step) => step.kind === "thinking");
-  if (tools && thought) return `思考并执行了 ${tools} 个工具调用`;
-  if (tools) return `执行了 ${tools} 个工具调用`;
-  return "思考过程";
+  const calls = `${tools} tool call${tools === 1 ? "" : "s"}`;
+  if (tools && thought) return `Thinking · ${calls}`;
+  if (tools) return calls;
+  return "Thinking";
 }
 
 function panel(elementId: string, title: string, content: string): Record<string, unknown> {
@@ -197,7 +213,7 @@ class CardReply {
     } else {
       this.entries.push({ kind: "text", text });
     }
-    this.status = "正在回复…";
+    this.status = "Replying…";
     this.schedule();
   }
 
@@ -207,15 +223,16 @@ class CardReply {
     const last = steps.at(-1);
     if (last?.kind === "thinking") last.text += text;
     else steps.push({ kind: "thinking", text });
-    this.status = "正在思考…";
+    this.status = STREAM_REPLY_INITIAL_TEXT;
     this.schedule();
   }
 
-  toolStarted(name: string, toolId?: string): void {
+  toolStarted(name: string, input: string, toolId?: string): void {
     if (this.finished) return;
     this.toolSerial += 1;
-    this.stepsEntry().push({ kind: "tool", key: toolId || `#${this.toolSerial}`, name, status: "running" });
-    this.status = `正在执行：${name}`;
+    const step: Extract<Step, { kind: "tool" }> = { kind: "tool", key: toolId || `#${this.toolSerial}`, name, input: toolInputForCard(input), status: "running" };
+    this.stepsEntry().push(step);
+    this.status = `Running ${toolLabel(step)}`;
     this.schedule();
   }
 
@@ -280,7 +297,7 @@ class CardReply {
     elements.push({ tag: "markdown", element_id: "status", content: `<font color='grey'>${this.status}</font>`, text_size: "notation" });
     return cardShell(elements, {
       streaming_mode: true,
-      summary: { content: "正在回复…" },
+      summary: { content: "Replying…" },
       streaming_config: { print_frequency_ms: { default: 30 }, print_step: { default: 8 }, print_strategy: "fast" },
     });
   }
@@ -294,7 +311,7 @@ class CardReply {
     const elements: unknown[] = [];
     if (steps.length) {
       const seconds = Math.max(1, Math.round((this.now() - this.startedAt) / 1000));
-      elements.push(panel("replay", `过程回放 · ${stepsTitle(steps)} · 用时 ${seconds} 秒`, stepLines(steps).join("\n")));
+      elements.push(panel("replay", `Replay · ${stepsTitle(steps)} · ${seconds}s`, stepLines(steps).join("\n")));
     }
     elements.push({ tag: "markdown", element_id: "answer", content: body });
     return cardShell(elements, { streaming_mode: true, summary: { content: truncateSummary(failure && !answer ? failure : body) } });
@@ -403,6 +420,8 @@ interface TurnState {
   cards: number;
   tools: number;
   source: string;
+  /** The polled message did not @ the Agent, so its text opens no card. */
+  replyByCommand: boolean;
 }
 
 export class StreamReplyCoordinator {
@@ -438,7 +457,7 @@ export class StreamReplyCoordinator {
       turn.tools += 1;
       // Resolve before this call runs: a poll's own source only exists after it returns.
       const card = this.cardFor(agentId, turn, true);
-      card?.toolStarted(event.name || "工具", event.toolId);
+      card?.toolStarted(event.name || "tool", event.text || "", event.toolId);
       turn.needsResolve = true;
       return;
     }
@@ -474,7 +493,7 @@ export class StreamReplyCoordinator {
 
   private freshTurn(): TurnState {
     return { card: null, needsResolve: true, lastResolveAt: 0, lastAddress: null, buffered: [], failed: null,
-      textChars: 0, cards: 0, tools: 0, source: "none" };
+      textChars: 0, cards: 0, tools: 0, source: "none", replyByCommand: false };
   }
 
   /** The card for the current source, opening (or switching) it when `open` is allowed. */
@@ -507,6 +526,7 @@ export class StreamReplyCoordinator {
     catch (error) { this.log(`读取当前 Inbox source 失败 agent=${agentId}: ${error instanceof Error ? error.message : String(error)}`); }
     const address = replyAddressOf(source);
     turn.source = source ? `${source.deliveryTarget}#${source.deliveryAnchor}` : "none";
+    turn.replyByCommand = Boolean(source?.replyByCommand);
     if (address && turn.lastAddress?.key !== address.key) turn.buffered = [];
     turn.lastAddress = address;
     return address;
@@ -527,7 +547,9 @@ export class StreamReplyCoordinator {
     this.turns.delete(agentId);
     if (turn.textChars || turn.failed || turn.cards) {
       this.log(`流式回复回合结束 agent=${agentId} text=${turn.textChars} cards=${turn.cards} tools=${turn.tools} source=${turn.source}${turn.failed ? " failed" : ""}`
-        + (turn.textChars && !turn.cards ? "（有回复文字但本回合没有领取到消息，文字未发送）" : ""));
+        + (turn.textChars && !turn.cards ? (turn.replyByCommand
+          ? "（本回合领到的消息没有 @ 机器人，Agent 输出的文字不会自动发到飞书）"
+          : "（本回合没有领到消息，Agent 输出的文字没有可回复的对象，没有发到飞书）") : ""));
     }
     if (!turn.failed) { turn.card?.finish(); return; }
     // A failed turn after a poll must not leave the user unanswered. Refresh the source first, so

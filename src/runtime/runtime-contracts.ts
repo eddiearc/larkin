@@ -43,7 +43,7 @@ export type NormalizedRuntimeEvent =
         | "rpc_timeout" | "rpc_error" | "turn_start" | "first_output" | "tool_call" | "tool_result" | "agent_end" | "completed" | "settled";
       reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; success?: boolean; inputId?: string; sessionId?: string }
   | { type: "turn-start"; turnId?: string }
-  /** For `tool`: `name` is the display name, `text` its argument summary, `toolId` pairs it with its `tool-result`. */
+  /** For `tool`: `name` is the display name, `text` its raw input (strings as-is, otherwise JSON), `toolId` pairs it with its `tool-result`. */
   | { type: "activity"; activity: "thinking" | "text" | "tool" | "internal"; text?: string; name?: string; toolId?: string }
   /** A tool call finished; `toolId` (or the latest running call named `name`) identifies which. */
   | { type: "tool-result"; toolId?: string; name?: string; ok: boolean }
@@ -82,6 +82,8 @@ export interface RuntimeSessionCreate {
   env?: NodeJS.ProcessEnv;
 }
 
+export type RuntimeTurnSettings = Pick<RuntimeSessionCreate, "model" | "reasoningEffort" | "fastMode">;
+
 export interface RuntimeSession {
   readonly sessionId: string | null;
   /** On-disk archive of this session when the Runtime exposes one (Pi jsonl). */
@@ -93,6 +95,7 @@ export interface RuntimeSession {
   cancel(reason: string): Promise<void>;
   compact?(customInstructions?: string): Promise<unknown>;
   getContextUsage?(): Promise<{ tokens: number; contextWindow: number } | null>;
+  updateSettings?(settings: RuntimeTurnSettings): boolean;
   close(reason: string): Promise<void>;
   subscribe(listener: (event: NormalizedRuntimeEvent) => void): () => void;
 }

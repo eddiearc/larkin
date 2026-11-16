@@ -1,51 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import {
-  isBotStartedTopic,
-  persistBotTopicRoot,
   ProcessingEyeOrchestrator,
-  rememberBotTopicRoot,
   shouldShowProcessingEye,
 } from "../../../dist/feishu/host-processing-eye.mjs";
 
 const agent = { agentId: "cli_eye", name: "cli_eye", feishuProfile: "cli_eye" };
 
-test("shouldShowProcessingEye is true for private chats, group @, and bot-started topics", () => {
+test("shouldShowProcessingEye is true only for private chats and group @", () => {
   assert.equal(shouldShowProcessingEye({ chatType: "p2p", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "dm", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ channelType: "dm", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", parentChannelType: "dm", mentionedBot: false }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: true }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: true }), true);
-  assert.equal(shouldShowProcessingEye({
-    chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false, botStartedTopic: true,
-  }), true);
   assert.equal(shouldShowProcessingEye({ chatType: "group", mentionedBot: false }), false);
   assert.equal(shouldShowProcessingEye({ chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false }), false);
-  assert.equal(shouldShowProcessingEye({
-    chatType: "group", channelType: "thread", parentChannelType: "channel", mentionedBot: false, botStartedTopic: false,
-  }), false);
   assert.equal(shouldShowProcessingEye({ mentionedBot: false }), false);
-});
-
-test("isBotStartedTopic matches a topic whose root or thread the bot already owns", () => {
-  assert.equal(isBotStartedTopic({ threadId: "omt_topic", rootId: "om_bot_root", ownedIds: ["om_bot_root"] }), true);
-  assert.equal(isBotStartedTopic({ threadId: "omt_topic", ownedIds: ["omt_topic"] }), true);
-  assert.equal(isBotStartedTopic({ threadId: "omt_topic", rootId: "om_human_root", ownedIds: ["om_bot_root"] }), false);
-  assert.equal(isBotStartedTopic({ threadId: null, rootId: "om_bot_root", ownedIds: ["om_bot_root"] }), false);
-  assert.equal(isBotStartedTopic({ threadId: "omt_topic", rootId: "om_bot_root", ownedIds: [] }), false);
-  assert.deepEqual(rememberBotTopicRoot(["om_a"], "om_b"), ["om_a", "om_b"]);
-  assert.deepEqual(rememberBotTopicRoot(["om_a"], "not-a-message"), ["om_a"]);
-  const store = {
-    state: { version: 1, cursors: {} },
-    mutateJson(_key, fallback, operation) {
-      this.state = { ...fallback, ...this.state };
-      operation(this.state);
-    },
-  };
-  persistBotTopicRoot(store, "om_owned");
-  persistBotTopicRoot(store, "skip-me");
-  assert.deepEqual(store.state.bot_topic_roots, ["om_owned"]);
 });
 
 function createTimers() {
@@ -215,70 +186,13 @@ test("error and offline clear immediately while fallback remains 15 minutes", ()
   assert.equal(deletes().length, 1);
 });
 
-test("long-running pending eyes send one visible progress reply before continuing", () => {
+test("a long-running turn only adds and removes the OnIt reaction", () => {
   const { eye, calls, timers } = createHarness();
-  eye.add(agent, "om_long_turn", { replyInThread: true });
-  const progress = timers.active(2 * 60 * 1_000)[0];
-  assert.ok(progress);
-  timers.run(progress);
-  const progressCall = calls.find(({ args }) => args.includes("+messages-reply"));
-  assert.ok(progressCall, "a pending 👀 must gain a human-visible progress reply");
-  assert.equal(progressCall.args[progressCall.args.indexOf("--message-id") + 1], "om_long_turn");
-  assert.equal(progressCall.args.includes("--reply-in-thread"), true);
-  assert.equal(progressCall.args[progressCall.args.indexOf("--text") + 1], "我还在处理中，完成后会汇总更新。");
-});
-
-test("a human follow-up resets the progress deadline to the newest pending message", () => {
-  const { eye, calls, timers } = createHarness();
-  eye.add(agent, "om_first");
-  const first = timers.active(2 * 60 * 1_000)[0];
-  eye.add(agent, "om_follow_up");
-  assert.equal(first.cancelled, true);
-  timers.run(first, { evenIfCancelled: true });
-  assert.equal(calls.some(({ args }) => args.includes("+messages-reply")), false);
-  timers.run(timers.active(2 * 60 * 1_000)[0]);
-  const progress = calls.find(({ args }) => args.includes("+messages-reply"));
-  assert.equal(progress.args[progress.args.indexOf("--message-id") + 1], "om_follow_up");
-});
-
-test("a successful progress reply records its target as outbound", () => {
-  const recorded = [];
-  const timers = createTimers();
-  const eye = new ProcessingEyeOrchestrator({
-    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
-    execFile(_command, args, _options, callback) {
-      callback(null, JSON.stringify(args.includes("POST") ? { data: { reaction_id: "react_recorded" } } : { ok: true }), "");
-      return {};
-    },
-    recordOutboundAt(_agent, target) { recorded.push(target); },
-    writePending() {},
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer,
-  });
-  eye.add(agent, "om_progress_recorded", { target: "chat:oc_progress" });
-  timers.run(timers.active(2 * 60 * 1_000)[0]);
-  assert.deepEqual(recorded, ["chat:oc_progress"]);
-});
-
-test("long-running progress is skipped after an outbound IM in the same turn", () => {
-  const { eye, calls, timers } = createHarness();
-  const now = Date.now();
-  const guarded = new ProcessingEyeOrchestrator({
-    cliForAgent: () => ({ command: "/test/official-lark-cli", argsPrefix: [], env: {} }),
-    execFile(_command, args, _options, callback) {
-      calls.push({ args });
-      callback(null, JSON.stringify(args.includes("POST") ? { data: { reaction_id: "react_guarded" } } : { ok: true }), "");
-      return {};
-    },
-    lastOutboundAt: (_agent, target) => target === "chat:oc_already_replied" ? now : null,
-    now: () => now,
-    writePending() {},
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer,
-  });
-  guarded.add(agent, "om_already_replied", { target: "chat:oc_already_replied" });
-  timers.run(timers.active(2 * 60 * 1_000)[0]);
-  assert.equal(calls.some(({ args }) => args.includes("+messages-reply")), false);
+  eye.add(agent, "om_long_turn");
+  assert.deepEqual(timers.timers.map(({ delay }) => delay), [15 * 60 * 1_000]);
+  eye.observeActivity(agent, "idle");
+  timers.run(timers.active(1_000)[0]);
+  assert.deepEqual(calls.map(({ args }) => args.slice(0, 2)), [["api", "POST"], ["api", "DELETE"]]);
 });
 
 test("unknown non-terminal activity preserves the reaction until explicit idle", () => {

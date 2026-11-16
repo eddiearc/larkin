@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.26
+## 0.5.24
 
 Codex turns that fail with the exact “Selected model is at capacity. Please try a different model.” provider error now continue in the same thread after 5, 15, and 30 seconds, up to three retries. Native Codex retries retain ownership until they finish; cancellation and shutdown stop pending recovery. Other provider failures keep their existing handling.
 

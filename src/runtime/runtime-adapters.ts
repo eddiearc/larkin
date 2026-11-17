@@ -438,7 +438,7 @@ class CodexSession extends EventSession {
         const id = message.result?.turn?.id;
         if (id) {
           pending.recovery.capacityInput = undefined;
-          this.turnOwnership.set(String(id), pending.recovery);
+          this.continuationOwnership(String(id), pending.recovery);
         }
         else { this.failCapacityRetry("Codex capacity retry returned no turn id"); return; }
         return;
@@ -540,8 +540,7 @@ class CodexSession extends EventSession {
           return;
         }
         this.retryAwaitingOwnership.capacityInput = undefined;
-        this.retryAwaitingOwnership.completedAt = null;
-        this.turnOwnership.set(this.activeTurnId, this.retryAwaitingOwnership);
+        this.continuationOwnership(this.activeTurnId, this.retryAwaitingOwnership);
         this.retryAwaitingOwnership = null;
         this.capacityRecovery = null;
       }
@@ -556,13 +555,24 @@ class CodexSession extends EventSession {
       const turnError = message.params?.turn?.error;
       const errorMessage = String(turnError?.message || turnError || `Codex turn ${status}`);
       if (turnId && this.recentTurnIds.includes(turnId)) return;
+      const capacityError = turnId ? this.turnOwnership.get(turnId)?.capacityError : undefined;
+      // A newer turn already owns this thread. Recovering the turn it replaced
+      // would clear the current turn's identity and start a second turn under it,
+      // so that failure only leaves its own input retryable for the Host.
+      const replacedByNewerTurn = Boolean(turnId && this.activeTurnId && this.activeTurnId !== turnId);
+      if (turnId && status === "failed" && replacedByNewerTurn
+        && (capacityError || errorMessage === CODEX_CAPACITY_ERROR)) {
+        this.emitTurnInputErrors(turnId, capacityError ?? errorMessage, true, true);
+        this.completeTurn(turnId);
+        return;
+      }
       if (turnId && status === "failed"
-        && this.scheduleCapacityRetry(turnId, this.turnOwnership.get(turnId)?.capacityError ?? errorMessage)) {
+        && this.scheduleCapacityRetry(turnId, capacityError ?? errorMessage)) {
         this.completeTurn(turnId);
         return;
       }
       if (turnId && (status === "failed" || status === "interrupted")) {
-        this.finishTurnInputs(turnId, this.turnOwnership.get(turnId)?.capacityError ?? errorMessage, status === "interrupted");
+        this.finishTurnInputs(turnId, capacityError ?? errorMessage, status === "interrupted");
       }
       const endsActiveTurn = !this.activeTurnId || this.activeTurnId === turnId;
       if (turnId) this.completeTurn(turnId);
@@ -645,6 +655,37 @@ class CodexSession extends EventSession {
       ownership = { inputIds: new Set(), terminalInputIds: new Set(), transientKeys: new Set(),
         configurationTerminal: false, completedAt: null };
       this.turnOwnership.set(turnId, ownership);
+    }
+    return ownership;
+  }
+
+  /**
+   * A capacity continuation is a new turn on the same thread. It inherits the
+   * retry budget and the still-unresolved inputs of the turn it replaces, so the
+   * logical delivery keeps being settled by the turn that actually runs it. The
+   * replaced turn keeps only its settled inputs: a late error for it can never
+   * fail an input accepted by the continuation, and an input accepted by the
+   * continuation can never be settled by the turn that already ended.
+   */
+  private continuationOwnership(turnId: string, previous: CodexTurnOwnership): CodexTurnOwnership {
+    const existing = this.turnOwnership.get(turnId);
+    const ownership = existing && existing !== previous ? existing : (() => {
+      const created: CodexTurnOwnership = {
+        inputIds: new Set(), terminalInputIds: new Set(), transientKeys: new Set(),
+        configurationTerminal: false, completedAt: null,
+      };
+      this.turnOwnership.set(turnId, created);
+      return created;
+    })();
+    for (const inputId of [...previous.inputIds]) {
+      if (previous.terminalInputIds.has(inputId)) continue;
+      previous.inputIds.delete(inputId);
+      ownership.inputIds.add(inputId);
+      // Keep the duplicate-suppression for this exact message across the move.
+      for (const key of previous.transientKeys) if (key.startsWith(`${inputId}\u0000`)) ownership.transientKeys.add(key);
+    }
+    if ((previous.capacityAttempts ?? 0) > (ownership.capacityAttempts ?? 0)) {
+      ownership.capacityAttempts = previous.capacityAttempts;
     }
     return ownership;
   }

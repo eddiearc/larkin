@@ -2016,6 +2016,79 @@ test("Codex capacity retry continues the turn with the current model, effort, an
   await session.close("done");
 });
 
+test("Codex stale capacity completion never starts a turn under a newer one", async () => {
+  const { child, session, events } = await startedCodexTurn("stale-input", "stale-A", { codexCapacityRetryDelaysMs: [1, 1, 1] });
+  // A newer turn takes the thread before the replaced turn reports its failure.
+  codexNotify(child, "turn/started", { threadId: "thread-owned", turn: { id: "stale-B" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  capacityFail(child, "stale-A");
+  await retryTick();
+  assert.equal(child.writes.filter((write) => write.method === "turn/start").length, 1,
+    "the replaced turn must not schedule a continuation under the active turn");
+  assert.equal(events.filter((event) => event.type === "turn-end").length, 0, "no premature turn-end");
+  const failures = events.filter((event) => event.type === "input-error" && event.inputId === "stale-input");
+  assert.ok(failures.length >= 1, "the replaced turn's input is reported");
+  assert.equal(failures.every((event) => event.retryable === true), true, "a stale capacity failure stays retryable");
+
+  // The newer turn keeps its identity: a steer goes to it instead of being deferred.
+  const steer = session.busyInput({ inputId: "stale-steer", kind: "inbox_update", text: "continue B", attempt: 0 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const request = child.writes.at(-1);
+  assert.equal(request.method, "turn/steer");
+  assert.equal(request.params.expectedTurnId, "stale-B");
+  child.stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`);
+  assert.equal((await steer).status, "accepted");
+  assert.equal(events.filter((event) => event.type === "turn-end").length, 0);
+  await session.close("done");
+});
+
+for (const notificationFirst of [true, false]) test(`Codex capacity continuation never settles inputs it did not accept (notificationFirst=${notificationFirst})`, async () => {
+  const { child, session, events } = await startedCodexTurn("own-input", "own-A", { codexCapacityRetryDelaysMs: [1] });
+  capacityFail(child, "own-A");
+  await retryTick();
+  const retry = child.writes.filter((write) => write.method === "turn/start").at(-1);
+  assert.match(retry.params.input[0].text, /Preserve completed work/);
+  const started = () => codexNotify(child, "turn/started", { threadId: "thread-owned", turn: { id: "own-B" } });
+  const respond = () => child.stdout.write(`${JSON.stringify({ id: retry.id, result: { turn: { id: "own-B" } } })}\n`);
+  if (notificationFirst) { started(); await new Promise((resolve) => setImmediate(resolve)); respond(); }
+  else { respond(); await new Promise((resolve) => setImmediate(resolve)); started(); }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // The continuation accepts a brand new input.
+  const steer = session.busyInput({ inputId: "own-input-B", kind: "inbox_update", text: "steer B", attempt: 0 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const steerRequest = child.writes.at(-1);
+  assert.equal(steerRequest.method, "turn/steer");
+  assert.equal(steerRequest.params.expectedTurnId, "own-B");
+  child.stdout.write(`${JSON.stringify({ id: steerRequest.id, result: {} })}\n`);
+  assert.equal((await steer).status, "accepted");
+
+  // A late, non-capacity error scoped to the replaced turn must not fail it.
+  codexNotify(child, "error", { turnId: "own-A", willRetry: false, error: { message: "late failure belonging to A" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const terminal = events.filter((event) => event.type === "input-error" && !event.willRetry);
+  assert.deepEqual(terminal.map((event) => event.inputId), [], "neither the moved delivery nor the new steer is terminally failed");
+  assert.equal(events.filter((event) => event.type === "turn-end").length, 0, "no premature turn-end");
+
+  // The continuation stays steerable after the stale error.
+  const again = session.busyInput({ inputId: "own-input-C", kind: "inbox_update", text: "steer B again", attempt: 0 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const againRequest = child.writes.at(-1);
+  assert.equal(againRequest.method, "turn/steer");
+  assert.equal(againRequest.params.expectedTurnId, "own-B");
+  child.stdout.write(`${JSON.stringify({ id: againRequest.id, result: {} })}\n`);
+  assert.equal((await again).status, "accepted");
+
+  // When the continuation itself fails for real, the moved delivery is settled once.
+  const secondSteerInput = "own-input-B";
+  codexNotify(child, "error", { turnId: "own-B", willRetry: false, error: { message: "B really failed" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settled = events.filter((event) => event.type === "input-error" && !event.willRetry);
+  assert.deepEqual(settled.map((event) => event.inputId).sort(), ["own-input", secondSteerInput, "own-input-C"].sort(),
+    "the continuation settles its own inputs exactly once");
+  await session.close("done");
+});
+
 test("Codex, Claude and Pi emit ordered text-delta events with block boundaries for card replies", async () => {
   const textDeltas = (events) => events.filter((event) => event.type === "text-delta")
     .map((event) => `${event.newBlock ? "|" : ""}${event.text}`);

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.24
+
+Codex child-thread notifications no longer replace the root session, leak child output into its replies, or end the active root turn. Late completions, steer failures, and configuration errors from an older turn preserve the newer turn.
+
 ## 0.5.23
 
 The standing prompt (`larkin-standing-v35`, card mode `larkin-standing-v42-card`) now requires a reply's `message_id` to be copied verbatim from the message being answered. A reply or other guarded write whose `--message-id` is not in this Agent's Inbox records now fails with a plain statement of that fact. Reminder envelopes drop the chat-send fallback for an unresolvable anchor and the legacy-anchor notes, and say once that people named in a reminder title are its content, not its recipients.

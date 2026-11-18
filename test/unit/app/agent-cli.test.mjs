@@ -454,7 +454,7 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
     assert.deepEqual(replayPoll.events.map((event) => event.message_id), ["om_1", "om_2"],
       "nothing new in scope returns this turn's already-polled messages");
     assert.equal(replayPoll.replayed, true);
-    assert.match(replayPoll.next_action, /already polled in this turn/);
+    assert.match(replayPoll.next_action, /already polled earlier in this turn/);
     assert.deepEqual(replayPoll.consumed_delivery_ids, []);
     assert.equal(replayPoll.pending_count, 0);
     assert.equal(replayPoll.has_more, false);

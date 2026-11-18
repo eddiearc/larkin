@@ -546,7 +546,7 @@ export function runAgentCli(
         const limit = rawLimit === undefined ? undefined : Number(rawLimit);
         const polled = stateStore.pollInbox<InboxEnvelope>({ ...(target ? { target } : {}), ...(limit !== undefined ? { limit } : {}) });
         const providerMessages = new Map<string, FeishuImMessage[]>();
-        for (const envelope of polled.envelopes) {
+        for (const envelope of polled.replayed ? [] : polled.envelopes) {
           if (typeof envelope.message_id !== "string" || typeof envelope.create_time !== "string") continue;
           const localTarget = typeof envelope.target === "string" ? envelope.target
             : (typeof envelope.chat_id === "string" && envelope.chat_id
@@ -568,7 +568,9 @@ export function runAgentCli(
         const hasMore = polled.pendingCount > 0;
         emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
           pending_count: polled.pendingCount, has_more: hasMore,
-          ...(hasMore ? { next_action: "Continue polling the same Inbox scope until has_more is false." } : {}),
+          ...(polled.replayed ? { replayed: true,
+            next_action: "Nothing new arrived. These are the messages you already polled in this turn, returned again; handle them as the messages this turn is about." }
+            : hasMore ? { next_action: "Continue polling the same Inbox scope until has_more is false." } : {}),
           seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });
         return 0;
       };

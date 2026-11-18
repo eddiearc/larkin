@@ -825,3 +825,48 @@ test("an active Inbox reclaimer is exclusive and its crash orphan is recoverable
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a repeated poll in the same turn returns the already-polled user message until the turn boundary", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-turn-lease-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateTurnLeaseA1");
+    const target = "chat:oc_turn_lease";
+    store.appendNdjson("inbox", { message_id: "om_lease_1", target, content: "question", wake: true });
+    const first = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(first.envelopes.map((row) => row.message_id), ["om_lease_1"]);
+    assert.equal(first.replayed, undefined);
+
+    // Context compaction dropped the body; the model polls the same target again.
+    const again = store.pollInbox({ target, limit: 1 });
+    assert.equal(again.replayed, true);
+    assert.deepEqual(again.envelopes.map((row) => [row.message_id, row.content]), [["om_lease_1", "question"]]);
+    assert.deepEqual(again.consumedDeliveryIds, []);
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: target, deliveryAnchor: "om_lease_1" },
+      "the replay keeps the original reply anchor");
+    assert.equal(store.pollInbox({ target: "chat:oc_other_lease", limit: 1 }).envelopes.length, 0,
+      "another target's scope does not see this lease");
+
+    // A new message in the same scope is returned instead of the replay, and joins the lease.
+    store.appendNdjson("inbox", { message_id: "om_lease_2", target, content: "follow-up", wake: true });
+    assert.deepEqual(store.pollInbox({ target, limit: 1 }).envelopes.map((row) => row.message_id), ["om_lease_2"]);
+    assert.deepEqual(store.pollInbox({ target }).envelopes.map((row) => row.message_id), ["om_lease_1", "om_lease_2"]);
+
+    store.clearCurrentInboxSource();
+    const nextTurn = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(nextTurn.envelopes, [], "leases expire at the Runtime turn boundary");
+    assert.equal(nextTurn.replayed, undefined);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("reminder envelopes are never replayed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-turn-lease-reminder-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateTurnLeaseA2");
+    store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_lease_1", reminderId: "reminder-lease",
+      target: "runtime:reminder", deliveryTarget: "chat:oc_lease_reminder", content: "reminder" });
+    store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    assert.deepEqual(store.pollInbox({ target: "runtime:reminder", limit: 1 }).envelopes, []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

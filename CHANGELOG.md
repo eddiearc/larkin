@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.25
+
+Polling the same Inbox scope again in one Runtime turn, with nothing new there, now returns the user messages already polled in that turn, marked `replayed: true` with a `next_action` saying so, instead of an empty batch. A Runtime that compacts its context right after a poll (Codex) can therefore read the message it owes a reply to again, instead of polling an empty target until the process restarts while the reply card shows only poll steps. The replay is a read of the same batch: it acknowledges no new delivery, keeps the original reply anchor, never repeats reminder envelopes, and ends at the turn boundary together with the in-turn reply source.
+
 ## 0.5.24
 
 Codex child-thread notifications no longer replace the root session, leak child output into its replies, or end the active root turn. Late completions, steer failures, and configuration errors from an older turn preserve the newer turn.

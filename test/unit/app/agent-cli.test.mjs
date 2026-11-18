@@ -450,10 +450,20 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
     assert.equal(finalPoll.pending_count, 0);
     assert.equal(finalPoll.has_more, false);
     assert.equal("next_action" in finalPoll, false);
+    const replayPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
+    assert.deepEqual(replayPoll.events.map((event) => event.message_id), ["om_1", "om_2"],
+      "nothing new in scope returns this turn's already-polled messages");
+    assert.equal(replayPoll.replayed, true);
+    assert.match(replayPoll.next_action, /already polled in this turn/);
+    assert.deepEqual(replayPoll.consumed_delivery_ids, []);
+    assert.equal(replayPoll.pending_count, 0);
+    assert.equal(replayPoll.has_more, false);
+    f.store.clearCurrentInboxSource();
     const emptyPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
     assert.deepEqual(emptyPoll.events, []);
     assert.equal(emptyPoll.pending_count, 0);
     assert.equal(emptyPoll.has_more, false);
+    assert.equal("replayed" in emptyPoll, false);
     assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_other"], "unrelated target must remain pending");
 
     f.store.appendNdjson("inbox", { message_id: "om_other_2", chat_id: "oc_3", content: "another target" });

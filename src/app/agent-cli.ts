@@ -568,7 +568,8 @@ export function runAgentCli(
         const hasMore = polled.pendingCount > 0;
         emitJson(io, { version: 2, delivery: "direct_ack", at_most_once: true, ...projected,
           pending_count: polled.pendingCount, has_more: hasMore,
-          ...(polled.replayed ? { replayed: true, next_action: "No new messages. These are the messages you already polled earlier in this turn, returned again. Continue the work they ask for." }
+          ...(polled.polledThisTurn ? { polled_this_turn: polled.polledThisTurn,
+            next_action: `No new messages. This turn already polled ${polled.polledThisTurn.join(", ")}; to read them again, run \`larkin im +messages-mget --message-ids ${polled.polledThisTurn.join(",")} --no-reactions --json\`.` }
             : hasMore ? { next_action: "Continue polling the same Inbox scope until has_more is false." } : {}),
           seen_through_seq: polled.seenThroughSeq, consumed_delivery_ids: polled.consumedDeliveryIds });
         return 0;

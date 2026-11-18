@@ -450,20 +450,17 @@ test("inbox check is repeatable and content-light while poll direct-acks a bound
     assert.equal(finalPoll.pending_count, 0);
     assert.equal(finalPoll.has_more, false);
     assert.equal("next_action" in finalPoll, false);
-    const replayPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
-    assert.deepEqual(replayPoll.events.map((event) => event.message_id), ["om_1", "om_2"],
-      "nothing new in scope returns this turn's already-polled messages");
-    assert.equal(replayPoll.replayed, true);
-    assert.match(replayPoll.next_action, /already polled earlier in this turn/);
-    assert.deepEqual(replayPoll.consumed_delivery_ids, []);
-    assert.equal(replayPoll.pending_count, 0);
-    assert.equal(replayPoll.has_more, false);
-    f.store.clearCurrentInboxSource();
     const emptyPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
-    assert.deepEqual(emptyPoll.events, []);
+    assert.deepEqual(emptyPoll.events, [], "a retried poll must not replay direct-acked bodies");
     assert.equal(emptyPoll.pending_count, 0);
     assert.equal(emptyPoll.has_more, false);
-    assert.equal("replayed" in emptyPoll, false);
+    assert.deepEqual(emptyPoll.polled_this_turn, ["om_1", "om_2"]);
+    assert.match(emptyPoll.next_action, /larkin im \+messages-mget --message-ids om_1,om_2 --no-reactions --json/);
+    f.store.clearCurrentInboxSource();
+    const nextTurnPoll = JSON.parse(f.run(["inbox", "poll", "--target", "chat:oc_1"]).stdout);
+    assert.deepEqual(nextTurnPoll.events, []);
+    assert.equal("polled_this_turn" in nextTurnPoll, false);
+    assert.equal("next_action" in nextTurnPoll, false);
     assert.deepEqual(f.store.readNdjson("inbox").map((row) => row.message_id), ["om_other"], "unrelated target must remain pending");
 
     f.store.appendNdjson("inbox", { message_id: "om_other_2", chat_id: "oc_3", content: "another target" });

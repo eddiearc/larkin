@@ -88,12 +88,8 @@ export interface InboxPollResult<T> {
   consumedDeliveryIds: string[];
   seenThroughSeq: number | null;
   pendingCount: number;
-  /** The scope had nothing new, so these are this turn's already-polled user messages, returned again. */
   replayed?: true;
 }
-
-/** Most user messages one target keeps leased within a turn. */
-const MAX_TURN_LEASED_PER_TARGET = 20;
 
 interface InboxTargetState {
   latest_received_seq: number;
@@ -152,13 +148,7 @@ interface InboxStateFile {
   /** Pinned reminder anchors survive the bounded messages index. */
   delivery_anchors?: Record<string, { target: string }>;
   last_source?: InboxSourceState;
-  /**
-   * User messages polled in the current Runtime turn, by target. A poll is
-   * at-most-once, but the model can lose a polled body mid-turn (Codex context
-   * compaction); polling the same scope again with nothing new returns these
-   * instead of an empty batch. Cleared with last_source at the turn boundary.
-   */
-  turn_leases?: Record<string, Array<Record<string, unknown>>>;
+  turn_polled?: InboxEnvelope[];
   /** Consumed reminder contexts for the guarded outbound hook; not an IM ledger. */
   reminder_contexts?: InboxReminderState[];
   /** Legacy single-slot reminder context, accepted only during migration. */
@@ -246,15 +236,7 @@ function normalizeInboxState(value: unknown): InboxStateFile {
         ...(row.reply_by === "command" ? { reply_by: "command" as const } : {}) };
     }
   }
-  const rawLeases = (raw as { turn_leases?: unknown }).turn_leases;
-  if (rawLeases && typeof rawLeases === "object" && !Array.isArray(rawLeases)) {
-    for (const [target, rows] of Object.entries(rawLeases)) {
-      if (!isUserDeliveryTarget(target) || !Array.isArray(rows)) continue;
-      const kept = rows.filter((row): row is Record<string, unknown> => !!row && typeof row === "object" && !Array.isArray(row))
-        .slice(-MAX_TURN_LEASED_PER_TARGET);
-      if (kept.length) (state.turn_leases ??= {})[target] = kept;
-    }
-  }
+  if (Array.isArray(raw.turn_polled)) state.turn_polled = raw.turn_polled;
   if (raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) {
     for (const [draftId, candidate] of Object.entries(raw.drafts)) {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
@@ -1136,12 +1118,8 @@ export class AgentStateStore {
         return count + (rowTarget === options.target ? 1 : 0);
       }, 0);
       if (!envelopes.length) {
-        const leased = Object.entries(state.turn_leases ?? {})
-          .filter(([target]) => !options.target || options.target === target)
-          .flatMap(([, rows]) => rows) as T[];
-        return leased.length
-          ? { envelopes: structuredClone(leased), consumedDeliveryIds: [], seenThroughSeq: null, pendingCount, replayed: true }
-          : { envelopes, consumedDeliveryIds: [], seenThroughSeq: null, pendingCount };
+        const polled = (state.turn_polled ?? []).filter((row) => !options.target || options.target === targetKeyOfInboxEnvelope(row)) as T[];
+        return { envelopes: polled, consumedDeliveryIds: [], seenThroughSeq: null, pendingCount, ...(polled.length ? { replayed: true as const } : {}) };
       }
       const messageIds = new Set(envelopes.flatMap((row) => {
         if (!row || typeof row !== "object") return [];
@@ -1203,14 +1181,8 @@ export class AgentStateStore {
           && isUserDeliveryTarget(targetKeyOfInboxEnvelope(envelope)));
         state.last_source = { ...userSources.at(-1)!, ...(addressed ? {} : { reply_by: "command" as const }) };
       } else delete state.last_source;
-      for (const envelope of envelopes) {
-        const target = targetKeyOfInboxEnvelope(envelope);
-        if (!isUserDeliveryTarget(target)) continue;
-        const messageId = (envelope as Record<string, unknown>).message_id;
-        const leases = (state.turn_leases ??= {});
-        const rows = (leases[target] ?? []).filter((row) => typeof messageId !== "string" || row.message_id !== messageId);
-        leases[target] = [...rows, structuredClone(envelope) as Record<string, unknown>].slice(-MAX_TURN_LEASED_PER_TARGET);
-      }
+      const userEnvelopes = envelopes.filter((row) => isUserDeliveryTarget(targetKeyOfInboxEnvelope(row)));
+      if (userEnvelopes.length) state.turn_polled = [...(state.turn_polled ?? []), ...userEnvelopes];
       this.replaceInboxUnlocked(remaining);
       this.writeJson("inboxState", state);
       return { envelopes, consumedDeliveryIds, seenThroughSeq, pendingCount };
@@ -1276,13 +1248,13 @@ export class AgentStateStore {
     });
   }
 
-  /** Expire the in-turn source capability and polled-message leases at the Runtime turn boundary. */
+  /** Expire the in-turn source capability at the Runtime turn boundary. */
   clearCurrentInboxSource(): void {
     this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      if (!state.last_source && !state.turn_leases) return;
+      if (!state.last_source && !state.turn_polled) return;
       delete state.last_source;
-      delete state.turn_leases;
+      delete state.turn_polled;
       this.writeJson("inboxState", state);
     });
   }

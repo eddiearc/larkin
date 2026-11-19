@@ -861,7 +861,7 @@ test("issue 122 injected former prompt-builder target omission retries while the
       }
       session.emit({ type: "turn-start", turnId: formerPromptOmission ? "former-turn" : "current-turn" });
       session.emit({ type: "turn-end", turnId: formerPromptOmission ? "former-turn" : "current-turn" });
-      if (formerPromptOmission) await waitForCondition(() => session.prompts.length === 2);
+      if (formerPromptOmission) await waitForCondition(() => session.prompts.length === 2, 5_000);
       else await new Promise((resolve) => setImmediate(resolve));
       return { prompts: session.prompts.length, inbox: store.readNdjson("inbox"),
         statuses: store.readJson("runtimeDeliveries", { records: [] }).records.map((record) => record.status) };

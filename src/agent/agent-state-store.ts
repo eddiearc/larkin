@@ -88,6 +88,7 @@ export interface InboxPollResult<T> {
   consumedDeliveryIds: string[];
   seenThroughSeq: number | null;
   pendingCount: number;
+  polledThisTurn?: string[];
 }
 
 interface InboxTargetState {
@@ -147,6 +148,7 @@ interface InboxStateFile {
   /** Pinned reminder anchors survive the bounded messages index. */
   delivery_anchors?: Record<string, { target: string }>;
   last_source?: InboxSourceState;
+  turn_polled?: Array<{ target: string; message_id: string }>;
   /** Consumed reminder contexts for the guarded outbound hook; not an IM ledger. */
   reminder_contexts?: InboxReminderState[];
   /** Legacy single-slot reminder context, accepted only during migration. */
@@ -234,6 +236,7 @@ function normalizeInboxState(value: unknown): InboxStateFile {
         ...(row.reply_by === "command" ? { reply_by: "command" as const } : {}) };
     }
   }
+  if (Array.isArray(raw.turn_polled)) state.turn_polled = raw.turn_polled;
   if (raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) {
     for (const [draftId, candidate] of Object.entries(raw.drafts)) {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
@@ -1114,7 +1117,10 @@ export class AgentStateStore {
         const rowTarget = targetKeyOfInboxEnvelope(row);
         return count + (rowTarget === options.target ? 1 : 0);
       }, 0);
-      if (!envelopes.length) return { envelopes, consumedDeliveryIds: [], seenThroughSeq: null, pendingCount };
+      if (!envelopes.length) {
+        const polledThisTurn = (state.turn_polled ?? []).filter((row) => !options.target || options.target === row.target).map((row) => row.message_id);
+        return { envelopes, consumedDeliveryIds: [], seenThroughSeq: null, pendingCount, ...(polledThisTurn.length ? { polledThisTurn } : {}) };
+      }
       const messageIds = new Set(envelopes.flatMap((row) => {
         if (!row || typeof row !== "object") return [];
         const messageId = (row as Record<string, unknown>).message_id;
@@ -1175,6 +1181,8 @@ export class AgentStateStore {
           && isUserDeliveryTarget(targetKeyOfInboxEnvelope(envelope)));
         state.last_source = { ...userSources.at(-1)!, ...(addressed ? {} : { reply_by: "command" as const }) };
       } else delete state.last_source;
+      const polledIds = userSources.filter((source) => source.message_id.startsWith("om_")).map(({ target, message_id }) => ({ target, message_id }));
+      if (polledIds.length) state.turn_polled = [...(state.turn_polled ?? []), ...polledIds];
       this.replaceInboxUnlocked(remaining);
       this.writeJson("inboxState", state);
       return { envelopes, consumedDeliveryIds, seenThroughSeq, pendingCount };
@@ -1244,8 +1252,9 @@ export class AgentStateStore {
   clearCurrentInboxSource(): void {
     this.withInboxLock(this.file("inbox"), () => {
       const state = this.inboxState();
-      if (!state.last_source) return;
+      if (!state.last_source && !state.turn_polled) return;
       delete state.last_source;
+      delete state.turn_polled;
       this.writeJson("inboxState", state);
     });
   }

@@ -825,3 +825,41 @@ test("an active Inbox reclaimer is exclusive and its crash orphan is recoverable
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("an empty repeat poll names the messages this turn already polled without replaying their bodies", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-turn-polled-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateTurnPolledA1");
+    const target = "chat:oc_turn_polled";
+    store.appendNdjson("inbox", { message_id: "om_polled_1", target, content: "question", wake: true });
+    const first = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(first.envelopes.map((row) => row.message_id), ["om_polled_1"]);
+    assert.equal(first.polledThisTurn, undefined);
+
+    const again = store.pollInbox({ target, limit: 1 });
+    assert.deepEqual(again.envelopes, [], "a poll never replays a direct-acked body");
+    assert.deepEqual(again.polledThisTurn, ["om_polled_1"]);
+    assert.equal(store.pollInbox({ target: "chat:oc_other_polled", limit: 1 }).polledThisTurn, undefined,
+      "another target's scope does not see these ids");
+
+    store.appendNdjson("inbox", { message_id: "om_polled_2", target, content: "follow-up", wake: true });
+    assert.deepEqual(store.pollInbox({ target, limit: 1 }).envelopes.map((row) => row.message_id), ["om_polled_2"]);
+    assert.deepEqual(store.pollInbox({ target }).polledThisTurn, ["om_polled_1", "om_polled_2"]);
+
+    store.clearCurrentInboxSource();
+    assert.equal(store.pollInbox({ target, limit: 1 }).polledThisTurn, undefined, "the list ends at the Runtime turn boundary");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("polled reminder envelopes are not listed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-turn-polled-reminder-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateTurnPolledA2");
+    store.appendNdjson("inbox", { kind: "reminder", message_id: "rem_polled_1", reminderId: "reminder-polled",
+      target: "runtime:reminder", deliveryTarget: "chat:oc_polled_reminder", content: "reminder" });
+    store.pollInbox({ target: "runtime:reminder", limit: 1 });
+    assert.equal(store.pollInbox({ target: "runtime:reminder", limit: 1 }).polledThisTurn, undefined);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

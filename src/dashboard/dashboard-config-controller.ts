@@ -657,6 +657,20 @@ export function createDashboardConfigController({
         }
         return true;
       }
+      if (requestUrl.pathname === "/api/models/cursor" && req.method === "GET") {
+        try {
+          assertPrivateReadRequest(req, csrfCapability);
+          const agentId = requestUrl.searchParams.get("agent") || "";
+          const { config } = loadConfig(env);
+          const agent = config.agents[agentId];
+          if (!agent) throw new Error("unknown agent");
+          const models = await cursorModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
+          json(res, 200, { models });
+        } catch (error) {
+          sendError(res, error, "读取 Cursor 模型列表失败");
+        }
+        return true;
+      }
       if (requestUrl.pathname === "/api/config" && req.method === "PATCH") {
         try {
           assertWriteRequest(req, csrfCapability);

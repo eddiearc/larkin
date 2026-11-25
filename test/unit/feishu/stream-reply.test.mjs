@@ -138,8 +138,8 @@ test("after the poll the card streams the answer, folds the steps into a replay 
   assert.equal(card.replyTo, "om_user");
   assert.equal(card.inThread, false);
   assert.equal(answerOf(card), "你好，世界\n\n查完了。");
-  assert.match(replayTitleOf(card), /过程回放 · 1 次工具调用 · 1 秒</);
-  assert.equal(replayStepsOf(card), "- `ls docs` · 失败", "a step shows the raw input, marked only when it failed");
+  assert.match(replayTitleOf(card), /Replay · 1 tool call · 1s</);
+  assert.equal(replayStepsOf(card), "- `ls docs` · failed", "a step shows the raw input, marked only when it failed");
   assert.deepEqual(card.settings, { config: { streaming_mode: false, summary: { content: "你好，世界 查完了。" } } });
   assert.deepEqual(card.sequences, [...card.sequences].sort((a, b) => a - b), "CardKit sequences only increase");
 });
@@ -172,8 +172,8 @@ test("while streaming, text grows through element updates and a new step restruc
   assert.ok(calls.includes("content:t0"), "same structure streams the text element in place");
   send({ type: "activity", activity: "tool", name: "web search", text: "飞书 卡片", toolId: "s1" });
   await tick();
-  assert.match(findElement(cards[0].json, "p1").header.title.content, /1 次工具调用/);
-  assert.match(findElement(cards[0].json, "status").content, /正在执行 `飞书 卡片`/);
+  assert.match(findElement(cards[0].json, "p1").header.title.content, /1 tool call/);
+  assert.match(findElement(cards[0].json, "status").content, /Running `飞书 卡片`/);
   assert.ok(calls.includes("update"), "a new steps panel is a full card update");
   send({ type: "turn-end" });
   await coordinator.idle();
@@ -193,7 +193,7 @@ test("reasoning after the poll waits for the answer and then shows in the steps"
   await coordinator.idle();
   assert.equal(cards.length, 1);
   assert.equal(answerOf(cards[0]), "你好！");
-  assert.match(replayTitleOf(cards[0]), /过程回放 · 思考 · /);
+  assert.match(replayTitleOf(cards[0]), /Replay · Thinking · /);
   assert.equal(replayStepsOf(cards[0]), "> 用户在打招呼，简短回应即可。");
 });
 
@@ -218,7 +218,7 @@ test("work after the poll that ends without answer text closes its card with onl
   assert.equal(answerOf(cards[0]), undefined, "the Host writes no answer the model did not write");
   assert.equal(replayStepsOf(cards[0]), "- `larkin reminder add`");
   assert.equal(cards[0].settings?.config.streaming_mode, false);
-  assert.match(cards[0].settings?.config.summary.content, /^过程回放 · 1 次工具调用 · 1 秒$/);
+  assert.match(cards[0].settings?.config.summary.content, /^Replay · 1 tool call · 1s$/);
   assert.doesNotMatch(JSON.stringify(cards[0].json), /Nothing to reply/);
 });
 

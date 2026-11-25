@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.28
+
+Host-written streaming card text is English again, as chosen in 0.5.22: `Thinking…`, `Replying…`, `Running <input>`, `Replay · N tool calls · Ns`, `· failed`, `… N earlier steps omitted`, the continuation notice `Continued in the next reply ↓`, and the failure notice `Something went wrong while handling this message. Please try again later.` The merge and continuation behavior from 0.5.26 is unchanged.
+
 ## 0.5.27
 
 Cursor CLI is a fourth Agent runtime (`cursor`). Larkin drives `cursor-agent acp` (Agent Client Protocol over stdio): a session is created or resumed with `session/load`, answer text, reasoning and tool calls stream into the reply card, tool permission requests are answered with the broadest allow option, and input that arrives mid-turn interrupts the running prompt and continues as the same turn. The standing prompt is written to the Larkin-managed rule `.cursor/rules/larkin-standing-prompt.mdc` in the Agent workspace, so the workspace `AGENTS.md` stays the user's. `--model` is passed only when the Agent pins a model, because Cursor saves it as the CLI default. Setup, `larkin config runtime`, readiness checks (`cursor-agent models`), the dashboard Runtime option, model directory and capability list (skills, subagents, MCP) support it; set `LARKIN_CURSOR_COMMAND` to use another executable.

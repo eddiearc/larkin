@@ -60,9 +60,9 @@ export interface StreamReplyOptions {
   now?: () => number;
 }
 
-export const STREAM_REPLY_INITIAL_TEXT = "思考中…";
-export const STREAM_REPLY_FAILURE_TEXT = "处理这条消息时出错了，请稍后再试。";
-export const STREAM_REPLY_CONTINUED_TEXT = "接下一条回复继续 ↓";
+export const STREAM_REPLY_INITIAL_TEXT = "Thinking…";
+export const STREAM_REPLY_FAILURE_TEXT = "Something went wrong while handling this message. Please try again later.";
+export const STREAM_REPLY_CONTINUED_TEXT = "Continued in the next reply ↓";
 
 const MAX_THINKING_CHARS = 600;
 const MAX_TOOL_INPUT_CHARS = 200;
@@ -106,18 +106,18 @@ function stepLines(steps: readonly Step[]): string[] {
       const text = step.text.replace(/\s+/g, " ").trim();
       return `> ${text.length > MAX_THINKING_CHARS ? `${text.slice(0, MAX_THINKING_CHARS - 1)}…` : text}`;
     }
-    return `- ${toolLabel(step)}${step.status === "failed" ? " · 失败" : ""}`;
+    return `- ${toolLabel(step)}${step.status === "failed" ? " · failed" : ""}`;
   });
-  return lines.length > MAX_STEP_LINES ? [`… 省略前面 ${lines.length - MAX_STEP_LINES} 步`, ...lines.slice(-MAX_STEP_LINES)] : lines;
+  return lines.length > MAX_STEP_LINES ? [`… ${lines.length - MAX_STEP_LINES} earlier steps omitted`, ...lines.slice(-MAX_STEP_LINES)] : lines;
 }
 
 function stepsTitle(steps: readonly Step[]): string {
   const tools = steps.filter((step) => step.kind === "tool").length;
   const thought = steps.some((step) => step.kind === "thinking");
-  const calls = `${tools} 次工具调用`;
-  if (tools && thought) return `思考 · ${calls}`;
+  const calls = `${tools} tool call${tools === 1 ? "" : "s"}`;
+  if (tools && thought) return `Thinking · ${calls}`;
   if (tools) return calls;
-  return "思考";
+  return "Thinking";
 }
 
 function panel(elementId: string, title: string, content: string): Record<string, unknown> {
@@ -223,7 +223,7 @@ class CardReply {
     } else {
       this.entries.push({ kind: "text", text });
     }
-    this.status = "回复中…";
+    this.status = "Replying…";
     this.schedule();
   }
 
@@ -242,7 +242,7 @@ class CardReply {
     this.toolSerial += 1;
     const step: Extract<Step, { kind: "tool" }> = { kind: "tool", key: toolId || `#${this.toolSerial}`, name, input: toolInputForCard(input), status: "running" };
     this.stepsEntry().push(step);
-    this.status = `正在执行 ${toolLabel(step)}`;
+    this.status = `Running ${toolLabel(step)}`;
     this.schedule();
   }
 
@@ -308,7 +308,7 @@ class CardReply {
     elements.push({ tag: "markdown", element_id: "status", content: `<font color='grey'>${this.status}</font>`, text_size: "notation" });
     return cardShell(elements, {
       streaming_mode: true,
-      summary: { content: "回复中…" },
+      summary: { content: "Replying…" },
       streaming_config: { print_frequency_ms: { default: 30 }, print_step: { default: 8 }, print_strategy: "fast" },
     });
   }
@@ -323,7 +323,7 @@ class CardReply {
     let replayTitle = "";
     if (steps.length) {
       const seconds = Math.max(1, Math.round((this.now() - this.startedAt) / 1000));
-      replayTitle = `过程回放 · ${stepsTitle(steps)} · ${seconds} 秒`;
+      replayTitle = `Replay · ${stepsTitle(steps)} · ${seconds}s`;
       elements.push(panel("replay", replayTitle, stepLines(steps).join("\n")));
     }
     if (body || !elements.length) elements.push({ tag: "markdown", element_id: "answer", content: body || " " });

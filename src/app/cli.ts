@@ -74,7 +74,7 @@ List every configured Agent and its current local status. Use --json for daemon/
   model: `Usage: larkin model [<model>] [--agent <App ID>]
 Show or change an Agent model.`,
   runtime: `Usage: larkin runtime [<runtime>] [--agent <App ID>] [--model <model>]
-Show or change an Agent runtime. User-facing ids: pi | codex | claude. A missing executable is rejected and does not write config.`,
+Show or change an Agent runtime. User-facing ids: pi | codex | claude | cursor. A missing executable is rejected and does not write config.`,
   effort: `Usage: larkin effort [<level>|clear|default] [--agent <App ID>]
 Show or change an Agent reasoning effort; clear/default restores the Runtime default.`,
   chats: `Usage: larkin chats [--agent <App ID>]

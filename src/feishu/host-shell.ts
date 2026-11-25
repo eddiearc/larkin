@@ -36,6 +36,7 @@ import {
   readinessForPersistedAuthFailure,
   RuntimePrerequisiteError,
   type PersistedAuthFailure,
+  type RuntimeReadiness,
 } from "../runtime/runtime-readiness.js";
 import { providerFinishReason, safeProviderDiagnostic } from "../runtime/provider-error-classifier.js";
 import { readDocumentCommentSubscription, verifyCallbackProbe, type EffectiveDocumentCommentSubscription } from "../platform/callback-capability.js";
@@ -1258,7 +1259,7 @@ export function createHostShell({
         sessionId: agentStates.get(candidate.agentId)?.state.sessions[candidate.runtime] || null };
       const staged = previous && runtimeHost.stage ? await runtimeHost.stage(runtimeCandidate) : null;
       const candidateReadiness = staged?.readiness ?? (runtimeHost.probe ? await runtimeHost.probe(runtimeCandidate)
-        : { runtime: candidate.runtime as "codex" | "claude" | "pi", state: "ready" as const });
+        : { runtime: candidate.runtime as RuntimeReadiness["runtime"], state: "ready" as const });
       if (candidateReadiness.state !== "ready") throw new RuntimePrerequisiteError(candidateReadiness);
       initializeAgentState(candidate);
       prepareAgentState(candidate);
@@ -1538,7 +1539,7 @@ export function createHostShell({
     }
     if (message.type === "runtime" && message.event.type === "input-error") {
       if (message.event.errorCategory === "auth") {
-        const readiness = providerAuthenticationFailureReadiness(agent.runtime as "codex" | "claude" | "pi", message.event.upstream?.provider);
+        const readiness = providerAuthenticationFailureReadiness(agent.runtime as RuntimeReadiness["runtime"], message.event.upstream?.provider);
         hostState.recordStatusError(agent, `auth: ${readiness.reason}; ${readiness.nextAction}`);
       } else {
         const category = message.event.errorCategory || "provider";

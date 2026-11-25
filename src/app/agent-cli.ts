@@ -14,7 +14,7 @@ import { InteractionStateMachine } from "../agent/interaction-state-machine.js";
 import { issueCallbackProbe, readCallbackCapability } from "../platform/callback-capability.js";
 import { requestAgentUpsert } from "./local-control.js";
 import { isUserRuntime } from "../runtime/user-runtime.js";
-import { resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
+import { resolveRuntimeExecutable, runtimeCommandFor, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 export { AGENT_CLI_CAPABILITIES } from "../agent/agent-cli-capabilities.js";
 import { AGENT_CLI_CAPABILITIES } from "../agent/agent-cli-capabilities.js";
 import { CONFIG_CLI_USAGE, CONFIG_CLI_VALUES } from "../agent/config-cli-contract.js";
@@ -206,12 +206,7 @@ function agentConfigRequest(
     const runtime = options.positionals[0];
     if (!runtime || options.positionals.length > 1) throw new Error("用法: larkin config runtime <runtime> [--model <model>] [--agent <App ID>]");
     if (!isUserRuntime(runtime)) throw new Error(`未知 runtime：${runtime}`);
-    const command = runtime === "pi"
-      ? env.LARKIN_PI_COMMAND || "pi"
-      : runtime === "codex"
-        ? env.LARKIN_CODEX_COMMAND || "codex"
-        : env.LARKIN_CLAUDE_COMMAND || "claude";
-    if (!resolveRuntimeExecutable(command, env)) {
+    if (!resolveRuntimeExecutable(runtimeCommandFor(runtime, env), env)) {
       throw new Error(`${runtime} is not installed；${runtimeInstallNextAction(runtime)}`);
     }
     const model = options.values.get("--model");

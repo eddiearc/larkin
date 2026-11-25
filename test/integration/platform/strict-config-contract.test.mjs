@@ -216,7 +216,7 @@ test("selectAgent fails closed and only explicit ID or valid activeAgent can sel
 
 test("authored runtime model catalog contains exactly the native adapters", () => {
   const catalog = require("../../../dist/platform/config.cjs").loadRuntimeModels();
-  assert.deepEqual(Object.keys(catalog).sort(), ["claude", "codex", "pi"]);
+  assert.deepEqual(Object.keys(catalog).sort(), ["claude", "codex", "cursor", "pi"]);
   assert.equal(catalog.codex[0].id, "default");
   assert.equal(catalog.claude[0].id, "default");
   assert.equal(catalog.codex[0].label, "default");

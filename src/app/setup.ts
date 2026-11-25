@@ -7,11 +7,11 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import * as larkinConfig from "../platform/config.js";
-import { isUserRuntime, type RuntimeOption } from "../runtime/user-runtime.js";
+import { isUserRuntime, RUNTIME_OPTIONS, type RuntimeOption } from "../runtime/user-runtime.js";
 import { acquireProcessLock, readProcessState } from "../platform/process-state.js";
 import { requestAgentUpsert } from "./local-control.js";
 import { openOwnedDashboardWhenReady } from "./setup-dashboard.js";
-import { probeNativeRuntimeReadiness, resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
+import { probeNativeRuntimeReadiness, resolveRuntimeExecutable, runtimeCommandFor, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 import { internalCommandSpec, processCommandToken, type InternalMode } from "./internal-command.js";
 import {
   ensureOfficialLarkCliForSetup,
@@ -38,19 +38,13 @@ if (has("--comment-subscription")) {
 
 const REMOVED_SETUP_FLAGS = ["--provider", "--api-key", "--base-url", "--pi-distribution", "--api-key-stdin", "--model-from-preset"];
 if (REMOVED_SETUP_FLAGS.some((name) => has(name) || argv.some((arg) => arg.startsWith(`${name}=`)))) {
-  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex 或 claude");
+  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex、claude 或 cursor-agent");
 }
 
 // 默认应用级评论订阅：平台验证的应用订阅让该应用可见文档的全部评论进入 Agent Inbox。
 const commentSubscription = "application";
 const OPT = { runtime: flag("--runtime") || null, commentSubscription, start: !has("--no-start"), help: has("--help") || has("-h"), nonInteractive: !Boolean(process.stdin.isTTY) };
 
-const RUNTIME_ENUM = ["pi", "codex", "claude"] as const;
-function runtimeCommand(runtime: RuntimeOption, env: NodeJS.ProcessEnv = process.env): string {
-  if (runtime === "pi") return env.LARKIN_PI_COMMAND || "pi";
-  if (runtime === "codex") return env.LARKIN_CODEX_COMMAND || "codex";
-  return env.LARKIN_CLAUDE_COMMAND || "claude";
-}
 function normalizeRuntime(value: string | null): RuntimeOption | null {
   if (!value) return null;
   if (value === "external-pi") {
@@ -58,10 +52,10 @@ function normalizeRuntime(value: string | null): RuntimeOption | null {
     return "pi";
   }
   if (isUserRuntime(value)) return value;
-  return die(`未知 runtime \`${value}\`；可选：${RUNTIME_ENUM.join(" | ")}`);
+  return die(`未知 runtime \`${value}\`；可选：${RUNTIME_OPTIONS.join(" | ")}`);
 }
 function assertRuntimeInstalled(runtime: RuntimeOption): void {
-  if (resolveRuntimeExecutable(runtimeCommand(runtime), process.env)) return;
+  if (resolveRuntimeExecutable(runtimeCommandFor(runtime), process.env)) return;
   die(`${runtime} is not installed；${runtimeInstallNextAction(runtime)}`);
 }
 
@@ -73,7 +67,7 @@ Usage:
   larkin setup --runtime pi            Non-interactive setup for an externally installed runtime
 
 Options:
-  --runtime <runtime>                   Required without a TTY. Agent runtime: pi | codex | claude
+  --runtime <runtime>                   Required without a TTY. Agent runtime: pi | codex | claude | cursor
   --model <id>                          Optional model ID; otherwise the runtime default is used.
                                           Use \`larkin model\` after setup to inspect or switch.
   --from-cli-profile <name>            Optional: reuse an existing official lark-cli profile
@@ -175,12 +169,12 @@ export async function main(): Promise<void> {
   const { config: configured } = larkinConfig.loadConfig(process.env);
   const configuredAgent = configured.agents[selectedAgentId];
   if (!configuredAgent) die(`setup 完成但 Agent ${selectedAgentId} 配置不可读`);
-  if (!(["codex", "claude", "pi"] as const).includes(configuredAgent.runtime as "codex" | "claude" | "pi")) die(`Runtime ${configuredAgent.runtime} 不受支持`);
+  if (!isUserRuntime(String(configuredAgent.runtime))) die(`Runtime ${configuredAgent.runtime} 不受支持`);
   // 非交互（Agent 驱动）时仍跳过 probeNativeRuntimeReadiness：该探测保持 interactive-only。
   // external-pi 绑定已在 setup-bind 内做非交互 Pi RPC catalog discovery（RPC over pipes 不需要 TTY）；
   // daemon attach 探测仍是权威校验。其余真实阻塞（缺 runtime 可执行文件 / 缺登录 / 缺 lark-cli）一律 fast-fail。
   if (!OPT.nonInteractive) {
-    const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as "codex" | "claude" | "pi",
+    const runtimeReadiness = await probeNativeRuntimeReadiness({ runtime: configuredAgent.runtime as RuntimeOption,
       agentId: selectedAgentId, cwd: configuredAgent.workspaceDir,
       env: { ...process.env, LARKIN_CONFIG_DIR: CFG_DIR } });
     if (runtimeReadiness.state !== "ready") {

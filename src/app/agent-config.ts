@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { daemonHasAgent, readProcessState } from "../platform/process-state.js";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
+import { discoverCursorModelCatalog } from "../runtime/cursor-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type PiModelCatalog } from "../runtime/pi-model-catalog.js";
 import {
@@ -21,7 +22,7 @@ import { requestAgentUpsert } from "./local-control.js";
 import * as larkinConfig from "../platform/config.js";
 import { managedOfficialLarkCli } from "./agent-lark-cli-workspace.js";
 import { RUNTIME_OPTIONS, fromUserRuntime, isUserRuntime, toUserRuntime } from "../runtime/user-runtime.js";
-import { resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
+import { resolveRuntimeExecutable, runtimeCommandFor, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 
 interface RuntimeModel {
   id: string;
@@ -465,17 +466,12 @@ if (!key) {
 const selectedKey = key as string;
 const agent = config.agents[selectedKey];
 
-function runtimeExecutableName(runtime: "pi" | "codex" | "claude"): string {
-  if (runtime === "pi") return process.env.LARKIN_PI_COMMAND || "pi";
-  if (runtime === "codex") return process.env.LARKIN_CODEX_COMMAND || "codex";
-  return process.env.LARKIN_CLAUDE_COMMAND || "claude";
-}
 if (kind === "runtime" && value) {
   if (!isUserRuntime(value)) {
     console.error(`✗ 未知 runtime：${value}。合法值: ${RUNTIME_OPTIONS.join(", ")}`);
     process.exit(1);
   }
-  if (!resolveRuntimeExecutable(runtimeExecutableName(value), process.env)) {
+  if (!resolveRuntimeExecutable(runtimeCommandFor(value, process.env), process.env)) {
     die(`${value} is not installed；${runtimeInstallNextAction(value)}`);
   }
 }
@@ -495,6 +491,14 @@ if ((["model", "effort"].includes(kind || "") && agent.runtime === "claude") || 
     catalog.claude = [{ id: "default", label: `default: ${discovered.effectiveModel}` }, ...discovered.models];
   } catch (error) {
     die(`Claude 模型目录加载失败：${error instanceof Error ? error.message : String(error)}。请确认当前 Claude Code 支持 list_models control request。`);
+  }
+}
+if ((kind === "model" && agent.runtime === "cursor") || (kind === "runtime" && value === "cursor")) {
+  try {
+    const discovered = await discoverCursorModelCatalog({ cwd: String(agent.workspaceDir), env: process.env });
+    catalog.cursor = [{ id: "default", label: `default: ${discovered.effectiveModel}` }, ...discovered.models];
+  } catch (error) {
+    die(`Cursor 模型目录加载失败：${error instanceof Error ? error.message : String(error)}。请确认已安装并登录 cursor-agent。`);
   }
 }
 let piCatalog: PiModelCatalog | null = null;

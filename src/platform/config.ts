@@ -130,6 +130,7 @@ const CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const PI_MODEL = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._:@+-]+)?$/;
 const CODEX_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CLAUDE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,127}$/;
+const CURSOR_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]=,-]{0,159}$/;
 const CONFIG_LIMIT_BYTES = 1024 * 1024;
 const PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES = 64 * 1024 * 1024;
 const LOCK_RETRIES = 200;
@@ -286,7 +287,8 @@ function assertModel(runtime: string, model: string): void {
   if (model === "default") return;
   const safe = runtime === "pi" ? PI_MODEL.test(model)
     : runtime === "codex" ? CODEX_MODEL.test(model)
-      : runtime === "claude" ? CLAUDE_MODEL.test(model) : false;
+      : runtime === "claude" ? CLAUDE_MODEL.test(model)
+        : runtime === "cursor" ? CURSOR_MODEL.test(model) : false;
   if (!safe) throw new Error(`${runtime} model 格式不安全：${model}`);
 }
 

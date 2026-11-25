@@ -2,7 +2,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import type { StoredAgent } from "./setup-binding.js";
 import { RUNTIME_OPTIONS, toUserRuntime, type RuntimeOption } from "../runtime/user-runtime.js";
-import { resolveRuntimeExecutable, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
+import { resolveRuntimeExecutable, runtimeCommandFor, runtimeInstallNextAction } from "../runtime/runtime-readiness.js";
 
 export type SetupAgentChoice = { runtime: RuntimeOption };
 
@@ -19,15 +19,9 @@ export interface RuntimeInstallStatus {
   nextAction?: string;
 }
 
-function runtimeCommand(runtime: RuntimeOption, env: NodeJS.ProcessEnv): string {
-  if (runtime === "pi") return env.LARKIN_PI_COMMAND || "pi";
-  if (runtime === "codex") return env.LARKIN_CODEX_COMMAND || "codex";
-  return env.LARKIN_CLAUDE_COMMAND || "claude";
-}
-
 export function listRuntimeInstallStatuses(env: NodeJS.ProcessEnv = process.env): RuntimeInstallStatus[] {
   return RUNTIME_OPTIONS.map((runtime) => {
-    if (resolveRuntimeExecutable(runtimeCommand(runtime, env), env)) return { runtime, installed: true };
+    if (resolveRuntimeExecutable(runtimeCommandFor(runtime, env), env)) return { runtime, installed: true };
     return {
       runtime,
       installed: false,
@@ -38,7 +32,7 @@ export function listRuntimeInstallStatuses(env: NodeJS.ProcessEnv = process.env)
 }
 
 export function missingRuntimeInstallMessage(runtime: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  if (runtime !== "pi" && runtime !== "codex" && runtime !== "claude") return null;
+  if (!(RUNTIME_OPTIONS as readonly string[]).includes(runtime)) return null;
   const status = listRuntimeInstallStatuses(env).find((entry) => entry.runtime === runtime);
   if (!status || status.installed) return null;
   return `${status.reason}；${status.nextAction}`;
@@ -48,6 +42,7 @@ const RUNTIME_LABELS: Record<RuntimeOption, string> = {
   pi: "pi（本机官方 pi CLI）",
   codex: "Codex",
   claude: "Claude Code",
+  cursor: "Cursor CLI（cursor-agent）",
 };
 
 function number(value: string, fallback: number, max: number): number {

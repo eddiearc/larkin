@@ -647,7 +647,7 @@ const documentCommentSubscription: DocumentCommentSubscriptionCapability = comme
     : priorSubscription;
 
 if (flag("--provider") || flag("--api-key") || flag("--base-url") || flag("--pi-distribution")) {
-  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex 或 claude");
+  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex、claude 或 cursor-agent");
 }
 
 const injectedAgentChoice = testFixture?.collectSetupAgentChoice;

@@ -1,4 +1,4 @@
-export type RuntimeId = "codex" | "claude" | "pi";
+export type RuntimeId = "codex" | "claude" | "pi" | "cursor";
 
 export type RuntimeInputKind =
   | "initial"

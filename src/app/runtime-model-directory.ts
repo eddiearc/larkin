@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
+import { discoverCursorModelCatalog } from "../runtime/cursor-model-catalog.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -64,6 +65,10 @@ export async function discoverRuntimeModelDirectory(input: RuntimeModelDirectory
         id, label, supportedReasoningEfforts, ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
       })),
     ];
+  }
+  if (input.runtime === "cursor") {
+    const catalog = await discoverCursorModelCatalog({ cwd: input.cwd, env: input.env });
+    return [{ id: "default", label: `default: ${catalog.effectiveModel}` }, ...catalog.models];
   }
   throw new Error(`未知 runtime：${input.runtime}`);
 }

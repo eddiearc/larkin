@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.27
+
+Cursor CLI is a fourth Agent runtime (`cursor`). Larkin drives `cursor-agent acp` (Agent Client Protocol over stdio): a session is created or resumed with `session/load`, answer text, reasoning and tool calls stream into the reply card, tool permission requests are answered with the broadest allow option, and input that arrives mid-turn interrupts the running prompt and continues as the same turn. The standing prompt is written to the Larkin-managed rule `.cursor/rules/larkin-standing-prompt.mdc` in the Agent workspace, so the workspace `AGENTS.md` stays the user's. `--model` is passed only when the Agent pins a model, because Cursor saves it as the CLI default. Setup, `larkin config runtime`, readiness checks (`cursor-agent models`), the dashboard Runtime option, model directory and capability list (skills, subagents, MCP) support it; set `LARKIN_CURSOR_COMMAND` to use another executable.
+
 ## 0.5.26
 
 Streaming reply cards no longer post the Host filler "Done. Nothing to reply.": a card that ends without answer text shows only its replay panel. When the model polls a second message from the same chat or topic in one turn, a card that has no answer text yet keeps streaming and answers both instead of leaving an empty card behind; a card that already has answer text ends with a grey "接下一条回复继续 ↓" line and the next message gets its own card. Polling a different chat or topic still closes the card unchanged. All Host-written card text (status line, step titles, replay title, failure and continuation notices) is now Chinese.

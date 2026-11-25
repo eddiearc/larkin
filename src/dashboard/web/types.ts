@@ -74,7 +74,7 @@ export interface DashboardAgent {
 }
 
 export interface RuntimeReadinessView {
-  runtime?: "codex" | "claude" | "pi";
+  runtime?: "codex" | "claude" | "pi" | "cursor";
   state: "missing" | "unauthenticated" | "incompatible" | "ready";
   executable?: string;
   version?: string;
@@ -103,7 +103,7 @@ export interface KnownChat {
 export interface ConfigAgent {
   agentId: string;
   runtime: string;
-  runtimeOption: "codex" | "claude" | "pi";
+  runtimeOption: "codex" | "claude" | "pi" | "cursor";
   model: string;
   effort: string | null;
   /** Codex sandbox; other Runtimes ignore it. */
@@ -140,7 +140,7 @@ export interface ConfigResponse {
   persistedRevision: string;
   agents: ConfigAgent[];
   runtimeModels: Record<string, RuntimeModel[]>;
-  runtimeOptions: Array<"codex" | "claude" | "pi">;
+  runtimeOptions: Array<"codex" | "claude" | "pi" | "cursor">;
 }
 
 export type WorkspaceProjection = {

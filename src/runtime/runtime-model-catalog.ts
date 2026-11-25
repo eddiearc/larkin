@@ -9,7 +9,7 @@ export interface RuntimeModelDefinition {
 export type RuntimeModels = Record<string, RuntimeModelDefinition[]>;
 
 // Authored catalog keys are adapter ids only.
-// Pi, Codex and Claude replace these placeholders/fallbacks at runtime with their machine-readable catalogs.
+// Pi, Codex, Claude and Cursor replace these placeholders/fallbacks at runtime with their machine-readable catalogs.
 // Claude's supported stdin control-channel list is the live authority; its entries below
 // remain explicit compatibility candidates for config loading and discovery failures.
 const PI_AUTHORED_MODELS: RuntimeModelDefinition[] = [{ id: "default", label: "default", verified: "dynamic" }];
@@ -49,4 +49,5 @@ export const CURRENT_RUNTIME_MODELS: RuntimeModels = {
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 · 静态候选", verified: "authored-candidate" },
   ],
   pi: [...PI_AUTHORED_MODELS],
+  cursor: [{ id: "default", label: "default", verified: "dynamic" }],
 };

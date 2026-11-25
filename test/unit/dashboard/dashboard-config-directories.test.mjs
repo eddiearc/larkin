@@ -440,7 +440,7 @@ function writePiAgents(root, agents) {
   })}\n`, { mode: 0o600 });
 }
 
-test("GET /api/config lists three runtimes and /api/models/builtin-pi is unhandled", async () => {
+test("GET /api/config lists four runtimes and /api/models/builtin-pi is unhandled", async () => {
   const { createDashboardConfigController } = await import(`${CONTROLLER}?pi-owned=${Date.now()}`);
   const f = fixture();
   onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
@@ -467,7 +467,7 @@ test("GET /api/config lists three runtimes and /api/models/builtin-pi is unhandl
     assert.equal(projected.status, 200);
     assert.equal(projected.body.agents[0].runtime, "pi");
     assert.equal(projected.body.agents[0].runtimeOption, "pi");
-    assert.deepEqual(projected.body.runtimeOptions, ["codex", "claude", "pi"]);
+    assert.deepEqual(projected.body.runtimeOptions, ["codex", "claude", "pi", "cursor"]);
     assert.equal(Object.hasOwn(projected.body.runtimeModels, "builtin-pi"), false);
     assert.ok(Object.hasOwn(projected.body.runtimeModels, "pi"));
     calls.length = 0;

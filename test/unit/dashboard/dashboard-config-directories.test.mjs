@@ -603,6 +603,54 @@ test("GET /api/models/claude returns the current Claude control catalog", async 
   assert.deepEqual(response.body.models, models);
 });
 
+test("GET /api/models/cursor returns the current Cursor catalog and a listed model can be saved", async () => {
+  const { createDashboardConfigController } = await import(`${CONTROLLER}?cursor-endpoint=${Date.now()}`);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const calls = [];
+  const models = [{ id: "default", label: "default: auto" }, { id: "claude-opus-4-8[context=1m,effort=high]", label: "Claude Opus 4.8 1M High" }];
+  const controller = createDashboardConfigController({
+    csrfCapability: "test",
+    env: f.env,
+    probeRuntimeReadiness: async ({ runtime }) => ({ runtime, state: "ready" }),
+    cursorModelDirectoryResolver: { async resolve(input) { calls.push(input); return models; } },
+  });
+  const response = await get(controller, `/api/models/cursor?agent=${APP}`);
+  assert.equal(response.handled, true);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.models, models);
+  assert.equal(calls[0].agentId, APP);
+
+  const saved = await patch(controller, { operation: "set-agent-runtime", agentId: APP, runtime: "cursor", model: models[1].id });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const reloaded = await get(controller, `/api/config?agent=${APP}`);
+  assert.deepEqual(
+    { runtime: reloaded.body.agents[0].runtimeOption, model: reloaded.body.agents[0].model },
+    { runtime: "cursor", model: models[1].id },
+  );
+});
+
+test("every runtime the Dashboard offers has a model directory endpoint", async () => {
+  const { createDashboardConfigController } = await import(`${CONTROLLER}?every-endpoint=${Date.now()}`);
+  const f = fixture();
+  onTestFinished(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const resolver = (runtime) => ({ async resolve() { return [{ id: "default", label: `default: ${runtime}` }]; } });
+  const controller = createDashboardConfigController({
+    csrfCapability: "test",
+    env: f.env,
+    piModelDirectoryResolver: resolver("pi"),
+    codexModelDirectoryResolver: resolver("codex"),
+    claudeModelDirectoryResolver: resolver("claude"),
+    cursorModelDirectoryResolver: resolver("cursor"),
+  });
+  const { runtimeOptions } = (await get(controller, `/api/config?agent=${APP}`)).body;
+  for (const runtime of runtimeOptions) {
+    const response = await get(controller, `/api/models/${runtime}?agent=${APP}`);
+    assert.equal(response.handled, true, runtime);
+    assert.deepEqual(response.body.models, [{ id: "default", label: `default: ${runtime}` }]);
+  }
+});
+
 for (const runtimeCase of [
   { runtime: "codex", model: "gpt-evaluator-dynamic-1", effort: "high" },
   { runtime: "claude", model: "claude-evaluator-9", effort: "medium" },
@@ -654,15 +702,18 @@ test("dynamic directory GETs require loopback Host and the dashboard capability 
     piModelDirectoryResolver: { async resolve() { calls.push("pi"); return []; } },
     codexModelDirectoryResolver: { async resolve() { calls.push("codex"); return []; } },
     claudeModelDirectoryResolver: { async resolve() { calls.push("claude"); return []; } },
+    cursorModelDirectoryResolver: { async resolve() { calls.push("cursor"); return []; } },
   });
 
   const badHost = await get(controller, `/api/models/pi?agent=${APP}`, { host: "evil.example", "x-larkin-csrf": "test" });
   const missingCodexCapability = await get(controller, `/api/models/codex?agent=${APP}`, { host: "localhost:9996" });
   const missingClaudeCapability = await get(controller, `/api/models/claude?agent=${APP}`, { host: "localhost:9996" });
+  const missingCursorCapability = await get(controller, `/api/models/cursor?agent=${APP}`, { host: "localhost:9996" });
   const missingCapability = await get(controller, `/api/config?agent=${APP}`, { host: "localhost:9996" });
   assert.equal(badHost.handled, true);
   assert.equal(missingCapability.handled, true);
-  assert.deepEqual([badHost.status, missingCodexCapability.status, missingClaudeCapability.status, missingCapability.status], [403, 403, 403, 403]);
+  assert.deepEqual([badHost.status, missingCodexCapability.status, missingClaudeCapability.status, missingCursorCapability.status, missingCapability.status],
+    [403, 403, 403, 403, 403]);
   assert.deepEqual(calls, [], "untrusted dynamic GETs never reach local credential-backed resolvers");
 });
 

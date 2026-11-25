@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.29
+
+The dashboard can list Cursor models: `GET /api/models/cursor` was missing, so choosing the `cursor` Runtime showed "HTTP 404" and left only the current model in the Model list. A model from that list can be saved like any other Runtime's.
+
 ## 0.5.28
 
 Host-written streaming card text is English again, as chosen in 0.5.22: `Thinking…`, `Replying…`, `Running <input>`, `Replay · N tool calls · Ns`, `· failed`, `… N earlier steps omitted`, the continuation notice `Continued in the next reply ↓`, and the failure notice `Something went wrong while handling this message. Please try again later.` The merge and continuation behavior from 0.5.26 is unchanged.

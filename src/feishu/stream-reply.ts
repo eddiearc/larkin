@@ -60,24 +60,24 @@ export interface StreamReplyOptions {
   now?: () => number;
 }
 
-export const STREAM_REPLY_INITIAL_TEXT = "Thinking…";
-export const STREAM_REPLY_FAILURE_TEXT = "Something went wrong while handling this message, so the reply is incomplete. Please try again later.";
-export const STREAM_REPLY_SILENT_TEXT = "Done. Nothing to reply.";
+export const STREAM_REPLY_INITIAL_TEXT = "思考中…";
+export const STREAM_REPLY_FAILURE_TEXT = "处理这条消息时出错了，请稍后再试。";
+export const STREAM_REPLY_CONTINUED_TEXT = "接下一条回复继续 ↓";
 
 const MAX_THINKING_CHARS = 600;
 const MAX_TOOL_INPUT_CHARS = 200;
 const MAX_STEP_LINES = 60;
 const SUMMARY_CHARS = 50;
 
-interface ReplyAddress { key: string; chatId: string; anchor: string; inThread: boolean }
+interface ReplyAddress { key: string; target: string; chatId: string; anchor: string; inThread: boolean }
 
 /** Map a canonical Inbox source to a card address; only IM chat/thread sources with a real om_ anchor qualify. */
 export function replyAddressOf(source: StreamReplySource | null): ReplyAddress | null {
   if (!source || source.replyByCommand || !/^om_[A-Za-z0-9_-]+$/.test(source.deliveryAnchor)) return null;
   const chat = /^chat:([^:]+)$/.exec(source.deliveryTarget);
-  if (chat) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, chatId: chat[1], anchor: source.deliveryAnchor, inThread: false };
+  if (chat) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, target: source.deliveryTarget, chatId: chat[1], anchor: source.deliveryAnchor, inThread: false };
   const thread = /^thread:([^:]+):([^:]+)$/.exec(source.deliveryTarget);
-  if (thread) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, chatId: thread[1], anchor: source.deliveryAnchor, inThread: true };
+  if (thread) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, target: source.deliveryTarget, chatId: thread[1], anchor: source.deliveryAnchor, inThread: true };
   return null;
 }
 
@@ -106,18 +106,18 @@ function stepLines(steps: readonly Step[]): string[] {
       const text = step.text.replace(/\s+/g, " ").trim();
       return `> ${text.length > MAX_THINKING_CHARS ? `${text.slice(0, MAX_THINKING_CHARS - 1)}…` : text}`;
     }
-    return `- ${toolLabel(step)}${step.status === "failed" ? " · failed" : ""}`;
+    return `- ${toolLabel(step)}${step.status === "failed" ? " · 失败" : ""}`;
   });
-  return lines.length > MAX_STEP_LINES ? [`… ${lines.length - MAX_STEP_LINES} earlier steps omitted`, ...lines.slice(-MAX_STEP_LINES)] : lines;
+  return lines.length > MAX_STEP_LINES ? [`… 省略前面 ${lines.length - MAX_STEP_LINES} 步`, ...lines.slice(-MAX_STEP_LINES)] : lines;
 }
 
 function stepsTitle(steps: readonly Step[]): string {
   const tools = steps.filter((step) => step.kind === "tool").length;
   const thought = steps.some((step) => step.kind === "thinking");
-  const calls = `${tools} tool call${tools === 1 ? "" : "s"}`;
-  if (tools && thought) return `Thinking · ${calls}`;
+  const calls = `${tools} 次工具调用`;
+  if (tools && thought) return `思考 · ${calls}`;
   if (tools) return calls;
-  return "Thinking";
+  return "思考";
 }
 
 function panel(elementId: string, title: string, content: string): Record<string, unknown> {
@@ -191,10 +191,12 @@ class CardReply {
   private finished = false;
   private readonly startedAt: number;
   private settle!: () => void;
+  private readonly covered: Set<string>;
 
   constructor(readonly address: ReplyAddress, private readonly client: CardKitClient, private readonly throttleMs: number,
     private readonly now: () => number, private readonly log: (...parts: unknown[]) => void) {
     this.startedAt = now();
+    this.covered = new Set([address.key]);
     this.done = new Promise<void>((resolve) => { this.settle = resolve; });
     this.chain = this.start();
   }
@@ -202,6 +204,14 @@ class CardReply {
   /** The answer text exactly as the model wrote it; blank blocks are skipped. */
   get answer(): string {
     return this.entries.flatMap((entry) => entry.kind === "text" && entry.text.trim() ? [entry.text] : []).join("\n\n");
+  }
+
+  answers(address: ReplyAddress): boolean {
+    return this.covered.has(address.key);
+  }
+
+  adopt(address: ReplyAddress): void {
+    this.covered.add(address.key);
   }
 
   appendText(text: string, newBlock: boolean): void {
@@ -213,7 +223,7 @@ class CardReply {
     } else {
       this.entries.push({ kind: "text", text });
     }
-    this.status = "Replying…";
+    this.status = "回复中…";
     this.schedule();
   }
 
@@ -232,7 +242,7 @@ class CardReply {
     this.toolSerial += 1;
     const step: Extract<Step, { kind: "tool" }> = { kind: "tool", key: toolId || `#${this.toolSerial}`, name, input: toolInputForCard(input), status: "running" };
     this.stepsEntry().push(step);
-    this.status = `Running ${toolLabel(step)}`;
+    this.status = `正在执行 ${toolLabel(step)}`;
     this.schedule();
   }
 
@@ -249,18 +259,19 @@ class CardReply {
   }
 
   /** Close the card; `failure` keeps any partial answer and appends the failure notice. */
-  finish(failure?: string): void {
+  finish(failure?: string, continued = false): void {
     if (this.finished) return;
     this.finished = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    const final = this.renderFinal(failure);
-    const plain = failure ? (this.answer ? `${this.answer}\n\n${failure}` : failure) : this.answer || STREAM_REPLY_SILENT_TEXT;
+    const notice = failure ?? (continued && this.answer ? STREAM_REPLY_CONTINUED_TEXT : "");
+    const final = this.renderFinal(notice);
+    const plain = notice ? (this.answer ? `${this.answer}\n\n${notice}` : notice) : this.answer;
     this.chain = this.chain.then(() => this.deliverFinal(final, plain)).finally(() => this.settle());
   }
 
   private async deliverFinal(final: Record<string, unknown>, plain: string): Promise<void> {
     if (this.dead) {
-      if (this.unsent) await this.replyPlain(plain);
+      if (this.unsent && plain) await this.replyPlain(plain);
       return;
     }
     // The card counts as sent only once its final body landed; one retry covers a transient failure.
@@ -297,24 +308,26 @@ class CardReply {
     elements.push({ tag: "markdown", element_id: "status", content: `<font color='grey'>${this.status}</font>`, text_size: "notation" });
     return cardShell(elements, {
       streaming_mode: true,
-      summary: { content: "Replying…" },
+      summary: { content: "回复中…" },
       streaming_config: { print_frequency_ms: { default: 30 }, print_step: { default: 8 }, print_strategy: "fast" },
     });
   }
 
-  private renderFinal(failure?: string): Record<string, unknown> {
+  private renderFinal(notice: string): Record<string, unknown> {
     // A Runtime that reports no tool results leaves calls "running"; the turn is over now.
     const steps = this.entries.flatMap((entry) => entry.kind === "steps" ? entry.steps : [])
       .map((step) => step.kind === "tool" && step.status === "running" ? { ...step, status: "completed" as const } : step);
     const answer = this.answer;
-    const body = failure ? (answer ? `${answer}\n\n<font color='grey'>${failure}</font>` : failure) : answer || STREAM_REPLY_SILENT_TEXT;
+    const body = notice ? (answer ? `${answer}\n\n<font color='grey'>${notice}</font>` : notice) : answer;
     const elements: unknown[] = [];
+    let replayTitle = "";
     if (steps.length) {
       const seconds = Math.max(1, Math.round((this.now() - this.startedAt) / 1000));
-      elements.push(panel("replay", `Replay · ${stepsTitle(steps)} · ${seconds}s`, stepLines(steps).join("\n")));
+      replayTitle = `过程回放 · ${stepsTitle(steps)} · ${seconds} 秒`;
+      elements.push(panel("replay", replayTitle, stepLines(steps).join("\n")));
     }
-    elements.push({ tag: "markdown", element_id: "answer", content: body });
-    return cardShell(elements, { streaming_mode: true, summary: { content: truncateSummary(failure && !answer ? failure : body) } });
+    if (body || !elements.length) elements.push({ tag: "markdown", element_id: "answer", content: body || " " });
+    return cardShell(elements, { streaming_mode: true, summary: { content: truncateSummary(answer || notice || replayTitle) } });
   }
 
   private async start(): Promise<void> {
@@ -504,14 +517,24 @@ export class StreamReplyCoordinator {
       turn.buffered = [];
       return null;
     }
-    if (turn.card && turn.card.address.key === address.key) return turn.card;
-    if (turn.card) { turn.card.finish(); turn.card = null; turn.buffered = []; }
+    this.retarget(turn, address);
+    if (turn.card) return turn.card;
     if (!open) return null;
     turn.card = this.open(agentId, address);
     if (!turn.card) return null;
     turn.cards += 1;
     for (const item of turn.buffered.splice(0)) turn.card.appendThinking(item.text);
     return turn.card;
+  }
+
+  private retarget(turn: TurnState, address: ReplyAddress): void {
+    const card = turn.card;
+    if (!card || card.answers(address)) return;
+    const sameTarget = card.address.target === address.target;
+    if (sameTarget && !card.answer) { card.adopt(address); return; }
+    card.finish(undefined, sameTarget);
+    turn.card = null;
+    turn.buffered = [];
   }
 
   private currentAddress(agentId: string, turn: TurnState): ReplyAddress | null {
@@ -557,7 +580,7 @@ export class StreamReplyCoordinator {
     const previous = turn.lastAddress;
     turn.needsResolve = true;
     const address = this.currentAddress(agentId, turn) ?? previous;
-    if (turn.card && address && turn.card.address.key !== address.key) { turn.card.finish(); turn.card = null; }
+    if (address) this.retarget(turn, address);
     if (!turn.card && address) turn.card = this.open(agentId, address);
     turn.card?.finish(turn.failed);
   }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.26
+
+Streaming reply cards no longer post the Host filler "Done. Nothing to reply.": a card that ends without answer text shows only its replay panel. When the model polls a second message from the same chat or topic in one turn, a card that has no answer text yet keeps streaming and answers both instead of leaving an empty card behind; a card that already has answer text ends with a grey "接下一条回复继续 ↓" line and the next message gets its own card. Polling a different chat or topic still closes the card unchanged. All Host-written card text (status line, step titles, replay title, failure and continuation notices) is now Chinese.
+
 ## 0.5.25
 
 Polling an Inbox scope that has nothing new, after the same Runtime turn already polled messages there, now lists those message ids in `polled_this_turn` with a `next_action` naming the `larkin im +messages-mget` command that reads them again. A Runtime that compacts its context right after a poll (Codex) can therefore recover the message it owes a reply to, instead of polling an empty target until the process restarts while the reply card shows only poll steps. Poll stays at-most-once: no body is returned twice. The list covers user messages only and ends at the turn boundary together with the in-turn reply source.

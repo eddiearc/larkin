@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { MINIMUM_PI_VERSION, parsePiExecutableVersion } from "./pi-compaction-recovery.js";
+import type { RuntimeId } from "./runtime-contracts.js";
 
 export type RuntimeReadinessState = "missing" | "unauthenticated" | "unavailable" | "incompatible" | "ready";
 
 export interface RuntimeReadiness {
-  runtime: "codex" | "claude" | "pi";
+  runtime: RuntimeId;
   state: RuntimeReadinessState;
   executable?: string;
   version?: string;
@@ -48,7 +49,7 @@ export function configuredProviderId(model: unknown): string | null {
 }
 
 function persistedRuntime(value: unknown): RuntimeReadiness["runtime"] | null {
-  return value === "pi" || value === "codex" || value === "claude" ? value : null;
+  return value === "pi" || value === "codex" || value === "claude" || value === "cursor" ? value : null;
 }
 
 export function parsePersistedAuthFailure(state: unknown): PersistedAuthFailure | null {
@@ -101,12 +102,14 @@ export function classifyPiMissingCredentialRejection(message: unknown): { provid
 export function runtimeInstallNextAction(runtime: RuntimeReadiness["runtime"]): string {
   if (runtime === "pi") return "Install Pi and ensure `pi` is on PATH, or set LARKIN_PI_COMMAND.";
   if (runtime === "codex") return "Install Codex and ensure `codex` is on PATH, or set LARKIN_CODEX_COMMAND.";
+  if (runtime === "cursor") return "Install the Cursor CLI and ensure `cursor-agent` is on PATH, or set LARKIN_CURSOR_COMMAND.";
   return "Install Claude Code and ensure `claude` is on PATH, or set LARKIN_CLAUDE_COMMAND.";
 }
 
 export function runtimeLoginNextAction(runtime: RuntimeReadiness["runtime"]): string {
   if (runtime === "pi") return "Log in with the external `pi` CLI, then retry.";
   if (runtime === "codex") return "Run `codex login`, then retry.";
+  if (runtime === "cursor") return "Run `cursor-agent login`, then retry.";
   return "Run `claude login`, then retry.";
 }
 
@@ -220,11 +223,20 @@ export interface ProbeNativeRuntimeReadinessOptions {
   agentId?: string;
 }
 
+const RUNTIME_COMMANDS: Record<RuntimeId, { variable: string; fallback: string }> = {
+  pi: { variable: "LARKIN_PI_COMMAND", fallback: "pi" },
+  codex: { variable: "LARKIN_CODEX_COMMAND", fallback: "codex" },
+  claude: { variable: "LARKIN_CLAUDE_COMMAND", fallback: "claude" },
+  cursor: { variable: "LARKIN_CURSOR_COMMAND", fallback: "cursor-agent" },
+};
+
+export function runtimeCommandFor(runtime: RuntimeId, env: NodeJS.ProcessEnv = process.env): string {
+  const { variable, fallback } = RUNTIME_COMMANDS[runtime];
+  return env[variable] || process.env[variable] || fallback;
+}
+
 function selectedCommand(options: ProbeNativeRuntimeReadinessOptions): string {
-  if (options.command) return options.command;
-  if (options.runtime === "pi") return options.env?.LARKIN_PI_COMMAND || process.env.LARKIN_PI_COMMAND || "pi";
-  if (options.runtime === "codex") return options.env?.LARKIN_CODEX_COMMAND || process.env.LARKIN_CODEX_COMMAND || "codex";
-  return options.env?.LARKIN_CLAUDE_COMMAND || process.env.LARKIN_CLAUDE_COMMAND || "claude";
+  return options.command || runtimeCommandFor(options.runtime, options.env ?? {});
 }
 
 function executableVersion(executable: string, env: NodeJS.ProcessEnv, commandArgs: readonly string[] = []): string | undefined {
@@ -271,6 +283,9 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
     } else if (options.runtime === "codex") {
       const { discoverCodexModelCatalog } = await import("./codex-model-catalog.js");
       await discoverCodexModelCatalog({ cwd: options.cwd, command: executable, env });
+    } else if (options.runtime === "cursor") {
+      const { discoverCursorModelCatalog } = await import("./cursor-model-catalog.js");
+      await discoverCursorModelCatalog({ cwd: options.cwd, command: executable, env });
     } else {
       const { discoverClaudeModelCatalog } = await import("./claude-model-catalog.js");
       await discoverClaudeModelCatalog({ cwd: options.cwd, command: executable, env });

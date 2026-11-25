@@ -9,8 +9,10 @@ const {
   runtimeOptionOf, runtimeOptionTarget, toUserRuntime,
 } = await import(pathToFileURL(path.join(ROOT, "dist/runtime/user-runtime.mjs")).href);
 
-test("user-facing runtimes are the three external ids", () => {
-  assert.deepEqual([...RUNTIME_OPTIONS], ["codex", "claude", "pi"]);
+test("user-facing runtimes are the four external ids", () => {
+  assert.deepEqual([...RUNTIME_OPTIONS], ["codex", "claude", "pi", "cursor"]);
+  assert.deepEqual(fromUserRuntime("cursor"), { runtime: "cursor" });
+  assert.equal(isAdapterRuntime("cursor"), true);
   assert.deepEqual(fromUserRuntime("pi"), { runtime: "pi" });
   assert.deepEqual(runtimeOptionTarget("pi"), { runtime: "pi" });
   assert.deepEqual(fromUserRuntime("codex"), { runtime: "codex" });

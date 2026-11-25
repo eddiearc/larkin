@@ -70,7 +70,7 @@ test("removed Dashboard pi-auth routes stay unhandled while /api/config still pr
   assert.equal(config.handled, true);
   assert.equal(config.status, 200);
   assert.equal(config.body.agents[0].runtimeOption, "pi");
-  assert.deepEqual(config.body.runtimeOptions, ["codex", "claude", "pi"]);
+  assert.deepEqual(config.body.runtimeOptions, ["codex", "claude", "pi", "cursor"]);
   assert.equal(config.headers["Cache-Control"], "no-store");
 
   const providers = await get(controller, "/api/pi-auth/providers");

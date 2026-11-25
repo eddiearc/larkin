@@ -254,6 +254,24 @@ function claudeCapabilities(workspace: string, homes: CapabilityHomes, display: 
   ];
 }
 
+function cursorCapabilities(workspace: string, homes: CapabilityHomes, display: Display): CapabilityItem[] {
+  const cursorHome = path.join(homes.home, ".cursor");
+  const project = asRecord(readJsonObject(path.join(workspace, ".cursor", "mcp.json")).mcpServers);
+  const user = asRecord(readJsonObject(path.join(cursorHome, "mcp.json")).mcpServers);
+  return [
+    ...skillsIn(path.join(workspace, ".cursor", "skills"), "workspace", display),
+    ...skillsIn(path.join(cursorHome, "skills"), "global", display),
+    ...markShadowed([
+      ...markdownAgentsIn(path.join(workspace, ".cursor", "agents"), "workspace", display),
+      ...markdownAgentsIn(path.join(cursorHome, "agents"), "global", display),
+    ]),
+    ...markShadowed([
+      ...Object.entries(project).map(([name, server]) => mcpItem(name, asRecord(server), "workspace", ".cursor/mcp.json")),
+      ...Object.entries(user).map(([name, server]) => mcpItem(name, asRecord(server), "global", display.path(path.join(cursorHome, "mcp.json")))),
+    ]),
+  ];
+}
+
 function piCapabilities(workspace: string, homes: CapabilityHomes, display: Display): CapabilityItem[] {
   return [
     ...skillsIn(path.join(workspace, ".pi", "skills"), "workspace", display),
@@ -278,5 +296,6 @@ export function collectCapabilities(config: DashboardWorkspaceConfig, agentId: s
   const display = new Display(workspace, homes.home);
   if (runtime === "codex") return { runtime, items: codexCapabilities(workspace, homes, display), unsupported: [] };
   if (runtime === "claude") return { runtime, items: claudeCapabilities(workspace, homes, display), unsupported: [] };
+  if (runtime === "cursor") return { runtime, items: cursorCapabilities(workspace, homes, display), unsupported: ["plugin"] };
   return { runtime, items: piCapabilities(workspace, homes, display), unsupported: ["subagent", "plugin", "mcp"] };
 }

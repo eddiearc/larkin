@@ -93,7 +93,7 @@ test("dashboard Pi model directory is wired to the official catalog authority", 
   assert.match(controller, /RuntimePrerequisiteError/);
 });
 
-test("Dashboard surfaces only three external runtimes and readiness errors", () => {
+test("Dashboard surfaces only the four external runtimes and readiness errors", () => {
   const controller = read("src/dashboard/dashboard-config-controller.ts");
   const viewModel = read("src/dashboard/dashboard-view-model.ts");
   const types = read("src/dashboard/web/types.ts");
@@ -114,7 +114,7 @@ test("Dashboard surfaces only three external runtimes and readiness errors", () 
   assert.match(app, /formatReadiness/);
   assert.match(app, /readinessFailure/);
   assert.match(app, /runtimeReadiness/);
-  assert.match(types, /runtimeOptions:\s*Array<"codex"\s*\|\s*"claude"\s*\|\s*"pi">/);
+  assert.match(types, /runtimeOptions:\s*Array<"codex"\s*\|\s*"claude"\s*\|\s*"pi"\s*\|\s*"cursor">/);
   assert.doesNotMatch(app, /Pi 发行版/);
   assert.match(read("src/runtime/runtime-model-catalog.ts"), /pi: \[\.\.\.PI_AUTHORED_MODELS\]/);
   assert.doesNotMatch(read("src/runtime/runtime-model-catalog.ts"), /"builtin-pi":/);

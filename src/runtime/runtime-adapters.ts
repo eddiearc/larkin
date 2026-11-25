@@ -102,6 +102,7 @@ export interface NativeRuntimeAdapterDependencies {
   codexUpdateTimeoutMs?: number;
   codexUpdateKillGraceMs?: number;
   claudeCommand?: string;
+  cursorCommand?: string;
   writeFile?: typeof fs.writeFileSync;
   mkdir?: typeof fs.mkdirSync;
   env?: NodeJS.ProcessEnv;
@@ -654,6 +655,196 @@ class ClaudeSession extends EventSession {
   }
 }
 
+type AcpPending =
+  | { kind: "initialize" | "session/new" | "session/load" }
+  | { kind: "prompt"; inputId: string };
+
+function cursorToolInput(update: Record<string, any>): string {
+  const raw = update.rawInput;
+  if (typeof raw?.command === "string") return raw.command;
+  if (raw && typeof raw === "object" && Object.keys(raw).length) return toolInputText(raw);
+  return typeof update.title === "string" ? update.title : "";
+}
+
+class CursorAcpSession extends EventSession {
+  private requestId = 0;
+  private currentSessionId: string | null = null;
+  private loadSupported = false;
+  private inTurn = false;
+  private latestPrompt: number | null = null;
+  private readonly superseded = new Set<number>();
+  private text = "";
+  private thought = "";
+  private readonly pending = new Map<number, AcpPending>();
+
+  constructor(private readonly process: ProcessLike, private readonly config: RuntimeSessionCreate) {
+    super();
+    attachLines(process.stdout, (message) => this.onMessage(message));
+    process.once("exit", (code, signal) => this.emit({ type: "closed", code, signal }));
+    process.once("error", (error) => this.emit({ type: "error", message: `Cursor process failed: ${error.message}` }));
+    this.request("initialize", { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } },
+      { kind: "initialize" });
+  }
+
+  get sessionId(): string | null { return this.currentSessionId; }
+
+  prompt(input: RuntimeInput): Promise<RuntimeInputResult> { return this.send(input); }
+
+  busyInput(input: RuntimeInput): Promise<RuntimeInputResult> { return this.send(input); }
+
+  async cancel(_reason: string): Promise<void> {
+    if (this.currentSessionId) void writeLine(this.process.stdin, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: this.currentSessionId } }, "cancel");
+  }
+
+  async close(_reason: string): Promise<void> { this.process.stdin?.end?.(); this.process.kill("SIGTERM"); }
+
+  private async send(input: RuntimeInput): Promise<RuntimeInputResult> {
+    if (!this.currentSessionId) return { status: "deferred", inputId: input.inputId, reason: "Cursor session is not initialized" };
+    const started = !this.inTurn;
+    if (started) {
+      this.inTurn = true;
+      this.emit({ type: "turn-start" });
+    }
+    const id = ++this.requestId;
+    const previous = this.latestPrompt;
+    this.pending.set(id, { kind: "prompt", inputId: input.inputId });
+    this.latestPrompt = id;
+    if (previous !== null) {
+      this.superseded.add(previous);
+      this.flush();
+    }
+    const result = await writeLine(this.process.stdin, { jsonrpc: "2.0", id, method: "session/prompt",
+      params: { sessionId: this.currentSessionId, prompt: textInput(input) } }, input.inputId);
+    if (result.status !== "accepted") {
+      this.pending.delete(id);
+      if (previous !== null) this.superseded.delete(previous);
+      if (this.latestPrompt === id) this.latestPrompt = previous;
+      if (started) {
+        this.inTurn = false;
+        this.emit({ type: "turn-end", sessionId: this.currentSessionId });
+      }
+    }
+    return result;
+  }
+
+  private request(method: string, params: unknown, pending: AcpPending): number {
+    const id = ++this.requestId;
+    this.pending.set(id, pending);
+    void writeLine(this.process.stdin, { jsonrpc: "2.0", id, method, params }, `request:${id}`);
+    return id;
+  }
+
+  private reply(id: unknown, payload: { result: unknown } | { error: { code: number; message: string } }): void {
+    void writeLine(this.process.stdin, { jsonrpc: "2.0", id, ...payload }, `reply:${String(id)}`);
+  }
+
+  private onMessage(message: Record<string, any>): void {
+    if (message.id != null && typeof message.method === "string") return this.onClientRequest(message);
+    if (message.id != null && this.pending.has(Number(message.id))) return this.onResponse(Number(message.id), message);
+    if (message.method === "session/update") this.onUpdate(message.params ?? {});
+  }
+
+  private onClientRequest(message: Record<string, any>): void {
+    if (message.method !== "session/request_permission") {
+      this.reply(message.id, { error: { code: -32601, message: `Unsupported ACP client request: ${message.method}` } });
+      return;
+    }
+    const options: Array<{ optionId?: string; kind?: string }> = Array.isArray(message.params?.options) ? message.params.options : [];
+    const chosen = options.find((option) => option.kind === "allow_always") ?? options.find((option) => option.kind === "allow_once");
+    this.reply(message.id, { result: { outcome: chosen?.optionId ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" } } });
+  }
+
+  private onResponse(id: number, message: Record<string, any>): void {
+    const pending = this.pending.get(id)!;
+    this.pending.delete(id);
+    const error = message.error ? String(message.error.message || `${pending.kind} failed`) : null;
+    if (pending.kind === "initialize") {
+      if (error) return this.emit({ type: "error", message: `Cursor ACP initialize failed: ${error}` });
+      this.loadSupported = message.result?.agentCapabilities?.loadSession === true;
+      if (this.config.resumeSessionId && this.loadSupported) {
+        this.request("session/load", { sessionId: this.config.resumeSessionId, cwd: this.config.workspaceDir, mcpServers: [] }, { kind: "session/load" });
+      } else this.newSession();
+      return;
+    }
+    if (pending.kind === "session/load") {
+      if (error) return this.newSession();
+      return this.adopt(this.config.resumeSessionId!, message.result);
+    }
+    if (pending.kind === "session/new") {
+      const sessionId = message.result?.sessionId;
+      if (error || typeof sessionId !== "string") return this.emit({ type: "error", message: `Cursor session could not be created: ${error ?? "no sessionId"}` });
+      return this.adopt(sessionId, message.result);
+    }
+    this.superseded.delete(id);
+    if (pending.kind !== "prompt" || id !== this.latestPrompt) return;
+    this.latestPrompt = null;
+    this.superseded.clear();
+    this.flush();
+    if (error) this.emit({ type: "input-error", inputId: pending.inputId, retryable: true, message: error });
+    this.inTurn = false;
+    this.emit({ type: "turn-end", ...(this.currentSessionId ? { sessionId: this.currentSessionId } : {}) });
+  }
+
+  private newSession(): void {
+    this.request("session/new", { cwd: this.config.workspaceDir, mcpServers: [] }, { kind: "session/new" });
+  }
+
+  private adopt(sessionId: string, result: Record<string, any> | undefined): void {
+    this.currentSessionId = sessionId;
+    const model = result?.models?.currentModelId;
+    this.emit({ type: "session-init", sessionId, ...(typeof model === "string" && model ? { model } : {}) });
+  }
+
+  private onUpdate(params: Record<string, any>): void {
+    if (!this.inTurn || params.sessionId !== this.currentSessionId) return;
+    const update = params.update ?? {};
+    const chunk = typeof update.content?.text === "string" ? update.content.text : "";
+    switch (update.sessionUpdate) {
+      case "agent_message_chunk":
+        if (!chunk || this.superseded.size) return;
+        this.flushThought();
+        this.emit({ type: "text-delta", text: chunk, ...(this.text ? {} : { newBlock: true }) });
+        this.text += chunk;
+        return;
+      case "agent_thought_chunk":
+        if (!chunk || this.superseded.size) return;
+        this.flushText();
+        this.thought += chunk;
+        return;
+      case "tool_call": {
+        this.flush();
+        const input = cursorToolInput(update);
+        this.emit({ type: "activity", activity: "tool", name: String(update.kind || update.title || "tool"),
+          ...(input ? { text: input } : {}), ...(update.toolCallId ? { toolId: String(update.toolCallId) } : {}) });
+        return;
+      }
+      case "tool_call_update":
+        if (update.status === "completed" || update.status === "failed") {
+          this.emit({ type: "tool-result", ok: update.status === "completed", ...(update.toolCallId ? { toolId: String(update.toolCallId) } : {}) });
+        }
+        return;
+      default:
+        return;
+    }
+  }
+
+  private flush(): void { this.flushThought(); this.flushText(); }
+
+  private flushText(): void {
+    if (this.text) this.emit({ type: "activity", activity: "text", text: this.text });
+    this.text = "";
+  }
+
+  private flushThought(): void {
+    if (this.thought.trim()) this.emit({ type: "activity", activity: "thinking", text: this.thought });
+    this.thought = "";
+  }
+}
+
+export function cursorStandingPromptRule(content: string): string {
+  return `---\ndescription: Larkin standing prompt\nalwaysApply: true\n---\n${content.endsWith("\n") ? content : `${content}\n`}`;
+}
+
 class PiSession extends EventSession {
   private readonly unsubscribe?: () => void;
   private readonly ownedInputIds = new Set<string>();
@@ -1003,6 +1194,7 @@ const CAPABILITIES: Record<RuntimeId, RuntimeCapabilities> = {
   codex: { standingPrompt: "append", sessionResume: true, busyInput: "direct", cancel: true },
   claude: { standingPrompt: "append", sessionResume: true, busyInput: "gated", cancel: true },
   pi: { standingPrompt: "append", sessionResume: true, busyInput: "boundary", cancel: true },
+  cursor: { standingPrompt: "append", sessionResume: true, busyInput: "direct", cancel: true },
 };
 
 function configuredModel(model: string | undefined): string | undefined {
@@ -1260,14 +1452,16 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
 }
 
 export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies: NativeRuntimeAdapterDependencies = {}): RuntimeAdapter {
-  if (id !== "codex" && id !== "claude" && id !== "pi") throw new Error(`Unsupported native runtime: ${id}`);
+  if (id !== "codex" && id !== "claude" && id !== "pi" && id !== "cursor") throw new Error(`Unsupported native runtime: ${id}`);
   const spawn = dependencies.spawn ?? ((command, args, options) => nodeSpawn(command, args, options as any) as unknown as ProcessLike);
   let resolvedExecutable: string | null = null;
   const configuredCommand = id === "pi"
     ? dependencies.piCommand ?? dependencies.env?.LARKIN_PI_COMMAND ?? process.env.LARKIN_PI_COMMAND ?? "pi"
     : id === "codex"
       ? dependencies.codexCommand ?? dependencies.env?.LARKIN_CODEX_COMMAND ?? "codex"
-      : dependencies.claudeCommand ?? dependencies.env?.LARKIN_CLAUDE_COMMAND ?? "claude";
+      : id === "cursor"
+        ? dependencies.cursorCommand ?? dependencies.env?.LARKIN_CURSOR_COMMAND ?? "cursor-agent"
+        : dependencies.claudeCommand ?? dependencies.env?.LARKIN_CLAUDE_COMMAND ?? "claude";
   const codexCommand = dependencies.codexCommand ?? dependencies.env?.LARKIN_CODEX_COMMAND ?? "codex";
   const runPiInitialization = createInitializationLimiter(PI_INITIALIZATION_CONCURRENCY);
   let codexUpdateAttempt: Promise<{ recovered: boolean; reason: string }> | null = null;
@@ -1373,6 +1567,21 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
           stdio: ["pipe", "pipe", "pipe"],
         });
         return new CodexSession(process, codexInput);
+      }
+      if (id === "cursor") {
+        const rulesDir = path.join(input.workspaceDir, ".cursor", "rules");
+        (dependencies.mkdir ?? fs.mkdirSync)(rulesDir, { recursive: true });
+        const ruleFile = path.join(rulesDir, "larkin-standing-prompt.mdc");
+        const rule = cursorStandingPromptRule(input.standingPrompt.content);
+        if (dependencies.writeFile) dependencies.writeFile(ruleFile, rule, { mode: 0o600 });
+        else writePrivateAtomic(ruleFile, rule);
+        const model = configuredModel(input.model);
+        const process = spawn(resolvedExecutable || configuredCommand, [...(model ? ["--model", model] : []), "acp"], {
+          cwd: input.workspaceDir,
+          env: { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" },
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        return new CursorAcpSession(process, input);
       }
       const runtimeDir = path.join(input.stateDir ?? path.join(input.workspaceDir, ".larkin"), "runtime");
       (dependencies.mkdir ?? fs.mkdirSync)(runtimeDir, { recursive: true });

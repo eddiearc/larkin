@@ -6,13 +6,13 @@
   <a href="#quick-start">Quick start</a> · <a href="#requirements">Requirements</a> · <a href="#what-it-does">What it does</a> · <a href="#installation">Installation</a> · <a href="#usage">Usage</a> · <a href="#setup-and-configuration">Setup and configuration</a> · <a href="#details">Details</a> · <a href="#development">Development</a>
 </p>
 
-Larkin is a local Runtime Host that connects Codex, Claude Code, and Pi agent runtimes to Feishu (Lark). It keeps sessions, reminders, interactive messages, and a local dashboard close to the machine that runs them.
+Larkin is a local Runtime Host that connects Codex, Claude Code, Pi, and Cursor CLI agent runtimes to Feishu (Lark). It keeps sessions, reminders, interactive messages, and a local dashboard close to the machine that runs them.
 
 ## Requirements
 
 - A supported macOS, Linux, or Windows (x64) system
 - Official `@larksuite/cli >= 1.0.80` (`lark-cli`) (Larkin product policy)
-- At least one externally installed agent runtime on `PATH`, already logged in: `pi`, `codex`, or `claude`
+- At least one externally installed agent runtime on `PATH`, already logged in: `pi`, `codex`, `claude`, or `cursor-agent`
 - Bun 1.4.4 when running the npm package or building from source (standalone binaries bundle their own runtime)
 
 ## Quick start
@@ -89,7 +89,7 @@ Feishu clients do not reliably render Markdown links such as `[label](URL)` as c
 
 Feishu (https://open.feishu.cn) and Lark (https://open.larksuite.com) are different platforms; `larkin setup` must be told which brand with `--tenant feishu|lark` or the interactive prompt before the authorization QR, and must never emit a `feishu.cn` host for a Lark tenant.
 
-During setup, choose one of the three externally installed runtimes: Pi (`pi`), Codex (`codex`), or Claude Code (`claude`). Larkin does not ship a runtime and does not store provider credentials. Install the runtime yourself and complete its own login (`pi` login flow, `codex login`, or `claude login`) before setup. Interactive setup lists each runtime as installed or not installed and refuses a missing binary; non-interactive setup requires `--runtime` and exits non-zero with the same missing-install message.
+During setup, choose one of the four externally installed runtimes: Pi (`pi`), Codex (`codex`), Claude Code (`claude`), or Cursor CLI (`cursor-agent`, driven through `cursor-agent acp`). Larkin does not ship a runtime and does not store provider credentials. Install the runtime yourself and complete its own login (`pi` login flow, `codex login`, `claude login`, or `cursor-agent login`) before setup. Interactive setup lists each runtime as installed or not installed and refuses a missing binary; non-interactive setup requires `--runtime` and exits non-zero with the same missing-install message.
 
 `larkin setup --model <id>` optionally stores a catalog model for that runtime. After setup, use `larkin model` and `larkin runtime` to inspect or switch. For Pi, Larkin talks to your installed `pi --mode rpc` and verifies the RPC handshake and compaction capability contract.
 

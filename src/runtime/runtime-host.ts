@@ -248,8 +248,7 @@ function authFailureScopeOf(agent: Pick<ManagedAgent, "adapter" | "config">): Au
 
 function currentAuthFailure(agent: ManagedAgent): PersistedAuthFailure | null {
   if (!agent.authFailureActive) return null;
-  const runtime = agent.adapter.id === "codex" || agent.adapter.id === "claude" || agent.adapter.id === "pi"
-    ? agent.adapter.id : null;
+  const runtime = agent.adapter.id;
   if (!runtime) return null;
   return {
     kind: agent.authFailureKind === "missing-provider" ? "missing-provider" : "generic",

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.30
+
+A streaming card no longer answers a same-chat message that was sent after the card was already posted, which put the answer above the new message. That message now gets a new card replying to it, and the earlier card keeps its steps and ends with `Continued in the next reply ↓`. A message sent before the card was posted still merges into it, as in 0.5.26.
+
 ## 0.5.29
 
 The dashboard can list Cursor models: `GET /api/models/cursor` was missing, so choosing the `cursor` Runtime showed "HTTP 404" and left only the current model in the Model list. A model from that list can be saved like any other Runtime's.

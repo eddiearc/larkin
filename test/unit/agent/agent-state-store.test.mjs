@@ -217,6 +217,20 @@ test("a polled batch replies by command only when no message in it addressed the
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("the polled source carries the Feishu create time of its message", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-created-at-"));
+  try {
+    const { createAgentStateStore } = await import(moduleUrl);
+    const store = createAgentStateStore(root, "cli_stateCreatedAtA1");
+    const target = "chat:oc_created_at";
+    store.appendNdjson("inbox", { message_id: "om_timed", target, content: "A", wake: true, create_time: "1700000000123" });
+    store.pollInbox({ target });
+    assert.deepEqual(store.resolveCurrentInboxSource(), { deliveryTarget: target, deliveryAnchor: "om_timed", createdAt: 1700000000123 });
+    assert.deepEqual(createAgentStateStore(root, "cli_stateCreatedAtA1").resolveCurrentInboxSource(),
+      { deliveryTarget: target, deliveryAnchor: "om_timed", createdAt: 1700000000123 }, "a reloaded state keeps it");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("implicit reminder source stays bound to the active poll when an unpolled Inbox event races in", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "larkin-state-targeted-source-"));
   try {

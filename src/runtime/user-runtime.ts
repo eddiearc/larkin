@@ -1,10 +1,10 @@
-export const RUNTIME_OPTIONS = ["codex", "claude", "pi", "cursor"] as const;
+export const RUNTIME_OPTIONS = ["codex", "claude", "pi", "cursor", "antigravity"] as const;
 export type RuntimeOption = (typeof RUNTIME_OPTIONS)[number];
 
 export const USER_RUNTIMES = RUNTIME_OPTIONS;
 export type UserRuntime = RuntimeOption;
 
-export const ADAPTER_RUNTIMES = ["pi", "codex", "claude", "cursor"] as const;
+export const ADAPTER_RUNTIMES = ["pi", "codex", "claude", "cursor", "antigravity"] as const;
 export type AdapterRuntime = (typeof ADAPTER_RUNTIMES)[number];
 
 export function isUserRuntime(value: string): value is RuntimeOption {

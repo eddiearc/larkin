@@ -43,6 +43,7 @@ const RUNTIME_LABELS: Record<RuntimeOption, string> = {
   codex: "Codex",
   claude: "Claude Code",
   cursor: "Cursor CLI（cursor-agent）",
+  antigravity: "Antigravity CLI（agy）",
 };
 
 function number(value: string, fallback: number, max: number): number {

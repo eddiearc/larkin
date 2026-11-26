@@ -28,6 +28,7 @@ import {
   missingProviderCredentialReadiness,
   probeNativeRuntimeReadiness,
   providerAuthenticationFailureReadiness,
+  runtimeLoginNextAction,
   RuntimePrerequisiteError,
 } from "./runtime-readiness.js";
 import {
@@ -103,6 +104,7 @@ export interface NativeRuntimeAdapterDependencies {
   codexUpdateKillGraceMs?: number;
   claudeCommand?: string;
   cursorCommand?: string;
+  antigravityCommand?: string;
   writeFile?: typeof fs.writeFileSync;
   mkdir?: typeof fs.mkdirSync;
   env?: NodeJS.ProcessEnv;
@@ -845,6 +847,314 @@ export function cursorStandingPromptRule(content: string): string {
   return `---\ndescription: Larkin standing prompt\nalwaysApply: true\n---\n${content.endsWith("\n") ? content : `${content}\n`}`;
 }
 
+const ANTIGRAVITY_RULE_MAX_BYTES = 23_500;
+const ANTIGRAVITY_RULE_PREFIX = "larkin-standing-prompt";
+
+export function antigravityStandingPromptRules(content: string): Array<{ fileName: string; content: string }> {
+  const body = content.endsWith("\n") ? content : `${content}\n`;
+  const header = (part: number, total: number): string =>
+    `---\ntrigger: always_on\ndescription: "Larkin standing prompt${total > 1 ? ` (part ${part}/${total})` : ""}"\n---\n`;
+  const single = `${header(1, 1)}${body}`;
+  if (Buffer.byteLength(single, "utf8") <= ANTIGRAVITY_RULE_MAX_BYTES) {
+    return [{ fileName: `${ANTIGRAVITY_RULE_PREFIX}.md`, content: single }];
+  }
+  const reserve = Buffer.byteLength(header(99, 99), "utf8");
+  const chunkLimit = Math.max(1024, ANTIGRAVITY_RULE_MAX_BYTES - reserve);
+  const chunks: string[] = [];
+  let current = "";
+  let currentBytes = 0;
+  const pushChunk = (): void => {
+    if (current) {
+      chunks.push(current.endsWith("\n") ? current : `${current}\n`);
+      current = "";
+      currentBytes = 0;
+    }
+  };
+  for (const rawLine of body.split("\n")) {
+    const line = `${rawLine}\n`;
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    if (lineBytes > chunkLimit) {
+      pushChunk();
+      let remaining = rawLine;
+      while (remaining.length > 0) {
+        let end = remaining.length;
+        while (end > 1 && Buffer.byteLength(`${remaining.slice(0, end)}\n`, "utf8") > chunkLimit) {
+          end = Math.floor(end / 2);
+        }
+        while (end < remaining.length && Buffer.byteLength(`${remaining.slice(0, end + 1)}\n`, "utf8") <= chunkLimit) {
+          end += 1;
+        }
+        chunks.push(`${remaining.slice(0, end)}\n`);
+        remaining = remaining.slice(end);
+      }
+      continue;
+    }
+    if (current && currentBytes + lineBytes > chunkLimit) pushChunk();
+    current += line;
+    currentBytes += lineBytes;
+  }
+  pushChunk();
+  const total = chunks.length;
+  return chunks.map((chunk, index) => ({
+    fileName: index === 0 ? `${ANTIGRAVITY_RULE_PREFIX}.md` : `${ANTIGRAVITY_RULE_PREFIX}-part-${index + 1}.md`,
+    content: `${header(index + 1, total)}${chunk}`,
+  }));
+}
+
+function antigravityToolInput(toolInfo: Record<string, any> | undefined): string {
+  const params = toolInfo?.parameters;
+  if (typeof params?.CommandLine === "string") return params.CommandLine;
+  if (typeof params?.command === "string") return params.command;
+  if (params && typeof params === "object" && Object.keys(params).length) return toolInputText(params);
+  return "";
+}
+
+export function resolveAntigravityModelArgs(model: string | undefined, reasoningEffort: string | null | undefined): string[] {
+  const pinned = configuredModel(model);
+  const effort = reasoningEffort?.trim() || undefined;
+  if (!pinned) return effort ? ["--effort", effort] : [];
+  const resolvedModel = effort && /-(?:low|medium|high|xhigh|max)$/.test(pinned)
+    ? pinned.replace(/-(?:low|medium|high|xhigh|max)$/, `-${effort}`)
+    : pinned;
+  return ["--model", resolvedModel, ...(effort ? ["--effort", effort] : [])];
+}
+
+class AntigravitySession extends EventSession {
+  private currentSessionId: string | null = null;
+  private initialized = false;
+  private busy = false;
+  private closing = false;
+  private exited = false;
+  private closeResolvers: Array<() => void> = [];
+  private closeTimer: NodeJS.Timeout | null = null;
+  private activeInputId: string | undefined;
+  private openTextStepIndex: number | null = null;
+  private stepText = "";
+  private emittedTextInTurn = false;
+  private readonly announcedTools = new Set<string>();
+  private readonly completedTools = new Set<string>();
+  private readonly gated: Array<{ input: RuntimeInput; resolve: (result: RuntimeInputResult) => void }> = [];
+  private stderrTail = "";
+
+  constructor(private readonly process: ProcessLike, private readonly closeGraceMs = 2_000) {
+    super();
+    attachLines(process.stdout, (message) => this.onMessage(message));
+    process.stderr?.on("data", (chunk: unknown) => {
+      const text = String(chunk);
+      this.stderrTail = `${this.stderrTail}${text}`.slice(-4096);
+    });
+    process.once("exit", (code, signal) => {
+      this.exited = true;
+      if (this.closeTimer) {
+        clearTimeout(this.closeTimer);
+        this.closeTimer = null;
+      }
+      const detail = this.stderrTail.trim();
+      if (this.busy) {
+        this.flushText();
+        const failed = code !== 0 && code !== null;
+        if (!this.closing && (failed || signal)) {
+          const message = detail || `Antigravity process exited (${code ?? signal ?? "unknown"})`;
+          const isAuth = /authentication required|not authenticated|unauthorized|login/i.test(message);
+          this.emit({
+            type: "input-error",
+            ...(this.activeInputId ? { inputId: this.activeInputId } : {}),
+            retryable: !isAuth,
+            willRetry: false,
+            message,
+            ...(isAuth ? { errorCategory: "auth" as const, nextAction: runtimeLoginNextAction("antigravity") } : {}),
+          });
+        }
+        this.busy = false;
+        this.activeInputId = undefined;
+        this.resetTurnState();
+        this.emit({ type: "turn-end", ...(this.currentSessionId ? { sessionId: this.currentSessionId } : {}) });
+      }
+      for (const queued of this.gated.splice(0)) {
+        queued.resolve({ status: "rejected", inputId: queued.input.inputId, retryable: true, reason: detail || "Antigravity process exited" });
+      }
+      this.emit({ type: "closed", code, signal });
+      for (const resolve of this.closeResolvers.splice(0)) resolve();
+    });
+    process.once("error", (error) => {
+      this.exited = true;
+      if (this.closeTimer) {
+        clearTimeout(this.closeTimer);
+        this.closeTimer = null;
+      }
+      for (const queued of this.gated.splice(0)) {
+        queued.resolve({ status: "rejected", inputId: queued.input.inputId, retryable: true, reason: error.message });
+      }
+      this.emit({ type: "error", message: `Antigravity process failed: ${error.message}` });
+      for (const resolve of this.closeResolvers.splice(0)) resolve();
+    });
+  }
+
+  get sessionId(): string | null { return this.currentSessionId; }
+
+  async prompt(input: RuntimeInput): Promise<RuntimeInputResult> {
+    if (!this.initialized) return { status: "deferred", inputId: input.inputId, reason: "Antigravity session is not initialized" };
+    if (this.busy) return this.busyInput(input);
+    return this.startTurn(input);
+  }
+
+  async busyInput(input: RuntimeInput): Promise<RuntimeInputResult> {
+    if (!this.initialized) return { status: "deferred", inputId: input.inputId, reason: "Antigravity session is not initialized" };
+    if (!this.busy) return this.startTurn(input);
+    return new Promise((resolve) => this.gated.push({ input, resolve }));
+  }
+
+  async cancel(_reason: string): Promise<void> { this.process.kill("SIGINT"); }
+
+  async close(_reason: string): Promise<void> {
+    this.closing = true;
+    this.process.stdin?.end?.();
+    if (this.exited) return;
+    await new Promise<void>((resolve) => {
+      this.closeResolvers.push(resolve);
+      if (!this.closeTimer) {
+        this.closeTimer = setTimeout(() => {
+          this.closeTimer = null;
+          if (!this.exited) this.process.kill("SIGTERM");
+          for (const done of this.closeResolvers.splice(0)) done();
+        }, this.closeGraceMs);
+        this.closeTimer.unref?.();
+      }
+    });
+  }
+
+  private async startTurn(input: RuntimeInput): Promise<RuntimeInputResult> {
+    this.busy = true;
+    this.activeInputId = input.inputId;
+    this.resetTurnState();
+    const result = await writeLine(this.process.stdin, {
+      event: "user",
+      message: { content: textInput(input) },
+    }, input.inputId);
+    if (result.status !== "accepted") {
+      this.busy = false;
+      this.activeInputId = undefined;
+      return result;
+    }
+    this.emit({ type: "turn-start" });
+    return result;
+  }
+
+  private resetTurnState(): void {
+    this.openTextStepIndex = null;
+    this.stepText = "";
+    this.emittedTextInTurn = false;
+    this.announcedTools.clear();
+    this.completedTools.clear();
+  }
+
+  private flushText(): void {
+    if (this.stepText) this.emit({ type: "activity", activity: "text", text: this.stepText });
+    this.stepText = "";
+    this.openTextStepIndex = null;
+  }
+
+  private adoptConversationId(conversationId: unknown, model?: unknown): void {
+    if (typeof conversationId !== "string" || !conversationId) return;
+    if (conversationId === this.currentSessionId) return;
+    this.currentSessionId = conversationId;
+    const modelName = typeof model === "string" && model ? model : undefined;
+    this.emit({ type: "session-init", sessionId: conversationId, ...(modelName ? { model: modelName } : {}) });
+  }
+
+  private onMessage(message: Record<string, any>): void {
+    if (message.event === "init") {
+      this.initialized = true;
+      this.adoptConversationId(message.conversation_id ?? message.init?.conversation_id, message.init?.model);
+      return;
+    }
+    if (message.event === "step_update") {
+      const step = message.step_update ?? {};
+      this.adoptConversationId(step.conversation_id ?? message.conversation_id);
+      const stepType = String(step.step_type || "");
+      const state = String(step.state || "").toUpperCase();
+      if (stepType === "agent_response") {
+        const delta = typeof step.text_delta === "string" ? step.text_delta : "";
+        const stepIndex = typeof step.step_index === "number" ? step.step_index : -1;
+        if (delta) {
+          const newBlock = this.openTextStepIndex !== stepIndex;
+          if (newBlock && this.openTextStepIndex !== null) this.flushText();
+          this.openTextStepIndex = stepIndex;
+          this.stepText += delta;
+          this.emittedTextInTurn = true;
+          this.emit({ type: "text-delta", text: delta, ...(newBlock ? { newBlock: true } : {}) });
+        }
+        if (state === "DONE") this.flushText();
+        return;
+      }
+      if (stepType === "tool") {
+        this.flushText();
+        const toolId = typeof step.step_index === "number" ? `step-${step.step_index}` : undefined;
+        const name = String(step.tool_name || step.tool_info?.name || "tool");
+        const input = antigravityToolInput(step.tool_info);
+        if (!toolId || !this.announcedTools.has(toolId)) {
+          if (toolId) this.announcedTools.add(toolId);
+          this.emit({
+            type: "activity",
+            activity: "tool",
+            name,
+            ...(input ? { text: input } : {}),
+            ...(toolId ? { toolId } : {}),
+          });
+        }
+        if (state === "DONE" && (!toolId || !this.completedTools.has(toolId))) {
+          if (toolId) this.completedTools.add(toolId);
+          this.emit({
+            type: "tool-result",
+            ok: !step.tool_info?.error,
+            name,
+            ...(toolId ? { toolId } : {}),
+          });
+        }
+        return;
+      }
+      if ((stepType === "thinking" || stepType === "thought") && typeof step.text_delta === "string" && step.text_delta) {
+        this.emit({ type: "activity", activity: "thinking", text: step.text_delta });
+      }
+      return;
+    }
+    if (message.event === "result") {
+      const result = message.result ?? {};
+      this.adoptConversationId(result.conversation_id ?? message.conversation_id);
+      this.flushText();
+      const status = String(result.status || "SUCCESS").toUpperCase();
+      if (status === "SUCCESS" && !this.emittedTextInTurn && typeof result.response === "string" && result.response) {
+        this.emit({ type: "text-delta", text: result.response, newBlock: true });
+        this.emit({ type: "activity", activity: "text", text: result.response });
+      }
+      if (status !== "SUCCESS" && !this.closing) {
+        const errorMessage = String(result.error || `Antigravity turn ${status.toLowerCase()}`);
+        if (/invalid model selection|not recognized as a known model/i.test(errorMessage)) {
+          this.emit({ type: "configuration-error", message: errorMessage });
+        } else {
+          const isAuth = /authentication required|not authenticated|unauthorized|login/i.test(errorMessage);
+          const retryable = !isAuth && (status === "INTERRUPTED" || status === "CANCELED"
+            || /timeout|timed? ?out|rate.?limit|\b429\b|\b5\d\d\b|temporar|overload|unavailable|network/i.test(errorMessage));
+          this.emit({
+            type: "input-error",
+            ...(this.activeInputId ? { inputId: this.activeInputId } : {}),
+            retryable,
+            willRetry: false,
+            message: errorMessage,
+            ...(isAuth ? { errorCategory: "auth" as const, nextAction: runtimeLoginNextAction("antigravity") } : {}),
+          });
+        }
+      }
+      this.busy = false;
+      this.activeInputId = undefined;
+      this.resetTurnState();
+      this.emit({ type: "turn-end", ...(this.currentSessionId ? { sessionId: this.currentSessionId } : {}) });
+      const next = this.gated.shift();
+      if (next) void this.startTurn(next.input).then(next.resolve);
+    }
+  }
+}
+
 class PiSession extends EventSession {
   private readonly unsubscribe?: () => void;
   private readonly ownedInputIds = new Set<string>();
@@ -1195,6 +1505,7 @@ const CAPABILITIES: Record<RuntimeId, RuntimeCapabilities> = {
   claude: { standingPrompt: "append", sessionResume: true, busyInput: "gated", cancel: true },
   pi: { standingPrompt: "append", sessionResume: true, busyInput: "boundary", cancel: true },
   cursor: { standingPrompt: "append", sessionResume: true, busyInput: "direct", cancel: true },
+  antigravity: { standingPrompt: "append", sessionResume: true, busyInput: "gated", cancel: true },
 };
 
 function configuredModel(model: string | undefined): string | undefined {
@@ -1452,7 +1763,7 @@ async function createPiRpcBackend(input: RuntimeSessionCreate, dependencies: Nat
 }
 
 export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies: NativeRuntimeAdapterDependencies = {}): RuntimeAdapter {
-  if (id !== "codex" && id !== "claude" && id !== "pi" && id !== "cursor") throw new Error(`Unsupported native runtime: ${id}`);
+  if (id !== "codex" && id !== "claude" && id !== "pi" && id !== "cursor" && id !== "antigravity") throw new Error(`Unsupported native runtime: ${id}`);
   const spawn = dependencies.spawn ?? ((command, args, options) => nodeSpawn(command, args, options as any) as unknown as ProcessLike);
   let resolvedExecutable: string | null = null;
   const configuredCommand = id === "pi"
@@ -1461,7 +1772,9 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
       ? dependencies.codexCommand ?? dependencies.env?.LARKIN_CODEX_COMMAND ?? "codex"
       : id === "cursor"
         ? dependencies.cursorCommand ?? dependencies.env?.LARKIN_CURSOR_COMMAND ?? "cursor-agent"
-        : dependencies.claudeCommand ?? dependencies.env?.LARKIN_CLAUDE_COMMAND ?? "claude";
+        : id === "antigravity"
+          ? dependencies.antigravityCommand ?? dependencies.env?.LARKIN_ANTIGRAVITY_COMMAND ?? "agy"
+          : dependencies.claudeCommand ?? dependencies.env?.LARKIN_CLAUDE_COMMAND ?? "claude";
   const codexCommand = dependencies.codexCommand ?? dependencies.env?.LARKIN_CODEX_COMMAND ?? "codex";
   const runPiInitialization = createInitializationLimiter(PI_INITIALIZATION_CONCURRENCY);
   let codexUpdateAttempt: Promise<{ recovered: boolean; reason: string }> | null = null;
@@ -1582,6 +1895,40 @@ export function createNativeRuntimeAdapter(id: RuntimeId | string, dependencies:
           stdio: ["pipe", "pipe", "pipe"],
         });
         return new CursorAcpSession(process, input);
+      }
+      if (id === "antigravity") {
+        const rulesDir = path.join(input.workspaceDir, ".agents", "rules");
+        (dependencies.mkdir ?? fs.mkdirSync)(rulesDir, { recursive: true });
+        const ruleFiles = antigravityStandingPromptRules(input.standingPrompt.content);
+        const writtenNames = new Set(ruleFiles.map((file) => file.fileName));
+        for (const file of ruleFiles) {
+          const rulePath = path.join(rulesDir, file.fileName);
+          if (dependencies.writeFile) dependencies.writeFile(rulePath, file.content, { mode: 0o600 });
+          else writePrivateAtomic(rulePath, file.content);
+        }
+        if (!dependencies.writeFile) {
+          try {
+            for (const entry of fs.readdirSync(rulesDir)) {
+              if (/^larkin-standing-prompt-part-\d+\.md$/.test(entry) && !writtenNames.has(entry)) {
+                fs.rmSync(path.join(rulesDir, entry), { force: true });
+              }
+            }
+          } catch { /* best-effort stale rule part cleanup */ }
+        }
+        const args = [
+          "--input-format", "stream-json",
+          "--output-format", "stream-json",
+          "--dangerously-skip-permissions",
+          "--disable-slash-commands",
+          ...resolveAntigravityModelArgs(input.model, input.reasoningEffort),
+          ...(input.resumeSessionId ? ["--conversation", input.resumeSessionId] : []),
+        ];
+        const process = spawn(resolvedExecutable || configuredCommand, args, {
+          cwd: input.workspaceDir,
+          env: { ...globalThis.process.env, ...dependencies.env, ...input.env, NO_COLOR: "1" },
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        return new AntigravitySession(process);
       }
       const runtimeDir = path.join(input.stateDir ?? path.join(input.workspaceDir, ".larkin"), "runtime");
       (dependencies.mkdir ?? fs.mkdirSync)(runtimeDir, { recursive: true });

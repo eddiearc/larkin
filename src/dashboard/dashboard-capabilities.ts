@@ -272,6 +272,70 @@ function cursorCapabilities(workspace: string, homes: CapabilityHomes, display: 
   ];
 }
 
+function antigravityCapabilities(workspace: string, homes: CapabilityHomes, display: Display): CapabilityItem[] {
+  const geminiConfigDir = path.join(homes.home, ".gemini", "config");
+  const globalConfig = readJsonObject(path.join(geminiConfigDir, "config.json"));
+  const pluginStates = asRecord(globalConfig.plugins);
+  const pluginRoots: Array<{ dir: string; source: "workspace" | "global" }> = [
+    { dir: path.join(workspace, ".agents", "plugins"), source: "workspace" },
+    { dir: path.join(geminiConfigDir, "plugins"), source: "global" },
+  ];
+  const plugins: Array<{ name: string; dir: string; source: "workspace" | "global"; enabled: boolean; location: string }> = [];
+  for (const root of pluginRoots) {
+    for (const entry of listDir(root.dir).filter((item) => isDirectory(item, root.dir))) {
+      const pluginDir = path.join(root.dir, entry.name);
+      const manifestFile = path.join(pluginDir, "plugin.json");
+      if (!fs.existsSync(manifestFile)) continue;
+      const manifest = readJsonObject(manifestFile);
+      const stateEntry = asRecord(pluginStates[entry.name]);
+      const enabled = typeof stateEntry.enabled === "boolean" ? stateEntry.enabled : manifest.disabled !== true;
+      const name = typeof manifest.name === "string" && manifest.name ? manifest.name : entry.name;
+      plugins.push({ name, dir: pluginDir, source: root.source, enabled, location: display.path(manifestFile) });
+    }
+  }
+  const pluginSkills = plugins.flatMap((plugin) =>
+    skillsIn(path.join(plugin.dir, "skills"), "plugin", display).map((item) => ({
+      ...item,
+      name: `${plugin.name}:${item.name}`,
+      status: plugin.enabled ? item.status : "disabled" as const,
+      detail: plugin.enabled ? item.detail : `插件 ${plugin.name} 未启用`,
+    })));
+  const pluginMcp = plugins.flatMap((plugin) => {
+    const mcpFile = path.join(plugin.dir, "mcp_config.json");
+    const servers = asRecord(readJsonObject(mcpFile).mcpServers);
+    return Object.entries(servers).map(([name, server]) =>
+      mcpItem(name, asRecord(server), "plugin", display.path(mcpFile), plugin.enabled));
+  });
+  const projectMcp = asRecord(readJsonObject(path.join(workspace, ".agents", "mcp_config.json")).mcpServers);
+  const globalMcpFile = path.join(geminiConfigDir, "mcp_config.json");
+  const globalMcp = asRecord(readJsonObject(globalMcpFile).mcpServers);
+  return [
+    ...skillsIn(path.join(workspace, ".agents", "skills"), "workspace", display),
+    ...skillsIn(path.join(workspace, ".agent", "skills"), "workspace", display),
+    ...skillsIn(path.join(geminiConfigDir, "skills"), "global", display),
+    ...skillsIn(path.join(homes.home, ".gemini", "skills"), "global", display),
+    ...pluginSkills,
+    ...markShadowed([
+      ...markdownAgentsIn(path.join(workspace, ".agents", "agents"), "workspace", display),
+      ...markdownAgentsIn(path.join(geminiConfigDir, "agents"), "global", display),
+    ]),
+    ...plugins.map((plugin) => ({
+      kind: "plugin" as const,
+      source: plugin.source,
+      name: plugin.name,
+      description: null,
+      location: plugin.location,
+      status: plugin.enabled ? "ok" as const : "disabled" as const,
+      detail: null,
+    })),
+    ...markShadowed([
+      ...Object.entries(projectMcp).map(([name, server]) => mcpItem(name, asRecord(server), "workspace", ".agents/mcp_config.json")),
+      ...Object.entries(globalMcp).map(([name, server]) => mcpItem(name, asRecord(server), "global", display.path(globalMcpFile))),
+      ...pluginMcp,
+    ]),
+  ];
+}
+
 function piCapabilities(workspace: string, homes: CapabilityHomes, display: Display): CapabilityItem[] {
   return [
     ...skillsIn(path.join(workspace, ".pi", "skills"), "workspace", display),
@@ -297,5 +361,6 @@ export function collectCapabilities(config: DashboardWorkspaceConfig, agentId: s
   if (runtime === "codex") return { runtime, items: codexCapabilities(workspace, homes, display), unsupported: [] };
   if (runtime === "claude") return { runtime, items: claudeCapabilities(workspace, homes, display), unsupported: [] };
   if (runtime === "cursor") return { runtime, items: cursorCapabilities(workspace, homes, display), unsupported: ["plugin"] };
+  if (runtime === "antigravity") return { runtime, items: antigravityCapabilities(workspace, homes, display), unsupported: [] };
   return { runtime, items: piCapabilities(workspace, homes, display), unsupported: ["subagent", "plugin", "mcp"] };
 }

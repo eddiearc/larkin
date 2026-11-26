@@ -258,7 +258,7 @@ assert.match(aliasHelp.stderr, /external-pi 已改名为 pi/);
 const unknownRuntime = run("dist/app/setup.mjs", "--runtime", "unknown");
 assert.equal(unknownRuntime.status, 1);
 assert.match(unknownRuntime.stderr, /未知 runtime/);
-assert.match(unknownRuntime.stderr, /codex \| claude \| pi \| cursor/);
+assert.match(unknownRuntime.stderr, /codex \| claude \| pi \| cursor \| antigravity/);
 assert.doesNotMatch(unknownRuntime.stderr, /builtin-pi/);
 assert.doesNotMatch(unknownRuntime.stderr, /external-pi/);
 

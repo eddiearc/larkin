@@ -114,7 +114,7 @@ test("Dashboard surfaces only the four external runtimes and readiness errors", 
   assert.match(app, /formatReadiness/);
   assert.match(app, /readinessFailure/);
   assert.match(app, /runtimeReadiness/);
-  assert.match(types, /runtimeOptions:\s*Array<"codex"\s*\|\s*"claude"\s*\|\s*"pi"\s*\|\s*"cursor">/);
+  assert.match(types, /runtimeOptions:\s*Array<"codex"\s*\|\s*"claude"\s*\|\s*"pi"\s*\|\s*"cursor"\s*\|\s*"antigravity">/);
   assert.doesNotMatch(app, /Pi 发行版/);
   assert.match(read("src/runtime/runtime-model-catalog.ts"), /pi: \[\.\.\.PI_AUTHORED_MODELS\]/);
   assert.doesNotMatch(read("src/runtime/runtime-model-catalog.ts"), /"builtin-pi":/);

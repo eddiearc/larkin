@@ -49,7 +49,7 @@ export function configuredProviderId(model: unknown): string | null {
 }
 
 function persistedRuntime(value: unknown): RuntimeReadiness["runtime"] | null {
-  return value === "pi" || value === "codex" || value === "claude" || value === "cursor" ? value : null;
+  return value === "pi" || value === "codex" || value === "claude" || value === "cursor" || value === "antigravity" ? value : null;
 }
 
 export function parsePersistedAuthFailure(state: unknown): PersistedAuthFailure | null {
@@ -103,6 +103,7 @@ export function runtimeInstallNextAction(runtime: RuntimeReadiness["runtime"]): 
   if (runtime === "pi") return "Install Pi and ensure `pi` is on PATH, or set LARKIN_PI_COMMAND.";
   if (runtime === "codex") return "Install Codex and ensure `codex` is on PATH, or set LARKIN_CODEX_COMMAND.";
   if (runtime === "cursor") return "Install the Cursor CLI and ensure `cursor-agent` is on PATH, or set LARKIN_CURSOR_COMMAND.";
+  if (runtime === "antigravity") return "Install Antigravity CLI and ensure `agy` is on PATH, or set LARKIN_ANTIGRAVITY_COMMAND.";
   return "Install Claude Code and ensure `claude` is on PATH, or set LARKIN_CLAUDE_COMMAND.";
 }
 
@@ -110,6 +111,7 @@ export function runtimeLoginNextAction(runtime: RuntimeReadiness["runtime"]): st
   if (runtime === "pi") return "Log in with the external `pi` CLI, then retry.";
   if (runtime === "codex") return "Run `codex login`, then retry.";
   if (runtime === "cursor") return "Run `cursor-agent login`, then retry.";
+  if (runtime === "antigravity") return "Run `agy` (or `agy acp --login`) to sign in, then retry.";
   return "Run `claude login`, then retry.";
 }
 
@@ -228,6 +230,7 @@ const RUNTIME_COMMANDS: Record<RuntimeId, { variable: string; fallback: string }
   codex: { variable: "LARKIN_CODEX_COMMAND", fallback: "codex" },
   claude: { variable: "LARKIN_CLAUDE_COMMAND", fallback: "claude" },
   cursor: { variable: "LARKIN_CURSOR_COMMAND", fallback: "cursor-agent" },
+  antigravity: { variable: "LARKIN_ANTIGRAVITY_COMMAND", fallback: "agy" },
 };
 
 export function runtimeCommandFor(runtime: RuntimeId, env: NodeJS.ProcessEnv = process.env): string {
@@ -286,6 +289,9 @@ export async function probeNativeRuntimeReadiness(options: ProbeNativeRuntimeRea
     } else if (options.runtime === "cursor") {
       const { discoverCursorModelCatalog } = await import("./cursor-model-catalog.js");
       await discoverCursorModelCatalog({ cwd: options.cwd, command: executable, env });
+    } else if (options.runtime === "antigravity") {
+      const { discoverAntigravityModelCatalog } = await import("./antigravity-model-catalog.js");
+      await discoverAntigravityModelCatalog({ cwd: options.cwd, command: executable, env });
     } else {
       const { discoverClaudeModelCatalog } = await import("./claude-model-catalog.js");
       await discoverClaudeModelCatalog({ cwd: options.cwd, command: executable, env });

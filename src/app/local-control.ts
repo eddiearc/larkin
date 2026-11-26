@@ -81,7 +81,7 @@ function recoveryErrorText(code: string | undefined): string {
 function sanitizeRecoveryReadiness(value: unknown): RuntimeReadiness | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as Partial<RuntimeReadiness>;
-  if (!["codex", "claude", "pi", "cursor"].includes(String(candidate.runtime))
+  if (!["codex", "claude", "pi", "cursor", "antigravity"].includes(String(candidate.runtime))
       || !["missing", "unauthenticated", "unavailable", "incompatible", "ready"].includes(String(candidate.state))) return undefined;
   const runtime = candidate.runtime as RuntimeReadiness["runtime"];
   const state = candidate.state as RuntimeReadiness["state"];

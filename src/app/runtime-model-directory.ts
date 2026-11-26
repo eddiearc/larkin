@@ -7,6 +7,7 @@ import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverPiModelCatalog } from "../runtime/pi-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverCursorModelCatalog } from "../runtime/cursor-model-catalog.js";
+import { discoverAntigravityModelCatalog } from "../runtime/antigravity-model-catalog.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -69,6 +70,15 @@ export async function discoverRuntimeModelDirectory(input: RuntimeModelDirectory
   if (input.runtime === "cursor") {
     const catalog = await discoverCursorModelCatalog({ cwd: input.cwd, env: input.env });
     return [{ id: "default", label: `default: ${catalog.effectiveModel}` }, ...catalog.models];
+  }
+  if (input.runtime === "antigravity") {
+    const catalog = await discoverAntigravityModelCatalog({ cwd: input.cwd, env: input.env });
+    return [
+      { id: "default", label: `default: ${catalog.effectiveModel}` },
+      ...catalog.models.map(({ id, label, supportedReasoningEfforts, defaultReasoningEffort }) => ({
+        id, label, supportedReasoningEfforts, ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+      })),
+    ];
   }
   throw new Error(`未知 runtime：${input.runtime}`);
 }

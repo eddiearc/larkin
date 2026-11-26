@@ -6,6 +6,7 @@ import { configApplyState, loadConfig, loadRuntimeModels, markConfigApplied, mut
 import { requestAgentUpsert } from "../app/local-control.js";
 import { discoverClaudeModelCatalog, type DiscoverClaudeCatalogOptions } from "../runtime/claude-model-catalog.js";
 import { discoverCursorModelCatalog } from "../runtime/cursor-model-catalog.js";
+import { discoverAntigravityModelCatalog } from "../runtime/antigravity-model-catalog.js";
 import { discoverCodexModelCatalog, type DiscoverCodexCatalogOptions } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type DiscoverPiCatalogOptions } from "../runtime/pi-model-catalog.js";
 import { managedOfficialLarkCli } from "../app/agent-lark-cli-workspace.js";
@@ -334,6 +335,35 @@ export function createCursorModelDirectoryResolver(options: {
   };
 }
 
+export type AntigravityModelDirectoryResolver = { resolve(input: { agentId: string; cwd: string; env: Env }): Promise<Array<Record<string, unknown> & { id: string; label: string }>> };
+
+export function createAntigravityModelDirectoryResolver(options: {
+  discover?: typeof discoverAntigravityModelCatalog;
+  now?: () => number;
+  ttlMs?: number;
+} = {}): AntigravityModelDirectoryResolver {
+  const discover = options.discover ?? discoverAntigravityModelCatalog;
+  const now = options.now ?? Date.now;
+  const ttlMs = options.ttlMs ?? 5 * 60_000;
+  const cache = new Map<string, { expiresAt: number; value: Array<Record<string, unknown> & { id: string; label: string }> }>();
+  return {
+    async resolve(input) {
+      const key = [input.agentId, input.cwd].join("\u0000");
+      const cached = cache.get(key);
+      if (cached && now() < cached.expiresAt) return cached.value;
+      const catalog = await discover({ cwd: input.cwd, env: input.env });
+      const value = [
+        { id: "default", label: `default: ${catalog.effectiveModel}` },
+        ...catalog.models.map(({ id, label, supportedReasoningEfforts, defaultReasoningEffort }) => ({
+          id, label, supportedReasoningEfforts, ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+        })),
+      ];
+      cache.set(key, { expiresAt: now() + ttlMs, value });
+      return value;
+    },
+  };
+}
+
 export function createClaudeModelDirectoryResolver(options: {
   discoverClaudeModelCatalog?: (options: DiscoverClaudeCatalogOptions) => ReturnType<typeof discoverClaudeModelCatalog>;
   now?: () => number;
@@ -536,6 +566,7 @@ export function createDashboardConfigController({
   codexModelDirectoryResolver = createCodexModelDirectoryResolver(),
   piModelDirectoryResolver = createPiModelDirectoryResolver(),
   cursorModelDirectoryResolver = createCursorModelDirectoryResolver(),
+  antigravityModelDirectoryResolver = createAntigravityModelDirectoryResolver(),
   probeRuntimeReadiness = probeNativeRuntimeReadiness,
 }: {
   csrfCapability: string;
@@ -544,6 +575,7 @@ export function createDashboardConfigController({
   chatDirectoryResolver?: ChatDirectoryResolver;
   claudeModelDirectoryResolver?: ClaudeModelDirectoryResolver;
   cursorModelDirectoryResolver?: CursorModelDirectoryResolver;
+  antigravityModelDirectoryResolver?: AntigravityModelDirectoryResolver;
   codexModelDirectoryResolver?: CodexModelDirectoryResolver;
   piModelDirectoryResolver?: PiModelDirectoryResolver;
   probeRuntimeReadiness?: typeof probeNativeRuntimeReadiness;
@@ -568,6 +600,7 @@ export function createDashboardConfigController({
     if (runtime === "codex") return await codexModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     if (runtime === "claude") return await claudeModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     if (runtime === "cursor") return await cursorModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
+    if (runtime === "antigravity") return await antigravityModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
     const authored = loadRuntimeModels()[runtime];
     if (!authored) throw new Error("unknown runtime");
     return authored;
@@ -668,6 +701,20 @@ export function createDashboardConfigController({
           json(res, 200, { models });
         } catch (error) {
           sendError(res, error, "读取 Cursor 模型列表失败");
+        }
+        return true;
+      }
+      if (requestUrl.pathname === "/api/models/antigravity" && req.method === "GET") {
+        try {
+          assertPrivateReadRequest(req, csrfCapability);
+          const agentId = requestUrl.searchParams.get("agent") || "";
+          const { config } = loadConfig(env);
+          const agent = config.agents[agentId];
+          if (!agent) throw new Error("unknown agent");
+          const models = await antigravityModelDirectoryResolver.resolve({ agentId, cwd: agent.workspaceDir, env });
+          json(res, 200, { models });
+        } catch (error) {
+          sendError(res, error, "读取 Antigravity 模型列表失败");
         }
         return true;
       }

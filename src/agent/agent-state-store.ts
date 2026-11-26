@@ -126,6 +126,13 @@ interface InboxSourceState {
   kind?: string;
   /** No message in the polled batch addressed the Agent, so it replies by command and no card opens. */
   reply_by?: "command";
+  /** Feishu create time (ms) of the message. */
+  created_at?: number;
+}
+
+function createdAtOf(value: unknown): { created_at: number } | Record<string, never> {
+  const millis = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof millis === "number" && Number.isSafeInteger(millis) && millis > 0 ? { created_at: millis } : {};
 }
 
 interface InboxReminderState {
@@ -233,7 +240,8 @@ function normalizeInboxState(value: unknown): InboxStateFile {
       && validSequence(row.seq)) {
       state.last_source = { target: row.target, message_id: row.message_id, seq: row.seq,
         ...(typeof row.kind === "string" && row.kind ? { kind: row.kind } : {}),
-        ...(row.reply_by === "command" ? { reply_by: "command" as const } : {}) };
+        ...(row.reply_by === "command" ? { reply_by: "command" as const } : {}),
+        ...createdAtOf(row.created_at) };
     }
   }
   if (Array.isArray(raw.turn_polled)) state.turn_polled = raw.turn_polled;
@@ -1169,7 +1177,8 @@ export class AgentStateStore {
             || (target.startsWith("document-comment:") && /^doc_comment_[A-Za-z0-9_-]+$/.test(messageId)));
         return isUserDeliveryTarget(target) && validSequence(targetSeq) && validAnchor
           ? [{ target, message_id: messageId, seq: targetSeq,
-            ...(typeof envelope.kind === "string" && envelope.kind ? { kind: envelope.kind } : {}) }]
+            ...(typeof envelope.kind === "string" && envelope.kind ? { kind: envelope.kind } : {}),
+            ...createdAtOf(envelope.create_time) }]
           : [];
       });
       const userTargets = new Set(userSources.map((source) => source.target));
@@ -1240,11 +1249,12 @@ export class AgentStateStore {
   }
 
   /** Return the most recently observed user Inbox source with a safe reply/send anchor. */
-  resolveCurrentInboxSource(): { deliveryTarget: string; deliveryAnchor: string; replyByCommand?: true } | null {
+  resolveCurrentInboxSource(): { deliveryTarget: string; deliveryAnchor: string; replyByCommand?: true; createdAt?: number } | null {
     return this.withInboxLock(this.file("inbox"), () => {
       const source = this.inboxState().last_source;
       return source ? { deliveryTarget: source.target, deliveryAnchor: source.message_id,
-        ...(source.reply_by === "command" ? { replyByCommand: true as const } : {}) } : null;
+        ...(source.reply_by === "command" ? { replyByCommand: true as const } : {}),
+        ...(source.created_at !== undefined ? { createdAt: source.created_at } : {}) } : null;
     });
   }
 

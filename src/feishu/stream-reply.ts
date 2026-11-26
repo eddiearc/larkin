@@ -34,7 +34,7 @@ import type { NormalizedRuntimeEvent } from "../runtime/runtime-contracts.js";
 
 export { replyModeFromEnv, type ReplyMode } from "../platform/reply-mode.js";
 
-export interface StreamReplySource { deliveryTarget: string; deliveryAnchor: string; replyByCommand?: boolean }
+export interface StreamReplySource { deliveryTarget: string; deliveryAnchor: string; replyByCommand?: boolean; createdAt?: number }
 
 type ApiCall = (request: Record<string, unknown>) => Promise<unknown>;
 
@@ -69,15 +69,16 @@ const MAX_TOOL_INPUT_CHARS = 200;
 const MAX_STEP_LINES = 60;
 const SUMMARY_CHARS = 50;
 
-interface ReplyAddress { key: string; target: string; chatId: string; anchor: string; inThread: boolean }
+interface ReplyAddress { key: string; target: string; chatId: string; anchor: string; inThread: boolean; createdAt?: number }
 
 /** Map a canonical Inbox source to a card address; only IM chat/thread sources with a real om_ anchor qualify. */
 export function replyAddressOf(source: StreamReplySource | null): ReplyAddress | null {
   if (!source || source.replyByCommand || !/^om_[A-Za-z0-9_-]+$/.test(source.deliveryAnchor)) return null;
+  const createdAt = source.createdAt !== undefined ? { createdAt: source.createdAt } : {};
   const chat = /^chat:([^:]+)$/.exec(source.deliveryTarget);
-  if (chat) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, target: source.deliveryTarget, chatId: chat[1], anchor: source.deliveryAnchor, inThread: false };
+  if (chat) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, target: source.deliveryTarget, chatId: chat[1], anchor: source.deliveryAnchor, inThread: false, ...createdAt };
   const thread = /^thread:([^:]+):([^:]+)$/.exec(source.deliveryTarget);
-  if (thread) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, target: source.deliveryTarget, chatId: thread[1], anchor: source.deliveryAnchor, inThread: true };
+  if (thread) return { key: `${source.deliveryTarget}#${source.deliveryAnchor}`, target: source.deliveryTarget, chatId: thread[1], anchor: source.deliveryAnchor, inThread: true, ...createdAt };
   return null;
 }
 
@@ -179,6 +180,8 @@ class CardReply {
   private toolSerial = 0;
   private cardId = "";
   private messageId = "";
+  /** Feishu create time (ms) of the posted card message. */
+  private postedAt: number | null = null;
   private sequence = 0;
   private applied: Record<string, unknown> | null = null;
   private elementStreaming = true;
@@ -208,6 +211,11 @@ class CardReply {
 
   answers(address: ReplyAddress): boolean {
     return this.covered.has(address.key);
+  }
+
+  /** The message was sent after this card was already posted, so the card sits above it in the chat. */
+  postedBefore(address: ReplyAddress): boolean {
+    return this.postedAt !== null && address.createdAt !== undefined && address.createdAt > this.postedAt;
   }
 
   adopt(address: ReplyAddress): void {
@@ -263,7 +271,7 @@ class CardReply {
     if (this.finished) return;
     this.finished = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    const notice = failure ?? (continued && this.answer ? STREAM_REPLY_CONTINUED_TEXT : "");
+    const notice = failure ?? (continued ? STREAM_REPLY_CONTINUED_TEXT : "");
     const final = this.renderFinal(notice);
     const plain = notice ? (this.answer ? `${this.answer}\n\n${notice}` : notice) : this.answer;
     this.chain = this.chain.then(() => this.deliverFinal(final, plain)).finally(() => this.settle());
@@ -346,6 +354,8 @@ class CardReply {
       mayHavePosted = false;
       const sent = responseData(response, "im.message.reply");
       this.messageId = String(sent.message_id ?? "");
+      const postedAt = Number(sent.create_time);
+      if (Number.isSafeInteger(postedAt) && postedAt > 0) this.postedAt = postedAt;
       this.applied = card;
     } catch (error) {
       this.dead = true;
@@ -531,7 +541,7 @@ export class StreamReplyCoordinator {
     const card = turn.card;
     if (!card || card.answers(address)) return;
     const sameTarget = card.address.target === address.target;
-    if (sameTarget && !card.answer) { card.adopt(address); return; }
+    if (sameTarget && !card.answer && !card.postedBefore(address)) { card.adopt(address); return; }
     card.finish(undefined, sameTarget);
     turn.card = null;
     turn.buffered = [];

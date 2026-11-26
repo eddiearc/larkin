@@ -67,7 +67,7 @@ function fakeClient() {
         card.replyTo = request.path.message_id;
         card.inThread = request.data.reply_in_thread;
         card.messageId = `om_card_${cards.indexOf(card) + 1}`;
-        return { code: 0, data: { message_id: card.messageId } };
+        return { code: 0, data: { message_id: card.messageId, create_time: "1000" } };
       },
     } } },
   };
@@ -264,6 +264,37 @@ test("a second poll in the same chat before any answer text keeps answering in t
   assert.equal(cards[0].replyTo, "om_1");
   assert.equal(answerOf(cards[0]), "两条一起回复");
   assert.equal(replayStepsOf(cards[0]), "- `ps aux`\n- `larkin inbox poll --target chat:x --limit 1`\n> 两条一起回答。");
+});
+
+test("a same-chat message sent after the card was posted gets its own card below it", async () => {
+  const { cards, state, coordinator, send } = harness();
+  send({ type: "turn-start" });
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_1", createdAt: 900 });
+  send({ type: "activity", activity: "tool", name: "command", text: "ps aux", toolId: "t1" });
+  send({ type: "tool-result", toolId: "t1", ok: true });
+  await tick();
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_2", createdAt: 1500 });
+  send({ type: "text-delta", text: "回第二条", newBlock: true });
+  send({ type: "turn-end" });
+  await coordinator.idle();
+  assert.deepEqual(cards.map((card) => [card.replyTo, answerOf(card)]), [
+    ["om_1", STREAM_REPLY_CONTINUED_TEXT],
+    ["om_2", "回第二条"],
+  ]);
+  assert.equal(replayStepsOf(cards[0]), "- `ps aux`\n- `larkin inbox poll --target chat:x --limit 1`");
+});
+
+test("a same-chat message sent before the card was posted still merges into that card", async () => {
+  const { cards, state, coordinator, send } = harness();
+  send({ type: "turn-start" });
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_1", createdAt: 900 });
+  send({ type: "activity", activity: "tool", name: "command", text: "ps aux", toolId: "t1" });
+  await tick();
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_2", createdAt: 950 });
+  send({ type: "text-delta", text: "两条一起回复", newBlock: true });
+  send({ type: "turn-end" });
+  await coordinator.idle();
+  assert.deepEqual(cards.map((card) => [card.replyTo, answerOf(card)]), [["om_1", "两条一起回复"]]);
 });
 
 test("a second poll in the same topic after partial answer text continues in a new card and says so", async () => {

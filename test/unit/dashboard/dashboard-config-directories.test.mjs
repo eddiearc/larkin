@@ -467,7 +467,7 @@ test("GET /api/config lists four runtimes and /api/models/builtin-pi is unhandle
     assert.equal(projected.status, 200);
     assert.equal(projected.body.agents[0].runtime, "pi");
     assert.equal(projected.body.agents[0].runtimeOption, "pi");
-    assert.deepEqual(projected.body.runtimeOptions, ["codex", "claude", "pi", "cursor"]);
+    assert.deepEqual(projected.body.runtimeOptions, ["codex", "claude", "pi", "cursor", "antigravity"]);
     assert.equal(Object.hasOwn(projected.body.runtimeModels, "builtin-pi"), false);
     assert.ok(Object.hasOwn(projected.body.runtimeModels, "pi"));
     calls.length = 0;
@@ -642,6 +642,7 @@ test("every runtime the Dashboard offers has a model directory endpoint", async 
     codexModelDirectoryResolver: resolver("codex"),
     claudeModelDirectoryResolver: resolver("claude"),
     cursorModelDirectoryResolver: resolver("cursor"),
+    antigravityModelDirectoryResolver: resolver("antigravity"),
   });
   const { runtimeOptions } = (await get(controller, `/api/config?agent=${APP}`)).body;
   for (const runtime of runtimeOptions) {
@@ -654,6 +655,7 @@ test("every runtime the Dashboard offers has a model directory endpoint", async 
 for (const runtimeCase of [
   { runtime: "codex", model: "gpt-evaluator-dynamic-1", effort: "high" },
   { runtime: "claude", model: "claude-evaluator-9", effort: "medium" },
+  { runtime: "antigravity", model: "gemini-4-neon-medium", effort: "xhigh" },
 ]) {
   test(`dynamic ${runtimeCase.runtime} directory choices survive Dashboard PATCH and controller reload`, async () => {
     const { createDashboardConfigController } = await import(`${CONTROLLER}?dynamic-persist=${runtimeCase.runtime}-${Date.now()}`);
@@ -669,6 +671,7 @@ for (const runtimeCase of [
       probeRuntimeReadiness: async ({ runtime }) => ({ runtime, state: "ready" }),
       codexModelDirectoryResolver: { async resolve() { return runtimeCase.runtime === "codex" ? models : []; } },
       claudeModelDirectoryResolver: { async resolve() { return runtimeCase.runtime === "claude" ? models : []; } },
+      antigravityModelDirectoryResolver: { async resolve() { return runtimeCase.runtime === "antigravity" ? models : []; } },
     };
     const controller = createDashboardConfigController(options);
     const directory = await get(controller, `/api/models/${runtimeCase.runtime}?agent=${APP}`);
@@ -703,17 +706,19 @@ test("dynamic directory GETs require loopback Host and the dashboard capability 
     codexModelDirectoryResolver: { async resolve() { calls.push("codex"); return []; } },
     claudeModelDirectoryResolver: { async resolve() { calls.push("claude"); return []; } },
     cursorModelDirectoryResolver: { async resolve() { calls.push("cursor"); return []; } },
+    antigravityModelDirectoryResolver: { async resolve() { calls.push("antigravity"); return []; } },
   });
 
   const badHost = await get(controller, `/api/models/pi?agent=${APP}`, { host: "evil.example", "x-larkin-csrf": "test" });
   const missingCodexCapability = await get(controller, `/api/models/codex?agent=${APP}`, { host: "localhost:9996" });
   const missingClaudeCapability = await get(controller, `/api/models/claude?agent=${APP}`, { host: "localhost:9996" });
   const missingCursorCapability = await get(controller, `/api/models/cursor?agent=${APP}`, { host: "localhost:9996" });
+  const missingAntigravityCapability = await get(controller, `/api/models/antigravity?agent=${APP}`, { host: "localhost:9996" });
   const missingCapability = await get(controller, `/api/config?agent=${APP}`, { host: "localhost:9996" });
   assert.equal(badHost.handled, true);
   assert.equal(missingCapability.handled, true);
-  assert.deepEqual([badHost.status, missingCodexCapability.status, missingClaudeCapability.status, missingCursorCapability.status, missingCapability.status],
-    [403, 403, 403, 403, 403]);
+  assert.deepEqual([badHost.status, missingCodexCapability.status, missingClaudeCapability.status, missingCursorCapability.status, missingAntigravityCapability.status, missingCapability.status],
+    [403, 403, 403, 403, 403, 403]);
   assert.deepEqual(calls, [], "untrusted dynamic GETs never reach local credential-backed resolvers");
 });
 

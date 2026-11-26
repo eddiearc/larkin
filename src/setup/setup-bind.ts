@@ -223,7 +223,7 @@ function readSetupSelection(fileArg: string | undefined): SetupAgentChoice | nul
   fs.unlinkSync(file);
   const raw = JSON.parse(bytes) as { runtime?: unknown };
   const runtime = raw?.runtime;
-  if (runtime === "pi" || runtime === "codex" || runtime === "claude" || runtime === "cursor") return { runtime };
+  if (runtime === "pi" || runtime === "codex" || runtime === "claude" || runtime === "cursor" || runtime === "antigravity") return { runtime };
   return die("setup Agent 选择无效");
 }
 

@@ -5,6 +5,7 @@ import path from "node:path";
 import { daemonHasAgent, readProcessState } from "../platform/process-state.js";
 import { discoverClaudeModelCatalog } from "../runtime/claude-model-catalog.js";
 import { discoverCursorModelCatalog } from "../runtime/cursor-model-catalog.js";
+import { discoverAntigravityModelCatalog } from "../runtime/antigravity-model-catalog.js";
 import { discoverCodexModelCatalog } from "../runtime/codex-model-catalog.js";
 import { discoverPiModelCatalog, type PiModelCatalog } from "../runtime/pi-model-catalog.js";
 import {
@@ -499,6 +500,19 @@ if ((kind === "model" && agent.runtime === "cursor") || (kind === "runtime" && v
     catalog.cursor = [{ id: "default", label: `default: ${discovered.effectiveModel}` }, ...discovered.models];
   } catch (error) {
     die(`Cursor 模型目录加载失败：${error instanceof Error ? error.message : String(error)}。请确认已安装并登录 cursor-agent。`);
+  }
+}
+if ((["model", "effort"].includes(kind || "") && agent.runtime === "antigravity") || (kind === "runtime" && value === "antigravity")) {
+  try {
+    const discovered = await discoverAntigravityModelCatalog({ cwd: String(agent.workspaceDir), env: process.env });
+    catalog.antigravity = [
+      { id: "default", label: `default: ${discovered.effectiveModel}` },
+      ...discovered.models.map(({ id, label, supportedReasoningEfforts, defaultReasoningEffort }) => ({
+        id, label, supportedReasoningEfforts, ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+      })),
+    ];
+  } catch (error) {
+    die(`Antigravity 模型目录加载失败：${error instanceof Error ? error.message : String(error)}。请确认已安装并登录 agy。`);
   }
 }
 let piCatalog: PiModelCatalog | null = null;

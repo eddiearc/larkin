@@ -151,3 +151,43 @@ test("Pi lists skills only and reports the kinds it does not have", async () => 
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("Antigravity capabilities discover workspace/global skills, subagents, plugins, and MCP without leaking secrets", async () => {
+  const { temp, home, workspace, agentId, homes, config } = setup();
+  try {
+    const { collectCapabilities } = await import(MODULE);
+    write(path.join(workspace, ".agents/skills/deploy/SKILL.md"), "---\nname: deploy\ndescription: 部署发布\n---\nbody");
+    write(path.join(home, ".gemini/config/skills/global-skill/SKILL.md"), "---\nname: global-skill\ndescription: 全局技能\n---\nbody");
+    write(path.join(workspace, ".agents/agents/reviewer.md"), "---\nname: reviewer\ndescription: 代码评审\n---\nbody");
+    write(path.join(home, ".gemini/config/plugins/team-kit/plugin.json"), JSON.stringify({ name: "team-kit" }));
+    write(path.join(home, ".gemini/config/plugins/team-kit/skills/lint/SKILL.md"), "---\nname: lint\ndescription: 规范检查\n---\nbody");
+    write(path.join(home, ".gemini/config/plugins/off-kit/plugin.json"), JSON.stringify({ name: "off-kit" }));
+    write(path.join(home, ".gemini/config/config.json"), JSON.stringify({ plugins: { "off-kit": { enabled: false } } }));
+    write(path.join(home, ".gemini/config/mcp_config.json"), JSON.stringify({
+      mcpServers: {
+        docs: { url: "https://mcp.example.com/mcp?token=SECRET-TOKEN" },
+      },
+    }));
+    const view = collectCapabilities(config, agentId, "antigravity", homes);
+    assert.equal(view.runtime, "antigravity");
+    assert.deepEqual(view.unsupported, []);
+    assert.deepEqual(summary(view.items, "skill"), [
+      "workspace|deploy|ok|.agents/skills/deploy/SKILL.md",
+      "global|global-skill|ok|~/.gemini/config/skills/global-skill/SKILL.md",
+      "plugin|team-kit:lint|ok|~/.gemini/config/plugins/team-kit/skills/lint/SKILL.md",
+    ]);
+    assert.deepEqual(summary(view.items, "subagent"), [
+      "workspace|reviewer|ok|.agents/agents/reviewer.md",
+    ]);
+    assert.deepEqual(summary(view.items, "plugin"), [
+      "global|off-kit|disabled|~/.gemini/config/plugins/off-kit/plugin.json",
+      "global|team-kit|ok|~/.gemini/config/plugins/team-kit/plugin.json",
+    ]);
+    assert.deepEqual(summary(view.items, "mcp"), [
+      "global|docs|ok|~/.gemini/config/mcp_config.json",
+    ]);
+    assert.doesNotMatch(JSON.stringify(view), /SECRET-TOKEN/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

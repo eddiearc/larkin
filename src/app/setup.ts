@@ -38,7 +38,7 @@ if (has("--comment-subscription")) {
 
 const REMOVED_SETUP_FLAGS = ["--provider", "--api-key", "--base-url", "--pi-distribution", "--api-key-stdin", "--model-from-preset"];
 if (REMOVED_SETUP_FLAGS.some((name) => has(name) || argv.some((arg) => arg.startsWith(`${name}=`)))) {
-  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex、claude 或 cursor-agent");
+  die("setup 不再接受 --provider/--api-key/--base-url；请安装并登录外部 pi、codex、claude、cursor-agent 或 agy");
 }
 
 // 默认应用级评论订阅：平台验证的应用订阅让该应用可见文档的全部评论进入 Agent Inbox。
@@ -67,7 +67,7 @@ Usage:
   larkin setup --runtime pi            Non-interactive setup for an externally installed runtime
 
 Options:
-  --runtime <runtime>                   Required without a TTY. Agent runtime: pi | codex | claude | cursor
+  --runtime <runtime>                   Required without a TTY. Agent runtime: pi | codex | claude | cursor | antigravity
   --model <id>                          Optional model ID; otherwise the runtime default is used.
                                           Use \`larkin model\` after setup to inspect or switch.
   --from-cli-profile <name>            Optional: reuse an existing official lark-cli profile

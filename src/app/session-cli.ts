@@ -8,7 +8,7 @@ interface SessionArguments { operation: "reset" | "recover"; agentId: string; wa
 function sanitizeRecoveryReadiness(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as { runtime?: unknown; state?: unknown };
-  if (!["codex", "claude", "pi", "cursor"].includes(String(candidate.runtime))
+  if (!["codex", "claude", "pi", "cursor", "antigravity"].includes(String(candidate.runtime))
       || !["missing", "unauthenticated", "unavailable", "incompatible", "ready"].includes(String(candidate.state))) return undefined;
   return { runtime: candidate.runtime, state: candidate.state,
     ...(candidate.state === "ready" ? {} : { reason: `Runtime readiness is ${String(candidate.state)}.`, nextAction: "Inspect Runtime/provider configuration, then retry." }) };

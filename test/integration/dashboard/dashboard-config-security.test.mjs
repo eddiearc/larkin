@@ -168,7 +168,7 @@ test("removed pi-auth routes 404 like unknown routes; remaining config routes ke
     assert.equal(config.status, 200);
     assert.equal(config.headers.get("cache-control"), "no-store");
     const view = await config.json();
-    assert.deepEqual(view.runtimeOptions, ["codex", "claude", "pi", "cursor"]);
+    assert.deepEqual(view.runtimeOptions, ["codex", "claude", "pi", "cursor", "antigravity"]);
     assert.equal(view.agents[0].runtimeOption, "pi");
 
     const raw = JSON.stringify({ operation: "set-global-mention", value: "free" });

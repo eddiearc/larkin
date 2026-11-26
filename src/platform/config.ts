@@ -127,10 +127,12 @@ const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
 const PI_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const CODEX_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const ANTIGRAVITY_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const PI_MODEL = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._:@+-]+)?$/;
 const CODEX_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CLAUDE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,127}$/;
 const CURSOR_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]=,-]{0,159}$/;
+const ANTIGRAVITY_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CONFIG_LIMIT_BYTES = 1024 * 1024;
 const PROFILE_MIGRATION_ROLLBACK_LIMIT_BYTES = 64 * 1024 * 1024;
 const LOCK_RETRIES = 200;
@@ -288,14 +290,16 @@ function assertModel(runtime: string, model: string): void {
   const safe = runtime === "pi" ? PI_MODEL.test(model)
     : runtime === "codex" ? CODEX_MODEL.test(model)
       : runtime === "claude" ? CLAUDE_MODEL.test(model)
-        : runtime === "cursor" ? CURSOR_MODEL.test(model) : false;
+        : runtime === "cursor" ? CURSOR_MODEL.test(model)
+          : runtime === "antigravity" ? ANTIGRAVITY_MODEL.test(model) : false;
   if (!safe) throw new Error(`${runtime} model 格式不安全：${model}`);
 }
 
 function runtimeSupportsEffort(runtime: string, effort: string): boolean {
   return runtime === "pi" ? PI_EFFORTS.has(effort)
     : runtime === "codex" ? CODEX_EFFORTS.has(effort)
-      : runtime === "claude" ? CLAUDE_EFFORTS.has(effort) : false;
+      : runtime === "claude" ? CLAUDE_EFFORTS.has(effort)
+        : runtime === "antigravity" ? ANTIGRAVITY_EFFORTS.has(effort) : false;
 }
 
 function takeLegacyAgentFields(agent: Obj): Obj {

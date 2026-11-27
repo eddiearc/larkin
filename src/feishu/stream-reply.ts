@@ -8,8 +8,10 @@
 // a grey status line at the bottom says what the Agent is doing now. When the
 // turn ends the steps fold into one "过程回放" panel above the full answer.
 //
-// The card opens lazily on the first answer text or tool call after the poll, so
-// an intentionally silent turn posts nothing. When the turn fails after a poll,
+// The card opens on the first non-blank answer text after the poll, or once tool work after the
+// poll has run for `openDelayMs` without answer text, so the user sees progress. Steps seen before
+// it opens are replayed into it. A turn that ends silently before then posts nothing, even when it
+// ran tools; one that goes silent after the card opened keeps only the replay. When the turn fails after a poll,
 // the Host posts or finishes the card with a visible failure instead of leaving
 // the user without a reply. When the card could not be created, so certainly
 // nothing reached the chat, the Host replies with a plain text message instead.
@@ -57,6 +59,8 @@ export interface StreamReplyOptions {
   throttleMs?: number;
   /** Re-read the Inbox source at least this often while no fresher tool boundary forced it. */
   resolveIntervalMs?: number;
+  /** How long tool work after a poll may run without answer text before the card opens anyway. */
+  openDelayMs?: number;
   now?: () => number;
 }
 
@@ -428,7 +432,8 @@ class CardReply {
 }
 
 /** Steps observed after the poll but before the card opened; replayed into the card when it opens. */
-type Buffered = { kind: "thinking"; text: string };
+type Buffered = { kind: "thinking"; text: string }
+  | { kind: "tool"; name: string; input: string; toolId?: string; ok?: boolean };
 
 interface TurnState {
   card: CardReply | null;
@@ -437,6 +442,7 @@ interface TurnState {
   /** Address of the latest poll even before any output arrives; used for failure replies. */
   lastAddress: ReplyAddress | null;
   buffered: Buffered[];
+  openTimer: ReturnType<typeof setTimeout> | null;
   failed: string | null;
   /** Diagnostics: assistant text seen this turn, cards opened for it, tool calls, raw Inbox source. */
   textChars: number;
@@ -452,6 +458,7 @@ export class StreamReplyCoordinator {
   private readonly log: (...parts: unknown[]) => void;
   private readonly throttleMs: number;
   private readonly resolveIntervalMs: number;
+  private readonly openDelayMs: number;
   private readonly now: () => number;
   private readonly pending = new Set<Promise<void>>();
 
@@ -459,6 +466,7 @@ export class StreamReplyCoordinator {
     this.log = options.log ?? (() => {});
     this.throttleMs = options.throttleMs ?? 300;
     this.resolveIntervalMs = options.resolveIntervalMs ?? 500;
+    this.openDelayMs = options.openDelayMs ?? 15_000;
     this.now = options.now ?? Date.now;
   }
 
@@ -479,8 +487,12 @@ export class StreamReplyCoordinator {
     if (event.type === "activity" && event.activity === "tool") {
       turn.tools += 1;
       // Resolve before this call runs: a poll's own source only exists after it returns.
-      const card = this.cardFor(agentId, turn, true);
-      card?.toolStarted(event.name || "tool", event.text || "", event.toolId);
+      const card = this.cardFor(agentId, turn, false);
+      if (card) card.toolStarted(event.name || "tool", event.text || "", event.toolId);
+      else if (turn.lastAddress) {
+        turn.buffered.push({ kind: "tool", name: event.name || "tool", input: event.text || "", toolId: event.toolId });
+        this.armOpen(agentId, turn);
+      }
       turn.needsResolve = true;
       return;
     }
@@ -488,7 +500,13 @@ export class StreamReplyCoordinator {
       // A poll's source exists once it returns; record it now so a later failure answers that message.
       turn.needsResolve = true;
       this.currentAddress(agentId, turn);
-      turn.card?.toolFinished(event.ok, event.toolId, event.name);
+      if (turn.card) turn.card.toolFinished(event.ok, event.toolId, event.name);
+      else {
+        const running = turn.buffered.filter((item): item is Extract<Buffered, { kind: "tool" }> => item.kind === "tool" && item.ok === undefined);
+        const tool = event.toolId ? running.find((item) => item.toolId === event.toolId)
+          : running.reverse().find((item) => !event.name || item.name === event.name);
+        if (tool) tool.ok = event.ok;
+      }
       return;
     }
     if (event.type === "activity" && event.activity === "thinking" && event.text) {
@@ -505,7 +523,7 @@ export class StreamReplyCoordinator {
     }
     if (event.type === "text-delta" && event.text) {
       turn.textChars += event.text.length;
-      this.cardFor(agentId, turn, true)?.appendText(event.text, event.newBlock === true);
+      this.cardFor(agentId, turn, Boolean(event.text.trim()))?.appendText(event.text, event.newBlock === true);
     }
   }
 
@@ -515,7 +533,7 @@ export class StreamReplyCoordinator {
   }
 
   private freshTurn(): TurnState {
-    return { card: null, needsResolve: true, lastResolveAt: 0, lastAddress: null, buffered: [], failed: null,
+    return { card: null, needsResolve: true, lastResolveAt: 0, lastAddress: null, buffered: [], openTimer: null, failed: null,
       textChars: 0, cards: 0, tools: 0, source: "none", replyByCommand: false };
   }
 
@@ -525,16 +543,39 @@ export class StreamReplyCoordinator {
     if (!address) {
       if (turn.card) { turn.card.finish(); turn.card = null; }
       turn.buffered = [];
+      this.disarmOpen(turn);
       return null;
     }
     this.retarget(turn, address);
     if (turn.card) return turn.card;
     if (!open) return null;
+    return this.openWithBuffered(agentId, turn, address);
+  }
+
+  private openWithBuffered(agentId: string, turn: TurnState, address: ReplyAddress): CardReply | null {
+    this.disarmOpen(turn);
     turn.card = this.open(agentId, address);
     if (!turn.card) return null;
     turn.cards += 1;
-    for (const item of turn.buffered.splice(0)) turn.card.appendThinking(item.text);
+    for (const item of turn.buffered.splice(0)) {
+      if (item.kind === "thinking") { turn.card.appendThinking(item.text); continue; }
+      turn.card.toolStarted(item.name, item.input, item.toolId);
+      if (item.ok !== undefined) turn.card.toolFinished(item.ok, item.toolId, item.name);
+    }
     return turn.card;
+  }
+
+  private armOpen(agentId: string, turn: TurnState): void {
+    if (turn.openTimer) return;
+    turn.openTimer = setTimeout(() => {
+      turn.openTimer = null;
+      if (this.turns.get(agentId) === turn && !turn.card) this.cardFor(agentId, turn, true);
+    }, this.openDelayMs);
+    turn.openTimer.unref?.();
+  }
+
+  private disarmOpen(turn: TurnState): void {
+    if (turn.openTimer) { clearTimeout(turn.openTimer); turn.openTimer = null; }
   }
 
   private retarget(turn: TurnState, address: ReplyAddress): void {
@@ -545,6 +586,7 @@ export class StreamReplyCoordinator {
     card.finish(undefined, sameTarget);
     turn.card = null;
     turn.buffered = [];
+    this.disarmOpen(turn);
   }
 
   private currentAddress(agentId: string, turn: TurnState): ReplyAddress | null {
@@ -560,7 +602,7 @@ export class StreamReplyCoordinator {
     const address = replyAddressOf(source);
     turn.source = source ? `${source.deliveryTarget}#${source.deliveryAnchor}` : "none";
     turn.replyByCommand = Boolean(source?.replyByCommand);
-    if (address && turn.lastAddress?.key !== address.key) turn.buffered = [];
+    if (address && turn.lastAddress && turn.lastAddress.target !== address.target) { turn.buffered = []; this.disarmOpen(turn); }
     turn.lastAddress = address;
     return address;
   }
@@ -578,11 +620,14 @@ export class StreamReplyCoordinator {
     const turn = this.turns.get(agentId);
     if (!turn) return;
     this.turns.delete(agentId);
-    if (turn.textChars || turn.failed || turn.cards) {
+    this.disarmOpen(turn);
+    const silentAfterPoll = !turn.cards && !turn.failed && Boolean(turn.lastAddress);
+    if (turn.textChars || turn.failed || turn.cards || silentAfterPoll) {
       this.log(`流式回复回合结束 agent=${agentId} text=${turn.textChars} cards=${turn.cards} tools=${turn.tools} source=${turn.source}${turn.failed ? " failed" : ""}`
-        + (turn.textChars && !turn.cards ? (turn.replyByCommand
-          ? "（本回合领到的消息没有 @ 机器人，Agent 输出的文字不会自动发到飞书）"
-          : "（本回合没有领到消息，Agent 输出的文字没有可回复的对象，没有发到飞书）") : ""));
+        + (silentAfterPoll ? "（Agent 没有写出回复，没有发卡片）"
+          : turn.textChars && !turn.cards ? (turn.replyByCommand
+            ? "（本回合领到的消息没有 @ 机器人，Agent 输出的文字不会自动发到飞书）"
+            : "（本回合没有领到消息，Agent 输出的文字没有可回复的对象，没有发到飞书）") : ""));
     }
     if (!turn.failed) { turn.card?.finish(); return; }
     // A failed turn after a poll must not leave the user unanswered. Refresh the source first, so
@@ -591,7 +636,7 @@ export class StreamReplyCoordinator {
     turn.needsResolve = true;
     const address = this.currentAddress(agentId, turn) ?? previous;
     if (address) this.retarget(turn, address);
-    if (!turn.card && address) turn.card = this.open(agentId, address);
+    if (!turn.card && address) this.openWithBuffered(agentId, turn, address);
     turn.card?.finish(turn.failed);
   }
 }

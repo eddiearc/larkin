@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.32
+
+A streaming card no longer posts as soon as the Agent runs a tool after polling a message. It opens on the first non-blank answer text, or once tool work after the poll has run for 15 seconds without answer text, and shows the steps run before it opened. An Agent that checks something and then decides to stay silent leaves no empty card in the chat; blank text does not count as an answer. A card that has not been posted yet answers the newest same-chat message it covers, and a failure card shows the steps run so far.
+
 ## 0.5.31
 
 Antigravity CLI (`agy`) is now supported as a fifth Agent runtime (`antigravity`). Larkin runs `agy --input-format stream-json --output-format stream-json --dangerously-skip-permissions --disable-slash-commands`, resuming saved sessions with `--conversation`, streaming `agent_response` text deltas and `tool` step updates into the reply card, and gating mid-turn input until the current turn emits `result`. The standing prompt is written to `.agents/rules/larkin-standing-prompt.md` (`trigger: always_on`, splitting cleanly across rule parts when larger than Antigravity's 24 KB per-file cap) so the workspace `AGENTS.md` and `GEMINI.md` remain untouched. `agy models` populates both CLI and Dashboard (`GET /api/models/antigravity`) model directories with grouped reasoning-effort choices (`low`, `medium`, `high`, `xhigh`, `max`) so Dashboard and `larkin effort` can pick reasoning intensity for adjustable models while leaving fixed-budget models such as Orchestrator untouched. Setup, `larkin config runtime`, readiness checks, and the Dashboard capability list (skills, subagents, plugins, MCP) support it; set `LARKIN_ANTIGRAVITY_COMMAND` to use another executable.

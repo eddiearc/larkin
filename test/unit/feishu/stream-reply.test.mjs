@@ -74,7 +74,7 @@ function fakeClient() {
   return { cards, calls, rawClient };
 }
 
-function harness(initialSource = null) {
+function harness(initialSource = null, options = {}) {
   const client = fakeClient();
   const state = { source: initialSource };
   const logs = [];
@@ -85,6 +85,8 @@ function harness(initialSource = null) {
     throttleMs: 0,
     resolveIntervalMs: 0,
     now: () => 0,
+    openDelayMs: 60_000,
+    ...options,
   });
   const send = (event) => coordinator.observe("agent-1", event);
   return { cards: client.cards, calls: client.calls, state, logs, coordinator, send };
@@ -151,6 +153,7 @@ test("a long tool input keeps its head and tail on one line and elides the middl
   const command = `bash -lc "cd /srv/app &&\n${"x".repeat(400)} && echo \`done\`" TAIL_END`;
   send({ type: "activity", activity: "tool", name: "command", text: command, toolId: "long" });
   send({ type: "activity", activity: "tool", name: "command", toolId: "bare" });
+  send({ type: "text-delta", text: "done", newBlock: true });
   send({ type: "turn-end" });
   await coordinator.idle();
   const [first, second] = replayStepsOf(cards[0]).split("\n");
@@ -207,19 +210,62 @@ test("a silent turn after the poll posts no card, even when it reasoned", async 
   assert.equal(cards.length, 0);
 });
 
-test("work after the poll that ends without answer text closes its card with only the replay, no filler text", async () => {
+test("tool work after the poll that ends quickly without answer text posts no card", async () => {
+  const { cards, state, logs, coordinator, send } = harness();
+  send({ type: "turn-start" });
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_a" });
+  send({ type: "activity", activity: "tool", name: "command", text: "lark-cli im +chat-messages-list", toolId: "r1" });
+  send({ type: "tool-result", toolId: "r1", ok: true });
+  send({ type: "text-delta", text: "\n\n", newBlock: true });
+  send({ type: "turn-end" });
+  await coordinator.idle();
+  assert.equal(cards.length, 0, "blank text is not an answer, so the Agent stayed silent");
+  assert.ok(logs.some((line) => line.includes("cards=0") && line.includes("没有写出回复")), logs.join("\n"));
+});
+
+test("the first answer text opens the card at once and shows the steps run before it", async () => {
   const { cards, state, coordinator, send } = harness();
   send({ type: "turn-start" });
   poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_a" });
-  send({ type: "activity", activity: "tool", name: "command", text: "larkin reminder add", toolId: "r1" });
+  send({ type: "activity", activity: "tool", name: "command", text: "ps aux", toolId: "t1" });
+  send({ type: "tool-result", toolId: "t1", ok: false });
+  send({ type: "activity", activity: "thinking", text: "看完了。" });
+  assert.equal(cards.length, 0);
+  send({ type: "text-delta", text: "结果如下", newBlock: true });
+  assert.equal(cards.length, 1);
   send({ type: "turn-end" });
   await coordinator.idle();
-  assert.equal(cards.length, 1);
+  assert.equal(answerOf(cards[0]), "结果如下");
+  assert.equal(replayStepsOf(cards[0]), "- `ps aux` · failed\n> 看完了。");
+});
+
+test("tool work running past the open delay posts the card early; a silent end keeps only the replay, no filler text", async () => {
+  const { cards, state, coordinator, send } = harness(null, { openDelayMs: 10 });
+  send({ type: "turn-start" });
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_a" });
+  send({ type: "activity", activity: "tool", name: "command", text: "larkin reminder add", toolId: "r1" });
+  assert.equal(cards.length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(cards.length, 1, "the card shows progress once the work outlasts the delay");
+  assert.equal(cards[0].replyTo, "om_a");
+  send({ type: "turn-end" });
+  await coordinator.idle();
   assert.equal(answerOf(cards[0]), undefined, "the Host writes no answer the model did not write");
   assert.equal(replayStepsOf(cards[0]), "- `larkin reminder add`");
   assert.equal(cards[0].settings?.config.streaming_mode, false);
   assert.match(cards[0].settings?.config.summary.content, /^Replay · 1 tool call · 1s$/);
   assert.doesNotMatch(JSON.stringify(cards[0].json), /Nothing to reply/);
+});
+
+test("a turn that ends before the open delay cancels it", async () => {
+  const { cards, state, coordinator, send } = harness(null, { openDelayMs: 10 });
+  send({ type: "turn-start" });
+  poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_a" });
+  send({ type: "activity", activity: "tool", name: "command", text: "ps aux", toolId: "t1" });
+  send({ type: "turn-end" });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await coordinator.idle();
+  assert.equal(cards.length, 0);
 });
 
 test("a thread source keeps the card reply inside the same topic", async () => {
@@ -249,7 +295,7 @@ test("polling another target mid-turn closes the first card and opens a new one"
   ]);
 });
 
-test("a second poll in the same chat before any answer text keeps answering in the first card", async () => {
+test("a second poll in the same chat before the card was posted answers both in one card under the newer message", async () => {
   const { cards, state, coordinator, send } = harness();
   send({ type: "turn-start" });
   poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_1" });
@@ -261,13 +307,13 @@ test("a second poll in the same chat before any answer text keeps answering in t
   send({ type: "turn-end" });
   await coordinator.idle();
   assert.equal(cards.length, 1, "one card answers both messages");
-  assert.equal(cards[0].replyTo, "om_1");
+  assert.equal(cards[0].replyTo, "om_2");
   assert.equal(answerOf(cards[0]), "两条一起回复");
   assert.equal(replayStepsOf(cards[0]), "- `ps aux`\n- `larkin inbox poll --target chat:x --limit 1`\n> 两条一起回答。");
 });
 
 test("a same-chat message sent after the card was posted gets its own card below it", async () => {
-  const { cards, state, coordinator, send } = harness();
+  const { cards, state, coordinator, send } = harness(null, { openDelayMs: 0 });
   send({ type: "turn-start" });
   poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_1", createdAt: 900 });
   send({ type: "activity", activity: "tool", name: "command", text: "ps aux", toolId: "t1" });
@@ -285,7 +331,7 @@ test("a same-chat message sent after the card was posted gets its own card below
 });
 
 test("a same-chat message sent before the card was posted still merges into that card", async () => {
-  const { cards, state, coordinator, send } = harness();
+  const { cards, state, coordinator, send } = harness(null, { openDelayMs: 0 });
   send({ type: "turn-start" });
   poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_1", createdAt: 900 });
   send({ type: "activity", activity: "tool", name: "command", text: "ps aux", toolId: "t1" });
@@ -313,7 +359,7 @@ test("a second poll in the same topic after partial answer text continues in a n
   assert.equal(cards[0].settings.config.summary.content, "先回第一条", "the chat-list summary shows the answer, not the notice");
 });
 
-test("a failure after a second same-chat poll with no answer yet finishes the first card", async () => {
+test("a failure after a second same-chat poll before the card was posted answers the newer message with the steps so far", async () => {
   const { cards, state, coordinator, send } = harness();
   send({ type: "turn-start" });
   poll(send, state, { deliveryTarget: "chat:oc_a", deliveryAnchor: "om_1" });
@@ -322,7 +368,8 @@ test("a failure after a second same-chat poll with no answer yet finishes the fi
   send({ type: "input-error", inputId: "i1", retryable: false, message: "provider down" });
   send({ type: "turn-end" });
   await coordinator.idle();
-  assert.deepEqual(cards.map((card) => [card.replyTo, answerOf(card)]), [["om_1", STREAM_REPLY_FAILURE_TEXT]]);
+  assert.deepEqual(cards.map((card) => [card.replyTo, answerOf(card)]), [["om_2", STREAM_REPLY_FAILURE_TEXT]]);
+  assert.equal(replayStepsOf(cards[0]), "- `ps aux`\n- `larkin inbox poll --target chat:x --limit 1`");
 });
 
 test("a turn that fails after the poll still answers the user with a failure card", async () => {
